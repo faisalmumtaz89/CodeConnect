@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Combine
 import SwiftTerm
 import SwiftUI

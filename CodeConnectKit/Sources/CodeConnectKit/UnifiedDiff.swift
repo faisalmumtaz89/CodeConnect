@@ -9,33 +9,33 @@ import Foundation
 /// `preamble`/`trailing` instead of being dropped: the contract also appends
 /// untracked file names, and silently swallowing them would make the diff claim
 /// a completeness it does not have.
-struct UnifiedDiff: Sendable, Hashable {
-    var files: [FileDiff]
+public struct UnifiedDiff: Sendable, Hashable {
+    public var files: [FileDiff]
     /// Lines before the first `diff --git`.
-    var preamble: [String]
+    public var preamble: [String]
     /// Lines after the last hunk that belong to no file — where the untracked
     /// names land.
-    var trailing: [String]
+    public var trailing: [String]
 
     /// Blank lines do not count as content: splitting a trailing newline always
     /// produces one empty element, and "the tree is clean" must not depend on
     /// whether git ended its output with a newline.
-    var isEmpty: Bool {
+    public var isEmpty: Bool {
         files.isEmpty && !(preamble + trailing).contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
-    var additions: Int { files.reduce(0) { $0 + $1.additions } }
-    var deletions: Int { files.reduce(0) { $0 + $1.deletions } }
+    public var additions: Int { files.reduce(0) { $0 + $1.additions } }
+    public var deletions: Int { files.reduce(0) { $0 + $1.deletions } }
 
     /// How many lines of context to keep visible on each side of a change.
     static let contextLines = 3
 
     // MARK: - Model
 
-    struct FileDiff: Sendable, Hashable, Identifiable {
-        enum Status: Sendable, Hashable {
+    public struct FileDiff: Sendable, Hashable, Identifiable {
+        public enum Status: Sendable, Hashable {
             case added, deleted, modified, renamed, binary
 
-            var symbol: String {
+            public var symbol: String {
                 switch self {
                 case .added: return "plus"
                 case .deleted: return "minus"
@@ -45,7 +45,7 @@ struct UnifiedDiff: Sendable, Hashable {
                 }
             }
 
-            var label: String {
+            public var label: String {
                 switch self {
                 case .added: return "added"
                 case .deleted: return "deleted"
@@ -56,78 +56,98 @@ struct UnifiedDiff: Sendable, Hashable {
             }
         }
 
-        var id: String
-        var oldPath: String?
-        var newPath: String?
-        var status: Status
-        var hunks: [Hunk]
+        public var id: String
+        public var oldPath: String?
+        public var newPath: String?
+        public var status: Status
+        public var hunks: [Hunk]
         /// `Binary files … differ`, mode changes, and anything else git said
         /// about the file that is not a hunk.
-        var notes: [String]
+        public var notes: [String]
 
-        var displayPath: String {
+        public init(
+            id: String, oldPath: String? = nil, newPath: String? = nil, status: Status, hunks: [Hunk],
+            notes: [String]
+        ) {
+            self.id = id
+            self.oldPath = oldPath
+            self.newPath = newPath
+            self.status = status
+            self.hunks = hunks
+            self.notes = notes
+        }
+
+        public var displayPath: String {
             if status == .renamed, let oldPath, let newPath { return "\(oldPath) → \(newPath)" }
             return newPath ?? oldPath ?? id
         }
 
         /// Just the file name, for a chip that has to fit on a phone.
-        var shortName: String {
+        public var shortName: String {
             let path = status == .deleted ? (oldPath ?? id) : (newPath ?? oldPath ?? id)
             return (path as NSString).lastPathComponent
         }
 
-        var additions: Int {
+        public var additions: Int {
             hunks.reduce(0) { $0 + $1.lines.reduce(0) { $0 + ($1.kind == .addition ? 1 : 0) } }
         }
-        var deletions: Int {
+        public var deletions: Int {
             hunks.reduce(0) { $0 + $1.lines.reduce(0) { $0 + ($1.kind == .deletion ? 1 : 0) } }
         }
     }
 
-    struct Hunk: Sendable, Hashable, Identifiable {
-        var id: String
+    public struct Hunk: Sendable, Hashable, Identifiable {
+        public var id: String
         /// The `@@ … @@` line verbatim, including any section heading git added.
-        var header: String
+        public var header: String
         var oldStart: Int
         var newStart: Int
-        var lines: [Line]
+        public var lines: [Line]
         /// The hunk split into runs that are shown and runs that are folded.
-        var segments: [Segment]
+        public var segments: [Segment]
     }
 
-    struct Line: Sendable, Hashable, Identifiable {
-        enum Kind: Sendable, Hashable {
+    public struct Line: Sendable, Hashable, Identifiable {
+        public enum Kind: Sendable, Hashable {
             case context, addition, deletion
             /// `\ No newline at end of file` — a fact about the file, not a line
             /// of it.
             case note
         }
 
-        var id: Int
-        var kind: Kind
-        var text: String
-        var oldNumber: Int?
-        var newNumber: Int?
+        public var id: Int
+        public var kind: Kind
+        public var text: String
+        public var oldNumber: Int?
+        public var newNumber: Int?
+
+        public init(id: Int, kind: Kind, text: String, oldNumber: Int? = nil, newNumber: Int? = nil) {
+            self.id = id
+            self.kind = kind
+            self.text = text
+            self.oldNumber = oldNumber
+            self.newNumber = newNumber
+        }
     }
 
     /// A run of hunk lines, either shown or folded away.
-    enum Segment: Sendable, Hashable, Identifiable {
+    public enum Segment: Sendable, Hashable, Identifiable {
         case shown(id: Int, lines: [Line])
         case folded(id: Int, lines: [Line])
 
-        var id: Int {
+        public var id: Int {
             switch self {
             case .shown(let id, _), .folded(let id, _): return id
             }
         }
 
-        var lines: [Line] {
+        public var lines: [Line] {
             switch self {
             case .shown(_, let lines), .folded(_, let lines): return lines
             }
         }
 
-        var isFolded: Bool {
+        public var isFolded: Bool {
             if case .folded = self { return true }
             return false
         }
@@ -135,7 +155,7 @@ struct UnifiedDiff: Sendable, Hashable {
 
     // MARK: - Parsing
 
-    static func parse(_ text: String) -> UnifiedDiff {
+    public static func parse(_ text: String) -> UnifiedDiff {
         var files: [FileDiff] = []
         var preamble: [String] = []
         var trailing: [String] = []

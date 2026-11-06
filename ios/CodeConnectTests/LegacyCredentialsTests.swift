@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 final class LegacyCredentialsTests: XCTestCase {
     private func isolatedDefaults() -> (UserDefaults, String) {

@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The offline link's classification, copy and cadence — the value layer of
 /// the fix for the flickering "OFFLINE … retrying in 5s" banner.

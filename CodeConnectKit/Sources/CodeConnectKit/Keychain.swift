@@ -4,7 +4,7 @@ import Security
 /// Minimal generic-password wrapper. The pairing token is the only secret the
 /// app holds, and it never leaves the device: `ThisDeviceOnly` accessibility
 /// keeps it out of encrypted backups and iCloud Keychain.
-enum Keychain {
+public enum Keychain {
     enum Failure: LocalizedError {
         case status(OSStatus)
 
@@ -52,7 +52,7 @@ enum Keychain {
     }
 
     @discardableResult
-    static func delete(account: String) -> Bool {
+    public static func delete(account: String) -> Bool {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

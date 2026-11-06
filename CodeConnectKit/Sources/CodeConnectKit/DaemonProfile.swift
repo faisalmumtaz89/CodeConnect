@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// What *this* daemon is, distilled from `hello_ack` into the handful of
@@ -9,19 +8,19 @@ import Foundation
 /// `capabilities?.foo == true` through the views. Every question defaults to
 /// "no" while nothing is known, which keeps a disconnected app from claiming
 /// features it cannot demonstrate.
-struct DaemonProfile: Sendable, Hashable {
-    var protocolVersion: UInt32
+public struct DaemonProfile: Sendable, Hashable {
+    public var protocolVersion: UInt32
     /// The additive feature level. Level `1` only ever added to the protocol, so
     /// the *major* version stayed at 1 and this — not `protocolVersion` — is
     /// what distinguishes a newer daemon from an older one.
-    var protocolMinor: UInt32
-    var capabilities: Capabilities?
+    public var protocolMinor: UInt32
+    public var capabilities: Capabilities?
     /// What `codeconnect devices` calls this phone, once the daemon has said.
     var deviceName: String?
     /// What the owner calls the computer, once the daemon has said (minor 25).
-    var machineName: String?
+    public var machineName: String?
     /// `"macos"` or `"linux"`, once the daemon has said (minor 25).
-    var machineOS: String?
+    public var machineOS: String?
 
     static let unknown = DaemonProfile(
         protocolVersion: 0, protocolMinor: 0, capabilities: nil, deviceName: nil)
@@ -38,14 +37,14 @@ struct DaemonProfile: Sendable, Hashable {
         self.machineOS = machineOS
     }
 
-    var isConnected: Bool { capabilities != nil }
+    public var isConnected: Bool { capabilities != nil }
 
     /// The computer's system as a person writes it, or nil for one this build
     /// does not know — nothing is shown rather than a raw token.
     var machineSystem: String? { Self.system(forOS: machineOS) }
 
     /// `hello_ack.machine_os` as a person writes it.
-    static func system(forOS os: String?) -> String? {
+    public static func system(forOS os: String?) -> String? {
         switch os {
         case "macos": "macOS"
         case "linux": "Linux"
@@ -69,7 +68,7 @@ struct DaemonProfile: Sendable, Hashable {
 
     /// The daemon puts a `risk` block on approval cards, which makes an *absent*
     /// class meaningful (contract: treat it as medium) rather than merely old.
-    var classifiesRisk: Bool { capabilities?.classifiesRisk == true || speaksMinor1OrLater }
+    public var classifiesRisk: Bool { capabilities?.classifiesRisk == true || speaksMinor1OrLater }
 
     /// The daemon accepts `delete_session` (minor 7).
     ///
@@ -77,10 +76,10 @@ struct DaemonProfile: Sendable, Hashable {
     /// swipe. Unknown is false, so this can only ever hide the action, never
     /// invent one — and a swipe that appeared and then failed would be worse than
     /// no swipe, because the row would stay and the user would not know why.
-    var removesSessions: Bool { capabilities?.deletesSessions == true }
+    public var removesSessions: Bool { capabilities?.deletesSessions == true }
 
     /// The daemon answers `get_diff`.
-    var servesDiff: Bool { capabilities?.servesDiff == true || speaksMinor1OrLater }
+    public var servesDiff: Bool { capabilities?.servesDiff == true || speaksMinor1OrLater }
 
     /// The daemon mints a `session_uid` per run, puts it on every session and
     /// every event, and accepts one anywhere a session is named.
@@ -91,7 +90,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// Either the daemon has said it does this — by the capability flag or by
     /// its own feature level — or the app keeps treating the tmux name as the
     /// identity, which is what a pre-minor-2 daemon means by sending no uid.
-    var scopesSessionsByUID: Bool {
+    public var scopesSessionsByUID: Bool {
         capabilities?.scopesSessionsByUID == true || protocolMinor >= 2
     }
 
@@ -100,7 +99,7 @@ struct DaemonProfile: Sendable, Hashable {
 
     /// This connection is actually encrypted — not merely "the daemon holds a
     /// certificate", which is what `capabilities.tls` says.
-    var connectionEncrypted: Bool { capabilities?.tlsActive == true }
+    public var connectionEncrypted: Bool { capabilities?.tlsActive == true }
 
     /// **This daemon honours a stop for a Codex session** (minor 17).
     ///
@@ -110,7 +109,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// reader a button that is offered and guaranteed broken — a control whose
     /// only behaviour is refusing the tap, which is the one thing the
     /// verification bar names by name.
-    var stopsCodexTurns: Bool { capabilities?.codexInterrupt == true }
+    public var stopsCodexTurns: Bool { capabilities?.codexInterrupt == true }
 
     /// **This daemon understands `compose` at all** (minor 18).
     ///
@@ -118,7 +117,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// `Error{code:"bad_request"}` rather than a `ComposeResult`, so a phone
     /// that sent one would register a typed waiter for a reply that never comes
     /// and sit on it until the request timeout — every tap.
-    var composesToCodex: Bool { capabilities?.codexCompose == true }
+    public var composesToCodex: Bool { capabilities?.codexCompose == true }
 
     /// **The minimum daemon for an ANSWERABLE Codex card** (minor 19).
     ///
@@ -132,7 +131,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// the reader would tap a decision the daemon has already made. So on an
     /// older daemon the Codex card is read-only and says why, the same shape the
     /// compose bar already uses for a minor-16 Mac.
-    var resolvesCodexCards: Bool {
+    public var resolvesCodexCards: Bool {
         protocolVersion > Wire.protocolVersion || protocolMinor >= 19
     }
 
@@ -140,28 +139,28 @@ struct DaemonProfile: Sendable, Hashable {
     /// the `question_card` capability. Below it the question is read-only here:
     /// such a daemon files it as an ordinary approval, and nothing this phone
     /// could send it chooses an answer.
-    var answersQuestions: Bool {
+    public var answersQuestions: Bool {
         (protocolVersion > Wire.protocolVersion || protocolMinor >= 21)
             && capabilities?.questionCard == true
     }
 
     /// `answersQuestions`, or nil while nothing is known of the daemon — its
     /// link is down and took its capabilities with it. Unknown is not old.
-    var knownAnswersQuestions: Bool? { isConnected ? answersQuestions : nil }
+    public var knownAnswersQuestions: Bool? { isConnected ? answersQuestions : nil }
 
     /// **The daemon answers a Claude approval only through the hook Claude holds
     /// for that card's own call** — the `hook_only_approvals` capability (minor
     /// 22). Without it a Claude approval is read-only here: an older daemon
     /// types the answer into whatever prompt is on screen, which can be another
     /// agent's.
-    var answersApprovalsByHook: Bool { capabilities?.hookOnlyApprovals == true }
+    public var answersApprovalsByHook: Bool { capabilities?.hookOnlyApprovals == true }
 
     /// **The daemon serves a run's log a page at a time** — minor 23 *and* the
     /// `history_pages` capability. With it a chat holds the newest 500 events
     /// and asks for earlier ones; without it the app backfills and loads the
     /// whole log as it always has, because an older daemon cannot answer
     /// `history` at all.
-    var pagesHistory: Bool {
+    public var pagesHistory: Bool {
         (protocolVersion > Wire.protocolVersion || protocolMinor >= 23)
             && capabilities?.historyPages == true
     }
@@ -175,7 +174,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// been answered") and then left the reader with nowhere to go; measured at
     /// AX5 on a 6.9" phone, that one ran to four lines in the pinned action bar
     /// and clipped its own last two words off the bottom of the screen.
-    var codexAnswerCaveat: String? {
+    public var codexAnswerCaveat: String? {
         guard !resolvesCodexCards else { return nil }
         return "This computer's CodeConnect is too old for answers from the phone; answer it at "
             + "the computer. Update it to answer here."
@@ -208,7 +207,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// Mac side would otherwise hide a feature that is really there, and a
     /// diff request costs one frame — so the app asks, and says plainly that it
     /// is asking a daemon which never advertised the ability.
-    var diffCaveat: String? {
+    public var diffCaveat: String? {
         guard isConnected else { return "Not connected. The daemon cannot be asked for a diff." }
         return servesDiff
             ? nil

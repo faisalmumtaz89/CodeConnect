@@ -1,10 +1,9 @@
-import CodeConnectKit
 import Foundation
 import Network
 import os
 import Observation
 
-enum ConnectionError: LocalizedError, Sendable {
+public enum ConnectionError: LocalizedError, Sendable {
     case notConnected
     case timedOut
     case unauthorized
@@ -41,7 +40,7 @@ enum ConnectionError: LocalizedError, Sendable {
     /// reading of that.
     case sentButUnanswered
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .notConnected: return "Not connected to the daemon"
         case .timedOut: return "The daemon did not answer in time"
@@ -67,8 +66,8 @@ enum ConnectionError: LocalizedError, Sendable {
 /// existence of a socket, which is the mistake this exists to prevent.
 @MainActor
 @Observable
-final class DaemonConnection {
-    enum Phase: Equatable, Sendable {
+public final class DaemonConnection {
+    public enum Phase: Equatable, Sendable {
         case idle
         case connecting
         case connected(since: Date)
@@ -77,7 +76,7 @@ final class DaemonConnection {
         /// Needs the user: a rejected token will be rejected again forever.
         case failed(reason: String)
 
-        var isConnected: Bool {
+        public var isConnected: Bool {
             if case .connected = self { return true }
             return false
         }
@@ -85,7 +84,7 @@ final class DaemonConnection {
 
     // MARK: Observable state
 
-    private(set) var phase: Phase = .idle {
+    public private(set) var phase: Phase = .idle {
         didSet {
             // Maintained here rather than at any caller, so every present and
             // future writer of `phase` keeps it true by construction. The
@@ -101,12 +100,12 @@ final class DaemonConnection {
     /// banners' grace clock: a banner that flashes during the seconds an
     /// ordinary connect is allowed to take is noise, and this is the fact that
     /// says those seconds are still running.
-    private(set) var connectingSince: Date?
-    private(set) var capabilities: Capabilities?
+    public private(set) var connectingSince: Date?
+    public private(set) var capabilities: Capabilities?
     /// The `hello_ack` this connection got, or nil before the handshake.
-    private(set) var helloAck: HelloAck?
+    public private(set) var helloAck: HelloAck?
     /// Everything the app needs to know about which daemon build this is.
-    var profile: DaemonProfile {
+    public var profile: DaemonProfile {
         guard let helloAck else { return .unknown }
         return DaemonProfile(
             protocolVersion: helloAck.protocolVersion,
@@ -125,14 +124,14 @@ final class DaemonConnection {
     /// per frame invalidated the whole fleet a hundred times a second. Nothing
     /// is lost: every surface renders it as an age in whole seconds, and a stamp
     /// that is under a second old is one that would print the same string.
-    private(set) var lastContactAt: Date?
-    private(set) var serverTime: String?
-    private(set) var reconnectCount = 0
-    private(set) var lastErrorMessage: String?
+    public private(set) var lastContactAt: Date?
+    public private(set) var serverTime: String?
+    public private(set) var reconnectCount = 0
+    public private(set) var lastErrorMessage: String?
     /// When `lastErrorMessage` was set. A request that times out *after* the
     /// daemon complained about something can quote the complaint instead of
     /// guessing — without ever routing an uncorrelated frame to a waiter.
-    private(set) var lastErrorAt: Date?
+    public private(set) var lastErrorAt: Date?
     /// The last complaint that **the daemon** put on the wire, kept apart from
     /// `lastErrorMessage`.
     ///
@@ -154,43 +153,43 @@ final class DaemonConnection {
     /// is so, with the type named — swallowing it (`case .unknown: break`) is
     /// what made "the phone silently ignores half of what a newer Mac says" a
     /// state nobody could observe from the outside.
-    private(set) var unreadableFrame: String?
+    public private(set) var unreadableFrame: String?
     private(set) var unreadableFrameAt: Date?
     /// Increments on every successful handshake. Work started for one
     /// connection must not be applied after a later one has replaced it.
-    private(set) var generation = 0
+    public private(set) var generation = 0
 
     /// Delivered on the main actor, in arrival order.
-    var onMessage: ((ServerMessage) -> Void)?
+    public var onMessage: ((ServerMessage) -> Void)?
     /// Fired after every successful `hello_ack`, which is where subscriptions
     /// must be re-established.
-    var onConnected: (() -> Void)?
+    public var onConnected: (() -> Void)?
     /// Fired when a `hello_ack` carries a device token — the durable credential
     /// a pairing code is exchanged for. Exactly once per successful pairing.
-    var onDeviceToken: ((String) -> Void)?
+    public var onDeviceToken: ((String) -> Void)?
     /// Fired when the transport that actually worked is not the one that was
     /// stored, so the pairing can remember it.
-    var onTransportSettled: ((Bool) -> Void)?
+    public var onTransportSettled: ((Bool) -> Void)?
     /// The live terminal's own delivery channel: `terminal_attached`,
     /// `terminal_output`, `terminal_credit` and `terminal_closed`, in arrival
     /// order. Separate from `onMessage` because the terminal is a byte stream
     /// with its own flow control, and its ordering must not depend on anything
     /// the model chooses to do with a message.
-    var onTerminal: ((ServerMessage) -> Void)?
+    public var onTerminal: ((ServerMessage) -> Void)?
     /// Fired when a connection that was up goes down, so a live terminal learns
     /// its carrier is gone rather than showing the last thing it received.
-    var onDisconnected: (() -> Void)?
+    public var onDisconnected: (() -> Void)?
 
     /// Whether the *current* attempt is `wss://`. Reported, never assumed: the
     /// pairing's stored preference is only a starting point.
-    private(set) var usingTLS = false
+    public private(set) var usingTLS = false
 
     /// Why the last dial of this `start` failed, typed — the stable fact the
     /// banner renders while retries cycle underneath it. Set by `supervise`,
     /// cleared on `start`, `stop` and a successful `hello_ack`, and it names
     /// its host so a stale classification can never dress a replacement
     /// endpoint.
-    enum DialFailure: Equatable, Sendable {
+    public enum DialFailure: Equatable, Sendable {
         /// DNS cannot resolve the daemon's name. On a `*.ts.net` pairing this
         /// almost always means Tailscale is off on this phone — but it is
         /// recovery guidance, not an observed fact, and the copy built from it
@@ -198,11 +197,11 @@ final class DaemonConnection {
         case hostUnresolvable(host: String)
         case other(message: String)
     }
-    private(set) var dialFailure: DialFailure?
+    public private(set) var dialFailure: DialFailure?
     /// Whether this `start` has already completed at least one failed dial —
     /// what separates the launch dial (whose quiet grace is earned) from a
     /// redial (whose blank-out was the flicker).
-    private(set) var isRedial = false
+    public private(set) var isRedial = false
 
     // MARK: Private
 
@@ -217,6 +216,8 @@ final class DaemonConnection {
     /// credit grant a frame through the encoder.
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
+
+    public init() {}
 
     /// Record that a frame arrived, at the resolution anything renders it.
     ///
@@ -306,7 +307,7 @@ final class DaemonConnection {
 
     // MARK: - Lifecycle
 
-    func start(endpoint: DaemonEndpoint, forPairing: Bool = false) {
+    public func start(endpoint: DaemonEndpoint, forPairing: Bool = false) {
         // A repeated start on the current endpoint is a no-op — except when it
         // comes from the pairing screen while the dial is struggling. A pairing
         // may defer to a link that is proven, never to one mid-retry: absorbed
@@ -341,7 +342,7 @@ final class DaemonConnection {
         startPathMonitor()
     }
 
-    func stop() {
+    public func stop() {
         supervisor?.cancel()
         supervisor = nil
         wakeTask?.cancel()
@@ -360,7 +361,7 @@ final class DaemonConnection {
 
     /// Called when the app returns to the foreground: waiting out a backoff
     /// while the user is looking at the screen is the wrong trade.
-    func retryNow() {
+    public func retryNow() {
         guard endpoint != nil else { return }
         if isFailed {
             lastErrorMessage = nil
@@ -842,7 +843,7 @@ final class DaemonConnection {
 
     // MARK: - Sending
 
-    func send(_ message: ClientMessage) async throws {
+    public func send(_ message: ClientMessage) async throws {
         #if DEBUG
             if let sendStub { return try sendStub(message) }
         #endif
@@ -860,7 +861,7 @@ final class DaemonConnection {
     }
 
     /// Fire-and-forget for messages whose failure the caller cannot act on.
-    func sendIgnoringFailure(_ message: ClientMessage) {
+    public func sendIgnoringFailure(_ message: ClientMessage) {
         Task { [weak self] in try? await self?.send(message) }
     }
 
@@ -871,7 +872,7 @@ final class DaemonConnection {
     /// **A write that fails drops the link.** The reply it would have earned
     /// never comes, so every position counted after it is wrong; the redial is
     /// a new link, where counting starts again.
-    func sendInOrder(_ message: ClientMessage) -> Bool {
+    public func sendInOrder(_ message: ClientMessage) -> Bool {
         #if DEBUG
             if let sendStub { return (try? sendStub(message)) != nil }
         #endif
@@ -888,7 +889,7 @@ final class DaemonConnection {
 
     /// Drop the link and dial again: a new generation, on which everything is
     /// asked for afresh.
-    func redial() {
+    public func redial() {
         #if DEBUG
             redialsForTesting += 1
         #endif
@@ -910,7 +911,7 @@ final class DaemonConnection {
     /// stays on `requestID` alone, because that is all `answer_result` carries —
     /// which also means two runs holding one request id cannot have concurrent
     /// answers in flight, and the one-per-key rule below is what enforces it.
-    func answer(
+    public func answer(
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?
     ) async throws -> AnswerResult {
         #if DEBUG
@@ -940,7 +941,7 @@ final class DaemonConnection {
     /// (`ccd/src/ws_server.rs` moves `session_id` straight into the result), so
     /// correlating on the string this app chose is exact whether it is a uid or
     /// a name.
-    func sendText(
+    public func sendText(
         session: String, text: String, require: PromptPresence?, submit: Bool,
         requestID: String? = nil, payloadHash: String? = nil,
         completeNativeConfirmation: Bool = false
@@ -972,7 +973,7 @@ final class DaemonConnection {
 
     /// Ask the Mac to forget one ended run. Keyed by uid, which is also the
     /// waiter key, so two rows swiped at once cannot collect each other's answer.
-    func deleteSession(sessionUID: String) async throws -> DeleteSessionResult {
+    public func deleteSession(sessionUID: String) async throws -> DeleteSessionResult {
         #if DEBUG
             deleteRequests.append(sessionUID)
             if let deleteStub { return try await deleteStub(sessionUID) }
@@ -984,7 +985,7 @@ final class DaemonConnection {
     }
 
     /// One real push to this device, with the daemon's typed answer.
-    func testPush() async throws -> TestPushResult {
+    public func testPush() async throws -> TestPushResult {
         let requestID = "tp-" + UUID().uuidString
         #if DEBUG
             if let testPushStub { return try await testPushStub(requestID) }
@@ -995,7 +996,7 @@ final class DaemonConnection {
             send: .testPush(requestID: requestID))
     }
 
-        func capture(session: String, lines: UInt32?) async throws -> String {
+        public func capture(session: String, lines: UInt32?) async throws -> String {
         try await request(
             key: session,
             store: \.captureWaiters,
@@ -1004,7 +1005,7 @@ final class DaemonConnection {
 
     /// On-demand `git diff` for one run. Correlated by the reference like the
     /// other single-keyed replies, so the same one-in-flight-per-key rule holds.
-    func diff(session: String) async throws -> SessionDiff {
+    public func diff(session: String) async throws -> SessionDiff {
         try await request(
             key: session,
             store: \.diffWaiters,
@@ -1019,7 +1020,7 @@ final class DaemonConnection {
     /// different facts and the UI shows them differently: a transport error
     /// means the frame may have gone, and every one of these means it certainly
     /// did not.
-    enum CodexRefusal: Error, Equatable {
+    public enum CodexRefusal: Error, Equatable {
         /// This daemon never advertised the capability. **This is the gate.**
         case notAdvertised(String)
         /// This session is not a Codex session, so the message would be refused
@@ -1040,7 +1041,7 @@ final class DaemonConnection {
     ///
     /// `session` must be the `session_uid`: `payloadHash` is computed over the
     /// exact string this argument becomes on the wire.
-    func interrupt(
+    public func interrupt(
         session: String, requestID: String, turnID: String, payloadHash: String
     ) async throws -> InterruptResult {
         guard capabilities?.codexInterrupt == true else {
@@ -1065,7 +1066,7 @@ final class DaemonConnection {
     /// `ComposeResult`. A phone that sent one would register a waiter for a
     /// typed reply that is never coming and sit there until the 20-second
     /// timeout — once per tap, on a control that looks like it works.
-    func compose(
+    public func compose(
         session: String, requestID: String, text: String, payloadHash: String
     ) async throws -> ComposeResult {
         guard capabilities?.codexCompose == true else {
@@ -1360,7 +1361,7 @@ final class DaemonConnection {
     /// The best account of a failure available after `since`, whoever wrote it.
     /// Used to explain a request that timed out rather than inventing a reason
     /// for it — but never as a quotation. See `daemonErrorReported(since:)`.
-    func errorReported(since: Date) -> String? {
+    public func errorReported(since: Date) -> String? {
         guard let lastErrorAt, lastErrorAt >= since else { return nil }
         return lastErrorMessage
     }
@@ -1368,7 +1369,7 @@ final class DaemonConnection {
     /// What the **daemon** said after `since`, verbatim, or nil if it said
     /// nothing. The only string in this class that may be quoted to the reader
     /// as the Mac's own words.
-    func daemonErrorReported(since: Date) -> String? {
+    public func daemonErrorReported(since: Date) -> String? {
         guard let lastDaemonErrorAt, lastDaemonErrorAt >= since else { return nil }
         return lastDaemonErrorMessage
     }
@@ -1388,7 +1389,7 @@ final class DaemonConnection {
     /// from exactly these two values. The ack is still ingested for everything
     /// else it carries, because what a daemon can do is what decides which
     /// surfaces are real.
-    func ingest(_ message: ServerMessage) {
+    public func ingest(_ message: ServerMessage) {
         let phaseBeforeIngest = phase
         handle(message)
         phase = phaseBeforeIngest
@@ -1405,7 +1406,7 @@ final class DaemonConnection {
         /// daemon and a real ledger, is covered by `ApprovalFlowUITests`; this
         /// seam never runs in a release build and never runs without the
         /// `-CC_FIXTURE` launch argument.
-        var fixtureAnswers = false
+        public var fixtureAnswers = false
 
         /// Test seam: feed a frame through the real inbound path *and* let it
         /// read as a link being spoken to — the contact stamp, and whatever
@@ -1414,7 +1415,7 @@ final class DaemonConnection {
         /// Debug builds only, and that is the whole difference from `ingest`: a
         /// test drives screens whose every action link health gates, and the
         /// sample fleet must never claim the link this one hands it.
-        func injectForTesting(_ message: ServerMessage) {
+        public func injectForTesting(_ message: ServerMessage) {
             lastContactAt = Date()
             handle(message)
         }
@@ -1423,14 +1424,14 @@ final class DaemonConnection {
         ///
         /// Needed because link health gates every action, so a fixture run with
         /// an idle connection could only ever demonstrate disabled buttons.
-        func simulateConnectedForTesting() {
+        public func simulateConnectedForTesting() {
             phase = .connected(since: Date())
             lastContactAt = Date()
         }
 
         /// Test seam: put the link in a phase without the socket that would
         /// get it there — a drop (`.connecting`), a refusal (`.failed`).
-        func setPhaseForTesting(_ phase: Phase) {
+        public func setPhaseForTesting(_ phase: Phase) {
             self.phase = phase
         }
 
@@ -1444,7 +1445,7 @@ final class DaemonConnection {
         /// nothing. The count is what makes the difference observable: a request
         /// that was never sent is a different fact from one that was sent and
         /// refused, and only that distinction tests a gate.
-        var deleteStub: ((String) async throws -> DeleteSessionResult)?
+        public var deleteStub: ((String) async throws -> DeleteSessionResult)?
         /// Test seam: answer `testPush` locally.
         var testPushStub: ((String) async throws -> TestPushResult)?
         /// Uids passed to `deleteSession`, in order, whether stubbed or not.
@@ -1452,7 +1453,7 @@ final class DaemonConnection {
         /// Test seam: answer `sendText` locally, and record each request's
         /// identity — the retry-recognition tests need to see whether two
         /// attempts carried the same `request_id`, which no result can say.
-        var sendTextStub: ((String, String) async throws -> SendTextResult)?
+        public var sendTextStub: ((String, String) async throws -> SendTextResult)?
         /// Test seam: answer `commandCatalog` locally.
         var catalogStub: ((String) async throws -> CommandCatalogResult)?
         private(set) var sendTextIdentities: [(requestID: String?, payloadHash: String?)] = []
@@ -1474,7 +1475,7 @@ final class DaemonConnection {
         /// it proves what the carrier does, not what goes on the wire. The wire
         /// shape is asserted directly, against the encoder, in
         /// `TerminalCarrierTests`.
-        var sendStub: ((ClientMessage) throws -> Void)?
+        public var sendStub: ((ClientMessage) throws -> Void)?
 
         /// Test seam: claim a set of capabilities without a handshake.
         ///

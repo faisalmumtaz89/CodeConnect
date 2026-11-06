@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// The live terminal half of the product: the phone's end of a tmux pane
@@ -44,8 +43,8 @@ import Foundation
 ///     rather than freezing it.
 @MainActor
 @Observable
-final class TerminalCarrier {
-    enum Phase: Sendable, Equatable {
+public final class TerminalCarrier {
+    public enum Phase: Sendable, Equatable {
         case idle
         /// `terminal_attach` is out; the daemon has not answered yet.
         case attaching
@@ -73,7 +72,7 @@ final class TerminalCarrier {
     /// the phase. A screen that renders a phase without asking this shows
     /// another run's live pane under its own label and sends its keystrokes
     /// there.
-    enum Standing: Sendable, Equatable {
+    public enum Standing: Sendable, Equatable {
         /// The carrier is this run's: its phase is this screen's to render.
         case mine
         /// No terminal is open. This run may open one without ending another.
@@ -85,7 +84,7 @@ final class TerminalCarrier {
         /// Whether the carrier's own state is this run's to read. A screen that
         /// reasons about the last close has to ask first: another run's close
         /// says nothing about this one.
-        var isMine: Bool {
+        public var isMine: Bool {
             if case .mine = self { return true }
             return false
         }
@@ -94,7 +93,7 @@ final class TerminalCarrier {
     /// What the daemon said when it closed the terminal. The wire carries a
     /// stable code plus human text; the code is what the UI reasons about, so a
     /// reworded reason never changes behaviour.
-    enum CloseCode: String, Sendable, CaseIterable {
+    public enum CloseCode: String, Sendable, CaseIterable {
         case sessionNotHosted = "session_not_hosted"
         case identityMismatch = "identity_mismatch"
         case tmuxUnavailable = "tmux_unavailable"
@@ -124,7 +123,7 @@ final class TerminalCarrier {
         /// courtesy: taking a terminal back from a holder that took it from you
         /// is the whole point of the supersede rule, and an attach refused
         /// because a close had not settled yet succeeds as soon as it has.
-        var isRetryable: Bool {
+        public var isRetryable: Bool {
             switch self {
             case .tmuxUnavailable, .attachmentLimit, .protocolError, .slowConsumer,
                 .windowChanged, .identityMismatch, .superseded, .sessionBusy:
@@ -137,13 +136,13 @@ final class TerminalCarrier {
 
     // MARK: Observable state
 
-    private(set) var phase: Phase = .idle
+    public private(set) var phase: Phase = .idle
     /// Rows and columns the emulator last reported, so a reattach starts at the
     /// right size instead of at 80×24.
-    private(set) var lastSize: (cols: Int, rows: Int) = (80, 24)
+    public private(set) var lastSize: (cols: Int, rows: Int) = (80, 24)
     /// The tail of everything received, so a view rebuild can replay what is
     /// already on screen instead of showing an empty terminal.
-    private(set) var transcript: [UInt8] = []
+    public private(set) var transcript: [UInt8] = []
     /// Whether this buffer has lost a head to the cap.
     ///
     /// The whole reason it is here: a rebuilt emulator seeded from a buffer
@@ -157,11 +156,11 @@ final class TerminalCarrier {
     /// is false. Only the one site that hands the buffer to a new emulator can
     /// turn it into a claim about what that emulator is showing — see
     /// `TerminalTabView.seededFromTrimmedBuffer`.
-    private(set) var transcriptIsTruncated = false
+    public private(set) var transcriptIsTruncated = false
     /// The session this terminal is for, while there is one.
     private(set) var sessionUID: String?
     /// The code the daemon closed with, for the view's explanation and retry.
-    private(set) var lastClose: CloseCode?
+    public private(set) var lastClose: CloseCode?
     /// Bytes this carrier has ever received, across every attachment.
     ///
     /// Monotonic on purpose. `transcript` is capped, so past the cap its count
@@ -186,7 +185,7 @@ final class TerminalCarrier {
     /// a tail drawn for a grid it would otherwise not know. Written by the pane
     /// that parsed it, emptied with the transcript it belongs to — a new run,
     /// or a confirmed attach, whose repaint states it again.
-    @ObservationIgnored var paneSize: PaneSize?
+    @ObservationIgnored public var paneSize: PaneSize?
     /// When output last arrived, sampled at most once a second.
     ///
     /// The freshness fact every liveness surface renders, and the reason it is
@@ -200,7 +199,7 @@ final class TerminalCarrier {
     /// stored value is a second old. So it is at most one second behind, which
     /// is below what a whole-seconds clock can show, and it never ticks on its
     /// own: a quiet pane's stamp is the last time bytes really arrived.
-    private(set) var lastOutputAt: Date?
+    public private(set) var lastOutputAt: Date?
 
     // MARK: Private
 
@@ -271,7 +270,7 @@ final class TerminalCarrier {
     /// a megabyte. Headroom makes it one move per 32 KiB of output instead.
     private static let trimmedTranscriptBytes = maxTranscriptBytes - 32 * 1024
 
-    init(connection: any PairedConnection) {
+    public init(connection: any PairedConnection) {
         self.connection = connection
         connection.onTerminal = { [weak self] message in self?.handle(message) }
         connection.onDisconnected = { [weak self] in
@@ -283,7 +282,7 @@ final class TerminalCarrier {
 
     /// This carrier's standing for a screen showing `run` — the first thing
     /// such a screen asks, before it renders anything of the carrier at all.
-    func standing(forRun run: String) -> Standing {
+    public func standing(forRun run: String) -> Standing {
         Self.standing(phase: phase, serving: sessionUID, forRun: run)
     }
 
@@ -294,7 +293,7 @@ final class TerminalCarrier {
     /// draws another run's live pane under its own label, hands that run's
     /// keystrokes to it, and — because the carrier is then busy — can never
     /// open the terminal it is actually for.
-    func phase(forRun run: String) -> Phase {
+    public func phase(forRun run: String) -> Phase {
         guard case .mine = standing(forRun: run) else { return .idle }
         return phase
     }
@@ -304,7 +303,7 @@ final class TerminalCarrier {
     ///
     /// A terminal that has *ended* holds nothing, whichever run it belonged to:
     /// the next run to ask gets it without ending anybody's.
-    nonisolated static func standing(
+    public nonisolated static func standing(
         phase: Phase, serving: String?, forRun run: String
     ) -> Standing {
         if serving == run { return .mine }
@@ -314,7 +313,7 @@ final class TerminalCarrier {
 
     /// Whether `attach` would do anything: used by foreground-reattach so it
     /// cannot stack attempts.
-    var canAttach: Bool {
+    public var canAttach: Bool {
         switch phase {
         case .idle, .ended: return true
         case .attaching, .attached: return false
@@ -326,7 +325,7 @@ final class TerminalCarrier {
     /// Refused before it reaches the wire when the connection is not up or does
     /// not offer a terminal: an attach the daemon would only close is a worse
     /// answer than saying so.
-    func attach(sessionUID: String, cols: Int, rows: Int) {
+    public func attach(sessionUID: String, cols: Int, rows: Int) {
         guard canAttach else { return }
         guard connection.isConnected else {
             end(reason: "Not connected to the computer.", code: nil)
@@ -399,7 +398,7 @@ final class TerminalCarrier {
     /// run's terminal is released on a frame that says so rather than as a
     /// side effect of taking it, and this carrier's own state is cleared before
     /// a new attachment id exists to be confused with the old one.
-    func takeOver(sessionUID: String, cols: Int, rows: Int) {
+    public func takeOver(sessionUID: String, cols: Int, rows: Int) {
         guard connection.isConnected, connection.servesTerminal else { return }
         if !canAttach { detach(reason: "Another run took the terminal.") }
         attach(sessionUID: sessionUID, cols: cols, rows: rows)
@@ -408,7 +407,7 @@ final class TerminalCarrier {
     /// Close the terminal and say why. Safe to call from any state; tells the
     /// daemon so its disposable client goes away now rather than at the next
     /// timeout.
-    func detach(reason: String = "Disconnected.") {
+    public func detach(reason: String = "Disconnected.") {
         if let id = attachmentID, phase.isAttached || phase.isBusy {
             submitDetach(of: id)
         }
@@ -421,13 +420,13 @@ final class TerminalCarrier {
     /// bytes, and never another run's. The carrier is shared, so handing back
     /// `transcript` unasked is how one run's output gets drawn into another
     /// run's terminal under that run's label.
-    func transcript(forRun run: String) -> ArraySlice<UInt8> {
+    public func transcript(forRun run: String) -> ArraySlice<UInt8> {
         guard sessionUID == run else { return [] }
         return ArraySlice(transcript)
     }
 
     /// Send output to `owner`'s emulator, replacing whatever was receiving it.
-    func deliverOutput(to owner: AnyObject, sink: @escaping (ArraySlice<UInt8>) -> Void) {
+    public func deliverOutput(to owner: AnyObject, sink: @escaping (ArraySlice<UInt8>) -> Void) {
         outputOwner = ObjectIdentifier(owner)
         onOutput = sink
     }
@@ -436,7 +435,7 @@ final class TerminalCarrier {
     /// commonly torn down *after* the one replacing it is already receiving —
     /// leaving a live terminal that draws nothing, which looks exactly like a
     /// hung agent.
-    func stopDeliveringOutput(to owner: AnyObject) {
+    public func stopDeliveringOutput(to owner: AnyObject) {
         guard outputOwner == ObjectIdentifier(owner) else { return }
         outputOwner = nil
         onOutput = nil
@@ -447,7 +446,7 @@ final class TerminalCarrier {
     /// Split to the wire's maximum chunk and spent against input credit. What
     /// does not fit waits for the daemon to grant more, so this never sends past
     /// the window the daemon agreed to — doing so would close the terminal.
-    func send(_ bytes: ArraySlice<UInt8>) {
+    public func send(_ bytes: ArraySlice<UInt8>) {
         // Refused, not queued, before the attach is answered — which is what
         // makes the queue provably empty at that point. Nothing reaches this
         // while a terminal is opening: the screen for that state has no
@@ -464,14 +463,14 @@ final class TerminalCarrier {
         flushInput()
     }
 
-    func send(text: String) {
+    public func send(text: String) {
         send(ArraySlice(Array(text.utf8)))
     }
 
     /// The emulator resized. Tell the daemon, or the agent's TUI will draw for
     /// the wrong window. Applied to the daemon's own client only, so a human at
     /// the Mac is never resized by this phone.
-    func resize(cols: Int, rows: Int) {
+    public func resize(cols: Int, rows: Int) {
         let size = Self.clampSize(cols: cols, rows: rows)
         guard lastSize != size else { return }
         // The phase is checked *before* the size is recorded, because
@@ -1053,7 +1052,7 @@ final class TerminalCarrier {
 /// rules above are the ones most worth a test and the least reachable without
 /// one, since exercising them otherwise needs a real Mac at the far end.
 @MainActor
-protocol PairedConnection: AnyObject {
+public protocol PairedConnection: AnyObject {
     var isConnected: Bool { get }
     /// Whether the daemon granted *this* connection shell-equivalent authority.
     /// Never assumed: absent means absent.
@@ -1068,6 +1067,6 @@ protocol PairedConnection: AnyObject {
 }
 
 extension DaemonConnection: PairedConnection {
-    var isConnected: Bool { phase.isConnected }
-    var servesTerminal: Bool { capabilities?.servesTerminal == true }
+    public var isConnected: Bool { phase.isConnected }
+    public var servesTerminal: Bool { capabilities?.servesTerminal == true }
 }

@@ -1,4 +1,3 @@
-import CodeConnectKit
 import CryptoKit
 import Foundation
 
@@ -25,7 +24,7 @@ import Foundation
 /// The length prefix is what makes the fields unambiguous: without it
 /// `("cc-1\na", "b")` and `("cc-1", "a\nb")` would share a preimage, and one
 /// request id could be made to name a different mutation.
-enum CodexHash {
+public enum CodexHash {
 
     /// Identity of one stop: which session's which turn.
     ///
@@ -33,7 +32,7 @@ enum CodexHash {
     /// carries**. The daemon recomputes with the client's own spelling, so the
     /// phone contracts itself to `session_uid` always rather than
     /// relying on a normalisation the hash check does not perform.
-    static func interrupt(sessionRef: String, turnID: String) -> String {
+    public static func interrupt(sessionRef: String, turnID: String) -> String {
         digest(tag: "codeconnect.interrupt.v1", fields: [sessionRef, turnID])
     }
 
@@ -44,7 +43,7 @@ enum CodexHash {
     /// instant the daemon writes — so putting the turn in would turn the honest
     /// retry of an unacknowledged send, which is the whole reason the hash
     /// exists, into a conflict whenever the session had moved.
-    static func compose(sessionRef: String, text: String) -> String {
+    public static func compose(sessionRef: String, text: String) -> String {
         digest(tag: "codeconnect.compose.v1", fields: [sessionRef, text])
     }
 
@@ -71,7 +70,7 @@ enum CodexHash {
 ///
 /// Nothing here throws and nothing force-unwraps: a reshaped field means
 /// "absent", which the card renders as absent rather than guessing.
-enum CodexCard {
+public enum CodexCard {
 
     /// One option exactly as the card offered it.
     ///
@@ -79,24 +78,24 @@ enum CodexCard {
     /// stored option set and reconstructs the wire decision from that option's
     /// own payload, never from anything the phone supplies. The phone must never
     /// synthesise one, shorten one, or infer one from a label.
-    struct Option: Sendable, Hashable, Identifiable {
-        let id: String
+    public struct Option: Sendable, Hashable, Identifiable {
+        public let id: String
         /// What the card draws and speaks for it, `displaySafe`. Never sent:
         /// the answer is `id`.
-        let label: String
+        public let label: String
     }
 
     /// One file the card proposes to change, as the card draws it: every
     /// string `displaySafe`.
-    struct Change: Sendable, Hashable, Identifiable {
+    public struct Change: Sendable, Hashable, Identifiable {
         /// Its place in the card's list. Not its path: two paths can draw
         /// alike, and a list keyed by what it draws would show one of them.
-        let id: Int
-        let path: String
+        public let id: Int
+        public let path: String
         /// `add` / `update` / `delete` / `rename`, as the app-server named it.
-        let kind: String
+        public let kind: String
         /// Where a rename would move it, when the kind is a rename.
-        let movePath: String?
+        public let movePath: String?
         /// The unified diff for this file, as captured.
         let diff: String
     }
@@ -105,14 +104,14 @@ enum CodexCard {
     /// ceiling. **Constructed shape** — no capture in the corpus exercises it —
     /// so it is rendered as a count and a digest and never as
     /// a list of paths the phone does not have.
-    struct ChangesOmitted: Sendable, Hashable {
-        let count: Int
+    public struct ChangesOmitted: Sendable, Hashable {
+        public let count: Int
         let sha256: String
     }
 
     /// The card's option table. Empty when the card is not a Codex card, which
     /// is how a Claude card falls through to Allow/Deny unchanged.
-    static func options(in toolInput: JSONValue?) -> [Option] {
+    public static func options(in toolInput: JSONValue?) -> [Option] {
         guard let rows = toolInput?["options"]?.arrayValue else { return [] }
         return rows.compactMap { row in
             guard let id = row["id"]?.stringValue, !id.isEmpty else { return nil }
@@ -124,20 +123,20 @@ enum CodexCard {
 
     /// Why the agent is asking, when it said. Present on 0.153 command cards,
     /// absent on every measured file-change card.
-    static func reason(in toolInput: JSONValue?) -> String? {
+    public static func reason(in toolInput: JSONValue?) -> String? {
         guard let reason = toolInput?["reason"]?.stringValue, !reason.isEmpty else { return nil }
         return reason.displaySafe
     }
 
     /// The working directory a command would run in.
-    static func cwd(in toolInput: JSONValue?) -> String? {
+    public static func cwd(in toolInput: JSONValue?) -> String? {
         guard let cwd = toolInput?["cwd"]?.stringValue, !cwd.isEmpty else { return nil }
         return cwd.displaySafe
     }
 
     /// The inline patch. Up to 32 files, 16 KiB per diff, 128 KiB shared — the
     /// Mac's own ceilings, so a card is bounded by construction.
-    static func changes(in toolInput: JSONValue?) -> [Change] {
+    public static func changes(in toolInput: JSONValue?) -> [Change] {
         guard let rows = toolInput?["changes"]?.arrayValue else { return [] }
         return rows.enumerated().compactMap { index, row in
             guard let path = row["path"]?.stringValue else { return nil }
@@ -162,7 +161,7 @@ enum CodexCard {
     ///
     /// The synthesised header is never shown. `CCDiffFileHeader` is drawn from
     /// `Change.path` and `Change.kind`, which are what the wire actually said.
-    static func parsedDiff(for change: Change) -> UnifiedDiff.FileDiff? {
+    public static func parsedDiff(for change: Change) -> UnifiedDiff.FileDiff? {
         guard !change.diff.isEmpty else { return nil }
         let path = change.path
         let header = "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n"
@@ -182,7 +181,7 @@ enum CodexCard {
     ///
     /// 160 rows is a little over two screens of diff at reading size, which is
     /// as much as anyone reads before they decide they need the Mac.
-    static let diffRowBudget = 160
+    public static let diffRowBudget = 160
 
     /// How the budget is spent across the files a card is showing.
     ///
@@ -190,14 +189,14 @@ enum CodexCard {
     /// out, and what is left over is counted rather than dropped silently. A
     /// per-file share was the other option and it is worse — it truncates a
     /// two-line rename to make room for a file nobody scrolled to.
-    struct DiffPlan: Sendable, Equatable {
+    public struct DiffPlan: Sendable, Equatable {
         /// Rows allowed for each shown change, positionally.
-        var allowances: [Int] = []
+        public var allowances: [Int] = []
         /// Rows this card is not drawing, across every shown file.
-        var heldBack: Int = 0
+        public var heldBack: Int = 0
     }
 
-    static func diffPlan(for changes: [Change], budget: Int = diffRowBudget) -> DiffPlan {
+    public static func diffPlan(for changes: [Change], budget: Int = diffRowBudget) -> DiffPlan {
         var plan = DiffPlan()
         var left = budget
         for change in changes {
@@ -210,7 +209,7 @@ enum CodexCard {
         return plan
     }
 
-    static func changesOmitted(in toolInput: JSONValue?) -> ChangesOmitted? {
+    public static func changesOmitted(in toolInput: JSONValue?) -> ChangesOmitted? {
         guard let block = toolInput?["changes_omitted"],
             let count = block["count"]?.intValue, count > 0
         else { return nil }
@@ -227,8 +226,10 @@ enum CodexCard {
 /// A value rather than a method on the view, so the byte rule is testable
 /// without a viewport — and so the ceiling is enforced in one place instead of
 /// being re-derived by the counter, the send button and the send path.
-struct ComposeDraft: Sendable, Hashable {
+public struct ComposeDraft: Sendable, Hashable {
     var text: String
+
+    public init(text: String) { self.text = text }
 
     /// The measurement the Mac makes: `text.len()` in Rust is UTF-8 bytes.
     var byteCount: Int { text.utf8.count }
@@ -244,7 +245,7 @@ struct ComposeDraft: Sendable, Hashable {
     /// can. Both refusals are ones the daemon would also make — the point of
     /// making them here is that a round trip to be told so is a round trip
     /// nobody needed, and the oversize one names the number the reader can act on.
-    var blockedReason: String? {
+    public var blockedReason: String? {
         if isEffectivelyEmpty { return "There is nothing to say yet." }
         if byteCount > Wire.maxComposeBytes {
             return "This message is \(byteCount) bytes. The ceiling is \(Wire.maxComposeBytes)."
@@ -257,13 +258,13 @@ struct ComposeDraft: Sendable, Hashable {
     /// A counter on every message is noise on a composer whose ordinary message
     /// is a sentence; a counter that appears only once you are already over is a
     /// scolding. It arrives with enough room left to do something about it.
-    var counterText: String? {
+    public var counterText: String? {
         guard byteCount >= Self.counterThreshold else { return nil }
         return "\(Self.number(byteCount)) / \(Self.number(Wire.maxComposeBytes)) bytes"
     }
 
     /// Whether the counter is reporting a draft that is already too long.
-    var isOverCeiling: Bool { byteCount > Wire.maxComposeBytes }
+    public var isOverCeiling: Bool { byteCount > Wire.maxComposeBytes }
 
     /// Roughly 90% of the ceiling: far enough in that it is not noise, early
     /// enough that a sentence can still be cut.
@@ -296,7 +297,7 @@ struct ComposeDraft: Sendable, Hashable {
 /// from a daemon that predates the field — and it needs no branch to prefer the
 /// envelope, because an approval event's `turn_id` arrives as `Event.turnID`
 /// exactly like every other event's, and the newest one wins by construction.
-enum CodexTurnTracker {
+public enum CodexTurnTracker {
 
     /// The turn this session is running, or nil.
     ///
@@ -310,7 +311,7 @@ enum CodexTurnTracker {
     ///
     /// `knownEnded` are turns the session saw end whose terminals `events` may no
     /// longer hold; they count as ended from the start of the scan.
-    static func runningTurn(
+    public static func runningTurn(
         in events: [Event], observed: [String] = [], retired: Set<String> = [],
         knownEnded: Set<String> = []
     ) -> String? {

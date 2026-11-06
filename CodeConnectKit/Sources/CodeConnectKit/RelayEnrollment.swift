@@ -107,7 +107,7 @@ enum AppAttestError: Error {
 /// service returns `isSupported == false` on the simulator and refuses every
 /// call, so every unit test injects a deterministic double instead. `attestKey`
 /// throws `AppAttestError` specifically so the retry policy can be exact.
-protocol AppAttesting: Sendable {
+public protocol AppAttesting: Sendable {
     var isSupported: Bool { get }
     func generateKey() async throws -> String
     func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data
@@ -116,16 +116,18 @@ protocol AppAttesting: Sendable {
 
 /// The production adapter over Apple's service. It holds no state; the key
 /// material lives in Apple's hardware-backed store, addressed by key id.
-struct DeviceAppAttest: AppAttesting {
+public struct DeviceAppAttest: AppAttesting {
+    public init() {}
+
     /// Computed, not stored: `DCAppAttestService` is a non-`Sendable` reference
     /// type, and storing it in this `Sendable` struct would be the only thing
     /// that made the struct unsound. `.shared` is a process singleton, so
     /// re-reading it costs nothing.
     private var service: DCAppAttestService { .shared }
 
-    var isSupported: Bool { service.isSupported }
+    public var isSupported: Bool { service.isSupported }
 
-    func generateKey() async throws -> String {
+    public func generateKey() async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             service.generateKey { keyID, error in
                 switch (keyID, error) {
@@ -137,7 +139,7 @@ struct DeviceAppAttest: AppAttesting {
         }
     }
 
-    func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data {
+    public func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             service.attestKey(keyID, clientDataHash: clientDataHash) { attestation, error in
                 switch (attestation, error) {
@@ -164,7 +166,7 @@ struct DeviceAppAttest: AppAttesting {
         }
     }
 
-    func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
+    public func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             service.generateAssertion(keyID, clientDataHash: clientDataHash) { assertion, error in
                 switch (assertion, error) {
@@ -179,7 +181,7 @@ struct DeviceAppAttest: AppAttesting {
 
 // MARK: - Transport, behind a seam
 
-struct RelayHTTPResponse: Sendable {
+public struct RelayHTTPResponse: Sendable {
     let status: Int
     let body: Data
 }
@@ -187,15 +189,17 @@ struct RelayHTTPResponse: Sendable {
 /// One relay request. A protocol so the enrollment state machine can be proven
 /// against a scripted relay that answers instantly and exactly — no real service
 /// can produce a consumed challenge or a revoked credential on demand.
-protocol RelayTransport: Sendable {
+public protocol RelayTransport: Sendable {
     func post(path: String, json: Data) async throws -> RelayHTTPResponse
     func get(path: String, bearer: String) async throws -> RelayHTTPResponse
 }
 
 /// The production transport: HTTPS to the one baked host, bearer in
 /// `Authorization` and nowhere else.
-struct URLSessionRelayTransport: RelayTransport {
+public struct URLSessionRelayTransport: RelayTransport {
     private let session: URLSession = .shared
+
+    public init() {}
 
     private func url(_ path: String) -> URL {
         var components = URLComponents()
@@ -207,7 +211,7 @@ struct URLSessionRelayTransport: RelayTransport {
         return components.url ?? URL(string: "https://\(RelayEndpoint.host)\(path)")!
     }
 
-    func post(path: String, json: Data) async throws -> RelayHTTPResponse {
+    public func post(path: String, json: Data) async throws -> RelayHTTPResponse {
         var request = URLRequest(url: url(path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -216,7 +220,7 @@ struct URLSessionRelayTransport: RelayTransport {
         return RelayHTTPResponse(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: data)
     }
 
-    func get(path: String, bearer: String) async throws -> RelayHTTPResponse {
+    public func get(path: String, bearer: String) async throws -> RelayHTTPResponse {
         var request = URLRequest(url: url(path))
         request.httpMethod = "GET"
         request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
@@ -302,9 +306,9 @@ private struct ErrorBody: Decodable {
 /// Owns the relay binding and every operation that mints, rebinds, refreshes, or
 /// discards it. An `actor` so single-flight and the stored binding are serialized
 /// without a lock; the caller is `AppModel` on the main actor.
-actor RelayEnrollment {
+public actor RelayEnrollment {
     /// What the register path should do with the result.
-    enum Outcome: Equatable {
+    public enum Outcome: Equatable {
         /// Register the token with this credential. Its `token` is the binding it
         /// was minted for — the caller rechecks it against the live token before
         /// sending, so a result that arrived for a superseded token is dropped.
@@ -416,7 +420,7 @@ actor RelayEnrollment {
         opEpoch == epoch && latestToken == token
     }
 
-    init(
+    public init(
         attest: AppAttesting = DeviceAppAttest(),
         transport: RelayTransport = URLSessionRelayTransport(),
         store: RelayCredentialStoring = KeychainRelayCredentialStore(),
@@ -439,7 +443,7 @@ actor RelayEnrollment {
     /// under the actor, before the stored binding is read makes the correction
     /// atomic with the credential the caller is about to register — so the app
     /// registers the corrected environment and never resends its stale one.
-    func credential(
+    public func credential(
         token: String, environment: String, daemonEnvironment: String? = nil
     ) async -> Outcome {
         let opEpoch = beginOperation(token: token)
@@ -466,7 +470,7 @@ actor RelayEnrollment {
     /// Foreground recovery. Asks the read-only status endpoint what became of the
     /// stored binding and acts on the answer: keep it, rotate via assertion,
     /// re-enroll with a fresh key, or surrender the token to APNs.
-    func refresh(token: String, environment: String) async -> Outcome {
+    public func refresh(token: String, environment: String) async -> Outcome {
         let opEpoch = beginOperation(token: token)
         guard let stored = store.load(), stored.token == token, stored.installID == installID
         else {
@@ -530,7 +534,7 @@ actor RelayEnrollment {
     /// generation floor, the next foreground `refresh` reads `reissue`, and the
     /// assertion-authorized rotation runs there — then redistributes on each
     /// Mac's next handshake.
-    func reset() {
+    public func reset() {
         epoch &+= 1
         latestToken = nil
         pendingAttestation = nil

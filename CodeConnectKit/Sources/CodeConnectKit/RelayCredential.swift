@@ -12,20 +12,20 @@ import Foundation
 /// reused to *assert* a rotation or rebind, so losing the credential does not
 /// cost the key. Losing the whole record (reinstall, Keychain loss) does cost
 /// the key, which is exactly the case the plan routes to fresh attestation.
-struct RelayCredential: Codable, Equatable, Sendable {
+public struct RelayCredential: Codable, Equatable, Sendable {
     /// The App Attest key id from `generateKey` — base64, ~44 chars. Durable.
     let keyID: String
     /// Lowercase-hex APNs token this credential is bound to. A different token is
     /// a different binding and cannot reuse this credential.
-    let token: String
+    public let token: String
     /// `"sandbox"` or `"production"`. The relay binding is the authority (§4);
     /// this field tracks the daemon's `hello_ack.push_environment` correction so
     /// the app stops resending a stale value.
-    let environment: String
+    public let environment: String
     /// The relay bearer — base64url, 43 chars. Sent to the daemon in
     /// `RegisterPush.relay_credential` and to the relay's status endpoint as a
     /// bearer. A secret; never logged.
-    let credential: String
+    public let credential: String
     /// The generation floor the bearer was minted under. A relay database restore
     /// bumps the floor and refuses every older bearer, which the app learns as
     /// `reenroll`. Carried so a future check can compare without another round
@@ -54,18 +54,18 @@ struct RelayCredential: Codable, Equatable, Sendable {
 /// other, and the plan requires the credential to be absent from `Debug` output
 /// (§Decision 5 stored-secrets table).
 extension RelayCredential: CustomStringConvertible, CustomDebugStringConvertible {
-    var description: String {
+    public var description: String {
         "RelayCredential(token: …\(token.suffix(4)), environment: \(environment), "
             + "credential: <redacted>, generation: \(generation))"
     }
-    var debugDescription: String { description }
+    public var debugDescription: String { description }
 }
 
 /// Where the relay binding lives. A protocol so the enrollment flow can be driven
 /// in a unit test against an in-memory store — the Keychain is unavailable to an
 /// unsigned automation launch, and "Keychain loss" is itself an acceptance case
 /// that a fake models directly.
-protocol RelayCredentialStoring: Sendable {
+public protocol RelayCredentialStoring: Sendable {
     func load() -> RelayCredential?
     func save(_ credential: RelayCredential)
     func clear()
@@ -77,21 +77,23 @@ protocol RelayCredentialStoring: Sendable {
 /// out of encrypted backups and iCloud Keychain, so a restored backup never
 /// resurrects a credential the relay may have revoked — the app re-enrolls
 /// instead, which is the behaviour the restore procedure depends on.
-struct KeychainRelayCredentialStore: RelayCredentialStoring {
+public struct KeychainRelayCredentialStore: RelayCredentialStoring {
     /// Distinct from the pairing account so clearing one never touches the other.
     private static let account = "relay-credential"
 
-    func load() -> RelayCredential? {
+    public init() {}
+
+    public func load() -> RelayCredential? {
         guard let data = Keychain.load(account: Self.account) else { return nil }
         return try? JSONDecoder().decode(RelayCredential.self, from: data)
     }
 
-    func save(_ credential: RelayCredential) {
+    public func save(_ credential: RelayCredential) {
         guard let data = try? JSONEncoder().encode(credential) else { return }
         try? Keychain.save(data, account: Self.account)
     }
 
-    func clear() {
+    public func clear() {
         Keychain.delete(account: Self.account)
     }
 }
