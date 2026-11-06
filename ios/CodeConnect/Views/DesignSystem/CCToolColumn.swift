@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// One shared left edge for the command beside a tool name.
