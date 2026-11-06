@@ -47,7 +47,7 @@ public enum ConnectionError: LocalizedError, Sendable {
         case .unauthorized: return "The daemon rejected this token"
         case .rejectedPairingCode:
             return
-                "The computer rejected that pairing code. It may have expired, already been used, or been mistyped, run `codeconnect pair` again for a fresh one."
+                "The computer rejected that pairing code. It may have expired, already been used, or been mistyped. Run `codeconnect pair` again for a fresh one."
         case .incompatible(let detail): return detail
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
