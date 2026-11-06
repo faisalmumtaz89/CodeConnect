@@ -450,7 +450,7 @@ mod tests {
     }
 
     /// What `pair` prints for the app's Address field is what that field
-    /// parses back (ios Store/Pairing.swift `DaemonEndpoint.parse`).
+    /// parses back (`CodeConnectKit/Sources/CodeConnectKit/Pairing.swift` `DaemonEndpoint.parse`).
     #[test]
     fn the_typed_address_is_what_the_apps_field_takes() {
         assert_eq!(typed_address("192.168.1.20", 8787), "192.168.1.20");

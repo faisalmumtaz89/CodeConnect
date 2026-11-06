@@ -87,10 +87,10 @@ pairing and opens no socket, and nothing in it reports a link
 
 | Path | What it is |
 |---|---|
-| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, and the session-start model. |
-| `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket. |
-| `CodeConnect/Store/` | Keychain pairing, this device's identity, preferences, the on-disk event cache. |
-| `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, the unified-diff parser. |
+| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, the session-start model, `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket, Keychain pairing, this device's identity, the relay credential and its enrollment, and the unified-diff parser. |
+| `CodeConnect/Net/` | Push registration (`PushRegistration`, the `PushRegistrar` seam, `PushWire`) and the hand-off to Tailscale. |
+| `CodeConnect/Store/` | Preferences, the on-disk event cache, and the start-up purge of credentials earlier releases stored. |
+| `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue. |
 | `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline, and the terminal from the bar's menu), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
 | `CodeConnectUITests/` | End-to-end. `ApprovalFlowUITests` and `LiveDaemonUITests` need a **real** daemon; `DeckUITests` replays contract-shaped frames. |
@@ -538,7 +538,7 @@ key of its own. `RelayEnrollment` does it lazily — only after a relay-capable
 handshake and an APNs token, single-flight per `(token hash, environment)`. It
 attests to the relay with App Attest, receives an opaque bearer, and stores the
 bearer and the App Attest key ID in the iOS Keychain, `ThisDeviceOnly`
-(`Store/RelayCredential.swift`). The credential then rides `register_push`'s
+(`CodeConnectKit/Sources/CodeConnectKit/RelayCredential.swift`). The credential then rides `register_push`'s
 `relay_credential` to the daemon over the same paired socket; the phone never
 sends the attestation to the daemon and the daemon never mints a credential.
 
@@ -566,7 +566,7 @@ Three surfaces differ, and each is gated rather than assumed.
 gets is decided by the *session's agent*, never by the card's contents
 (`Views/DecisionCard.swift`): a Claude card gets Allow/Deny, a Codex card gets the
 option list the request carried, read verbatim from `tool_input.options[]`
-(`Model/CodexWire.swift`) under the header **Choose one**. An option whose label the
+(`CodeConnectKit/Sources/CodeConnectKit/CodexWire.swift`) under the header **Choose one**. An option whose label the
 daemon did not supply falls back to its id rather than to an invented word, and a card
 whose options this build cannot read is rendered **unanswerable** — never as Allow/Deny,
 which would be a decision nobody offered. *Deny with a reason* is withheld on a Codex
