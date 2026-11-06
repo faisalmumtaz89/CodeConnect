@@ -67,7 +67,7 @@
 //!
 //! The phone recomputes `SHA-256(display_text)` and compares it to
 //! `payload_hash`; on a mismatch the card is replaced by a banner and both
-//! actions die (`ios/CodeConnect/Model/CardVerification.swift`,
+//! actions die (`CodeConnectKit/Sources/CodeConnectKit/CardVerification.swift`,
 //! `Views/DecisionCard.swift`). It then separately checks that
 //! `"{tool_name}\n{tool_input}"` reproduces `display_text`, and falls back to
 //! printing `display_text` raw when it does not. So the only shape that renders
@@ -1690,7 +1690,7 @@ mod tests {
     }
 
     /// **The card passes the phone's own gate**, which is the only test of this
-    /// card that matters: `ios/CodeConnect/Model/CardVerification.swift`
+    /// card that matters: `CodeConnectKit/Sources/CodeConnectKit/CardVerification.swift`
     /// recomputes `SHA-256(display_text)`, compares it to `payload_hash`, and
     /// on a mismatch replaces the card with a banner and kills both actions.
     ///

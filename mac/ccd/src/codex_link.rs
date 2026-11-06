@@ -19167,7 +19167,7 @@ mod tests {
     /// retirement queries.
     ///
     /// The card assertions are the phone's own checks, not this daemon's
-    /// opinion of them: `ios/CodeConnect/Model/CardVerification.swift`
+    /// opinion of them: `CodeConnectKit/Sources/CodeConnectKit/CardVerification.swift`
     /// recomputes `SHA-256(display_text)` against `payload_hash` and replaces
     /// the card with a banner when they disagree, and decoding fails outright
     /// if any of the five required keys is missing.

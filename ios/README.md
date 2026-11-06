@@ -87,10 +87,9 @@ pairing and opens no socket, and nothing in it reports a link
 
 | Path | What it is |
 |---|---|
-| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, the session-start model, `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket, Keychain pairing, this device's identity, the relay credential and its enrollment, and the unified-diff parser. |
-| `CodeConnect/Net/` | Push registration (`PushRegistration`, the `PushRegistrar` seam, `PushWire`) and the hand-off to Tailscale. |
-| `CodeConnect/Store/` | Preferences, the on-disk event cache, and the start-up purge of credentials earlier releases stored. |
-| `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue. |
+| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, the session-start model, `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket, Keychain pairing, this device's identity, the relay credential and its enrollment, the unified-diff parser, and the models: every paired computer (`Machines`, one `AppModel` each), event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, preferences, the on-disk event cache, the start-up purge of credentials earlier releases stored, and the `PushRegistrar` seam with `PushWire`. |
+| `CodeConnect/Net/` | `PushRegistration`, which asks iOS for notifications and an APNs token, and the hand-off to Tailscale. |
+| `CodeConnect/Model/` | `Dictation`, speech to text for the compose bar. |
 | `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline, and the terminal from the bar's menu), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
 | `CodeConnectUITests/` | End-to-end. `ApprovalFlowUITests` and `LiveDaemonUITests` need a **real** daemon; `DeckUITests` replays contract-shaped frames. |
@@ -606,7 +605,7 @@ they are: the first began a turn, the second joined the one already running. Sto
 answers with `aborted`, `duplicate`, `rejected` or `indeterminate`, and the same unknown
 arm. A `rejected` or `indeterminate` message is the daemon's own sentence, rendered
 verbatim and attributed to the Mac rather than paraphrased. The two enums are
-decode-only: nothing in the app constructs one. `Model/CodexControls.swift` holds what
+decode-only: nothing in the app constructs one. `CodeConnectKit/Sources/CodeConnectKit/CodexControls.swift` holds what
 follows from each — an `indeterminate` spends its material so the same words can never
 be sent twice, and an unknown status deliberately spends nothing and keeps the request
 id open.
@@ -621,8 +620,8 @@ drew a whole turn as a lone "Turn complete".
 
 | Fixture | Where it runs | What it pins |
 |---|---|---|
-| `fixtures/codex/phone-turn-stream-0.153.4.json` | app bundle, via `Model/Fixtures.swift` | The `ServerMessage` frames a subscribed phone is actually sent for a Codex turn, replayed in seq order. |
-| `fixtures/codex/refusal-sentences.json` | app bundle, via `Model/CodexRefusals.swift` | Every sentence the daemon can send when a Stop or a compose did not happen, with what the phone may conclude from each. `Rejected` carries a bare reason and no code, so the classifier matches on the sentence — and the file is what keeps that match honest. |
+| `fixtures/codex/phone-turn-stream-0.153.4.json` | app bundle, via `CodeConnectKit/Sources/CodeConnectKit/Fixtures.swift` | The `ServerMessage` frames a subscribed phone is actually sent for a Codex turn, replayed in seq order. |
+| `fixtures/codex/refusal-sentences.json` | app bundle, via `CodeConnectKit/Sources/CodeConnectKit/CodexRefusals.swift` | Every sentence the daemon can send when a Stop or a compose did not happen, with what the phone may conclude from each. `Rejected` carries a bare reason and no code, so the classifier matches on the sentence — and the file is what keeps that match honest. |
 | `fixtures/codex/minor-19-wire.json` | **test bundle only** | That the three fields minor 19 adds decode whole, against bytes the daemon emitted. |
 
 The rule is per-file and worth stating narrowly: those three are emitted, not written.
@@ -641,7 +640,7 @@ stream, and two older-daemon states that prove the controls hide rather than fai
 
 ## The session timeline
 
-`TimelineBuilder` (`Model/Timeline.swift`) turns the event log into rows, a pure
+`TimelineBuilder` (`CodeConnectKit/Sources/CodeConnectKit/Timeline.swift`) turns the event log into rows, a pure
 function of the events:
 
 * an agent reply is drawn without the blank lines Claude puts around a text block
@@ -720,7 +719,7 @@ falls back to the approval layout, read-only):
 
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
-(`AnswerDecision`, `Model/QuestionCard.swift`). The daemon builds Claude's answer
+(`AnswerDecision`, `CodeConnectKit/Sources/CodeConnectKit/QuestionCard.swift`). The daemon builds Claude's answer
 from the question it stored and returns it through Claude's held hook; nothing is
 typed.
 
@@ -753,7 +752,7 @@ is HIGH, where Submit takes Face ID.
 
 `-CC_QUESTION held|at-mac|ended|answered|old-mac` stages one session holding the
 live 2.1.286 four-question card from the daemon's own events, its words lengthened
-to the worst case (`Model/QuestionFixtures.swift`, DEBUG only); answers resolve
+to the worst case (`CodeConnectKit/Sources/CodeConnectKit/QuestionFixtures.swift`, DEBUG only); answers resolve
 locally as under `-CC_FIXTURE`, so `QuestionCardUITests` drives the phone's half —
 every step, Review and Submit — not the hook. Nine `question-*` render scenarios
 photograph each step, Review, and the read-only card at the Mac, after its hold
