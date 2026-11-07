@@ -493,6 +493,25 @@ pub struct SessionSummary {
     /// said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<Fact>,
+    /// The branch checked out in `cwd` (minor 31), as git read it when a turn
+    /// last ended, when the run registered, or when the daemon started. Absent
+    /// outside a repository, on a detached head, before the first read, and from
+    /// any older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    /// Lines added and removed in `cwd` against `HEAD` (minor 31), read at the
+    /// same moments as `git_branch`. Tracked files only: a new file git does not
+    /// track yet is not counted. Absent outside a repository, before the first
+    /// read, and from any older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<DiffStat>,
+}
+
+/// How much a working tree has changed, in lines. See [`SessionSummary::diff_stat`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffStat {
+    pub added: u64,
+    pub removed: u64,
 }
 
 /// One open card, named without its body. See [`SessionSummary::pending`].
@@ -656,6 +675,8 @@ mod tests {
             pending: Vec::new(),
             model: None,
             permission_mode: None,
+            git_branch: None,
+            diff_stat: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);
@@ -712,6 +733,49 @@ mod tests {
         let s = serde_json::to_string(&codex).unwrap();
         assert!(s.contains("\"agent\":\"codex\""), "{s}");
         assert_eq!(codex, serde_json::from_str::<SessionSummary>(&s).unwrap());
+    }
+
+    /// `git_branch` and `diff_stat` (minor 31): absent from an older daemon and
+    /// decoded as unknown, left off the wire while unknown, and carried exactly
+    /// when known.
+    #[test]
+    fn the_git_fields_are_optional_both_ways() {
+        let older = serde_json::json!({
+            "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "session_id": "cc-1",
+            "tmux_session": "cc-1",
+            "cwd": "/Users/dev/Aion",
+            "lifecycle": "live",
+            "link": "detached",
+            "last_seq": 3,
+            "created_at": "t",
+            "updated_at": "t"
+        });
+        let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
+        assert_eq!(decoded.git_branch, None);
+        assert_eq!(decoded.diff_stat, None);
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        assert!(!encoded.contains("git_branch"), "{encoded}");
+        assert!(!encoded.contains("diff_stat"), "{encoded}");
+
+        let known = SessionSummary {
+            git_branch: Some("main".into()),
+            diff_stat: Some(DiffStat {
+                added: 120,
+                removed: 7,
+            }),
+            ..decoded
+        };
+        let encoded = serde_json::to_value(&known).unwrap();
+        assert_eq!(encoded["git_branch"], "main");
+        assert_eq!(
+            encoded["diff_stat"],
+            serde_json::json!({"added": 120, "removed": 7})
+        );
+        assert_eq!(
+            known,
+            serde_json::from_value::<SessionSummary>(encoded).unwrap()
+        );
     }
 
     /// **The five words the phone matches on, and the one an older daemon means.**

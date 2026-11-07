@@ -1081,6 +1081,14 @@ Only CodeConnect's own launchd job answers either. An `Operation not permitted` 
 those folders adds where to change the answer (System Settings → Privacy &
 Security → Files and Folders → ccd). External drives are out of scope: the first
 visit to one can still raise a dialog on the Mac.
+`>= 31` adds each session's `git_branch` and `diff_stat {added, removed}` to
+`SessionSummary`: the branch checked out in its folder and the lines added and
+removed in tracked files against `HEAD` (`git diff --numstat`, run with the
+same switches as `get_diff`, so no configured program runs; a binary file and a
+file git does not track add nothing). They are read when a turn ends, when the
+run registers and when the daemon starts, never on a `sessions` request, and
+omitted outside a repository, before the first read, and on a detached head
+(the branch).
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
