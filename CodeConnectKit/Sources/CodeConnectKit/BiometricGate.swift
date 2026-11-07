@@ -58,7 +58,7 @@ public enum BiometricGate {
             let detail = accessError?.takeRetainedValue().localizedDescription
                 ?? "the access policy could not be created"
             return .unavailable(
-                "High-risk approvals need Face ID or a passcode, and this iPhone could not set that up (\(detail)). Answer this one at the computer."
+                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret), and this \(HostDevice.current.name) could not set that up (\(detail)). Answer this one at the computer."
             )
         }
 
@@ -97,21 +97,21 @@ public enum BiometricGate {
     private static func unavailableReason(_ error: NSError?) -> String {
         guard let error, let code = LAError.Code(rawValue: error.code) else {
             return
-                "High-risk approvals need Face ID or a passcode and this iPhone cannot run that check. Answer this one at the computer."
+                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret) and this \(HostDevice.current.name) cannot run that check. Answer this one at the computer."
         }
         switch code {
         case .passcodeNotSet:
             return
-                "This iPhone has no passcode, so it cannot prove who is holding it. High-risk approvals have to be answered at the computer."
+                "This \(HostDevice.current.name) has no \(HostDevice.current.secret), so it cannot prove who is holding it. High-risk approvals have to be answered at the computer."
         case .biometryNotEnrolled:
             return
-                "Face ID is not set up on this iPhone. Set it up, or answer high-risk approvals at the computer, the passcode alone is offered when Face ID is available but unrecognised."
+                "\(HostDevice.current.biometric) is not set up on this \(HostDevice.current.name). Set it up, or answer high-risk approvals at the computer, the \(HostDevice.current.secret) alone is offered when \(HostDevice.current.biometric) is available but unrecognised."
         case .biometryNotAvailable:
             return
-                "Face ID is unavailable on this iPhone. High-risk approvals need it, or the passcode; answer this one at the computer."
+                "\(HostDevice.current.biometric) is unavailable on this \(HostDevice.current.name). High-risk approvals need it, or the \(HostDevice.current.secret); answer this one at the computer."
         default:
             return
-                "High-risk approvals need Face ID or a passcode: \(error.localizedDescription). Answer this one at the computer."
+                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret): \(error.localizedDescription). Answer this one at the computer."
         }
     }
 

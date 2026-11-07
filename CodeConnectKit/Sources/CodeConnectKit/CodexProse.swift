@@ -121,7 +121,7 @@ public enum CodexProse {
         // human text written to be shown, so it is shown — and the stage says
         // how far the attempt got, in words rather than in its wire spelling.
         case .unknown(let attemptedBy, _, let stage, let cause):
-            let who = attemptedBy == .phone ? "This phone's answer" : "The answer"
+            let who = attemptedBy == .phone ? "This \(HostDevice.current.noun)'s answer" : "The answer"
             return Banner(
                 title: "Sent, outcome unknown",
                 message:
@@ -153,7 +153,7 @@ public enum CodexProse {
             return Banner(
                 title: "Answered at the computer",
                 message:
-                    "Someone answered at the keyboard before this phone did. "
+                    "Someone answered at the keyboard before this \(HostDevice.current.noun) did. "
                     + "Codex does not report which choice they made.",
                 icon: "keyboard", tone: .info)
         case .unknown(let raw):

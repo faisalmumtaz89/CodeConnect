@@ -176,7 +176,7 @@ public struct DaemonProfile: Sendable, Hashable {
     /// and clipped its own last two words off the bottom of the screen.
     public var codexAnswerCaveat: String? {
         guard !resolvesCodexCards else { return nil }
-        return "This computer's CodeConnect is too old for answers from the phone; answer it at "
+        return "This computer's CodeConnect is too old for answers from the \(HostDevice.current.noun); answer it at "
             + "the computer. Update it to answer here."
     }
 

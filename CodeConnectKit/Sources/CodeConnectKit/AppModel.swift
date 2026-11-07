@@ -3134,7 +3134,7 @@ public final class AppModel {
     }
 
     private static func sentNoAnswerSentence(verb: String) -> String {
-        "This left the phone and the computer never answered, so what became of it is not known; "
+        "This left the \(HostDevice.current.noun) and the computer never answered, so what became of it is not known; "
             + "it will not be \(verb) again. Check the computer."
     }
 
@@ -3241,7 +3241,7 @@ public final class AppModel {
             }
             guard answersQuestions else {
                 return "The computer's CodeConnect is too old to answer Claude's questions from the "
-                    + "phone, so nothing was sent. Answer at the computer."
+                    + "\(HostDevice.current.noun), so nothing was sent. Answer at the computer."
             }
             return nil
         case (.claude, _) where isQuestion:
@@ -3249,12 +3249,12 @@ public final class AppModel {
                 + "so nothing was sent."
         case (.claude, _) where !answersApprovalsByHook:
             return "The computer's CodeConnect is too old to answer Claude's approvals from the "
-                + "phone, so nothing was sent. Update it, or answer at the computer."
+                + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at the computer."
         case (.codex, _) where !resolvesCodexCards:
             // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
             // an answered card can never be retired. A card that cannot be
             // retired must not be answered from here, by any vocabulary.
-            return "The computer's CodeConnect is too old to answer a Codex card from the phone, "
+            return "The computer's CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
                 + "so nothing was sent. Update it, or answer at the computer."
         case (.codex, .allow), (.codex, .deny), (.codex, .option),
             (.codex, .text), (.codex, .answers), (.codex, .decline):

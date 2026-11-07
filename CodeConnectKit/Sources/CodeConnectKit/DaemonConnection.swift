@@ -54,7 +54,7 @@ public enum ConnectionError: LocalizedError, Sendable {
         case .transport(let message): return message
         case .hostUnresolvable: return "The daemon's address is not resolving"
         case .sentButUnanswered:
-            return "This left the phone and the computer never answered."
+            return "This left the \(HostDevice.current.noun) and the computer never answered."
         }
     }
 }
@@ -497,7 +497,7 @@ public final class DaemonConnection {
     static func pairingUnreachable(host: String, port: Int, detail: String?) -> String {
         let said = detail.map { " (\($0.hasSuffix(".") ? String($0.dropLast()) : $0))" } ?? ""
         return
-            "Could not reach the computer at \(host):\(port)\(said). On the computer, `codeconnect daemon status` shows whether the daemon is running and the address it listens on; this iPhone has to be able to reach that address, over Tailscale by default."
+            "Could not reach the computer at \(host):\(port)\(said). On the computer, `codeconnect daemon status` shows whether the daemon is running and the address it listens on; this \(HostDevice.current.name) has to be able to reach that address, over Tailscale by default."
     }
 
     /// Which scheme this attempt should use.
@@ -745,7 +745,7 @@ public final class DaemonConnection {
                 let type =
                     (try? decoder.decode(FrameType.self, from: payload))?.type ?? "unrecognised"
                 unreadableFrame =
-                    "This phone could not read a “\(Self.boundedType(type))” message from the computer."
+                    "This \(HostDevice.current.noun) could not read a “\(Self.boundedType(type))” message from the computer."
                 unreadableFrameAt = Date()
                 lastErrorMessage = unreadableFrame
                 continue
@@ -1330,7 +1330,7 @@ public final class DaemonConnection {
             // adds message types, and the reader deserves to know the Mac is
             // telling them something this app cannot hear.
             unreadableFrame =
-                "This phone cannot read a “\(Self.boundedType(type))” message from the computer."
+                "This \(HostDevice.current.noun) cannot read a “\(Self.boundedType(type))” message from the computer."
             unreadableFrameAt = Date()
         case .pong, .sessions, .event, .historyEnd, .projects, .startSessionResult, .projectGit, .folderListing,
             .createFolderResult:
@@ -1349,7 +1349,7 @@ public final class DaemonConnection {
         guard let expected = mutationSessions[requestID] else { return true }
         guard expected == sessionID else {
             unreadableFrame =
-                "The computer answered this iPhone's \(kind) for one session with another session's "
+                "The computer answered this \(HostDevice.current.name)'s \(kind) for one session with another session's "
                 + "result. It was ignored."
             unreadableFrameAt = Date()
             return false
@@ -1505,7 +1505,7 @@ public final class DaemonConnection {
     /// One device is one identity wherever it shows up on the Mac.
     private static var installationID: String { DeviceIdentity.installationID }
 
-    private static let clientName = "CodeConnect iPhone"
+    private static let clientName = "CodeConnect \(HostDevice.current.name)"
 }
 
 /// Just the discriminator, for a frame whose *body* would not decode.
