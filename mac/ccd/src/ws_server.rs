@@ -46,6 +46,13 @@ use crate::state::{AuthOutcome, Daemon};
 const REPLAY_PAGE: u32 = 500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEPALIVE: Duration = Duration::from_secs(30);
+/// How often a paired device's `peers` frame is read again; it is sent only when
+/// it changed.
+const PEERS_REFRESH: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(60)
+};
 /// The longest a single frame may take to reach the peer before the connection
 /// is judged dead. Without it a peer that stops reading its socket wedges the
 /// very `send` that a revocation, a teardown, or a keepalive would ride, and
@@ -514,6 +521,13 @@ where
     let (replies_tx, mut replies) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // the first tick completes immediately
+                            // The `peers` frame this connection last sent, and the re-reads that keep it
+                            // current: each one runs off this loop, because `tailscale status` can take
+                            // seconds to give up, and comes back on `peers_read`.
+    let mut peers_sent: Option<String> = None;
+    let mut peers_refresh = tokio::time::interval(PEERS_REFRESH);
+    peers_refresh.tick().await;
+    let (peers_reader, mut peers_read) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
     let auth_deadline = tokio::time::sleep(HANDSHAKE_TIMEOUT);
     tokio::pin!(auth_deadline);
@@ -602,12 +616,21 @@ where
                                 }).await?;
                                 return Ok(());
                             }
+                            // Read once for both: whether Tailscale vouches for
+                            // this address, and the `peers` frame a paired device
+                            // is sent after its ack.
+                            let tailnet = daemon.read_tailnet().await;
+                            let vouched = match &tailnet {
+                                Some(tailnet) => tailnet.sender(peer).map(|node| node.id.clone()),
+                                None => Err(protocol::tailnet::Refusal::Unknown),
+                            };
                             let outcome = daemon
                                 .authenticate(
                                     &token,
                                     given.as_deref(),
                                     pairing_code.as_deref(),
                                     client_name.as_deref(),
+                                    vouched.as_deref().map_err(|refusal| *refusal),
                                 )
                                 .await;
                             let ack = match outcome {
@@ -659,6 +682,14 @@ where
                                     return Ok(());
                                 }
                             }
+                            if device_id.is_some() {
+                                let frame = peers_frame(&daemon, tailnet.as_ref(), peer);
+                                peers_sent = Some(serde_json::to_string(&frame)?);
+                                send(&mut sink, &frame).await?;
+                            }
+                            // The ack carried what a re-read would, so the first
+                            // re-read is a whole period after it.
+                            peers_refresh.reset();
                         }
                         _ => {
                             send(&mut sink, &ServerMessage::Error {
@@ -711,6 +742,25 @@ where
                         parsed,
                     )
                     .await?;
+                    continue;
+                }
+
+                // Off the loop: the sample waits half a second for the CPU, and
+                // nothing else on this connection may wait behind it.
+                if matches!(parsed, ClientMessage::GetMachineStats) {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let stats = crate::machine::stats(home.as_deref()).await;
+                        let _ = replies.send(ServerMessage::MachineStats {
+                            cpu: stats.cpu,
+                            memory_used: stats.memory_used,
+                            memory_total: stats.memory_total,
+                            disk_used: stats.disk_used,
+                            disk_total: stats.disk_total,
+                            captured_at: protocol::time::now_rfc3339(),
+                        });
+                    });
                     continue;
                 }
 
@@ -1034,6 +1084,23 @@ where
 
             Some(reply) = replies.recv() => send(&mut sink, &reply).await?,
 
+            _ = peers_refresh.tick(), if device_id.is_some() => {
+                let daemon = Arc::clone(&daemon);
+                let peers_reader = peers_reader.clone();
+                tokio::spawn(async move {
+                    let tailnet = daemon.read_tailnet().await;
+                    let _ = peers_reader.send(peers_frame(&daemon, tailnet.as_ref(), peer));
+                });
+            }
+
+            Some(frame) = peers_read.recv() => {
+                let json = serde_json::to_string(&frame)?;
+                if peers_sent.as_deref() != Some(json.as_str()) {
+                    send(&mut sink, &frame).await?;
+                    peers_sent = Some(json);
+                }
+            }
+
             _ = keepalive.tick() => {
                 if authed {
                     // An idle connection sends nothing, so the per-message check
@@ -1119,7 +1186,8 @@ where
         | ClientMessage::GetProjectGit { .. }
         | ClientMessage::ListFolder { .. }
         | ClientMessage::CreateFolder { .. }
-        | ClientMessage::StartSession { .. } => {}
+        | ClientMessage::StartSession { .. }
+        | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -2584,6 +2652,21 @@ async fn hello_ack(
 /// answering approvals — and the reconnect itself has to authenticate against
 /// the same database, so a genuinely broken store denies access either way
 /// rather than quietly grandfathering whoever was already inside.
+/// The `peers` frame for one reading of this computer's tailnet, told to the
+/// connection from `viewer`.
+fn peers_frame(
+    daemon: &Daemon,
+    tailnet: Option<&protocol::tailnet::Tailnet>,
+    viewer: IpAddr,
+) -> ServerMessage {
+    protocol::tailnet::peers_frame(
+        tailnet,
+        protocol::pairing::tailscale_bin().is_some(),
+        daemon.config.ws_port,
+        viewer,
+    )
+}
+
 async fn revoked(daemon: &Arc<Daemon>, device_id: Option<&str>) -> bool {
     let Some(device_id) = device_id else {
         return false;
@@ -3107,6 +3190,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         start_session: terminal_allowed,
         start_worktree: terminal_allowed,
         browse_folders: terminal_allowed,
+        machine_stats: true,
     }
 }
 
@@ -3261,7 +3345,7 @@ mod tests {
         let now = protocol::time::now_rfc3339();
         let device_id = "abcd1234".to_string();
         store
-            .insert_device(&device_id, "iPhone", "not-a-real-hash", &now)
+            .insert_device(&device_id, "iPhone", "not-a-real-hash", &now, None)
             .unwrap();
 
         let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3572,7 +3656,9 @@ mod tests {
     ///
     /// The deadline is absolute rather than per poll, so a keepalive ping — which
     /// is skipped rather than returned — cannot extend the wait a caller asked to
-    /// be bounded.
+    /// be bounded. A `peers` frame is skipped the same way: every paired device is
+    /// sent one after its ack, unasked, and the tests of it read it with
+    /// [`next_peers`].
     async fn next_frame(
         socket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
         within: Duration,
@@ -3582,7 +3668,11 @@ mod tests {
             match tokio::time::timeout_at(deadline, socket.next()).await {
                 Err(_) => return Frame::Silent,
                 Ok(Some(Ok(Message::Text(text)))) => {
-                    return Frame::Json(serde_json::from_str(&text).unwrap())
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "peers" {
+                        continue;
+                    }
+                    return Frame::Json(frame);
                 }
                 Ok(Some(Ok(Message::Close(_))) | None) => return Frame::Closed,
                 Ok(Some(Ok(_))) => continue,
@@ -3661,6 +3751,235 @@ mod tests {
             .expect("a Codex registration is accepted");
     }
 
+    /// The next text frame, `peers` included, or `None` for silence or closure.
+    async fn next_raw(
+        socket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+        within: Duration,
+    ) -> Option<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match tokio::time::timeout_at(deadline, socket.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => return serde_json::from_str(&text).ok(),
+                Ok(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) | Err(_) => return None,
+                Ok(Some(Ok(_))) => continue,
+            }
+        }
+    }
+
+    /// The next `peers` frame within `within`, past any other.
+    async fn next_peers(
+        socket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+        within: Duration,
+    ) -> Option<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let frame = next_raw(socket, left).await?;
+            if frame["type"] == "peers" {
+                return Some(frame);
+            }
+        }
+    }
+
+    /// The recorded tailnet with `edit` applied, in which "laptop" is this test's
+    /// loopback, so a connection from here comes from the owner's laptop.
+    fn tailnet_from_the_laptop(
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> protocol::tailnet::Tailnet {
+        let mut status: serde_json::Value = serde_json::from_str(
+            &include_str!("../../../fixtures/tailscale/status-six-nodes.json")
+                .replace("100.64.0.6", "127.0.0.1"),
+        )
+        .unwrap();
+        edit(&mut status);
+        protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap()
+    }
+
+    fn set_tailnet(server: &LiveServer, tailnet: Option<protocol::tailnet::Tailnet>) {
+        *server
+            .daemon
+            .test_tailnet
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = tailnet;
+    }
+
+    /// A hello with neither a token nor a code, from this test's loopback.
+    async fn hello_with_no_credential(
+        server: &LiveServer,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<TcpStream>,
+        serde_json::Value,
+    ) {
+        let stream = TcpStream::connect(server.addr).await.unwrap();
+        let url = format!("ws://{}/", server.addr);
+        let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
+        let hello = serde_json::json!({
+            "type": "hello",
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "client_name": "iPad",
+        });
+        socket.send(Message::Text(hello.to_string())).await.unwrap();
+        let reply = next_raw(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("a reply to hello");
+        (socket, reply)
+    }
+
+    /// **The owner's own Tailscale device signs in with no code, over the real
+    /// listener, and is told the owner's other computers:** the frame
+    /// `fixtures/wire/peers.json` records, right after its ack, and again when the
+    /// tailnet changes, and not when it does not.
+    #[tokio::test]
+    async fn the_owners_tailscale_device_signs_in_with_no_code_and_learns_the_other_computers() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        set_tailnet(&server, Some(tailnet_from_the_laptop(|_| {})));
+
+        let (mut socket, ack) = hello_with_no_credential(&server).await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        assert_eq!(
+            ack["device_token"].as_str().map(str::len),
+            Some(64),
+            "{ack}"
+        );
+        // The recorded frame, less this test's own computer: a computer is never
+        // told about itself.
+        let mut expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/wire/peers.json")).unwrap();
+        let expected = {
+            let running = &mut expected["running"];
+            running["computers"] = serde_json::json!([]);
+            running.clone()
+        };
+        // Right after the ack, not at the first re-read: the ack and this frame go
+        // out back to back, and the first re-read is a whole `PEERS_REFRESH` away.
+        assert_eq!(
+            next_raw(&mut socket, PEERS_REFRESH / 2).await,
+            Some(expected),
+            "the frame right after the ack"
+        );
+
+        set_tailnet(
+            &server,
+            Some(tailnet_from_the_laptop(|status| {
+                for node in status["Peer"].as_object_mut().unwrap().values_mut() {
+                    if node["HostName"] == "linux-box" {
+                        node["Online"] = true.into();
+                    }
+                }
+            })),
+        );
+        let changed = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("a changed tailnet is sent");
+        let names: Vec<&str> = changed["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|computer| computer["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["linux-box"]);
+        assert_eq!(
+            next_peers(&mut socket, PEERS_REFRESH * 4).await,
+            None,
+            "an unchanged tailnet is not sent again"
+        );
+    }
+
+    /// **A computer removed from this one is no longer told about**: the next
+    /// re-read of the tailnet drops it from an open connection's `peers`.
+    #[tokio::test]
+    async fn a_removed_computer_drops_out_of_the_peers_a_viewer_is_told() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        set_tailnet(
+            &server,
+            Some(tailnet_from_the_laptop(|status| {
+                for node in status["Peer"].as_object_mut().unwrap().values_mut() {
+                    if node["HostName"] == "linux-box" {
+                        node["Online"] = true.into();
+                    }
+                }
+            })),
+        );
+        let (mut socket, ack) = hello_with_no_credential(&server).await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        let names = |frame: serde_json::Value| -> Vec<String> {
+            frame["computers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|computer| computer["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let first = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(names(first), ["linux-box"]);
+
+        // linux-box signed in once through Tailscale, and is removed.
+        server
+            .daemon
+            .store
+            .insert_device(
+                "lb",
+                "linux-box",
+                "hash-lb",
+                "2026-11-08T00:00:00Z",
+                Some("n0000000003CNTRL"),
+            )
+            .unwrap();
+        server.daemon.revoke("lb").await.unwrap();
+        let after = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("the change is sent");
+        assert!(names(after).is_empty());
+    }
+
+    /// **A hello with no credential is refused unless Tailscale vouches for the
+    /// address it came from:** with no tailnet, from another user's device, from a
+    /// tagged one. A code still pairs from there, and nothing else was added.
+    #[tokio::test]
+    async fn a_hello_with_no_credential_is_refused_unless_tailscale_vouches_for_its_address() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let laptop = |field: &'static str, value: serde_json::Value| {
+            tailnet_from_the_laptop(move |status| {
+                for node in status["Peer"].as_object_mut().unwrap().values_mut() {
+                    if node["HostName"] == "laptop" {
+                        node[field] = value.clone();
+                    }
+                }
+            })
+        };
+        for (case, tailnet) in [
+            ("no tailnet", None),
+            ("another user's device", Some(laptop("UserID", 9999.into()))),
+            (
+                "a tagged device",
+                Some(laptop("Tags", serde_json::json!(["tag:server"]))),
+            ),
+        ] {
+            set_tailnet(&server, tailnet);
+            let (_socket, reply) = hello_with_no_credential(&server).await;
+            assert_eq!(reply["type"], "error", "{case}: {reply}");
+            assert_eq!(reply["code"], "unauthorized", "{case}: {reply}");
+        }
+        assert_eq!(server.daemon.list_devices().await.unwrap().len(), 1);
+
+        let (code, _) = server.daemon.create_pairing(300).await.unwrap();
+        let stream = TcpStream::connect(server.addr).await.unwrap();
+        let url = format!("ws://{}/", server.addr);
+        let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
+        let hello = serde_json::json!({
+            "type": "hello",
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "pairing_code": code,
+            "client_name": "iPad",
+        });
+        socket.send(Message::Text(hello.to_string())).await.unwrap();
+        let ack = next_json(&mut socket).await.unwrap();
+        assert_eq!(ack["type"], "hello_ack", "a code still pairs: {ack}");
+        assert_eq!(server.daemon.list_devices().await.unwrap().len(), 2);
+    }
+
     /// **One computer's agent messages another computer's, over the real
     /// listener.** The sending daemon dials the receiver's port at the address its
     /// tailnet gives the receiving computer; the receiver serves the connection
@@ -3675,10 +3994,12 @@ mod tests {
                 .replace("100.64.0.6", "127.0.0.1"),
         )
         .unwrap();
-        *crate::mail::TEST_TAILNET
+        let (receiver, _device) = live_server(protocol::config::Config::default()).await;
+        *receiver
+            .daemon
+            .test_tailnet
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(tailnet.clone());
-        let (receiver, _device) = live_server(protocol::config::Config::default()).await;
         let target = protocol::uid::new().unwrap();
         codex_run(&receiver.daemon, &target, "cc-1").await;
         let (sender, _, _, _) = daemon_with_a_device_pushing(
@@ -3833,6 +4154,7 @@ mod tests {
                 "iPhone",
                 &protocol::hash::sha256_hex(device_token.as_bytes()),
                 &now,
+                None,
             )
             .unwrap();
         let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4214,6 +4536,8 @@ mod tests {
                 created_at: protocol::time::now_rfc3339(),
                 last_seen_at: None,
                 revoked_at: None,
+                tailnet_node: None,
+                paired_before_nodes: false,
             }))
         };
         let result = hello_ack(&daemon, reconnect(), true, true).await;
@@ -8518,6 +8842,46 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// **A machine-stats sample holds nothing up**: it is advertised, its answer
+    /// carries every value, and a `sessions` asked right behind it on the same
+    /// connection is answered first, well inside the sample's half second.
+    #[tokio::test]
+    async fn machine_stats_is_answered_without_holding_up_the_connection() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["machine_stats"], true, "{ack}");
+
+        let asked = std::time::Instant::now();
+        for request in [ClientMessage::GetMachineStats, ClientMessage::Sessions] {
+            phone
+                .send(Message::Text(serde_json::to_string(&request).unwrap()))
+                .await
+                .unwrap();
+        }
+        let first = next_json(&mut phone).await.unwrap();
+        let sessions_after = asked.elapsed();
+        assert_eq!(first["type"], "sessions", "{first}");
+        assert!(
+            sessions_after < crate::machine::CPU_WINDOW / 2,
+            "sessions waited {sessions_after:?} behind the sample"
+        );
+
+        let stats = next_json(&mut phone).await.unwrap();
+        assert_eq!(stats["type"], "machine_stats", "{stats}");
+        assert!(asked.elapsed() >= crate::machine::CPU_WINDOW, "{stats}");
+        for key in [
+            "cpu",
+            "memory_used",
+            "memory_total",
+            "disk_used",
+            "disk_total",
+        ] {
+            assert!(stats[key].is_number(), "{key}: {stats}");
+        }
+    }
+
     /// **Browsing and making folders answer only a paired device**, as starting
     /// does: the bootstrap token is refused, and a paired phone gets its listing and
     /// its new folder.
@@ -8715,6 +9079,105 @@ mod tests {
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// **The session-list fields and machine stats a minor-31 daemon sends,
+    /// emitted by this build.** The Mac app's tests read the copy under `ios/`
+    /// (byte-identical, by `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_31_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-31-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_31_wire().await,
+            committed,
+            "the committed minor-31 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_31_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-31-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_31_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_31_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-31-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The capabilities a paired phone is offered over a live socket, the
+    /// `get_machine_stats` request, and the two answers it can get, whole and
+    /// with the disk unread; and a session list with and without a branch and
+    /// line counts. The answers are this build's encoding of fixed values, so the
+    /// fixture is the same on every machine: how they are read is covered by the
+    /// tests of `machine` and of the turn-end refresh.
+    async fn derived_minor_31_wire() -> serde_json::Value {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (_phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let stats = |disk: Option<(u64, u64)>| ServerMessage::MachineStats {
+            cpu: Some(0.38),
+            memory_used: Some(76_235_669_504),
+            memory_total: Some(206_158_430_208),
+            disk_used: disk.map(|(used, _)| used),
+            disk_total: disk.map(|(_, total)| total),
+            captured_at: "2026-11-07T04:00:00.000Z".into(),
+        };
+        let summary = |uid: &str, name: &str, cwd: &str, tree: Option<(&str, u64, u64)>| {
+            protocol::event::SessionSummary {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                cwd: cwd.into(),
+                lifecycle: protocol::event::Lifecycle::Live,
+                link: protocol::event::Link::Attached,
+                claude_session_id: None,
+                transcript_path: None,
+                last_seq: 12,
+                created_at: "2026-11-07T03:00:00.000Z".into(),
+                updated_at: "2026-11-07T04:00:00.000Z".into(),
+                blocked_on: Vec::new(),
+                project_label: crate::project_label::project_label(cwd),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_link: protocol::event::CodexLink::None,
+                pending: Vec::new(),
+                model: None,
+                permission_mode: None,
+                git_branch: tree.map(|(branch, _, _)| branch.to_string()),
+                diff_stat: tree
+                    .map(|(_, added, removed)| protocol::event::DiffStat { added, removed }),
+            }
+        };
+        serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "get_machine_stats_request": serde_json::to_value(ClientMessage::GetMachineStats)
+                .unwrap(),
+            "machine_stats": serde_json::to_value(stats(Some((1_400_000_000_000, 4_000_000_000_000))))
+                .unwrap(),
+            "machine_stats_partial": serde_json::to_value(stats(None)).unwrap(),
+            "sessions": serde_json::to_value(ServerMessage::Sessions {
+                sessions: vec![
+                    summary(
+                        "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+                        "cc-1",
+                        "/tmp/ccd-minor-31/app",
+                        Some(("feature/fleet", 120, 7)),
+                    ),
+                    summary("01K1B3XQ8ZC0DE5FGH7JKMNPQS", "cc-2", "/tmp/ccd-minor-31/notes", None),
+                ],
+            })
+            .unwrap(),
+        })
     }
 
     /// A folder's folders, a new folder, a start in a folder no session has run in,
@@ -9252,6 +9715,8 @@ esac
                 created_at: protocol::time::now_rfc3339(),
                 last_seen_at: None,
                 revoked_at: None,
+                tailnet_node: None,
+                paired_before_nodes: false,
             }))
         };
         let offered = |tls_active: bool, trust: PlaintextTrust, outcome: AuthOutcome| {

@@ -105,6 +105,7 @@ fn main() -> Result<()> {
             | "pair"
             | "devices"
             | "revoke"
+            | "unblock"
             | "daemon"
             | "--version"
             | "version"
@@ -141,6 +142,7 @@ fn main() -> Result<()> {
         "pair" => pair::pair(rest),
         "devices" => pair::devices(rest),
         "revoke" => pair::revoke(rest),
+        "unblock" => pair::unblock(rest),
         "daemon" => service::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
@@ -281,7 +283,8 @@ codeconnect — host coding agents your iPhone can see and answer
 
   codeconnect pair                show a QR code that pairs a phone (single use, 5 min)
   codeconnect devices             list paired devices
-  codeconnect revoke <device>     revoke a device's token
+  codeconnect revoke <device>     revoke a device, and every other on its Tailscale device
+  codeconnect unblock <device>    let a revoked device sign in again
   codeconnect token               print the computer's permanent token (instead of a pairing code)
 "
 }

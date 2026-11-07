@@ -490,6 +490,9 @@ pub enum ClientMessage {
         parent: String,
         name: String,
     },
+    /// **This computer's CPU, memory and disk, as one sample** (minor 31,
+    /// `machine_stats`), answered with one [`ServerMessage::MachineStats`].
+    GetMachineStats,
 
     Ping,
 }
@@ -714,8 +717,65 @@ pub enum ServerMessage {
         request_id: String,
         result: CreateFolderResult,
     },
+    /// The answer to [`ClientMessage::GetMachineStats`]: one sample, taken when
+    /// asked. Each value is absent when this computer could not read it. The same
+    /// definitions on macOS and Linux:
+    MachineStats {
+        /// The share of all cores busy over half a second, from 0 to 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<f64>,
+        /// Bytes of memory not available for new work: total less available.
+        /// On macOS what Activity Monitor calls Memory Used (app memory, wired
+        /// and compressed); on Linux `MemTotal - MemAvailable`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory_used: Option<u64>,
+        /// Bytes of physical memory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory_total: Option<u64>,
+        /// Bytes in use on the volume holding the daemon user's home folder:
+        /// its size less what this user can still write, so blocks reserved
+        /// for root count as used.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_used: Option<u64>,
+        /// Bytes on that volume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_total: Option<u64>,
+        captured_at: String,
+    },
+    /// The owner's other computers this one can reach on Tailscale, and this
+    /// computer's own Tailscale state. Built by [`crate::tailnet::peers_frame`].
+    Peers {
+        tailnet: TailnetState,
+        /// This computer's Tailscale login, when Tailscale is running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<String>,
+        /// This computer is a tagged device, which Tailscale vouches for to no
+        /// one: every connection to it needs a code.
+        tagged: bool,
+        computers: Vec<PeerComputer>,
+    },
 
     Pong,
+}
+
+/// Tailscale on this computer, as [`ServerMessage::Peers`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailnetState {
+    Running,
+    /// Installed, but stopped, signed out, or not answering.
+    NotRunning,
+    NotInstalled,
+}
+
+/// One computer in [`ServerMessage::Peers`]: where its daemon listens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerComputer {
+    /// The first label of its MagicDNS name, as Mail names it.
+    pub name: String,
+    /// Its whole MagicDNS name, or its IPv4 address when it has none.
+    pub host: String,
+    pub port: u16,
 }
 
 /// What a [`ServerMessage::FolderListing`] found.
@@ -1129,6 +1189,11 @@ pub struct Capabilities {
     /// `bad_request` and starts only in a folder [`ServerMessage::Projects`] listed.
     #[serde(default)]
     pub browse_folders: bool,
+    /// **This daemon answers [`ClientMessage::GetMachineStats`]** (minor 31).
+    /// Absent decodes `false`: an older daemon answers it with `bad_request`, so a
+    /// client asks only when this is advertised.
+    #[serde(default)]
+    pub machine_stats: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -1819,10 +1884,12 @@ mod tests {
         };
         let encoded = serde_json::to_string(&ack).unwrap();
         assert!(!encoded.contains("device_token"), "{encoded}");
-        assert!(
-            !encoded.contains("machine_"),
-            "a name that could not be read is left out, never sent empty: {encoded}"
-        );
+        for key in ["\"machine_name\"", "\"machine_os\"", "\"machine_id\""] {
+            assert!(
+                !encoded.contains(key),
+                "a name that could not be read is left out, never sent empty: {encoded}"
+            );
+        }
         assert!(
             !encoded.contains("push_environment"),
             "a daemon holding no token for this device claims no environment: {encoded}"
@@ -1991,10 +2058,21 @@ mod tests {
             "browsing folders (`list_folder`, `create_folder`, `browse_folders` capability, a \
              start in any folder) is minor 30"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 31,
+            "each session's branch and line counts (`git_branch`, `diff_stat`) and the \
+             computer's CPU, memory and disk (`get_machine_stats`, `machine_stats` \
+             capability) are minor 31"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 32,
+            "a hello with neither token nor code from the owner's own Tailscale device, and \
+             the `peers` frame, are minor 32"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 30);
+        assert_eq!(crate::PROTOCOL_MINOR, 32);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2503,6 +2581,7 @@ mod tests {
             start_session: true,
             start_worktree: true,
             browse_folders: true,
+            machine_stats: true,
         }
     }
 
@@ -3294,6 +3373,47 @@ mod tests {
 
         let current = serde_json::to_value(capabilities_fixture()).unwrap();
         assert_eq!(current["browse_folders"], true);
+    }
+
+    /// `machine_stats` (minor 31): absent from a minor-30 ack, so a client there
+    /// never asks; the request and its answer read as written, and a value the
+    /// computer could not read is left off rather than sent as zero.
+    #[test]
+    fn machine_stats_is_gated_and_reads_as_written() {
+        let old: Capabilities = serde_json::from_str(
+            r#"{"can_approve_reliably":true,"fail_mode":"fail_open",
+                "answer_path":"hook_return","hold_secs":0,"send_text":true,
+                "capture":true,"push":false,"tls":true,"browse_folders":true}"#,
+        )
+        .unwrap();
+        assert!(old.browse_folders && !old.machine_stats);
+        let current = serde_json::to_value(capabilities_fixture()).unwrap();
+        assert_eq!(current["machine_stats"], true);
+
+        let request: ClientMessage =
+            serde_json::from_str(r#"{"type":"get_machine_stats"}"#).unwrap();
+        assert!(matches!(request, ClientMessage::GetMachineStats));
+
+        let reply = ServerMessage::MachineStats {
+            cpu: Some(0.38),
+            memory_used: Some(71 << 30),
+            memory_total: Some(192 << 30),
+            disk_used: None,
+            disk_total: None,
+            captured_at: "t".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            serde_json::json!({"type": "machine_stats", "cpu": 0.38,
+                "memory_used": 76_235_669_504u64, "memory_total": 206_158_430_208u64,
+                "captured_at": "t"}),
+        );
+        let ServerMessage::MachineStats { cpu, disk_used, .. } =
+            serde_json::from_str(r#"{"type":"machine_stats","captured_at":"t"}"#).unwrap()
+        else {
+            panic!("wrong message");
+        };
+        assert_eq!((cpu, disk_used), (None, None));
     }
 
     #[test]

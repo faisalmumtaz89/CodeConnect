@@ -649,7 +649,33 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     A daemon below 30 answers `list_folder` and `create_folder` with
 ///     `bad_request` and refuses an unlisted folder, so a client sends them, and
 ///     offers folders outside the list, only when the capability is advertised.
-pub const PROTOCOL_MINOR: u32 = 30;
+///   * `31` — **Each session's branch and line counts, and the computer's load.**
+///
+///     For the Mac app. Additive:
+///       - [`event::SessionSummary::git_branch`] and
+///         [`event::SessionSummary::diff_stat`] — read from git when a turn ends,
+///         when the run registers and when the daemon starts; never on a listing.
+///         Both are optional and an older daemon sends neither, which a client
+///         reads as unknown, so no capability gates them.
+///       - [`ws::Capabilities::machine_stats`], [`ws::ClientMessage::GetMachineStats`]
+///         and [`ws::ServerMessage::MachineStats`] — one sample of CPU, memory and
+///         disk. A daemon below 31 answers `bad_request`, so a client asks only
+///         when the capability is advertised.
+///   * `32` — **The owner's own devices sign in through Tailscale, and learn the
+///     owner's other computers.**
+///
+///     Additive:
+///       - A [`ws::ClientMessage::Hello`] with neither `token` nor `pairing_code`,
+///         from a device of this computer's Tailscale user that is not tagged, is
+///         paired as a code would pair it: the ack carries a fresh `device_token`.
+///         A daemon below 32, or any other source, answers `unauthorized`, and
+///         the client offers a code.
+///       - [`ws::ServerMessage::Peers`] — sent to a paired device after its
+///         `hello_ack`, and again when it changes: this computer's Tailscale state
+///         and the owner's other computers it can reach. A `hello` names no client
+///         minor, so it goes to every paired device: an app from before 32 reads it
+///         as a frame it cannot read and asks to be updated.
+pub const PROTOCOL_MINOR: u32 = 32;
 
 #[cfg(test)]
 mod ledger_tests {

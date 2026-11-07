@@ -687,8 +687,43 @@ impl Db {
         name: String,
         token_hash: String,
         at: String,
+        tailnet_node: Option<String>,
     ) -> Result<()> {
-        self.run(move |store| store.insert_device(&device_id, &name, &token_hash, &at))
+        self.run(move |store| {
+            store.insert_device(&device_id, &name, &token_hash, &at, tailnet_node.as_deref())
+        })
+        .await
+    }
+
+    /// See [`crate::store::Store::admit_tailnet_device`].
+    pub async fn admit_tailnet_device(
+        &self,
+        device_id: String,
+        name: String,
+        token_hash: String,
+        at: String,
+        tailnet_node: String,
+    ) -> Result<crate::store::Admission> {
+        self.run(move |store| {
+            store.admit_tailnet_device(&device_id, &name, &token_hash, &at, &tailnet_node)
+        })
+        .await
+    }
+
+    /// See [`crate::store::Store::stamp_tailnet_node`].
+    pub async fn stamp_tailnet_node(&self, token_hash: String, tailnet_node: String) -> Result<()> {
+        self.run(move |store| store.stamp_tailnet_node(&token_hash, &tailnet_node))
+            .await
+    }
+
+    /// See [`crate::store::Store::blocked_tailnet_nodes`].
+    pub async fn blocked_tailnet_nodes(&self) -> Result<Vec<String>> {
+        self.run(|store| store.blocked_tailnet_nodes()).await
+    }
+
+    /// See [`crate::store::Store::unblock_device`].
+    pub async fn unblock_device(&self, device_id: String) -> Result<usize> {
+        self.run(move |store| store.unblock_device(&device_id))
             .await
     }
 
@@ -758,7 +793,7 @@ impl Db {
             .await
     }
 
-    pub async fn revoke_device(&self, device_id: String, at: String) -> Result<bool> {
+    pub async fn revoke_device(&self, device_id: String, at: String) -> Result<Vec<String>> {
         self.run(move |store| store.revoke_device(&device_id, &at))
             .await
     }

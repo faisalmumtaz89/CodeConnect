@@ -157,7 +157,8 @@ codeconnect daemon uninstall      # stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
 codeconnect devices               # paired devices
-codeconnect revoke <device>       # revoke a device's token
+codeconnect revoke <device>       # revoke a device, and every other on its Tailscale device
+codeconnect unblock <device>      # let a revoked device sign in again
 codeconnect token                 # the static fallback token
 ```
 
@@ -438,7 +439,11 @@ CodeConnect update available · 0.2.0 → 0.3.0
 It ends with the one fix: `codeconnect update`, which downloads that release,
 proves it is signed by CodeConnect's Apple team, and replaces all three
 binaries in a single directory exchange — so an interrupted update leaves the
-complete old set or the complete new one, never a mixture. A failed check
+complete old set or the complete new one, never a mixture. Where CodeConnect.app
+installed the binaries (it leaves `~/.codeconnect/bin/.installed-by-app`), the
+app keeps them current: there is no advisory, and `codeconnect update` refuses
+with "CodeConnect.app keeps these up to date; update the app.", followed by the
+way back: delete that file if CodeConnect.app was removed. A failed check
 renders as silence: an advisory that can be wrong is worse than none. The
 `update_check` config switch disables the background check; identity stays
 visible through `--version` and `daemon status`.
@@ -694,18 +699,49 @@ turn the loopback listener off.
 ## Pairing
 
 `codeconnect pair` asks the daemon for a single-use 8-character code (5-minute TTL,
-stored hashed) and prints it as a QR the app decodes, beside the address and code the app's
-manual field takes. The QR holds:
+stored hashed) and prints it as a QR, beside the address and code the app's
+manual field takes. The QR holds a link:
 
-```json
-{"v":1,"host":"<magicdns-name>","port":8787,"code":"ABCD2345"}
+```text
+https://codeconnect.sh/p#v=1&h=<magicdns-name>&p=8787&c=ABCD2345
 ```
+
+A phone camera opens it in the app when the app is installed, and otherwise on
+the page, which offers the App Store. The fields ride in the fragment, which a
+browser never sends to the server.
 
 The app connects and sends `hello{pairing_code}` with no token. The daemon
 validates and consumes the code, mints a 256-bit per-device token, and returns
 it once in `hello_ack{device_token}`; the app keeps it in the Keychain. Only the
 token's hash is stored here, so a leaked database cannot be replayed as a
 credential.
+
+### Your own Tailscale devices need no code
+
+A `hello` with neither a token nor a code is paired as a code would pair it
+(protocol minor 32) when it comes from one of this computer's own Tailscale
+user's devices and neither end is tagged: the same rule Mail uses between
+computers, read from a fresh `tailscale status` on each such `hello`. The ack
+carries a new device token. From anywhere else (another Tailscale user's device,
+a tagged one, an address Tailscale does not know, this computer itself) it gets
+`unauthorized`, and a code still pairs. Trust is per device, not per person: every
+account on a trusted computer, and every app on a trusted phone, is let in.
+
+Each device remembers the Tailscale device it was seen from (its stable node id),
+from a token, from a code or from such a `hello`. `codeconnect revoke` revokes
+every device with the same node at once, so the phone or computer stays out,
+and this computer has no traffic with it either way: its Mail is refused, no
+message is sent or retried to it, it is not asked for its agents, and no `peers`
+frame names it. `codeconnect unblock <device>` forgets it so it may sign
+in again. A device paired before this release and revoked before it was seen
+through Tailscale cannot be placed, so while one is listed every such `hello` is
+refused; `codeconnect devices` says so, and unblocking it lifts that.
+
+After its ack, a paired device is sent `peers`: this computer's Tailscale state
+and login, and the owner's other computers it can reach (the ones Mail may
+message, less the computer the device connects from), each by MagicDNS name
+and port. It is read again every minute and sent
+when it changes. `fixtures/wire/peers.json` holds the frames this build emits.
 
 ### Both ends refuse what is unreachable by definition
 
@@ -754,7 +790,8 @@ The static `codeconnect token` credential stays valid alongside device tokens. D
 `~/.codeconnect/token` is the only thing that retires it.
 
 `codeconnect revoke` takes effect on connections that are **already open**, and takes
-effect *immediately*. Three mechanisms, in order of how fast they act:
+effect *immediately*, for every device on the same Tailscale device. Three
+mechanisms, in order of how fast they act:
 
 1. **A cancellation is published the instant the token is revoked.** Every open
    socket is subscribed to it and closes the moment its own device id appears.
@@ -1081,6 +1118,24 @@ Only CodeConnect's own launchd job answers either. An `Operation not permitted` 
 those folders adds where to change the answer (System Settings → Privacy &
 Security → Files and Folders → ccd). External drives are out of scope: the first
 visit to one can still raise a dialog on the Mac.
+`>= 31` adds each session's `git_branch` and `diff_stat {added, removed}` to
+`SessionSummary`: the branch checked out in its folder and the lines added and
+removed in tracked files against `HEAD` (`git diff --numstat`, run with the
+same switches as `get_diff`, so no external diff, textconv or fsmonitor program
+runs; a clean filter configured for a file, such as Git LFS's, does, as it does
+for `get_diff`; a binary file and a file git does not track add nothing). They are read when a turn ends, when the
+run registers and when the daemon starts, never on a `sessions` request, and
+omitted outside a repository, before the first read, and on a detached head
+(the branch). It also answers `get_machine_stats` (the `machine_stats`
+capability, offered to every connection) with one `machine_stats {cpu?,
+memory_used?, memory_total?, disk_used?, disk_total?, captured_at}`, taken when
+asked and never stored: `cpu` is the share of all cores busy over half a
+second, 0 to 1; memory is in bytes, used being total less what is available for
+new work (Activity Monitor's Memory Used on macOS, `MemTotal - MemAvailable` on
+Linux); disk is in bytes for the volume holding the daemon user's home folder,
+used being its size less what that user can still write. A value that cannot be
+read is omitted. The sample is answered off the connection's loop, so nothing
+else on it waits for the half second.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

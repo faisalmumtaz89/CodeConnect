@@ -33,7 +33,34 @@ use crate::update_release::Archive;
 
 /// Where the checker's answer lives between launches.
 fn cache_path() -> PathBuf {
-    protocol::root_dir().join("update-check.json")
+    cache_path_at(&protocol::root_dir())
+}
+
+fn cache_path_at(root: &std::path::Path) -> PathBuf {
+    root.join("update-check.json")
+}
+
+/// Written into `bin` by CodeConnect.app when it installs these binaries. The
+/// app keeps them current, so neither `codeconnect update` nor its advisory
+/// speaks for them; only whether the file exists is read.
+pub const INSTALLED_BY_APP: &str = ".installed-by-app";
+
+fn app_marker(root: &std::path::Path) -> PathBuf {
+    root.join("bin").join(INSTALLED_BY_APP)
+}
+
+fn installed_by_app(root: &std::path::Path) -> bool {
+    app_marker(root).exists()
+}
+
+/// What `codeconnect update` says on a computer where the app installed the
+/// binaries, with the way back for one where the app has since been deleted.
+fn updated_by_the_app(root: &std::path::Path) -> String {
+    format!(
+        "CodeConnect.app keeps these up to date; update the app. If you removed \
+         CodeConnect.app, delete {}.",
+        app_marker(root).display()
+    )
 }
 
 /// The claim that makes the 24-hour throttle hold across processes — two
@@ -258,9 +285,17 @@ pub fn update_advisory(cache: &UpdateCache, installed: (u64, u64, u64)) -> Optio
     })
 }
 
-/// The advisory for the current install, from the cache on disk.
+/// The advisory for the current install, from the cache on disk; none where the
+/// app installed the binaries, because the command it names would refuse.
 pub fn cached_advisory() -> Option<UpdateAdvisory> {
-    update_advisory(&read_cache(), installed_version())
+    cached_advisory_at(&protocol::root_dir())
+}
+
+fn cached_advisory_at(root: &std::path::Path) -> Option<UpdateAdvisory> {
+    if installed_by_app(root) {
+        return None;
+    }
+    update_advisory(&read_cache_from(&cache_path_at(root)), installed_version())
 }
 
 // -------------------------------------------------------- update advisory
@@ -641,6 +676,9 @@ pub fn run_update() -> Result<()> {
 }
 
 fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
+    if installed_by_app(root) {
+        anyhow::bail!("{}", updated_by_the_app(root));
+    }
     let live = root.join("bin");
     let _only_one = claim_throttle_at(&update_lock_path(root)).ok_or_else(|| {
         anyhow::anyhow!(
@@ -2366,6 +2404,53 @@ mod tests {
     fn newer() -> String {
         let (major, minor, patch) = installed_version();
         format!("{major}.{minor}.{patch}", patch = patch + 1,)
+    }
+
+    /// **Where the app installed the binaries, `codeconnect update` stands aside**
+    /// before it asks anything, takes a lock or moves a file.
+    #[test]
+    fn an_app_install_is_left_to_the_app_to_update() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        std::fs::write(
+            fixture.live.join(INSTALLED_BY_APP),
+            "/Applications/CodeConnect.app\n",
+        )
+        .unwrap();
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert_eq!(
+            ran.outcome.map_err(|why| why.to_string()).unwrap_err(),
+            format!(
+                "CodeConnect.app keeps these up to date; update the app. If you removed \
+                 CodeConnect.app, delete {}.",
+                fixture.live.join(INSTALLED_BY_APP).display()
+            )
+        );
+        assert!(ran.events.is_empty(), "nothing was asked: {:?}", ran.events);
+        assert_eq!(snapshot(&fixture.live), before, "the live set is untouched");
+        assert!(
+            !update_lock_path(&fixture.root).exists(),
+            "no lock was taken"
+        );
+    }
+
+    /// The advisory names `codeconnect update`, so where the app installed the
+    /// binaries there is none, however new the release the cache knows.
+    #[test]
+    fn an_app_install_is_advised_nothing() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let cache = UpdateCache {
+            last_attempt_unix: 0,
+            latest: Some(newer()),
+        };
+        std::fs::write(
+            cache_path_at(&fixture.root),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        assert!(cached_advisory_at(&fixture.root).is_some());
+        std::fs::write(fixture.live.join(INSTALLED_BY_APP), "").unwrap();
+        assert!(cached_advisory_at(&fixture.root).is_none());
     }
 
     #[test]

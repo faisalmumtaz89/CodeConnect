@@ -610,6 +610,14 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The permission mode the main agent last reported, with the event that
     /// reported it (minor 23). `nil` until something has said.
     public let permissionMode: SessionFact?
+    /// The branch checked out in `cwd` (minor 31), as git read it when a turn
+    /// last ended. `nil` outside a repository, on a detached head, before the
+    /// first read, and from an older daemon.
+    public let gitBranch: String?
+    /// Lines added and removed in tracked files against `HEAD` (minor 31), read
+    /// at the same moments. `nil` outside a repository, before the first read,
+    /// and from an older daemon.
+    public let diffStat: DiffStat?
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -631,6 +639,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case pending
         case model
         case permissionMode = "permission_mode"
+        case gitBranch = "git_branch"
+        case diffStat = "diff_stat"
     }
 
     public init(from decoder: Decoder) throws {
@@ -654,6 +664,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         pending = try c.decodeIfPresent([PendingRef].self, forKey: .pending) ?? []
         model = try c.decodeIfPresent(ModelFact.self, forKey: .model)
         permissionMode = try c.decodeIfPresent(SessionFact.self, forKey: .permissionMode)
+        gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
+        diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
     }
 
     /// Whether the Codex vocabulary applies here. The one place the question is
@@ -678,6 +690,12 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     public var id: String { sessionKey }
     public var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }
     public var createdDate: Date { ISO8601.parse(createdAt) ?? .distantPast }
+}
+
+/// How much a working tree has changed, in lines (`SessionSummary.diffStat`).
+public struct DiffStat: Codable, Sendable, Hashable {
+    public let added: UInt64
+    public let removed: UInt64
 }
 
 /// One open card, named without its body (`SessionSummary.pending`).
@@ -874,6 +892,8 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// `list_folder` and `create_folder` are answerable, and `start_session`
     /// takes any absolute folder (minor 30).
     public var browsesFolders: Bool { advertises(["browse_folders"]) }
+    /// `get_machine_stats` is answerable (minor 31).
+    public var reportsMachineStats: Bool { advertises(["machine_stats"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     public var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
     /// A live terminal can be opened over *this* connection. Connection-scoped,
@@ -1706,6 +1726,34 @@ public struct WireRisk: Codable, Sendable, Hashable {
     }
 }
 
+// MARK: - Machine stats
+
+/// One sample of a computer's load, as `machine_stats` carries it. Each value
+/// is `nil` when the computer could not read it.
+public struct MachineStats: Decodable, Sendable, Hashable {
+    /// The share of all cores busy over half a second, from 0 to 1.
+    public let cpu: Double?
+    /// Bytes of memory not available for new work, and of physical memory.
+    public let memoryUsed: UInt64?
+    public let memoryTotal: UInt64?
+    /// Bytes in use on the volume holding the daemon user's home folder, and
+    /// its size.
+    public let diskUsed: UInt64?
+    public let diskTotal: UInt64?
+    let capturedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case cpu
+        case memoryUsed = "memory_used"
+        case memoryTotal = "memory_total"
+        case diskUsed = "disk_used"
+        case diskTotal = "disk_total"
+        case capturedAt = "captured_at"
+    }
+
+    public var capturedDate: Date? { ISO8601.parse(capturedAt) }
+}
+
 // MARK: - Diff
 
 /// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
@@ -1859,6 +1907,9 @@ public enum ClientMessage: Sendable {
     case listFolder(requestID: String, path: String?, showHidden: Bool)
     /// Make one folder, as `mkdir` does. Minor 30.
     case createFolder(requestID: String, parent: String, name: String)
+    /// One sample of the computer's CPU, memory and disk. Minor 31, sent only
+    /// when `Capabilities.reportsMachineStats`.
+    case getMachineStats
     case ping
 }
 
@@ -2055,6 +2106,8 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(parent, forKey: .parent)
             try c.encode(name, forKey: .name)
+        case .getMachineStats:
+            try c.encode("get_machine_stats", forKey: .type)
         case .ping:
             try c.encode("ping", forKey: .type)
         }
@@ -2338,6 +2391,8 @@ public enum ServerMessage: Sendable {
     /// The answer to `create_folder`: nil once made, else the computer's own
     /// words.
     case createFolderResult(requestID: String, refusal: String?)
+    /// The answer to `get_machine_stats`.
+    case machineStats(MachineStats)
     case error(code: String, message: String)
     case pong
     /// A message type this build does not know. Kept rather than thrown away so
@@ -2506,6 +2561,8 @@ extension ServerMessage: Decodable {
             self = .createFolderResult(
                 requestID: try c.decode(String.self, forKey: .requestID),
                 refusal: result.status == "created" ? nil : result.detail ?? result.status)
+        case "machine_stats":
+            self = .machineStats(try MachineStats(from: decoder))
         case "pong":
             self = .pong
         case let other:

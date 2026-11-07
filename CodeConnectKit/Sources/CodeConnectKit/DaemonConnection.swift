@@ -1333,7 +1333,7 @@ public final class DaemonConnection {
                 "This \(HostDevice.current.noun) cannot read a “\(Self.boundedType(type))” message from \(HostDevice.current.computer("the computer", named: helloAck?.machineName))."
             unreadableFrameAt = Date()
         case .pong, .sessions, .event, .historyEnd, .projects, .startSessionResult, .projectGit, .folderListing,
-            .createFolderResult:
+            .createFolderResult, .machineStats:
             break
         }
         onMessage?(message)

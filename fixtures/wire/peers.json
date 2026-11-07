@@ -1,0 +1,27 @@
+{
+  "not_installed": {
+    "computers": [],
+    "tagged": false,
+    "tailnet": "not_installed",
+    "type": "peers"
+  },
+  "not_running": {
+    "computers": [],
+    "tagged": false,
+    "tailnet": "not_running",
+    "type": "peers"
+  },
+  "running": {
+    "computers": [
+      {
+        "host": "laptop.tail0000.ts.net",
+        "name": "laptop",
+        "port": 8787
+      }
+    ],
+    "login": "owner@example.com",
+    "tagged": false,
+    "tailnet": "running",
+    "type": "peers"
+  }
+}
