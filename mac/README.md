@@ -1192,8 +1192,7 @@ means an incompatible peer cannot use the handshake to probe credentials.
   until the next prompt. Within the second after a `/clear`:
   another transcript move skips the transcript in between; a move back to the
   old transcript leaves the run following the abandoned one until it moves
-  again; restarting ccd, or the session ending with more than 4 MiB of the old
-  transcript unread, loses that turn's last reply and end; and anything Claude
+  again; restarting ccd loses that turn's last reply and end; and anything Claude
   writes to the old transcript later than that second is not read. `SessionEnd` now means only what it
   says: the supervisor exited or the tmux session is gone.
 * **`risk_class`** rides on every `approval_request` card as

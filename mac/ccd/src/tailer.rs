@@ -113,9 +113,10 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
     // Everything *still running*, that is. A run that has ended has nothing
     // left to write, and re-arming a watch on its working directory — usually
     // deleted by now — is filesystem work and a warning per session on behalf
-    // of an agent that is gone. The liveness sweep runs before this task is
-    // even spawned, so by the time this list is read the ended runs are
-    // already marked as such.
+    // of an agent that is gone. The liveness sweep runs alongside this task,
+    // not before it, so a run that ended while the daemon was down can still
+    // read as running here: it is followed until the sweep marks it exited,
+    // and its `Stop` reads it to the end then.
     let mut final_reads = Vec::new();
     match daemon.db.list_sessions().await {
         Ok(rows) => {
@@ -127,18 +128,16 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
     }
     if !tails.is_empty() || !final_reads.is_empty() {
         crate::log_info!(
-            "tailer resuming {} transcript(s); {} ended run(s) read once and released",
+            "tailer resuming {} transcript(s); {} ended run(s) read to the end and released",
             tails.len(),
             final_reads.len()
         );
     }
-    // Read once, then let go. A run that ended while this daemon was down can
-    // still have transcript bytes nobody consumed, and they are only reachable
-    // from here — nothing else will ever look at that file again.
+    // Read to the end, then let go. A run that ended while this daemon was down
+    // can still have transcript bytes nobody consumed, and they are only
+    // reachable from here — nothing else will ever look at that file again.
     for tail in final_reads {
-        if let Err(err) = poll_once(&daemon, &tail.session, &tail.path).await {
-            crate::log_debug!("tail {}: final read failed: {err:#}", tail.session.name);
-        }
+        read_to_end(&daemon, &tail.session, &tail.path).await;
     }
 
     let (nudge_tx, mut nudge_rx) = mpsc::unbounded_channel::<()>();
@@ -197,20 +196,17 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
                         let Some(tail) = tails.remove(&session_uid) else {
                             continue;
                         };
-                        // One last read *before* letting go. A run can write its
+                        // Read to the end *before* letting go. A run can write its
                         // final transcript lines between the previous poll and
-                        // the moment its end is established, and dropping the
-                        // tail without reading them would lose the tail-end of
-                        // the session permanently — the log's whole promise is
-                        // that ending costs nothing. A transcript whose file is
-                        // already gone scans to nothing, silently, so this is
-                        // free for a run that ended days ago.
+                        // the moment its end is established, or end before a
+                        // backfill has caught up, and dropping the tail without
+                        // reading them would lose the tail-end of the session
+                        // permanently — the log's whole promise is that ending
+                        // costs nothing. A transcript whose file is already gone
+                        // scans to nothing, silently, so this is free for a run
+                        // that ended days ago.
                         for path in std::iter::once(&tail.path).chain(tail.next.as_ref().map(|(next, _)| next)) {
-                            if let Err(err) = poll_once(&daemon, &tail.session, path).await {
-                                crate::log_debug!(
-                                    "tail {}: final read failed: {err:#}", tail.session.name
-                                );
-                            }
+                            read_to_end(&daemon, &tail.session, path).await;
                         }
                         if let Some(watcher) = watcher.as_mut() {
                             watcher.release_parent_of(&tail.path);
@@ -237,7 +233,7 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
     }
 }
 
-/// What a starting tailer should follow, and what it should read once and drop.
+/// What a starting tailer should follow, and what it should read to the end and drop.
 ///
 /// Split out of `run` because the decision is the whole point and the loop
 /// around it is not testable. Two rules, and the second was learned the hard
@@ -249,15 +245,15 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
 ///    Measured on the owner's Mac: 1,282 `could not watch` failures in one error
 ///    log, against directories deleted days earlier.
 ///
-/// 2. **…but it is still *read*, once.** The first rule alone was a data-loss
-///    bug, and the soak gauntlet caught it: a run can end with transcript bytes
-///    the tailer had not yet consumed, and skipping it outright meant those
-///    lines were never ingested and never would be. The event log's promise is
-///    that a `kill -9` costs nothing but a reconnect; silently abandoning the
-///    tail-end of a session's transcript is not nothing. One final scan costs a
-///    `stat` — free for a run whose file is already deleted, and free again for
-///    one whose cursor is already at the end — and then the run is let go for
-///    good, which is what keeps rule 1's benefit.
+/// 2. **…but it is still *read*, to the end, once.** The first rule alone was a
+///    data-loss bug, and the soak gauntlet caught it: a run can end with
+///    transcript bytes the tailer had not yet consumed, and skipping it outright
+///    meant those lines were never ingested and never would be. The event log's
+///    promise is that a `kill -9` costs nothing but a reconnect; silently
+///    abandoning the tail-end of a session's transcript is not nothing. The
+///    final read costs a `stat` — free for a run whose file is already deleted,
+///    and free again for one whose cursor is already at the end — and then the
+///    run is let go for good, which is what keeps rule 1's benefit.
 fn tails_to_resume(rows: Vec<crate::store::SessionRow>) -> (Tails, Vec<Tail>) {
     let mut tails = Tails::new();
     let mut final_reads = Vec::new();
@@ -285,7 +281,7 @@ async fn poll_all(daemon: &Arc<Daemon>, tails: &mut Tails) {
             .next
             .take_if(|(_, at)| *at <= std::time::Instant::now())
         {
-            read_to_end(daemon, tail).await;
+            read_to_end(daemon, &tail.session, &tail.path).await;
             crate::log_info!(
                 "tailing {next} for {} ({})",
                 tail.session.name,
@@ -299,19 +295,20 @@ async fn poll_all(daemon: &Arc<Daemon>, tails: &mut Tails) {
     }
 }
 
-/// Read a transcript the run is leaving to the end it has now, however many
-/// polls that takes, while each one moves the run's saved cursor on. A poll
-/// whose lines were not filed (the run was deleted) saves no cursor, and
-/// the read stops there rather than repeat it.
-async fn read_to_end(daemon: &Arc<Daemon>, tail: &Tail) {
-    let end = std::fs::metadata(&tail.path).map_or(0, |m| m.len());
+/// Read a transcript the run is leaving — for a new one, or because the run
+/// has ended — to the end it has now, however many polls that takes, while each
+/// one moves the run's saved cursor on. A poll whose lines were not filed (the
+/// run was deleted) saves no cursor, and the read stops there rather than
+/// repeat it.
+async fn read_to_end(daemon: &Arc<Daemon>, session: &SessionKey, path: &str) {
+    let end = std::fs::metadata(path).map_or(0, |m| m.len());
     let mut reached = 0;
     loop {
-        if let Err(err) = poll_once(daemon, &tail.session, &tail.path).await {
-            crate::log_debug!("tail {}: final read failed: {err:#}", tail.session.name);
+        if let Err(err) = poll_once(daemon, session, path).await {
+            crate::log_debug!("tail {}: final read failed: {err:#}", session.name);
             return;
         }
-        let saved = match daemon.db.load_cursor(tail.session.uid.clone()).await {
+        let saved = match daemon.db.load_cursor(session.uid.clone()).await {
             Ok(Some(cursor)) => cursor.offset,
             _ => return,
         };

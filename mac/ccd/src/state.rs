@@ -15371,6 +15371,129 @@ mod tests {
         assert_eq!(filed(), want);
     }
 
+    /// A transcript longer than two of the tailer's 4 MiB reads: 90 lines of
+    /// 100 kB, then the line `last`.
+    fn write_long_transcript(path: &std::path::Path) {
+        let mut text: String = (0..90)
+            .map(|i| {
+                format!(
+                    "{}\n",
+                    json!({"type": "user", "uuid": format!("f{i}"), "text": "x".repeat(100_000)})
+                )
+            })
+            .collect();
+        text.push_str(&format!("{}\n", json!({"type": "user", "uuid": "last"})));
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// Whether the run files its transcript's line `last` within 5 s.
+    async fn files_the_last_line(daemon: &Arc<Daemon>) -> bool {
+        for _ in 0..500 {
+            let events = daemon.store.events_after(TEST_UID, 0, 1_000).unwrap();
+            if events
+                .iter()
+                .any(|event| event.source_event_id.as_deref() == Some("last"))
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    fn long_transcript_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ccd-{name}-{}-{}.jsonl",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ))
+    }
+
+    /// A run that ends before its transcript has been read through (resumed
+    /// from a long conversation and quit at once) is read to the end before
+    /// its tail is let go, however many of the tailer's reads that takes.
+    #[tokio::test]
+    async fn a_run_that_ends_before_its_transcript_is_read_through_is_read_to_the_end() {
+        let path = long_transcript_path("ended-mid-read");
+        write_long_transcript(&path);
+        let (daemon, tails) = daemon_watching_tails(
+            shared_store(),
+            Config {
+                fsevents: false,
+                // Longer than the test: the first tick, at once, is the only
+                // read before the end.
+                tail_poll_ms: 10_000,
+                ..Config::default()
+            },
+        );
+        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "SessionStart".into(),
+                payload: json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": path,
+                }),
+                wait: false,
+                holds_questions: false,
+                holds_approvals: false,
+            })
+            .await;
+        daemon
+            .transcript_tx
+            .send(crate::tailer::TailCommand::Stop {
+                session_uid: TEST_UID.to_string(),
+            })
+            .unwrap();
+        let filed = files_the_last_line(&daemon).await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(filed, "the transcript's last line was not filed");
+    }
+
+    /// A run that ended while the daemon was down, with more of its transcript
+    /// unread than one read takes, is read to the end when the daemon starts.
+    #[tokio::test]
+    async fn a_run_that_ended_while_the_daemon_was_down_is_read_to_the_end() {
+        let path = long_transcript_path("ended-while-down");
+        write_long_transcript(&path);
+        let store = shared_store();
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: TEST_UID.into(),
+                session_id: "cc-1".into(),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: Some(path.to_string_lossy().into_owned()),
+                lifecycle: protocol::event::Lifecycle::Exited,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        let (daemon, tails) = daemon_watching_tails(
+            store,
+            Config {
+                fsevents: false,
+                tail_poll_ms: 10_000,
+                ..Config::default()
+            },
+        );
+        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
+        let filed = files_the_last_line(&daemon).await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(filed, "the transcript's last line was not filed");
+    }
+
     /// A run that ends within moments of `/clear` still has the start of its
     /// new transcript read.
     #[tokio::test]
