@@ -17,6 +17,7 @@
     "history_pages": true,
     "hold_secs": 0,
     "hook_only_approvals": true,
+    "machine_stats": true,
     "prompt_identity": true,
     "push": false,
     "push_relay": false,
