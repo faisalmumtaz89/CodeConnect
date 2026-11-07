@@ -714,6 +714,25 @@ where
                     continue;
                 }
 
+                // Off the loop: the sample waits half a second for the CPU, and
+                // nothing else on this connection may wait behind it.
+                if matches!(parsed, ClientMessage::GetMachineStats) {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let stats = crate::machine::stats(home.as_deref()).await;
+                        let _ = replies.send(ServerMessage::MachineStats {
+                            cpu: stats.cpu,
+                            memory_used: stats.memory_used,
+                            memory_total: stats.memory_total,
+                            disk_used: stats.disk_used,
+                            disk_total: stats.disk_total,
+                            captured_at: protocol::time::now_rfc3339(),
+                        });
+                    });
+                    continue;
+                }
+
                 // Starting an agent carries a terminal's authority, so it is
                 // open to exactly the connections a terminal is.
                 if matches!(
@@ -1119,7 +1138,8 @@ where
         | ClientMessage::GetProjectGit { .. }
         | ClientMessage::ListFolder { .. }
         | ClientMessage::CreateFolder { .. }
-        | ClientMessage::StartSession { .. } => {}
+        | ClientMessage::StartSession { .. }
+        | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -3107,6 +3127,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         start_session: terminal_allowed,
         start_worktree: terminal_allowed,
         browse_folders: terminal_allowed,
+        machine_stats: true,
     }
 }
 
@@ -8531,6 +8552,46 @@ mod tests {
         assert_eq!(agents, ["claude", "codex"]);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **A machine-stats sample holds nothing up**: it is advertised, its answer
+    /// carries every value, and a `sessions` asked right behind it on the same
+    /// connection is answered first, well inside the sample's half second.
+    #[tokio::test]
+    async fn machine_stats_is_answered_without_holding_up_the_connection() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["machine_stats"], true, "{ack}");
+
+        let asked = std::time::Instant::now();
+        for request in [ClientMessage::GetMachineStats, ClientMessage::Sessions] {
+            phone
+                .send(Message::Text(serde_json::to_string(&request).unwrap()))
+                .await
+                .unwrap();
+        }
+        let first = next_json(&mut phone).await.unwrap();
+        let sessions_after = asked.elapsed();
+        assert_eq!(first["type"], "sessions", "{first}");
+        assert!(
+            sessions_after < crate::machine::CPU_WINDOW / 2,
+            "sessions waited {sessions_after:?} behind the sample"
+        );
+
+        let stats = next_json(&mut phone).await.unwrap();
+        assert_eq!(stats["type"], "machine_stats", "{stats}");
+        assert!(asked.elapsed() >= crate::machine::CPU_WINDOW, "{stats}");
+        for key in [
+            "cpu",
+            "memory_used",
+            "memory_total",
+            "disk_used",
+            "disk_total",
+        ] {
+            assert!(stats[key].is_number(), "{key}: {stats}");
+        }
     }
 
     /// **Browsing and making folders answer only a paired device**, as starting
