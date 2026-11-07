@@ -83,11 +83,10 @@ pub fn pair(args: &[String]) -> Result<()> {
         );
     }
 
-    let payload = QrPayload::new(&host, port, &code);
-    let json = payload.to_json();
+    let link = QrPayload::new(&host, port, &code).to_link();
 
     println!();
-    print_qr(&json)?;
+    print_qr(&link)?;
     println!();
     println!("  scan with the CodeConnect app, or enter it by hand:");
     println!();
@@ -496,8 +495,8 @@ mod tests {
             8787,
             "ABCD2345",
         );
-        let json = payload.to_json();
-        let code = QrCode::new(json.as_bytes()).expect("must encode");
+        let link = payload.to_link();
+        let code = QrCode::new(link.as_bytes()).expect("must encode");
         let art = code.render::<Dense1x2>().quiet_zone(true).build();
 
         let widest = art.lines().map(|line| line.chars().count()).max().unwrap();

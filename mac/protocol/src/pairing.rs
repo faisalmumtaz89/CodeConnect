@@ -22,6 +22,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The page a pairing QR opens; see [`QrPayload::to_link`].
+pub const PAIR_LINK: &str = "https://codeconnect.sh/p";
+
 /// Uppercase, unambiguous, 32 symbols: `A-Z` without `I`/`O`, `2-9`.
 pub const PAIRING_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -32,14 +35,13 @@ pub const PAIRING_CODE_LEN: usize = 8;
 /// shared display is not a standing invitation.
 pub const PAIRING_TTL_SECS: u64 = 300;
 
-/// The QR's contents. The shape is fixed — the daemon encodes it and the app
-/// decodes it, and neither may change it unilaterally:
-/// `{"v":1,"host":"…","port":8787,"code":"…"}`.
+/// What the QR carries. The shape is fixed — the daemon encodes it and the app
+/// decodes it, and neither may change it unilaterally: see [`QrPayload::to_link`].
 ///
 /// `host` is the MagicDNS name whenever Tailscale reports one. With TLS on this
 /// is not a preference but a requirement: `tailscale cert` issues for a DNS
 /// name, and a certificate cannot be validated against an IP literal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QrPayload {
     /// Payload version, independent of `PROTOCOL_VERSION`: the QR must stay
     /// decodable by an app too old to speak the current protocol, so that it
@@ -60,10 +62,20 @@ impl QrPayload {
         }
     }
 
-    /// Compact JSON — every byte costs QR modules, and the payload is scanned
-    /// from a terminal at whatever size the window happens to be.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| String::from("{}"))
+    /// The QR's contents: a web link whose fragment carries the four fields,
+    /// `https://codeconnect.sh/p#v=1&h=<host>&p=<port>&c=<code>`.
+    ///
+    /// A phone camera opens it: the app when it is installed, and otherwise the
+    /// page, which offers the App Store. A browser never sends the fragment to the
+    /// server, so the code goes from the screen to the phone and nowhere else. The
+    /// host is a DNS name or an IP literal and the code is from
+    /// [`PAIRING_ALPHABET`], none of which can hold `&`, `=` or `#`, so nothing is
+    /// escaped.
+    pub fn to_link(&self) -> String {
+        format!(
+            "{PAIR_LINK}#v={}&h={}&p={}&c={}",
+            self.v, self.host, self.port, self.code
+        )
     }
 }
 
@@ -192,20 +204,42 @@ impl DeviceSummary {
 mod tests {
     use super::*;
 
+    fn derived_qr_link() -> String {
+        QrPayload::new("studio.tail0000.ts.net", 8787, "ABCD2345").to_link()
+    }
+
+    /// **The pairing link, emitted by this build**, compared byte for byte: one
+    /// line, then a newline. The file is the fixture for the apps' and the web
+    /// page's readers of the link; the copy under `ios/` is byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`.
     #[test]
-    fn qr_payload_serialises_to_the_exact_shape_the_app_decodes() {
-        let payload = QrPayload::new("your-mac.tailnet-name.ts.net", 8787, "ABCD2345");
+    fn the_qr_link_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/wire/qr-link.txt");
         assert_eq!(
-            payload.to_json(),
-            r#"{"v":1,"host":"your-mac.tailnet-name.ts.net","port":8787,"code":"ABCD2345"}"#
+            FIXTURE,
+            derived_qr_link() + "\n",
+            "the committed pairing link no longer matches what this build emits. Regenerate \
+             it with cargo test -p protocol -- --ignored regenerate_the_qr_link_fixture, then \
+             copy the file over its copy under ios/"
+        );
+        assert_eq!(
+            derived_qr_link(),
+            "https://codeconnect.sh/p#v=1&h=studio.tail0000.ts.net&p=8787&c=ABCD2345"
         );
     }
 
+    /// Rewrite `fixtures/wire/qr-link.txt` with what this build emits.
     #[test]
-    fn qr_payload_round_trips() {
-        let payload = QrPayload::new("host.ts.net", 8787, "ABCD2345");
-        let back: QrPayload = serde_json::from_str(&payload.to_json()).unwrap();
-        assert_eq!(back, payload);
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_qr_link_fixture() {
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/wire/qr-link.txt"
+            ),
+            derived_qr_link() + "\n",
+        )
+        .unwrap();
     }
 
     #[test]

@@ -742,8 +742,40 @@ pub enum ServerMessage {
         disk_total: Option<u64>,
         captured_at: String,
     },
+    /// The owner's other computers this one can reach on Tailscale, and this
+    /// computer's own Tailscale state. Built by [`crate::tailnet::peers_frame`].
+    Peers {
+        tailnet: TailnetState,
+        /// This computer's Tailscale login, when Tailscale is running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<String>,
+        /// This computer is a tagged device, which Tailscale vouches for to no
+        /// one: every connection to it needs a code.
+        tagged: bool,
+        computers: Vec<PeerComputer>,
+    },
 
     Pong,
+}
+
+/// Tailscale on this computer, as [`ServerMessage::Peers`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailnetState {
+    Running,
+    /// Installed, but stopped, signed out, or not answering.
+    NotRunning,
+    NotInstalled,
+}
+
+/// One computer in [`ServerMessage::Peers`]: where its daemon listens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerComputer {
+    /// The first label of its MagicDNS name, as Mail names it.
+    pub name: String,
+    /// Its whole MagicDNS name, or its IPv4 address when it has none.
+    pub host: String,
+    pub port: u16,
 }
 
 /// What a [`ServerMessage::FolderListing`] found.

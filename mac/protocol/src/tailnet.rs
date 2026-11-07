@@ -15,10 +15,14 @@ use std::net::IpAddr;
 
 use serde::Deserialize;
 
+use crate::ws::{PeerComputer, ServerMessage, TailnetState};
+
 /// One reading of the tailnet: this computer and its peers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tailnet {
     me: Node,
+    /// This computer's user's login, from the status's `User` map.
+    login: Option<String>,
     /// Sorted by name, so a listing reads the same on every call.
     peers: Vec<Node>,
 }
@@ -26,6 +30,8 @@ pub struct Tailnet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     pub name: String,
+    /// The whole MagicDNS name without its trailing dot; empty when it has none.
+    dns_name: String,
     ips: Vec<IpAddr>,
     online: bool,
     user: i64,
@@ -75,8 +81,13 @@ impl Tailnet {
             .map(Node::from)
             .collect();
         peers.sort_by(|a, b| a.name.cmp(&b.name));
+        let login = status
+            .user
+            .and_then(|mut users| users.remove(&status.me.user_id.to_string()))
+            .and_then(|user| user.login_name);
         Some(Tailnet {
             me: Node::from(status.me),
+            login,
             peers,
         })
     }
@@ -127,8 +138,12 @@ impl Tailnet {
     pub fn reachable_peers(&self) -> impl Iterator<Item = Place<'_>> {
         self.peers
             .iter()
-            .filter(|node| node.online && node.runs_codeconnect() && self.trust(node).is_ok())
+            .filter(|node| self.reachable(node))
             .filter_map(Node::place)
+    }
+
+    fn reachable(&self, node: &Node) -> bool {
+        node.online && node.runs_codeconnect() && self.trust(node).is_ok()
     }
 
     fn trust(&self, node: &Node) -> Result<(), Refusal> {
@@ -142,6 +157,51 @@ impl Tailnet {
             return Err(Refusal::OtherUser);
         }
         Ok(())
+    }
+}
+
+/// The [`ServerMessage::Peers`] frame for one reading of the tailnet: `None` when
+/// Tailscale is not running, or not installed, which `installed` tells apart. The
+/// computers are those [`Tailnet::reachable_peers`] names, and `port` is this
+/// daemon's, which Mail also takes as every peer's.
+///
+/// Names come from `DNSName`, never `HostName`: an iPhone reports its `HostName`
+/// as `localhost`.
+pub fn peers_frame(tailnet: Option<&Tailnet>, installed: bool, port: u16) -> ServerMessage {
+    let Some(tailnet) = tailnet else {
+        return ServerMessage::Peers {
+            tailnet: if installed {
+                TailnetState::NotRunning
+            } else {
+                TailnetState::NotInstalled
+            },
+            login: None,
+            tagged: false,
+            computers: Vec::new(),
+        };
+    };
+    let computers = tailnet
+        .peers
+        .iter()
+        .filter(|node| tailnet.reachable(node))
+        .filter_map(|node| {
+            let ipv4 = node.ips.iter().copied().find(IpAddr::is_ipv4)?;
+            Some(PeerComputer {
+                name: node.name.clone(),
+                host: if node.dns_name.is_empty() {
+                    ipv4.to_string()
+                } else {
+                    node.dns_name.clone()
+                },
+                port,
+            })
+        })
+        .collect();
+    ServerMessage::Peers {
+        tailnet: TailnetState::Running,
+        login: tailnet.login.clone(),
+        tagged: tailnet.me.tagged,
+        computers,
     }
 }
 
@@ -170,6 +230,7 @@ impl From<NodeStatus> for Node {
                 .next()
                 .unwrap_or_default()
                 .to_string(),
+            dns_name: status.dns_name.trim_end_matches('.').to_string(),
             ips: status.tailscale_ips.unwrap_or_default(),
             online: status.online,
             user: status.user_id,
@@ -189,6 +250,15 @@ struct Status {
     me: NodeStatus,
     #[serde(rename = "Peer")]
     peer: Option<HashMap<String, NodeStatus>>,
+    /// Keyed by the decimal user id.
+    #[serde(rename = "User", default)]
+    user: Option<HashMap<String, UserStatus>>,
+}
+
+#[derive(Deserialize)]
+struct UserStatus {
+    #[serde(rename = "LoginName", default)]
+    login_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -372,5 +442,112 @@ mod tests {
         let tailnet = edited(|s| s["Peer"] = serde_json::Value::Null);
         assert_eq!(tailnet.locate("studio"), Ok(Place::Here));
         assert_eq!(tailnet.locate("desktop"), Err(Refusal::Unknown));
+    }
+
+    fn computers(frame: ServerMessage) -> Vec<PeerComputer> {
+        match frame {
+            ServerMessage::Peers { computers, .. } => computers,
+            other => panic!("not a peers frame: {other:?}"),
+        }
+    }
+
+    /// The same computers Mail may reach, named by their whole MagicDNS name, or
+    /// by their IPv4 address when they have none.
+    #[test]
+    fn the_peers_frame_lists_the_computers_mail_may_reach() {
+        let tailnet = edited(|s| peer(s, "linux-box")["Online"] = true.into());
+        let listed = computers(peers_frame(Some(&tailnet), true, 8787));
+        assert_eq!(
+            listed,
+            [
+                PeerComputer {
+                    name: "laptop".into(),
+                    host: "laptop.tail0000.ts.net".into(),
+                    port: 8787
+                },
+                PeerComputer {
+                    name: "linux-box".into(),
+                    host: "linux-box.tail0000.ts.net".into(),
+                    port: 8787
+                },
+            ]
+        );
+        let reachable: Vec<&str> = tailnet
+            .reachable_peers()
+            .map(|place| match place {
+                Place::Peer { name, .. } => name,
+                Place::Here => "here",
+            })
+            .collect();
+        assert_eq!(reachable, ["laptop", "linux-box"]);
+
+        let tailnet = edited(|s| peer(s, "laptop")["DNSName"] = "".into());
+        assert_eq!(
+            computers(peers_frame(Some(&tailnet), true, 8787))[0].host,
+            "100.64.0.6"
+        );
+    }
+
+    #[test]
+    fn a_tagged_computer_lists_no_one_and_says_it_is_tagged() {
+        let tailnet = edited(|s| s["Self"]["Tags"] = serde_json::json!(["tag:server"]));
+        let ServerMessage::Peers {
+            tagged, computers, ..
+        } = peers_frame(Some(&tailnet), true, 8787)
+        else {
+            panic!("not a peers frame");
+        };
+        assert!(tagged);
+        assert!(computers.is_empty());
+    }
+
+    #[test]
+    fn a_status_without_this_users_login_still_reads() {
+        let tailnet = edited(|s| s["User"] = serde_json::Value::Null);
+        let ServerMessage::Peers { login, .. } = peers_frame(Some(&tailnet), true, 8787) else {
+            panic!("not a peers frame");
+        };
+        assert_eq!(login, None);
+    }
+
+    /// The frame for the recorded tailnet, for one that is not running, and for a
+    /// computer without Tailscale.
+    fn derived_peers_wire() -> serde_json::Value {
+        serde_json::json!({
+            "running": peers_frame(Some(&recorded()), true, 8787),
+            "not_running": peers_frame(None, true, 8787),
+            "not_installed": peers_frame(None, false, 8787),
+        })
+    }
+
+    /// **The `peers` frames, emitted by this build**, compared as JSON values. The
+    /// file is the fixture for the apps' decoders of this frame; the copy under
+    /// `ios/` is byte-identical, by `fixtures/check-duplicated-fixtures.sh`.
+    #[test]
+    fn the_peers_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/wire/peers.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_peers_wire(),
+            committed,
+            "the committed peers frames no longer match what this build emits. Regenerate \
+             them with cargo test -p protocol -- --ignored regenerate_the_peers_wire_fixture, \
+             then copy the file over its copy under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/wire/peers.json` with what this build emits.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_peers_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_peers_wire()).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/wire/peers.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
     }
 }

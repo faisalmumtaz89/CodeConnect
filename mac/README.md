@@ -694,12 +694,16 @@ turn the loopback listener off.
 ## Pairing
 
 `codeconnect pair` asks the daemon for a single-use 8-character code (5-minute TTL,
-stored hashed) and prints it as a QR the app decodes, beside the address and code the app's
-manual field takes. The QR holds:
+stored hashed) and prints it as a QR, beside the address and code the app's
+manual field takes. The QR holds a link:
 
-```json
-{"v":1,"host":"<magicdns-name>","port":8787,"code":"ABCD2345"}
+```text
+https://codeconnect.sh/p#v=1&h=<magicdns-name>&p=8787&c=ABCD2345
 ```
+
+A phone camera opens it in the app when the app is installed, and otherwise on
+the page, which offers the App Store. The fields ride in the fragment, which a
+browser never sends to the server.
 
 The app connects and sends `hello{pairing_code}` with no token. The daemon
 validates and consumes the code, mints a 256-bit per-device token, and returns

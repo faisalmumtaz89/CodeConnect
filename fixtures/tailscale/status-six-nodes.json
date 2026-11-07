@@ -74,5 +74,10 @@
       ],
       "Online": true
     }
+  },
+  "User": {
+    "1234567890123456": {
+      "LoginName": "owner@example.com"
+    }
   }
 }
