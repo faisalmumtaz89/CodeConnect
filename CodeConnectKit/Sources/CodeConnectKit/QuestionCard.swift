@@ -283,7 +283,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .answerAtMac:
             return (
                 "Answer at the computer",
-                "This question can no longer be answered from the phone. It may still be open "
+                "This question can no longer be answered from the \(HostDevice.current.noun). It may still be open "
                     + "at the computer.",
                 .warning, "desktop"
             )
@@ -291,25 +291,25 @@ public enum QuestionCardStatus: Sendable, Hashable {
             return (
                 "Answer at the computer",
                 "This computer's CodeConnect is too old to answer Claude's questions from the "
-                    + "phone. Answer it at the computer, or update it to answer here.",
+                    + "\(HostDevice.current.noun). Answer it at the computer, or update it to answer here.",
                 .warning, "desktop"
             )
         case .unreachable(let reason):
             return ("Not connected", reason, .warning, "desktop")
         case .answeredOnPhone:
             return (
-                "Answered", "Claude has the answers sent from the phone.", .success,
+                "Answered", "Claude has the answers sent from the \(HostDevice.current.noun).", .success,
                 "check-circle-fill"
             )
         case .answeredAtMac:
             return (
                 "Answered at the computer",
-                "This question was answered at the computer. Nothing from this phone was used.",
+                "This question was answered at the computer. Nothing from this \(HostDevice.current.noun) was used.",
                 .info, "desktop"
             )
         case .declined:
             return (
-                "Declined", "Declined from the phone, as Escape does at the computer.", .info,
+                "Declined", "Declined from the \(HostDevice.current.noun), as Escape does at the computer.", .info,
                 "x-circle"
             )
         case .unconfirmed:
