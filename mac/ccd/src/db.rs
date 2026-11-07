@@ -781,15 +781,7 @@ mod tests {
     use protocol::event::{EventKind, SessionKey, Source};
 
     fn temp_db() -> Db {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-db-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        Db::new(Arc::new(Store::open(&path).unwrap()))
+        Db::new(Arc::new(Store::open_temp("ccd-db")))
     }
 
     fn seed(db: &Db) -> SessionKey {

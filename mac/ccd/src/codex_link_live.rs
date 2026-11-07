@@ -147,7 +147,8 @@ use serde_json::Value;
 use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use crate::codex_link::{ControlLink, TempDb};
+use crate::codex_link::ControlLink;
+use crate::store::TempDb;
 
 /// Per-sandbox sequence, so two live sandboxes can never derive the same run dir.
 static SANDBOX_SEQ: AtomicU32 = AtomicU32::new(0);

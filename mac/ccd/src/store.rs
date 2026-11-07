@@ -132,6 +132,106 @@ pub struct Store {
     /// Round-robin start point, so `read()` does not always probe reader 0 and
     /// serialise everything behind it under light load.
     next_reader: std::sync::atomic::AtomicUsize,
+    /// A test's database, set by [`Store::open_temp`]. Last, so the connections
+    /// close before it goes.
+    #[cfg(test)]
+    temp: Option<TempDb>,
+}
+
+/// A test database that removes itself, siblings and all, once nothing holds it:
+/// not the [`Store`] opened on it, and no clone a test kept to open it again.
+///
+/// SQLite leaves a `-wal` and a `-shm` beside the file it is given, so "delete the
+/// db" has to mean all three, and a file the test writes beside it goes too. Not
+/// fussiness: a suite that leaves its files behind on every run is how a machine
+/// ends up with gigabytes of them.
+#[cfg(test)]
+#[derive(Clone)]
+pub struct TempDb(std::sync::Arc<TempDbFile>);
+
+#[cfg(test)]
+struct TempDbFile {
+    db: std::path::PathBuf,
+    beside: Option<std::path::PathBuf>,
+}
+
+#[cfg(test)]
+impl TempDb {
+    pub fn new(stem: &str) -> TempDb {
+        TempDb::holding(std::env::temp_dir().join(format!("{stem}.db")), None)
+    }
+
+    /// `<prefix>-<pid>-<n>-<ms>.db`: the counter is load-bearing, because tests
+    /// run in parallel threads and a millisecond alone lets two share a file.
+    pub fn unique(prefix: &str) -> TempDb {
+        TempDb::new(&unique_stem(prefix))
+    }
+
+    /// [`TempDb::unique`], and the path of one more file beside it, the same name
+    /// with `extension`, that goes with it: a transcript a test writes next to
+    /// its database.
+    pub fn unique_with_file(prefix: &str, extension: &str) -> (TempDb, std::path::PathBuf) {
+        let db = std::env::temp_dir().join(format!("{}.db", unique_stem(prefix)));
+        let file = db.with_extension(extension);
+        (TempDb::holding(db, Some(file.clone())), file)
+    }
+
+    fn holding(db: std::path::PathBuf, beside: Option<std::path::PathBuf>) -> TempDb {
+        let file = TempDbFile { db, beside };
+        file.remove();
+        TempDb(std::sync::Arc::new(file))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0.db
+    }
+}
+
+#[cfg(test)]
+fn unique_stem(prefix: &str) -> String {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    format!(
+        "{prefix}-{}-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        protocol::time::now_unix_ms()
+    )
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TempDb {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.path()
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for TempDb {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+#[cfg(test)]
+impl TempDbFile {
+    fn remove(&self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.db.clone().into_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+        }
+        if let Some(beside) = &self.beside {
+            let _ = std::fs::remove_file(beside);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDbFile {
+    fn drop(&mut self) {
+        self.remove();
+    }
 }
 
 /// A folder sessions have started in, from the `projects` table.
@@ -1022,9 +1122,28 @@ impl Store {
             writer: Mutex::new(writer),
             readers,
             next_reader: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            temp: None,
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// A store on a fresh test database named after `prefix` (see
+    /// [`TempDb::unique`]), removed when the store and every clone of
+    /// [`Store::temp_db`] are dropped.
+    #[cfg(test)]
+    pub fn open_temp(prefix: &str) -> Store {
+        let db = TempDb::unique(prefix);
+        let mut store = Store::open(db.path()).unwrap();
+        store.temp = Some(db);
+        store
+    }
+
+    /// The database [`Store::open_temp`] made, for a test that opens it again.
+    #[cfg(test)]
+    pub fn temp_db(&self) -> TempDb {
+        self.temp.clone().expect("a store from Store::open_temp")
     }
 
     fn migrate(&self) -> Result<()> {
@@ -6802,20 +6921,12 @@ mod tests {
     use super::*;
     use protocol::ws::{AnswerDecision, AnswerPath, ResolvedBy};
     use serde_json::json;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn temp_store() -> (Store, std::path::PathBuf) {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-test-{}-{}-{}.db",
-            std::process::id(),
-            n,
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        (Store::open(&path).unwrap(), path)
+    fn temp_store() -> (Store, TempDb) {
+        let store = Store::open_temp("ccd-test");
+        let path = store.temp_db();
+        (store, path)
     }
 
     /// A uid that reads like one in a failure message. Real ones come from
@@ -10663,7 +10774,7 @@ mod tests {
     };
 
     /// A store with two runs, `R` (cc-1) and `S` (cc-2), on this computer.
-    fn mail_store() -> (Store, std::path::PathBuf, SessionKey, SessionKey) {
+    fn mail_store() -> (Store, TempDb, SessionKey, SessionKey) {
         let (store, path) = temp_store();
         let (receiver, sender) = (key("R1", "cc-1"), key("S1", "cc-2"));
         for session in [&receiver, &sender] {
@@ -12279,16 +12390,8 @@ mod tests {
         conn
     }
 
-    fn legacy_path() -> std::path::PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-legacy-{}-{}-{}.db",
-            std::process::id(),
-            n,
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        path
+    fn legacy_path() -> TempDb {
+        TempDb::unique("ccd-legacy")
     }
 
     #[test]
@@ -14819,7 +14922,7 @@ mod tests {
                 "--exact",
                 "--nocapture",
             ])
-            .env(CHILD, &path)
+            .env(CHILD, path.path())
             .output()
             .unwrap();
         let told = String::from_utf8_lossy(&started.stderr);

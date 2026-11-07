@@ -1456,15 +1456,7 @@ mod tests {
     /// posted.
     #[tokio::test]
     async fn a_paired_phone_is_rung_for_an_approval_and_a_finished_turn() {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-relay-codex-rings-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let store = Arc::new(crate::store::Store::open_temp("ccd-relay-codex-rings"));
         store
             .insert_device("phone", "iPhone", "hash-phone", "2026-10-23T00:00:00Z")
             .unwrap();
@@ -1527,7 +1519,6 @@ mod tests {
             "an approval, a finished turn and a second approval each reach the \
              paired phone once"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// **A relayed doorbell that waited out a withdrawal is not posted.**

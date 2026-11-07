@@ -1465,15 +1465,7 @@ mod tests {
     /// turn and its counts read `0`.
     #[tokio::test]
     async fn a_doorbell_is_filed_for_every_paired_phone_and_a_departing_device_takes_its_own() {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-paired-fleet-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let store = Arc::new(crate::store::Store::open_temp("ccd-paired-fleet"));
         for device in ["phone-1", "phone-2"] {
             store
                 .insert_device(
@@ -1520,8 +1512,6 @@ mod tests {
             0,
             "a retired device is not left holding an undelivered doorbell"
         );
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

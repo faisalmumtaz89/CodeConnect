@@ -12611,16 +12611,10 @@ mod tests {
     /// ask SQLite directly what is in a table. `Store` exposes readers for the
     /// rows *it* knows how to make, and a test whose whole claim is "no row of
     /// any shape landed here" must not be answered through that surface.
-    fn shared_store_on_disk() -> (Arc<Store>, std::path::PathBuf) {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-state-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        (Arc::new(Store::open(&path).unwrap()), path)
+    fn shared_store_on_disk() -> (Arc<Store>, crate::store::TempDb) {
+        let store = Store::open_temp("ccd-state");
+        let path = store.temp_db();
+        (Arc::new(store), path)
     }
 
     fn daemon_on(store: Arc<Store>, config: Config) -> Arc<Daemon> {
