@@ -163,6 +163,9 @@ public final class AppModel {
     /// Called at the end of every `hello_ack`, once what the daemon said about
     /// itself is kept: the last thing the handshake does on this model.
     @ObservationIgnored var onIdentified: (() -> Void)?
+    /// Called with each list of the owner's other computers this machine's
+    /// daemon sends.
+    @ObservationIgnored var onPeers: ((PeerDirectory) -> Void)?
 
     /// The Mac's list of runs, as it last said. The truth: what is on screen is
     /// `shownSummaries`.
@@ -1488,6 +1491,16 @@ public final class AppModel {
         connection.start(endpoint: endpoint)
     }
 
+    /// Join a computer another daemon listed, with no code: its daemon lets this
+    /// device in by its Tailscale identity, and the device token it answers with
+    /// is what gets saved. Dialled with a saved link's patience — a computer
+    /// listed before its daemon answers joins once it does — until the daemon
+    /// says no.
+    func join(_ computer: PeerComputer) {
+        startPairing(computer.endpoint)
+        connection.start(endpoint: computer.endpoint)
+    }
+
     /// True while a scanned code is being exchanged for a device token.
     var isPairing: Bool { pendingPairing != nil }
 
@@ -2184,6 +2197,8 @@ public final class AppModel {
             // The Mac's answer to a `sessions` request it could not serve: it
             // takes that request's place, so the replies after it stay matched.
             if takeSessionsReply() { catchUp?.progressed = true }
+        case .peers(let directory):
+            onPeers?(directory)
         case .answerResult, .sendTextResult, .captureResult, .commandCatalog, .diff, .error,
             .pong, .unknown:
             break

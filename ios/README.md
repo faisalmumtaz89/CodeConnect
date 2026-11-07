@@ -74,7 +74,10 @@ xcodebuild -project CodeConnect.xcodeproj -scheme CodeConnect \
 
 Pair by scanning the QR that `codeconnect pair` prints on the Mac. Manual entry
 takes either the eight-character code from the same output or the static
-`codeconnect token`.
+`codeconnect token`. The QR holds a link, `https://codeconnect.sh/p#…`; the
+iPhone's camera opens it in the app (Associated Domains, `applinks:codeconnect.sh`),
+on a sheet that names the computer and pairs only when Pair is tapped
+(`PairingLinkSheet`).
 
 With nothing paired, the pairing screen also offers "New here? Look around with
 sample data", for someone without a computer to pair with. It opens a **sample
@@ -183,6 +186,7 @@ release build:
 | `-CC_RENDER_PROBE YES` | adds a 1pt invisible element carrying the content-size category this process actually resolved to (`cc-render-probe`). The render harness reads it before it photographs anything — see *The render harness* below. Off by default so it cannot appear in a tree a product test is counting |
 | `-CC_ROW_RENDER_PROBE YES` | adds a 1pt invisible element (`cc-row-render-probe`) listing, per fleet row, how many times it has drawn other than on its own clock's tick, and how many times it has been made anew. `FleetRowRenderUITests` reads it to prove one session's event redraws that session's row and no other |
 | `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, the same way a tapped notification does. `…/deck/<request-id>` opens a **named** card — a URL can name one; a notification cannot, and does not try — which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
+| `-CC_OPEN_LINK https://codeconnect.sh/p#…` | opens a link at launch through the handler `onOpenURL` calls. A pairing link, the one a `codeconnect pair` QR code holds, arrives on iOS as a universal link only once codeconnect.sh vouches for the build, which a simulator run cannot arrange; this is how `PairingLinkUITests` and the render harness reach its sheet |
 | `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
 | `-cc.debug.diff truncated` | a capture the daemon cut at its 512KB cap, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Truncated at 512KB`. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |

@@ -7,6 +7,8 @@ struct CodeConnectApp: App {
     /// `UIApplicationDelegate`, and SwiftUI's `App` has none, so one is adopted.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @State private var machines = Machines(makePushRegistrar: { PushRegistration() })
+    /// A pairing link opened from outside the app, waiting on its sheet.
+    @State private var pairingLink: PairingLink?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -66,6 +68,15 @@ struct CodeConnectApp: App {
                     if let kind = UserDefaults.standard.string(forKey: "CC_TAP") {
                         PushWire.seedTapForTesting(kind: kind)
                     }
+                    // Test seam: `-CC_OPEN_LINK <url>` opens a link at launch
+                    // the way `onOpenURL` does, because a universal link needs
+                    // codeconnect.sh to vouch for this build, which a simulator
+                    // run cannot arrange.
+                    if let link = UserDefaults.standard.string(forKey: "CC_OPEN_LINK"),
+                        let url = URL(string: link)
+                    {
+                        open(url)
+                    }
                 #endif
                 machines.consumePendingTap()
                 machines.bootstrap()
@@ -89,7 +100,10 @@ struct CodeConnectApp: App {
                         return
                     }
                 #endif
-                _ = machines.open(url: url)
+                open(url)
+            }
+            .sheet(item: $pairingLink) { link in
+                PairingLinkSheet(link: link).environment(machines)
             }
             // A tapped notification lands the same way a link does, and for the
             // same reason: it may have cold-started the app, so the destination
@@ -97,5 +111,15 @@ struct CodeConnectApp: App {
             .onReceive(NotificationCenter.default.publisher(for: PushWire.tapNotification)) { _ in
                 machines.consumePendingTap()
             }
+    }
+
+    /// A pairing link a QR code holds opens its sheet; every other link is a
+    /// deep link.
+    private func open(_ url: URL) {
+        if let link = PairingLink(url: url) {
+            pairingLink = link
+        } else {
+            _ = machines.open(url: url)
+        }
     }
 }

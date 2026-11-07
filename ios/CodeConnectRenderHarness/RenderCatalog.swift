@@ -489,6 +489,12 @@ enum RenderCatalog {
     /// gallery — which is the only reachable render several components have.
     static let all: [RenderScenario] = product + codex + questions + gallery
 
+    /// A pairing link as `codeconnect pair` prints it (`fixtures/wire/qr-link.txt`),
+    /// naming a computer with a long name on a port other than the default.
+    static func pairingLink(version: Int) -> String {
+        "https://codeconnect.sh/p#v=\(version)&h=jordans-macbook-pro-16-inch-m4-max.tail1a2b3c.ts.net&p=18794&c=ABCD2345"
+    }
+
     static let product: [RenderScenario] = [
         // The first screen, launched unpaired with no arguments, exactly as the
         // App Store build opens. Taller than a phone at any type size, so it is
@@ -522,6 +528,41 @@ enum RenderCatalog {
                     app.buttons["Pair by hand"].isHittable
                         || app.buttons["Scan pairing code"].isHittable
                 }
+            }),
+
+        // A pairing link opened from outside the app, with the longest computer
+        // name a tailnet gives and a port other than the default, so the address
+        // wraps where it must. The host resolves nowhere, which keeps a tapped
+        // Pair pending: a refused code needs a daemon, so this catalogue cannot
+        // reach the failed state.
+        RenderScenario(
+            name: "pairing-link",
+            purpose: "a pairing link opened from outside: the computer it names, and one tap to pair",
+            arguments: ["-CC_OPEN_LINK", RenderCatalog.pairingLink(version: 1)],
+            reach: { app, driver in
+                try driver.require(app.buttons["Pair"], "the pairing link's Pair button")
+            }),
+
+        RenderScenario(
+            name: "pairing-link-pairing",
+            purpose: "Pair tapped: the code being exchanged",
+            arguments: ["-CC_OPEN_LINK", RenderCatalog.pairingLink(version: 1)],
+            reach: { app, driver in
+                try driver.require(app.buttons["Pair"], "the pairing link's Pair button").tap()
+                try driver.require(
+                    app.buttons.matching(NSPredicate(format: "label == 'Pair' AND value == 'Busy'"))
+                        .firstMatch,
+                    "Pair, busy while it pairs")
+            }),
+
+        RenderScenario(
+            name: "pairing-link-unreadable",
+            purpose: "a link from a newer computer: what to update, and nothing to tap",
+            arguments: ["-CC_OPEN_LINK", RenderCatalog.pairingLink(version: 2)],
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Could not read that code", in: app),
+                    "the unreadable link's message")
             }),
 
         RenderScenario(

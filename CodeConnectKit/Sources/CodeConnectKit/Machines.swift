@@ -29,6 +29,15 @@ public final class Machines {
     public private(set) var models: [AppModel] = []
     /// A pairing with an address no machine has, until its daemon answers it.
     private(set) var candidate: AppModel?
+    /// The owner's computers a daemon listed that this device holds no pairing
+    /// for, each being joined without a code until its daemon lets this device
+    /// in — then it is a machine — or says no, and stays here, refused.
+    private(set) var joining: [(computer: PeerComputer, model: AppModel)] = []
+    /// Machines joined from a list in this launch, until their daemon says which
+    /// it is: one that is a removed computer under a new address leaves again.
+    private var joinedFromList: Set<String> = []
+    /// What a daemon last said about its computer's Tailscale.
+    public private(set) var tailnet: PeerDirectory?
     /// Where a deep link (a `codeconnect://` URL, or a tapped notification)
     /// wants the UI to go. Cleared by whichever surface consumes it.
     public var pendingDeepLink: DeepLink?
@@ -77,6 +86,7 @@ public final class Machines {
             guard let self, let model else { return }
             self.identified(model)
         }
+        model.onPeers = { [weak self] directory in self?.join(directory) }
         return model
     }
 
@@ -169,7 +179,9 @@ public final class Machines {
     }
 
     public func scenePhaseChanged(to phase: ScenePhase) {
-        for model in models + [candidate].compactMap({ $0 }) { model.scenePhaseChanged(to: phase) }
+        for model in models + [candidate].compactMap({ $0 }) + joining.map(\.model) {
+            model.scenePhaseChanged(to: phase)
+        }
     }
 
     /// The model of the machine this session is on.
@@ -233,12 +245,48 @@ public final class Machines {
 
     /// Pair from a scanned QR code. See `AppModel.pair(withQR:)`.
     public func pair(withQR payload: PairingQRPayload) {
+        pairing.undecline(host: payload.host)
         pairingModel(for: payload.endpoint).pair(withQR: payload)
     }
 
     /// Pair from a host and a token typed by hand. See `AppModel.pair(with:)`.
     public func pair(with endpoint: DaemonEndpoint) {
+        pairing.undecline(host: endpoint.host)
         pairingModel(for: endpoint).pair(with: endpoint)
+    }
+
+    // MARK: - The owner's other computers
+
+    /// The computers a daemon lists, joined without a code: each this device
+    /// has no pairing for, has not removed and is not already joining.
+    func join(_ directory: PeerDirectory) {
+        tailnet = directory
+        for computer in directory.computers {
+            guard pairing.machine(matching: computer.endpoint) == nil,
+                !pairing.isDeclined(host: computer.host), joiningIndex(at: computer.endpoint) == nil
+            else { continue }
+            let model = makeModel(UUID().uuidString)
+            model.onPaired = { [weak self, weak model] in
+                guard let self, let model else { return }
+                self.adopt(model)
+            }
+            model.start()
+            model.join(computer)
+            joining.append((computer, model))
+        }
+    }
+
+    private func joiningIndex(at endpoint: DaemonEndpoint) -> Int? {
+        joining.firstIndex { $0.computer.endpoint.isSameAddress(as: endpoint) }
+    }
+
+    /// The listed computers whose daemon would not let this device in without a
+    /// code.
+    public var computersNeedingCode: [PeerComputer] {
+        joining.compactMap { entry in
+            guard case .failed = entry.model.connection.phase else { return nil }
+            return entry.computer
+        }
     }
 
     public var isPairing: Bool { candidate != nil || models.contains(where: \.isPairing) }
@@ -260,6 +308,9 @@ public final class Machines {
         // begins.
         for model in models { model.stopSampleFleet() }
         dropCandidate()
+        // A listed computer being paired by code is no longer joined from the
+        // list: one link to it, and no "scan its code" left behind.
+        if let index = joiningIndex(at: endpoint) { joining.remove(at: index).model.leave() }
         if let machine = pairing.machine(matching: endpoint), let model = model(for: machine.id) {
             return model
         }
@@ -273,11 +324,17 @@ public final class Machines {
         return model
     }
 
-    /// A new machine's daemon answered its pairing: it joins the fleet, and the
-    /// model there was with nothing paired goes.
+    /// A new machine's daemon answered its pairing, or let it join from a list:
+    /// it joins the fleet, and the model there was with nothing paired goes.
     private func adopt(_ model: AppModel) {
-        guard model === candidate else { return }
-        candidate = nil
+        if model === candidate {
+            candidate = nil
+        } else if let index = joining.firstIndex(where: { $0.model === model }), let id = model.machineID {
+            joining.remove(at: index)
+            joinedFromList.insert(id)
+        } else {
+            return
+        }
         // Added to a fleet already on screen, it joins it as its sessions
         // arrive, rather than sending the app back to the loader.
         if models.contains(where: \.launchSettled) { model.settleLaunch() }
@@ -292,8 +349,21 @@ public final class Machines {
     /// pairing's address, credential and place (`PairingStore.merge`); the later
     /// one's link closes and its folder goes. A daemon too old to say is never
     /// merged.
+    ///
+    /// A machine joined from a list whose daemon is a removed computer, under an
+    /// address it was not removed by, leaves again, and that address joins the
+    /// removed ones. Any other machine this device holds is wanted, so its daemon
+    /// is no longer a removed one.
     private func identified(_ answered: AppModel) {
-        guard let id = answered.machineID, let other = pairing.sameDaemon(as: id),
+        guard let id = answered.machineID else { return }
+        if let daemonID = pairing.machine(id: id)?.daemonID {
+            if joinedFromList.remove(id) != nil, pairing.isDeclined(daemonID: daemonID) {
+                removeMachine(id: id)
+                return
+            }
+            pairing.undecline(daemonID: daemonID)
+        }
+        guard let other = pairing.sameDaemon(as: id),
             let mine = pairing.machines.firstIndex(where: { $0.id == id }),
             let theirs = pairing.machines.firstIndex(where: { $0.id == other.id })
         else { return }
@@ -328,8 +398,11 @@ public final class Machines {
     }
 
     /// Forget one machine — its pairing, its link and its cache — and no other
-    /// machine's.
+    /// machine's. It stays removed: no daemon's list adds it back.
     func removeMachine(id: String) {
+        if let machine = pairing.machine(id: id) {
+            pairing.decline(daemonID: machine.daemonID, host: machine.endpoint.host)
+        }
         pairing.remove(id: id)
         guard pairing.machine(id: id) == nil else { return }
         if let index = models.firstIndex(where: { $0.machineID == id }) {

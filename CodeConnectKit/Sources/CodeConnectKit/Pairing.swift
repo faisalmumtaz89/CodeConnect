@@ -157,15 +157,23 @@ public struct DaemonEndpoint: Codable, Sendable, Hashable {
         switch credential {
         case .token(let token): try c.encode(token, forKey: .token)
         case .pairingCode(let code): try c.encode(code, forKey: .pairingCode)
+        case .tailnet:
+            // Never a pairing (`PairingStore.save`), so never written.
+            throw EncodingError.invalidValue(
+                credential,
+                EncodingError.Context(codingPath: [], debugDescription: "a Tailscale hello is not a pairing"))
         }
     }
 }
 
 // MARK: - QR payload
 
-/// The JSON `codeconnect pair` renders as a QR code.
+/// What a pairing QR code carries.
 ///
-/// Locked shape: `{"v":1,"host":"<MagicDNS-or-tailnet-ip>","port":8787,"code":"<8 chars>"}`.
+/// The daemon puts a link in it, `https://codeconnect.sh/p#v=1&h=<host>&p=<port>&c=<code>`,
+/// which the camera opens in the app, or in the App Store page without it. An older
+/// daemon prints the JSON the link replaced, with the same fields:
+/// `{"v":1,"host":"<MagicDNS-or-tailnet-ip>","port":8787,"code":"<8 chars>"}`.
 /// Parsing is strict about the version and permissive about nothing else: a
 /// payload this build cannot vouch for is refused with a reason rather than
 /// half-understood.
@@ -255,11 +263,10 @@ public struct PairingQRPayload: Sendable, Hashable {
         return nil
     }
 
+    /// A scanned code or an opened link: the pairing link, or the JSON an older
+    /// daemon still prints. Both are read by the same checks.
     public static func decode(_ scanned: String) -> Result<PairingQRPayload, Failure> {
-        guard let data = scanned.data(using: .utf8),
-            let value = try? JSONDecoder().decode(JSONValue.self, from: data),
-            case .object = value
-        else { return .failure(.notJSON) }
+        guard let value = linkFields(scanned) ?? jsonFields(scanned) else { return .failure(.notJSON) }
 
         let version = value["v"]?.intValue ?? 0
         guard version == supportedVersion else { return .failure(.unsupportedVersion(version)) }
@@ -277,6 +284,37 @@ public struct PairingQRPayload: Sendable, Hashable {
         }
 
         return .success(PairingQRPayload(host: host, port: port, code: code))
+    }
+
+    private static func jsonFields(_ scanned: String) -> JSONValue? {
+        guard let data = scanned.data(using: .utf8),
+            let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+            case .object = value
+        else { return nil }
+        return value
+    }
+
+    /// `https://codeconnect.sh/p#v=1&h=<host>&p=<port>&c=<code>`, read as the JSON
+    /// fields it carries. The secret is after `#`, which a browser never sends,
+    /// so the page that link opens without the app never sees it.
+    private static func linkFields(_ scanned: String) -> JSONValue? {
+        guard let link = URLComponents(string: scanned), link.scheme == "https",
+            link.host?.lowercased() == "codeconnect.sh", link.path == "/p",
+            let fragment = link.percentEncodedFragment,
+            let items = URLComponents(string: "?" + fragment)?.queryItems
+        else { return nil }
+        var fields: [String: JSONValue] = [:]
+        for item in items {
+            guard let value = item.value else { continue }
+            switch item.name {
+            case "v": fields["v"] = Int64(value).map(JSONValue.int) ?? .string(value)
+            case "p": fields["port"] = Int64(value).map(JSONValue.int) ?? .string(value)
+            case "h": fields["host"] = .string(value)
+            case "c": fields["code"] = .string(value)
+            default: break
+            }
+        }
+        return .object(fields)
     }
 
     /// The endpoint to open while exchanging the code for a device token.
@@ -328,6 +366,7 @@ public enum PairingCredentialInput {
         switch credential {
         case .token: return "Read as a device token."
         case .pairingCode(let code): return "Read as the single-use pairing code \(code)."
+        case .tailnet: return "Read as nothing: this device's Tailscale identity."
         }
     }
 
@@ -359,14 +398,12 @@ public enum PairingCredentialInput {
         guard let endpoint = DaemonEndpoint.parse(address: address, credential: credential) else {
             return .refused("That address could not be parsed. Try 100.x.y.z or ws://host:8787.")
         }
-        switch credential {
-        case .token:
-            return .token(endpoint)
-        case .pairingCode(let code):
-            // A typed code is the same one-shot exchange the QR performs; it
-            // must not be stored, so it goes through the pairing path.
+        // A typed code is the same one-shot exchange the QR performs; it must
+        // not be stored, so it goes through the pairing path.
+        if case .pairingCode(let code) = credential {
             return .pairingCode(PairingQRPayload(host: endpoint.host, port: endpoint.port, code: code))
         }
+        return .token(endpoint)
     }
 }
 
@@ -387,6 +424,14 @@ public struct PairedMachine: Codable, Sendable, Hashable, Identifiable {
     var daemonID: String?
 }
 
+/// A computer removed from this device (`PairingStore.declined`).
+struct DeclinedComputer: Codable, Sendable, Hashable {
+    /// Its daemon's `machine_id`, or nil when that daemon never said.
+    var daemonID: String?
+    /// Every address it was known by here, lowercased.
+    var hosts: [String]
+}
+
 /// Owns the pairings. Every machine's whole record lives in one Keychain item
 /// rather than only the tokens: one item to write, one to revoke.
 ///
@@ -403,9 +448,15 @@ public final class PairingStore {
     /// holds is written, so a test or an automation launch never replaces the
     /// machines the device keeps.
     private var machinesAccount: String?
+    /// Where the removed computers are kept, beside the pairings and under the
+    /// same rule: nil, nothing is written.
+    private var declinedAccount: String?
 
     /// Oldest first, so the last is the machine paired most recently.
     public private(set) var machines: [PairedMachine] = []
+    /// Computers removed from this device, which the daemons' lists of the
+    /// owner's computers must not bring back. Only a pairing by code does.
+    private(set) var declined: [DeclinedComputer] = []
     private(set) var lastError: String?
     /// By machine: set when its daemon advertises TLS but the pairing points at
     /// an IP literal, which no certificate can cover. Surfaced in Settings,
@@ -420,6 +471,7 @@ public final class PairingStore {
     public init() {
         legacyAccount = "daemon"
         machinesAccount = "machines"
+        declinedAccount = "declined"
         load()
     }
 
@@ -444,6 +496,7 @@ public final class PairingStore {
         public init(keychainPrefix prefix: String) {
             legacyAccount = prefix + "daemon"
             machinesAccount = prefix + "machines"
+            declinedAccount = prefix + "declined"
             load()
         }
     #endif
@@ -454,6 +507,11 @@ public final class PairingStore {
     /// on the next launch, and one that cannot write leaves the old item in place.
     private func load() {
         guard let machinesAccount else { return }
+        if let declinedAccount, let data = Keychain.load(account: declinedAccount),
+            let stored = try? JSONDecoder().decode([DeclinedComputer].self, from: data)
+        {
+            declined = stored
+        }
         if let data = Keychain.load(account: machinesAccount) {
             guard let stored = try? JSONDecoder().decode([PairedMachine].self, from: data) else {
                 return
@@ -483,11 +541,13 @@ public final class PairingStore {
     /// `id` names a new machine; the app chooses it when the pairing starts, so the
     /// machine's cache is its own from the first frame.
     ///
-    /// A pairing code is refused on purpose: it is single-use, so storing one would
-    /// produce a pairing that looks valid and can never connect.
+    /// Only a device token is a pairing. A pairing code is refused on purpose: it
+    /// is single-use, so storing one would produce a pairing that looks valid and
+    /// can never connect. A Tailscale hello is refused for the same reason: what
+    /// it lets in is paid for with a token, and the token is what is stored.
     public func save(_ endpoint: DaemonEndpoint, id: String = UUID().uuidString) {
-        guard !endpoint.isPairingCode else {
-            lastError = "Internal: a single-use pairing code cannot be stored as a pairing."
+        guard endpoint.token != nil else {
+            lastError = "Internal: only a device token can be stored as a pairing."
             return
         }
         let next = upserting(endpoint, id: id)
@@ -506,8 +566,9 @@ public final class PairingStore {
         /// id, so its cache folder is the same from one automation launch to the
         /// next.
         public func saveEphemeral(_ endpoint: DaemonEndpoint) {
-            guard !endpoint.isPairingCode else { return }
+            guard endpoint.token != nil else { return }
             machinesAccount = nil
+            declinedAccount = nil
             machines = [PairedMachine(id: "automation", endpoint: endpoint)]
             lastError = nil
         }
@@ -577,6 +638,54 @@ public final class PairingStore {
         guard persist(next) else { return }
         machines = next
         tlsUnavailableReasons[id] = nil
+    }
+
+    // MARK: Removed computers
+
+    /// Keep a computer out of this device's fleet until it is paired by code:
+    /// its daemon, once that daemon has said which it is, and every address it
+    /// has been known by here.
+    func decline(daemonID: String?, host: String) {
+        let host = host.lowercased()
+        var next = declined
+        if let daemonID, let index = next.firstIndex(where: { $0.daemonID == daemonID }) {
+            guard !next[index].hosts.contains(host) else { return }
+            next[index].hosts.append(host)
+        } else {
+            next.append(DeclinedComputer(daemonID: daemonID, hosts: [host]))
+        }
+        persistDeclined(next)
+    }
+
+    func isDeclined(host: String) -> Bool {
+        declined.contains { $0.hosts.contains(host.lowercased()) }
+    }
+
+    func isDeclined(daemonID: String) -> Bool {
+        declined.contains { $0.daemonID == daemonID }
+    }
+
+    /// A pairing by code with this computer: it is wanted again.
+    func undecline(host: String? = nil, daemonID: String? = nil) {
+        let host = host?.lowercased()
+        let next = declined.filter { computer in
+            !(host.map(computer.hosts.contains) ?? false)
+                && !(daemonID != nil && computer.daemonID == daemonID)
+        }
+        guard next != declined else { return }
+        persistDeclined(next)
+    }
+
+    private func persistDeclined(_ next: [DeclinedComputer]) {
+        if let declinedAccount {
+            do {
+                try Keychain.save(JSONEncoder().encode(next), account: declinedAccount)
+            } catch {
+                lastError = error.localizedDescription
+                return
+            }
+        }
+        declined = next
     }
 
     /// Change one machine's record where it stands: no other machine's record,
