@@ -730,7 +730,9 @@ account on a trusted computer, and every app on a trusted phone, is let in.
 Each device remembers the Tailscale device it was seen from (its stable node id),
 from a token, from a code or from such a `hello`. `codeconnect revoke` revokes
 every device with the same node at once, so the phone or computer stays out,
-and Mail refuses it too; `codeconnect unblock <device>` forgets it so it may sign
+and this computer has no traffic with it either way: its Mail is refused, no
+message is sent or retried to it, it is not asked for its agents, and no `peers`
+frame names it. `codeconnect unblock <device>` forgets it so it may sign
 in again. A device paired before this release and revoked before it was seen
 through Tailscale cannot be placed, so while one is listed every such `hello` is
 refused; `codeconnect devices` says so, and unblocking it lifts that.

@@ -39,6 +39,9 @@ pub struct Node {
     online: bool,
     user: i64,
     tagged: bool,
+    /// Removed from this computer: a revoked device carries its node id. See
+    /// [`Tailnet::block`].
+    blocked: bool,
     /// The operating system Tailscale reports (`macOS`, `linux`, `windows`, `iOS`, …).
     os: String,
 }
@@ -54,6 +57,9 @@ pub enum Refusal {
     Tagged,
     /// This computer is tagged, so it takes part in no messages.
     ThisComputerTagged,
+    /// The device was removed from this computer, so it takes part in no
+    /// messages and is told about no one.
+    Blocked,
     /// The device is on the tailnet but not connected now.
     Offline,
     /// The device runs an operating system CodeConnect does not run on: a phone, a
@@ -98,6 +104,16 @@ impl Tailnet {
     /// This computer's name.
     pub fn name(&self) -> &str {
         &self.me.name
+    }
+
+    /// This reading with the peers whose node ids are in `blocked` refused: by
+    /// [`Tailnet::sender`], [`Tailnet::locate`], [`Tailnet::reachable_peers`] and
+    /// so [`peers_frame`], which all ask the one trust rule.
+    pub fn block(mut self, blocked: &[String]) -> Tailnet {
+        for node in &mut self.peers {
+            node.blocked = blocked.contains(&node.id);
+        }
+        self
     }
 
     /// The computer a connection from `ip` came from, if it may message this
@@ -158,6 +174,9 @@ impl Tailnet {
         }
         if node.user != self.me.user {
             return Err(Refusal::OtherUser);
+        }
+        if node.blocked {
+            return Err(Refusal::Blocked);
         }
         Ok(())
     }
@@ -245,6 +264,7 @@ impl From<NodeStatus> for Node {
             online: status.online,
             user: status.user_id,
             tagged: status.tags.is_some_and(|tags| !tags.is_empty()),
+            blocked: false,
             os: status.os,
         }
     }
@@ -526,6 +546,35 @@ mod tests {
         assert_eq!(names("fd7a:115c:a1e0::6"), ["linux-box"]);
         assert_eq!(names("100.64.0.3"), ["laptop"]);
         assert_eq!(names("100.64.0.4"), ["laptop", "linux-box"], "a phone");
+    }
+
+    /// **A blocked computer gets no traffic either way**: no message is taken from
+    /// it, none is sent to it, it is not asked for its agents, and no viewer is
+    /// told about it. The owner's other computers are untouched.
+    #[test]
+    fn a_blocked_computer_is_refused_by_every_path() {
+        let tailnet = edited(|s| peer(s, "linux-box")["Online"] = true.into())
+            .block(&["n0000000006CNTRL".to_string()]);
+        assert_eq!(tailnet.sender(ip("100.64.0.6")), Err(Refusal::Blocked));
+        assert_eq!(tailnet.locate("laptop"), Err(Refusal::Blocked));
+        let reachable: Vec<Place> = tailnet.reachable_peers().collect();
+        assert_eq!(
+            reachable,
+            [Place::Peer {
+                name: "linux-box",
+                ip: ip("100.64.0.3")
+            }]
+        );
+        let names: Vec<String> =
+            computers(peers_frame(Some(&tailnet), true, 8787, ip("100.64.0.4")))
+                .into_iter()
+                .map(|computer| computer.name)
+                .collect();
+        assert_eq!(names, ["linux-box"]);
+        assert_eq!(tailnet.sender(ip("100.64.0.3")).unwrap().name, "linux-box");
+
+        let unblocked = tailnet.block(&[]);
+        assert_eq!(unblocked.sender(ip("100.64.0.6")).unwrap().name, "laptop");
     }
 
     #[test]

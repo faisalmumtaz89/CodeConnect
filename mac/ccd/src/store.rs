@@ -3174,15 +3174,17 @@ impl Store {
         Ok(())
     }
 
-    /// Is this Tailscale device kept out: does a revoked device carry it?
-    pub fn tailnet_node_blocked(&self, tailnet_node: &str) -> Result<bool> {
+    /// The Tailscale devices kept out: those a revoked device carries.
+    pub fn blocked_tailnet_nodes(&self) -> Result<Vec<String>> {
         let conn = self.read();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM devices WHERE tailnet_node = ?1 AND revoked_at IS NOT NULL",
-            params![tailnet_node],
-            |row| row.get(0),
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT tailnet_node FROM devices
+              WHERE revoked_at IS NOT NULL AND tailnet_node IS NOT NULL",
         )?;
-        Ok(count > 0)
+        let nodes = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(nodes)
     }
 
     /// Forget a revoked device, and every revoked device on the same Tailscale
@@ -12439,8 +12441,7 @@ mod tests {
         store.stamp_tailnet_node("hash-a", "n9").unwrap();
         assert_eq!(row(&store, "a").tailnet_node.as_deref(), Some("n1"));
         assert_eq!(row(&store, "b").tailnet_node.as_deref(), Some("n2"));
-        assert!(store.tailnet_node_blocked("n2").unwrap());
-        assert!(!store.tailnet_node_blocked("n1").unwrap());
+        assert_eq!(store.blocked_tailnet_nodes().unwrap(), ["n2"]);
     }
 
     /// **A revocation from before the upgrade pauses Tailscale sign-in.** The

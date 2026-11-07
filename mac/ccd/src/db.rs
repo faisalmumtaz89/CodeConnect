@@ -716,10 +716,9 @@ impl Db {
             .await
     }
 
-    /// See [`crate::store::Store::tailnet_node_blocked`].
-    pub async fn tailnet_node_blocked(&self, tailnet_node: String) -> Result<bool> {
-        self.run(move |store| store.tailnet_node_blocked(&tailnet_node))
-            .await
+    /// See [`crate::store::Store::blocked_tailnet_nodes`].
+    pub async fn blocked_tailnet_nodes(&self) -> Result<Vec<String>> {
+        self.run(|store| store.blocked_tailnet_nodes()).await
     }
 
     /// See [`crate::store::Store::unblock_device`].

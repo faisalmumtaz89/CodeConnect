@@ -768,7 +768,7 @@ mod tests {
                 None,
                 Some(&code),
                 Some("iPhone"),
-                None,
+                Err(protocol::tailnet::Refusal::Unknown),
             )
             .await;
         let devices = daemon.list_devices().await.unwrap();

@@ -620,17 +620,17 @@ where
                             // this address, and the `peers` frame a paired device
                             // is sent after its ack.
                             let tailnet = daemon.read_tailnet().await;
-                            let tailnet_node = tailnet
-                                .as_ref()
-                                .and_then(|tailnet| tailnet.sender(peer).ok())
-                                .map(|node| node.id.clone());
+                            let vouched = match &tailnet {
+                                Some(tailnet) => tailnet.sender(peer).map(|node| node.id.clone()),
+                                None => Err(protocol::tailnet::Refusal::Unknown),
+                            };
                             let outcome = daemon
                                 .authenticate(
                                     &token,
                                     given.as_deref(),
                                     pairing_code.as_deref(),
                                     client_name.as_deref(),
-                                    tailnet_node.as_deref(),
+                                    vouched.as_deref().map_err(|refusal| *refusal),
                                 )
                                 .await;
                             let ack = match outcome {
@@ -3883,6 +3883,55 @@ mod tests {
             None,
             "an unchanged tailnet is not sent again"
         );
+    }
+
+    /// **A computer removed from this one is no longer told about**: the next
+    /// re-read of the tailnet drops it from an open connection's `peers`.
+    #[tokio::test]
+    async fn a_removed_computer_drops_out_of_the_peers_a_viewer_is_told() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        set_tailnet(
+            &server,
+            Some(tailnet_from_the_laptop(|status| {
+                for node in status["Peer"].as_object_mut().unwrap().values_mut() {
+                    if node["HostName"] == "linux-box" {
+                        node["Online"] = true.into();
+                    }
+                }
+            })),
+        );
+        let (mut socket, ack) = hello_with_no_credential(&server).await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        let names = |frame: serde_json::Value| -> Vec<String> {
+            frame["computers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|computer| computer["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let first = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(names(first), ["linux-box"]);
+
+        // linux-box signed in once through Tailscale, and is removed.
+        server
+            .daemon
+            .store
+            .insert_device(
+                "lb",
+                "linux-box",
+                "hash-lb",
+                "2026-11-08T00:00:00Z",
+                Some("n0000000003CNTRL"),
+            )
+            .unwrap();
+        server.daemon.revoke("lb").await.unwrap();
+        let after = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("the change is sent");
+        assert!(names(after).is_empty());
     }
 
     /// **A hello with no credential is refused unless Tailscale vouches for the

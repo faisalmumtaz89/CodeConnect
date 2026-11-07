@@ -10596,20 +10596,22 @@ impl Daemon {
     /// already-paired phone would mint a second credential for one device and
     /// leave the first one live but unlisted against it.
     ///
-    /// `tailnet_node` is the Tailscale device the connection came from, when
-    /// [`protocol::tailnet::Tailnet::sender`] vouches for its address: one of this
-    /// computer's own user's, not tagged. A token presented from it records that
-    /// device on the token's row; a code redeemed from it pairs that device; and a
-    /// hello with neither is paired as a code would pair it, unless that device is
-    /// kept out ([`crate::store::Store::admit_tailnet_device`]).
+    /// `tailnet` is what [`protocol::tailnet::Tailnet::sender`] said of the address
+    /// the connection came from: the Tailscale device, when it vouches for it (one
+    /// of this computer's own user's, not tagged, not removed), or why not. A token
+    /// presented from such a device records it on the token's row; a code redeemed
+    /// from it pairs that device; and a hello with neither is paired as a code would
+    /// pair it, unless that device is kept out
+    /// ([`crate::store::Store::admit_tailnet_device`]).
     pub async fn authenticate(
         &self,
         static_token: &str,
         token: Option<&str>,
         pairing_code: Option<&str>,
         client_name: Option<&str>,
-        tailnet_node: Option<&str>,
+        tailnet: Result<&str, protocol::tailnet::Refusal>,
     ) -> AuthOutcome {
+        let tailnet_node = tailnet.ok();
         if let Some(token) = token.filter(|t| !t.is_empty()) {
             if constant_time_eq(token.as_bytes(), static_token.as_bytes()) {
                 return AuthOutcome::Static;
@@ -10643,13 +10645,20 @@ impl Daemon {
         if let Some(code) = pairing_code {
             return self.pair(code, client_name, tailnet_node).await;
         }
-        let Some(node) = tailnet_node else {
-            return AuthOutcome::Rejected(
-                "hello carried neither a token nor a pairing code, from an address Tailscale \
-                 does not vouch for"
-                    .into(),
-            );
-        };
+        let node =
+            match tailnet {
+                Ok(node) => node,
+                Err(protocol::tailnet::Refusal::Blocked) => return AuthOutcome::Rejected(
+                    "hello carried neither a token nor a pairing code, from a Tailscale device \
+                     that was revoked"
+                        .into(),
+                ),
+                Err(_) => return AuthOutcome::Rejected(
+                    "hello carried neither a token nor a pairing code, from an address Tailscale \
+                     does not vouch for"
+                        .into(),
+                ),
+            };
         match self.admit_tailnet_device(client_name, node).await {
             Ok(outcome) => outcome,
             Err(err) => AuthOutcome::Rejected(format!("Tailscale sign-in failed: {err:#}")),
@@ -12836,7 +12845,13 @@ mod tests {
 
     async fn hello_with_code(daemon: &Arc<Daemon>, code: &str) -> AuthOutcome {
         daemon
-            .authenticate(STATIC_TOKEN, None, Some(code), Some("iPhone"), None)
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(code),
+                Some("iPhone"),
+                Err(protocol::tailnet::Refusal::Unknown),
+            )
             .await
     }
 
@@ -12854,14 +12869,26 @@ mod tests {
     /// A hello from the Tailscale device `node` with neither a token nor a code.
     async fn hello_through_tailscale(daemon: &Arc<Daemon>, node: Option<&str>) -> AuthOutcome {
         daemon
-            .authenticate(STATIC_TOKEN, None, None, Some("iPad"), node)
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                None,
+                Some("iPad"),
+                node.ok_or(protocol::tailnet::Refusal::Unknown),
+            )
             .await
     }
 
     async fn token_works(daemon: &Arc<Daemon>, token: &str) -> bool {
         matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(token), None, None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    Some(token),
+                    None,
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Device(_)
         )
@@ -12970,7 +12997,7 @@ mod tests {
         };
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(&token), None, None, Some("n2"))
+                .authenticate(STATIC_TOKEN, Some(&token), None, None, Ok("n2"))
                 .await,
             AuthOutcome::Device(_)
         ));
@@ -12992,7 +13019,7 @@ mod tests {
         daemon.revoke(&device_id).await.unwrap();
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(&token), None, None, Some("n3"))
+                .authenticate(STATIC_TOKEN, Some(&token), None, None, Ok("n3"))
                 .await,
             AuthOutcome::Rejected(_)
         ));
@@ -13005,7 +13032,7 @@ mod tests {
         // made, before the ack.
         let (code, _) = daemon.create_pairing(300).await.unwrap();
         let AuthOutcome::Paired { device_id, .. } = daemon
-            .authenticate(STATIC_TOKEN, None, Some(&code), Some("iPhone"), Some("n4"))
+            .authenticate(STATIC_TOKEN, None, Some(&code), Some("iPhone"), Ok("n4"))
             .await
         else {
             panic!("pairing must succeed");
@@ -13038,30 +13065,105 @@ mod tests {
         ));
     }
 
-    /// **A computer blocked as a viewer is kept out of Mail too**, before any
-    /// request is served; unblocked, it is served again.
+    /// A removed computer's hello with no credential is refused for that reason,
+    /// which is what the daemon logs, not as an address Tailscale does not know.
     #[tokio::test]
-    async fn a_blocked_computer_is_refused_by_mail_before_anything_is_served() {
+    async fn a_removed_computers_hello_is_refused_as_removed() {
+        let daemon = test_daemon();
+        let refused = |outcome: AuthOutcome| match outcome {
+            AuthOutcome::Rejected(reason) => reason,
+            other => panic!("must be refused: {other:?}"),
+        };
+        let removed = refused(
+            daemon
+                .authenticate(
+                    STATIC_TOKEN,
+                    None,
+                    None,
+                    Some("iPad"),
+                    Err(protocol::tailnet::Refusal::Blocked),
+                )
+                .await,
+        );
+        assert!(removed.contains("was revoked"), "{removed}");
+        let unknown = refused(
+            daemon
+                .authenticate(
+                    STATIC_TOKEN,
+                    None,
+                    None,
+                    Some("iPad"),
+                    Err(protocol::tailnet::Refusal::Unknown),
+                )
+                .await,
+        );
+        assert!(unknown.contains("does not vouch for"), "{unknown}");
+    }
+
+    /// **A computer removed as a viewer gets no Mail traffic either way**, through
+    /// the daemon's one reading of the tailnet: a request from it is refused before
+    /// anything is served, a message to it is refused before any dial, and it is
+    /// neither asked for its agents nor told what became of a message. Unblocked,
+    /// it is served and reachable again.
+    #[tokio::test]
+    async fn a_blocked_computer_gets_no_mail_traffic_either_way() {
         use protocol::peer::{PeerReply, PeerRequest};
         let _home = redirected_home("mail-block");
         let daemon = test_daemon();
-        let tailnet = six_nodes();
-        let desktop: std::net::IpAddr = "100.64.0.2".parse().unwrap();
-        let ask = || daemon.serve_peer_on(Some(&tailnet), desktop, PeerRequest::PeerListAgents);
+        *daemon
+            .test_tailnet
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(six_nodes());
+        let laptop: std::net::IpAddr = "100.64.0.6".parse().unwrap();
+        let from = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &from, "cc-1").await;
+        let ask = || daemon.serve_peer(laptop, PeerRequest::PeerListAgents);
         assert!(matches!(ask().await, PeerReply::PeerAgents { .. }));
 
         let AuthOutcome::Paired { device_id, .. } =
-            hello_through_tailscale(&daemon, Some("n0000000002CNTRL")).await
+            hello_through_tailscale(&daemon, Some("n0000000006CNTRL")).await
         else {
             panic!("a trusted Tailscale device pairs");
         };
         daemon.revoke(&device_id).await.unwrap();
+
         match ask().await {
             PeerReply::PeerRefused { reason } => assert!(reason.contains("removed"), "{reason}"),
             other => panic!("a blocked computer must be refused: {other:?}"),
         }
+        let sent = daemon
+            .send_agent_message(
+                &from,
+                &format!("{}@laptop", protocol::uid::new().unwrap()),
+                "hi",
+                None,
+            )
+            .await;
+        assert_eq!(sent.state, protocol::ipc::MailState::Refused, "{sent:?}");
+        assert_eq!(
+            sent.reason.as_deref(),
+            Some("laptop was removed from this computer")
+        );
+        let reading = daemon.read_tailnet().await.unwrap();
+        assert_eq!(
+            reading.reachable_peers().count(),
+            0,
+            "nobody left to ask or tell"
+        );
+        assert_eq!(
+            reading.locate("laptop"),
+            Err(protocol::tailnet::Refusal::Blocked),
+            "the sweep's retries and told changes find it the same way"
+        );
+
         daemon.unblock(&device_id).await.unwrap();
         assert!(matches!(ask().await, PeerReply::PeerAgents { .. }));
+        assert!(daemon
+            .read_tailnet()
+            .await
+            .unwrap()
+            .locate("laptop")
+            .is_ok());
     }
 
     // ------------------------------------------------------------ pairing
@@ -13096,7 +13198,13 @@ mod tests {
 
         // The minted token authenticates on its own from now on.
         match daemon
-            .authenticate(STATIC_TOKEN, Some(&token), None, None, None)
+            .authenticate(
+                STATIC_TOKEN,
+                Some(&token),
+                None,
+                None,
+                Err(protocol::tailnet::Refusal::Unknown),
+            )
             .await
         {
             AuthOutcome::Device(device) => assert_eq!(device.name, "iPhone"),
@@ -13156,13 +13264,25 @@ mod tests {
         let daemon = test_daemon();
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, None, None, None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    None,
+                    None,
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Rejected(_)
         ));
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(""), None, None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    Some(""),
+                    None,
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Rejected(_)
         ));
@@ -13175,13 +13295,25 @@ mod tests {
         let daemon = test_daemon();
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), None, None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    Some(STATIC_TOKEN),
+                    None,
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Static
         ));
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some("not-the-token"), None, None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    Some("not-the-token"),
+                    None,
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Rejected(_)
         ));
@@ -13194,7 +13326,13 @@ mod tests {
         // Re-pairing an already-paired phone would strand its first credential.
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), Some(&code), None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    Some(STATIC_TOKEN),
+                    Some(&code),
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Static
         ));
@@ -13223,7 +13361,13 @@ mod tests {
         assert!(outcome.token_revoked);
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(&token), None, None, None)
+                .authenticate(
+                    STATIC_TOKEN,
+                    Some(&token),
+                    None,
+                    None,
+                    Err(protocol::tailnet::Refusal::Unknown)
+                )
                 .await,
             AuthOutcome::Rejected(_)
         ));

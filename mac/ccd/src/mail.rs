@@ -563,21 +563,6 @@ impl Daemon {
             return refuse("the receiving computer is not connected to Tailscale");
         };
         let computer = match tailnet.sender(source) {
-            // A computer revoked as a viewer is kept out of Mail too: it is the
-            // same device, and Mail is the one route that skips the hello.
-            Ok(node)
-                if self
-                    .db
-                    .tailnet_node_blocked(node.id.clone())
-                    .await
-                    .unwrap_or(true) =>
-            {
-                crate::log_warn!(
-                    "refused a peer request from {source}: {} is blocked",
-                    node.name
-                );
-                return refuse("the sending computer was removed from this one");
-            }
             Ok(node) => node.name.clone(),
             Err(refusal) => {
                 crate::log_warn!("refused a peer request from {source}: {refusal:?}");
@@ -585,6 +570,7 @@ impl Daemon {
                     Refusal::OtherUser => "the sending computer belongs to another Tailscale user",
                     Refusal::Tagged => "the sending computer is a tagged device",
                     Refusal::ThisComputerTagged => "the receiving computer is a tagged device",
+                    Refusal::Blocked => "the sending computer was removed from this one",
                     Refusal::Unknown | Refusal::Offline | Refusal::NoCodeConnect => {
                         "the request did not come from one of your computers on Tailscale"
                     }
@@ -1018,12 +1004,22 @@ async fn dial_peer(
 }
 
 impl Daemon {
-    /// This computer's tailnet, or `None` when Tailscale is missing, down or slow.
+    /// This computer's tailnet, or `None` when Tailscale is missing, down or slow,
+    /// with every computer a revoked device was seen from blocked
+    /// ([`Tailnet::block`]): a removed computer gets no traffic either way.
     ///
-    /// In a test, the reading the test gave this daemon in
-    /// [`Daemon::test_tailnet`], and none until it gives one: no test asks this
-    /// computer's own Tailscale, and one daemon's tailnet is never another's.
+    /// The one reading every caller takes, so the block cannot be missed by one of
+    /// them. Failing to read the devices fails closed: no reading at all.
     pub(crate) async fn read_tailnet(&self) -> Option<Tailnet> {
+        let tailnet = self.read_status().await?;
+        let blocked = self.db.blocked_tailnet_nodes().await.ok()?;
+        Some(tailnet.block(&blocked))
+    }
+
+    /// `tailscale status`, read. In a test, the reading the test gave this daemon
+    /// in [`Daemon::test_tailnet`], and none until it gives one: no test asks this
+    /// computer's own Tailscale, and one daemon's tailnet is never another's.
+    async fn read_status(&self) -> Option<Tailnet> {
         #[cfg(test)]
         return self
             .test_tailnet
@@ -1056,6 +1052,7 @@ fn refusal_sentence(refusal: Refusal, computer: &str) -> String {
         }
         Refusal::Offline => format!("{computer} is offline"),
         Refusal::NoCodeConnect => format!("CodeConnect does not run on {computer}"),
+        Refusal::Blocked => format!("{computer} was removed from this computer"),
     }
 }
 
