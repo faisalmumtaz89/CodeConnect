@@ -15,7 +15,8 @@
       "100.64.0.1",
       "fd7a:115c:a1e0::1"
     ],
-    "Online": true
+    "Online": true,
+    "ID": "n0000000001CNTRL"
   },
   "MagicDNSSuffix": "tail0000.ts.net",
   "Peer": {
@@ -28,7 +29,8 @@
         "100.64.0.2",
         "fd7a:115c:a1e0::2"
       ],
-      "Online": true
+      "Online": true,
+      "ID": "n0000000002CNTRL"
     },
     "nodekey:0000000000000000000000000000000000000000000000000000000000000003": {
       "HostName": "linux-box",
@@ -39,7 +41,8 @@
         "100.64.0.3",
         "fd7a:115c:a1e0::3"
       ],
-      "Online": false
+      "Online": false,
+      "ID": "n0000000003CNTRL"
     },
     "nodekey:0000000000000000000000000000000000000000000000000000000000000004": {
       "HostName": "phone",
@@ -50,7 +53,8 @@
         "100.64.0.4",
         "fd7a:115c:a1e0::4"
       ],
-      "Online": true
+      "Online": true,
+      "ID": "n0000000004CNTRL"
     },
     "nodekey:0000000000000000000000000000000000000000000000000000000000000005": {
       "HostName": "tablet",
@@ -61,7 +65,8 @@
         "100.64.0.5",
         "fd7a:115c:a1e0::5"
       ],
-      "Online": false
+      "Online": false,
+      "ID": "n0000000005CNTRL"
     },
     "nodekey:0000000000000000000000000000000000000000000000000000000000000006": {
       "HostName": "laptop",
@@ -72,7 +77,8 @@
         "100.64.0.6",
         "fd7a:115c:a1e0::6"
       ],
-      "Online": true
+      "Online": true,
+      "ID": "n0000000006CNTRL"
     }
   },
   "User": {

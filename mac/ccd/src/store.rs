@@ -297,6 +297,8 @@ pub struct DeviceRow {
     pub created_at: String,
     pub last_seen_at: Option<String>,
     pub revoked_at: Option<String>,
+    pub tailnet_node: Option<String>,
+    pub paired_before_nodes: bool,
 }
 
 impl DeviceRow {
@@ -307,8 +309,21 @@ impl DeviceRow {
             created_at: self.created_at.clone(),
             last_seen_at: self.last_seen_at.clone(),
             revoked_at: self.revoked_at.clone(),
+            tailnet_node: self.tailnet_node.clone(),
+            paired_before_nodes: self.paired_before_nodes,
         }
     }
+}
+
+/// What a sign-in with neither a token nor a code came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Admitted,
+    /// A revoked device carries this Tailscale device.
+    Blocked,
+    /// A device paired before devices were recorded was revoked with none, so
+    /// this daemon cannot tell which Tailscale device to keep out.
+    Paused,
 }
 
 /// One device's push registration as the store holds it.
@@ -1197,6 +1212,11 @@ impl Store {
         // the opposite reason — it is deliberately never fatal, and a failure
         // inside this transaction would take the schema down with it.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Asked before anything widens `devices`: a table that already exists
+        // without `tailnet_node` holds pairings made before devices were recorded.
+        // Asked of the schema, not of `user_version`, which a rollback rewrites.
+        let pairings_predate_nodes =
+            table_exists(&tx, "devices")? && !column_exists(&tx, "devices", "tailnet_node")?;
         create_schema(&tx)?;
         // Additive, and applied after `create_schema` for the reason the note
         // above gives in reverse: `CREATE TABLE IF NOT EXISTS` will not widen a
@@ -1205,6 +1225,16 @@ impl Store {
         // missing column.
         if needs_column_additions(&tx)? {
             add_missing_columns(&tx)?;
+        }
+        // Every row, revoked or not: a device paired before this release and
+        // revoked after it, before it ever connected through Tailscale, has no
+        // node either, and must keep out what it was just as a revocation from
+        // before the upgrade does.
+        if pairings_predate_nodes {
+            let marked = tx.execute("UPDATE devices SET paired_before_nodes = 1", [])?;
+            crate::log_info!(
+                "schema: marked {marked} device(s) as paired before Tailscale sign-in"
+            );
         }
         // **Third, and it has to be here.** The move reads `sessions.agent`, so
         // it must follow `add_missing_columns` on a database written before the
@@ -3073,21 +3103,114 @@ impl Store {
         anyhow::bail!("no free device name based on {base:?}")
     }
 
+    /// `tailnet_node` is the Tailscale device it paired from, when Tailscale
+    /// vouched for that address.
     pub fn insert_device(
         &self,
         device_id: &str,
         name: &str,
         token_hash: &str,
         created_at: &str,
+        tailnet_node: Option<&str>,
     ) -> Result<()> {
         let conn = self.write();
+        insert_device_row(&conn, device_id, name, token_hash, created_at, tailnet_node)
+    }
+
+    /// **Pair a device Tailscale vouched for, unless that device is kept out.**
+    ///
+    /// The checks and the insert are one `BEGIN IMMEDIATE` on the one write
+    /// connection, which [`Store::revoke_device`] also writes through, so a revoke
+    /// lands wholly before this (and the check refuses) or wholly after it (and
+    /// revokes the row this inserts).
+    pub fn admit_tailnet_device(
+        &self,
+        device_id: &str,
+        name: &str,
+        token_hash: &str,
+        created_at: &str,
+        tailnet_node: &str,
+    ) -> Result<Admission> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let blocked: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM devices WHERE tailnet_node = ?1 AND revoked_at IS NOT NULL",
+            params![tailnet_node],
+            |row| row.get(0),
+        )?;
+        if blocked > 0 {
+            return Ok(Admission::Blocked);
+        }
+        let paused: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM devices
+              WHERE paired_before_nodes = 1 AND tailnet_node IS NULL AND revoked_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if paused > 0 {
+            return Ok(Admission::Paused);
+        }
+        insert_device_row(
+            &tx,
+            device_id,
+            name,
+            token_hash,
+            created_at,
+            Some(tailnet_node),
+        )?;
+        tx.commit()?;
+        Ok(Admission::Admitted)
+    }
+
+    /// Record the Tailscale device a token was presented from, on the row that
+    /// token belongs to, revoked or not, when that row has none yet.
+    pub fn stamp_tailnet_node(&self, token_hash: &str, tailnet_node: &str) -> Result<()> {
+        let conn = self.write();
         conn.execute(
-            "INSERT INTO devices(device_id, name, token_hash, created_at,
-                                 last_seen_at, revoked_at)
-             VALUES(?1, ?2, ?3, ?4, ?4, NULL)",
-            params![device_id, name, token_hash, created_at],
+            "UPDATE devices SET tailnet_node = ?2
+              WHERE token_hash = ?1 AND tailnet_node IS NULL",
+            params![token_hash, tailnet_node],
         )?;
         Ok(())
+    }
+
+    /// Is this Tailscale device kept out: does a revoked device carry it?
+    pub fn tailnet_node_blocked(&self, tailnet_node: &str) -> Result<bool> {
+        let conn = self.read();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM devices WHERE tailnet_node = ?1 AND revoked_at IS NOT NULL",
+            params![tailnet_node],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Forget a revoked device, and every revoked device on the same Tailscale
+    /// device, so it may sign in again. Returns how many rows went; zero when the
+    /// device is not revoked, which is refused rather than forgotten.
+    pub fn unblock_device(&self, device_id: &str) -> Result<usize> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let node: Option<Option<String>> = tx
+            .query_row(
+                "SELECT tailnet_node FROM devices WHERE device_id = ?1 AND revoked_at IS NOT NULL",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let removed = match node {
+            None => 0,
+            Some(None) => tx.execute(
+                "DELETE FROM devices WHERE device_id = ?1",
+                params![device_id],
+            )?,
+            Some(Some(node)) => tx.execute(
+                "DELETE FROM devices WHERE tailnet_node = ?1 AND revoked_at IS NOT NULL",
+                params![node],
+            )?,
+        };
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Authenticate a presented token. Revoked devices are excluded in SQL, so
@@ -3096,7 +3219,8 @@ impl Store {
         let conn = self.read();
         let row = conn
             .query_row(
-                "SELECT device_id, name, created_at, last_seen_at, revoked_at
+                "SELECT device_id, name, created_at, last_seen_at, revoked_at,
+                        tailnet_node, paired_before_nodes
                    FROM devices
                   WHERE token_hash = ?1 AND revoked_at IS NULL",
                 params![token_hash],
@@ -3330,7 +3454,8 @@ impl Store {
     pub fn list_devices(&self) -> Result<Vec<DeviceRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
-            "SELECT device_id, name, created_at, last_seen_at, revoked_at
+            "SELECT device_id, name, created_at, last_seen_at, revoked_at,
+                    tailnet_node, paired_before_nodes
                FROM devices ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], device_row_from)?;
@@ -3388,8 +3513,10 @@ impl Store {
         Ok(DeviceLookup::NotFound)
     }
 
-    /// Returns false when the device was already revoked, so the caller can
-    /// report "nothing to do" instead of pretending it acted.
+    /// Returns every device it revoked: this one, unless it was already revoked,
+    /// and every active device on the same Tailscale device, which is the same
+    /// phone or computer. Empty when there was nothing to do, so the caller can
+    /// report that instead of pretending it acted.
     ///
     /// **The push tuple goes with the trust.** Filtering revoked rows out of
     /// `push_targets` is what stops the notifications; erasing the tuple here is
@@ -3401,18 +3528,23 @@ impl Store {
     /// this phone is no longer trusted, which is the opposite of what they asked
     /// for. Written in the same statement as the revocation so there is no
     /// instant in which one holds without the other.
-    pub fn revoke_device(&self, device_id: &str, at: &str) -> Result<bool> {
+    pub fn revoke_device(&self, device_id: &str, at: &str) -> Result<Vec<String>> {
         let conn = self.write();
-        let changed = conn.execute(
+        let mut stmt = conn.prepare(
             "UPDATE devices
                 SET revoked_at = ?2,
                     push_token = NULL,
                     push_environment = NULL,
                     push_credential = NULL
-              WHERE device_id = ?1 AND revoked_at IS NULL",
-            params![device_id, at],
+              WHERE revoked_at IS NULL
+                AND (device_id = ?1
+                     OR tailnet_node = (SELECT tailnet_node FROM devices WHERE device_id = ?1))
+              RETURNING device_id",
         )?;
-        Ok(changed == 1)
+        let revoked = stmt
+            .query_map(params![device_id, at], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(revoked)
     }
 
     // ----------------------------------------------------- pending approvals
@@ -5664,7 +5796,14 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             -- so a new database has the shape every release since v0.7.0 made;
             -- the bundled SQLite cannot drop `features_epoch` from those tables.
             features          TEXT,
-            features_epoch    TEXT
+            features_epoch    TEXT,
+            -- The Tailscale device (stable node id) it was last seen connecting
+            -- from. A revoked row that carries one keeps that device out.
+            tailnet_node      TEXT,
+            -- 1 on every row that existed when `tailnet_node` was added: paired
+            -- before devices were recorded. Revoked with no node, such a row
+            -- pauses every sign-in without a token or a code.
+            paired_before_nodes INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS devices_name ON devices(name);
@@ -6078,6 +6217,14 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     // See the `devices` table above.
     ("devices", "features", "TEXT"),
     ("devices", "features_epoch", "TEXT"),
+    // Tailscale sign-in (minor 32). Adding `tailnet_node` is also when every
+    // existing row is marked `paired_before_nodes`: see [`Store::migrate`].
+    ("devices", "tailnet_node", "TEXT"),
+    (
+        "devices",
+        "paired_before_nodes",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -6776,7 +6923,26 @@ fn device_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
         created_at: row.get(2)?,
         last_seen_at: row.get(3)?,
         revoked_at: row.get(4)?,
+        tailnet_node: row.get(5)?,
+        paired_before_nodes: row.get(6)?,
     })
+}
+
+fn insert_device_row(
+    conn: &Connection,
+    device_id: &str,
+    name: &str,
+    token_hash: &str,
+    created_at: &str,
+    tailnet_node: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO devices(device_id, name, token_hash, created_at,
+                             last_seen_at, revoked_at, tailnet_node)
+         VALUES(?1, ?2, ?3, ?4, ?4, NULL, ?5)",
+        params![device_id, name, token_hash, created_at, tailnet_node],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn lifecycle_str(lifecycle: Lifecycle) -> &'static str {
@@ -12134,7 +12300,7 @@ mod tests {
     fn add_device(store: &Store, id: &str, name: &str, token_hash: &str) {
         let name = store.unique_device_name(name).unwrap();
         store
-            .insert_device(id, &name, token_hash, &protocol::time::now_rfc3339())
+            .insert_device(id, &name, token_hash, &protocol::time::now_rfc3339(), None)
             .unwrap();
     }
 
@@ -12145,9 +12311,12 @@ mod tests {
         let found = store.device_by_token_hash("token-hash-1").unwrap().unwrap();
         assert_eq!(found.name, "iPhone");
 
-        assert!(store
-            .revoke_device("d1a2b3c4", &protocol::time::now_rfc3339())
-            .unwrap());
+        assert_eq!(
+            store
+                .revoke_device("d1a2b3c4", &protocol::time::now_rfc3339())
+                .unwrap(),
+            ["d1a2b3c4"]
+        );
         assert!(
             store
                 .device_by_token_hash("token-hash-1")
@@ -12156,9 +12325,249 @@ mod tests {
             "a revoked token must not authenticate"
         );
         // Revoking twice is a no-op, not an error.
-        assert!(!store
+        assert!(store
             .revoke_device("d1a2b3c4", &protocol::time::now_rfc3339())
-            .unwrap());
+            .unwrap()
+            .is_empty());
+    }
+
+    // ------------------------------------------------- Tailscale sign-in
+
+    const NOW: &str = "2026-11-08T00:00:00.000Z";
+
+    /// A Tailscale sign-in on `node`, under a name nothing else holds.
+    fn admit(store: &Store, id: &str, node: &str) -> Admission {
+        store
+            .admit_tailnet_device(id, &format!("dev {id}"), &format!("hash-{id}"), NOW, node)
+            .unwrap()
+    }
+
+    fn row(store: &Store, id: &str) -> DeviceRow {
+        store
+            .list_devices()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.device_id == id)
+            .unwrap()
+    }
+
+    /// The database a build from before Tailscale sign-in left (its `devices` as
+    /// shipped, [`SHIPPED_DEVICES_DDL`]), holding one row for each `(id, revoked)`
+    /// in `rows`, reopened by this build.
+    fn upgraded_with(rows: &[(&str, bool)]) -> (Store, TempDb) {
+        let (store, path) = temp_store();
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DROP INDEX devices_name; DROP TABLE devices;")
+                .unwrap();
+            conn.execute_batch(SHIPPED_DEVICES_DDL).unwrap();
+            for (id, revoked) in rows {
+                conn.execute(
+                    "INSERT INTO devices(device_id, name, token_hash, created_at, revoked_at)
+                     VALUES(?1, 'dev ' || ?1, 'hash-' || ?1, ?2, ?3)",
+                    params![id, NOW, revoked.then_some(NOW)],
+                )
+                .unwrap();
+            }
+        }
+        (Store::open(&path).unwrap(), path)
+    }
+
+    /// **Revoking one device revokes every device on the same Tailscale device, in
+    /// one statement, and clears each one's push tuple.** A device on no Tailscale
+    /// device is revoked alone.
+    #[test]
+    fn a_revoke_takes_every_device_on_the_same_tailscale_device_and_its_push_tuple() {
+        let (store, _path) = temp_store();
+        assert_eq!(admit(&store, "a", "n1"), Admission::Admitted);
+        assert_eq!(admit(&store, "b", "n1"), Admission::Admitted);
+        assert_eq!(admit(&store, "c", "n2"), Admission::Admitted);
+        store
+            .insert_device("d", "dev d", "hash-d", NOW, None)
+            .unwrap();
+        for id in ["a", "b", "c", "d"] {
+            store
+                .set_push_token(id, &format!("tok-{id}"), "production", Some("cred"))
+                .unwrap();
+        }
+
+        let mut revoked = store.revoke_device("a", NOW).unwrap();
+        revoked.sort();
+        assert_eq!(revoked, ["a", "b"]);
+        let mut pushed: Vec<String> = store
+            .push_targets()
+            .unwrap()
+            .into_iter()
+            .map(|target| target.device_id)
+            .collect();
+        pushed.sort();
+        assert_eq!(pushed, ["c", "d"]);
+        let raw = store.read();
+        let tuples: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM devices WHERE device_id IN ('a', 'b')
+                   AND (push_token IS NOT NULL OR push_environment IS NOT NULL
+                        OR push_credential IS NOT NULL)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(raw);
+        assert_eq!(tuples, 0, "no push tuple outlives the revoke");
+
+        assert_eq!(store.revoke_device("d", NOW).unwrap(), ["d"]);
+        assert!(row(&store, "c").revoked_at.is_none());
+        assert_eq!(admit(&store, "e", "n1"), Admission::Blocked);
+        assert_eq!(admit(&store, "f", "n2"), Admission::Admitted);
+    }
+
+    /// The token stamp reaches revoked rows as well as active ones, and never
+    /// overwrites a node already recorded.
+    #[test]
+    fn a_token_records_its_tailscale_device_once_revoked_or_not() {
+        let (store, _path) = temp_store();
+        store
+            .insert_device("a", "dev a", "hash-a", NOW, None)
+            .unwrap();
+        store
+            .insert_device("b", "dev b", "hash-b", NOW, None)
+            .unwrap();
+        store.revoke_device("b", NOW).unwrap();
+        store.stamp_tailnet_node("hash-a", "n1").unwrap();
+        store.stamp_tailnet_node("hash-b", "n2").unwrap();
+        store.stamp_tailnet_node("hash-a", "n9").unwrap();
+        assert_eq!(row(&store, "a").tailnet_node.as_deref(), Some("n1"));
+        assert_eq!(row(&store, "b").tailnet_node.as_deref(), Some("n2"));
+        assert!(store.tailnet_node_blocked("n2").unwrap());
+        assert!(!store.tailnet_node_blocked("n1").unwrap());
+    }
+
+    /// **A revocation from before the upgrade pauses Tailscale sign-in.** The
+    /// upgrade marks every row it finds, and a revoked marked row with no node is
+    /// one this daemon cannot place. Unblocking it, or its own old token arriving
+    /// from a Tailscale device, lifts the pause.
+    #[test]
+    fn a_device_revoked_before_the_upgrade_pauses_sign_in_until_it_is_placed_or_unblocked() {
+        let (store, _path) = upgraded_with(&[("old", true), ("lost", true)]);
+        assert!(row(&store, "old").paired_before_nodes);
+        assert_eq!(admit(&store, "a", "n1"), Admission::Paused);
+
+        store.stamp_tailnet_node("hash-old", "n7").unwrap();
+        assert_eq!(
+            admit(&store, "a", "n1"),
+            Admission::Paused,
+            "one is still unplaced"
+        );
+        assert_eq!(store.unblock_device("lost").unwrap(), 1);
+        assert_eq!(admit(&store, "a", "n1"), Admission::Admitted);
+        assert_eq!(admit(&store, "b", "n7"), Admission::Blocked);
+    }
+
+    /// **A device paired after the upgrade is never marked**, so revoking it
+    /// while it has no node blocks its token and nothing else: here, the Mac app's
+    /// own loopback pairing.
+    #[test]
+    fn a_device_paired_after_the_upgrade_revoked_without_a_node_pauses_nothing() {
+        let (store, _path) = upgraded_with(&[]);
+        store
+            .insert_device("local", "dev local", "hash-local", NOW, None)
+            .unwrap();
+        store.revoke_device("local", NOW).unwrap();
+        assert!(!row(&store, "local").paired_before_nodes);
+        assert_eq!(admit(&store, "a", "n1"), Admission::Admitted);
+    }
+
+    /// **A device paired before the upgrade and revoked after it, before it
+    /// ever connected through Tailscale, pauses sign-in too**, and still does
+    /// after a restart.
+    #[test]
+    fn a_device_paired_before_the_upgrade_and_revoked_after_it_pauses_sign_in() {
+        let (store, path) = upgraded_with(&[("phone", false)]);
+        assert!(row(&store, "phone").paired_before_nodes);
+        assert_eq!(admit(&store, "a", "n1"), Admission::Admitted);
+        store.revoke_device("phone", NOW).unwrap();
+        assert_eq!(admit(&store, "b", "n2"), Admission::Paused);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            admit(&store, "b", "n2"),
+            Admission::Paused,
+            "after a restart"
+        );
+        assert!(
+            row(&store, "phone").paired_before_nodes,
+            "marked once, not re-marked away"
+        );
+        assert!(
+            !row(&store, "a").paired_before_nodes,
+            "rows after the upgrade stay unmarked"
+        );
+    }
+
+    /// **Unblock forgets revoked devices only, and the whole Tailscale device
+    /// at once.**
+    #[test]
+    fn unblock_forgets_every_revoked_device_on_the_tailscale_device_and_no_active_one() {
+        let (store, _path) = temp_store();
+        admit(&store, "a", "n1");
+        admit(&store, "b", "n1");
+        assert_eq!(
+            store.unblock_device("a").unwrap(),
+            0,
+            "an active device is not blocked"
+        );
+        store.revoke_device("a", NOW).unwrap();
+        assert_eq!(store.unblock_device("a").unwrap(), 2);
+        assert!(store.list_devices().unwrap().is_empty());
+        assert_eq!(admit(&store, "c", "n1"), Admission::Admitted);
+    }
+
+    /// **A Tailscale sign-in and a revoke of the same device never leave it
+    /// signed in.** Raced from two threads, 200 times: the revoke lands wholly
+    /// before the sign-in, which is refused, or wholly after it, which revokes
+    /// the row the sign-in made.
+    #[test]
+    fn a_sign_in_racing_a_revoke_of_its_device_never_survives_it() {
+        let (store, _path) = temp_store();
+        let store = std::sync::Arc::new(store);
+        for round in 0..200 {
+            let node = format!("n{round}");
+            let first = format!("first-{round}");
+            store
+                .insert_device(&first, &first, &format!("hash-{first}"), NOW, Some(&node))
+                .unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let sign_in = {
+                let (store, start, node) = (
+                    std::sync::Arc::clone(&store),
+                    std::sync::Arc::clone(&start),
+                    node.clone(),
+                );
+                std::thread::spawn(move || {
+                    start.wait();
+                    admit(&store, &format!("second-{round}"), &node)
+                })
+            };
+            let revoke = {
+                let (store, start) = (std::sync::Arc::clone(&store), std::sync::Arc::clone(&start));
+                std::thread::spawn(move || {
+                    start.wait();
+                    store.revoke_device(&first, NOW).unwrap()
+                })
+            };
+            sign_in.join().unwrap();
+            revoke.join().unwrap();
+            let active = store
+                .list_devices()
+                .unwrap()
+                .into_iter()
+                .filter(|row| {
+                    row.tailnet_node.as_deref() == Some(&node) && row.revoked_at.is_none()
+                })
+                .count();
+            assert_eq!(active, 0, "round {round}: a device survived its revoke");
+        }
     }
 
     #[test]
@@ -12805,7 +13214,7 @@ mod tests {
         // neither retired column.
         mint(&store, "hash-new", 300_000);
         store
-            .insert_device("d2", "iPad", "hash-b", "2026-08-03T00:00:00.000Z")
+            .insert_device("d2", "iPad", "hash-b", "2026-08-03T00:00:00.000Z", None)
             .unwrap();
         assert_eq!(store.list_devices().unwrap().len(), 2);
 
@@ -13026,7 +13435,7 @@ mod tests {
         // nothing but a cheerful log line to show for it.
         let (store, path) = temp_store();
         store
-            .insert_device("d1", "iPhone", "hash-a", "2026-08-01T00:00:00.000Z")
+            .insert_device("d1", "iPhone", "hash-a", "2026-08-01T00:00:00.000Z", None)
             .unwrap();
         drop(store);
 
@@ -13291,12 +13700,18 @@ mod tests {
     fn a_push_token_lives_on_exactly_one_device_row() {
         let (store, _path) = temp_store();
         store
-            .insert_device("dev-old", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-old", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             // The same physical phone re-pairing arrives as a *new* device
             // row with a fresh name — names are unique.
-            .insert_device("dev-new", "iPhone 2", "hash-b", "2026-08-02T00:00:00Z")
+            .insert_device(
+                "dev-new",
+                "iPhone 2",
+                "hash-b",
+                "2026-08-02T00:00:00Z",
+                None,
+            )
             .unwrap();
 
         store
@@ -13333,7 +13748,7 @@ mod tests {
     fn an_environment_correction_only_moves_the_token_it_is_about() {
         let (store, _path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "sandbox", None)
@@ -13376,7 +13791,7 @@ mod tests {
     fn a_dead_token_is_cleared_only_if_it_is_still_the_one_registered() {
         let (store, _path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "production", None)
@@ -13423,7 +13838,7 @@ mod tests {
     fn a_failed_claim_rolls_back_the_strip() {
         let (store, _path) = temp_store();
         store
-            .insert_device("dev-live", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-live", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-live", "tok-live", "production", Some("cred-live"))
@@ -13447,7 +13862,13 @@ mod tests {
         // A revoked device is no better than an unknown one — the claim's
         // `revoked_at IS NULL` is load-bearing, not decoration.
         store
-            .insert_device("dev-revoked", "iPhone 2", "hash-b", "2026-08-02T00:00:00Z")
+            .insert_device(
+                "dev-revoked",
+                "iPhone 2",
+                "hash-b",
+                "2026-08-02T00:00:00Z",
+                None,
+            )
             .unwrap();
         store
             .revoke_device("dev-revoked", "2026-08-03T00:00:00Z")
@@ -13478,7 +13899,7 @@ mod tests {
     fn a_registration_replaces_the_whole_push_tuple() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
 
         store
@@ -13527,10 +13948,16 @@ mod tests {
     fn a_displaced_row_loses_its_credential_with_its_token() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-old", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-old", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
-            .insert_device("dev-new", "iPhone 2", "hash-b", "2026-08-02T00:00:00Z")
+            .insert_device(
+                "dev-new",
+                "iPhone 2",
+                "hash-b",
+                "2026-08-02T00:00:00Z",
+                None,
+            )
             .unwrap();
 
         store
@@ -13567,7 +13994,7 @@ mod tests {
     fn a_dead_token_takes_its_credential_only_if_it_is_still_the_one_registered() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "production", Some("cred-a"))
@@ -13612,7 +14039,7 @@ mod tests {
     fn a_late_environment_correction_for_a_superseded_credential_is_a_no_op() {
         let (store, _path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         // Same token, rotated credential — the relay reissued a bearer.
         store
@@ -13658,7 +14085,7 @@ mod tests {
     fn a_late_410_for_a_superseded_credential_clears_nothing() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "production", Some("cred-1"))
@@ -13698,7 +14125,7 @@ mod tests {
     fn an_environment_correction_leaves_the_credential_alone() {
         let (store, _path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "sandbox", Some("cred-a"))
@@ -13749,7 +14176,7 @@ mod tests {
     fn a_rollback_mixed_tuple_is_cleared_on_the_next_upgrade() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-1", "production", Some("cred-1"))
@@ -13808,7 +14235,7 @@ mod tests {
     fn a_historically_revoked_row_loses_its_push_tuple_on_upgrade() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         drop(store);
 
@@ -13851,7 +14278,7 @@ mod tests {
     fn a_current_credential_survives_a_restart_that_is_not_an_upgrade() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "production", Some("cred-a"))
@@ -13884,7 +14311,7 @@ mod tests {
             ("dev-gone", "retired iPhone", "hash-c"),
         ] {
             store
-                .insert_device(device_id, name, hash, "2026-08-01T00:00:00Z")
+                .insert_device(device_id, name, hash, "2026-08-01T00:00:00Z", None)
                 .unwrap();
         }
         store
@@ -13897,9 +14324,12 @@ mod tests {
             .set_push_token("dev-gone", "tok-gone", "production", Some("cred-gone"))
             .unwrap();
 
-        assert!(store
-            .revoke_device("dev-gone", "2026-08-03T00:00:00Z")
-            .unwrap());
+        assert_eq!(
+            store
+                .revoke_device("dev-gone", "2026-08-03T00:00:00Z")
+                .unwrap(),
+            ["dev-gone"]
+        );
         assert_eq!(
             registrations(&store),
             vec![
@@ -13947,10 +14377,10 @@ mod tests {
     fn only_a_device_with_a_registered_token_reports_an_environment() {
         let (store, path) = temp_store();
         store
-            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z", None)
             .unwrap();
         store
-            .insert_device("dev-2", "iPad", "hash-b", "2026-08-02T00:00:00Z")
+            .insert_device("dev-2", "iPad", "hash-b", "2026-08-02T00:00:00Z", None)
             .unwrap();
         store
             .set_push_token("dev-1", "tok-a", "production", Some("cred-a"))
@@ -14013,6 +14443,7 @@ mod tests {
                     &format!("iPhone ({device})"),
                     &format!("hash-{device}"),
                     "2026-08-01T00:00:00Z",
+                    None,
                 )
                 .unwrap();
             store
@@ -14525,7 +14956,13 @@ mod tests {
         // is still on.
         let store = Store::open(&path).unwrap();
         store
-            .insert_device("d-new", "iPad mini", "hash-new", "2026-08-04T00:00:00.000Z")
+            .insert_device(
+                "d-new",
+                "iPad mini",
+                "hash-new",
+                "2026-08-04T00:00:00.000Z",
+                None,
+            )
             .unwrap();
         assert_eq!(
             store.list_devices().unwrap().len(),
@@ -14881,7 +15318,13 @@ mod tests {
         );
 
         store
-            .insert_device("d-new", "iPad mini", "hash-new", "2026-08-04T00:00:00.000Z")
+            .insert_device(
+                "d-new",
+                "iPad mini",
+                "hash-new",
+                "2026-08-04T00:00:00.000Z",
+                None,
+            )
             .unwrap();
         assert_eq!(
             store

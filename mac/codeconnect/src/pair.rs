@@ -1,4 +1,4 @@
-//! `codeconnect pair`, `codeconnect devices`, `codeconnect revoke`.
+//! `codeconnect pair`, `codeconnect devices`, `codeconnect revoke`, `codeconnect unblock`.
 //!
 //! ## Why the QR is drawn with explicit colours
 //!
@@ -257,6 +257,35 @@ pub fn devices(args: &[String]) -> Result<()> {
             device.last_seen_at.as_deref().unwrap_or("never"),
         );
     }
+    // The one state in which a device of the owner's own Tailscale cannot sign
+    // in without a code, said where the operator looks.
+    if devices
+        .iter()
+        .any(|d| !d.is_active() && d.paired_before_nodes && d.tailnet_node.is_none())
+    {
+        println!();
+        println!("  A device revoked above was paired before Tailscale sign-in, so this");
+        println!("  computer cannot tell which device to keep out. Until it is unblocked");
+        println!("  (codeconnect unblock <device>), new devices need a code.");
+    }
+    Ok(())
+}
+
+pub fn unblock(args: &[String]) -> Result<()> {
+    let Some(device) = args
+        .first()
+        .filter(|device| !device.is_empty() && !device.starts_with('-'))
+    else {
+        bail!("usage: codeconnect unblock <device>   (`codeconnect devices` lists them)");
+    };
+    crate::no_arguments(&args[1..], "codeconnect unblock <device>")?;
+    let reply = daemon::request(&ClientFrame::UnblockDevice {
+        device: device.clone(),
+    })?;
+    let DaemonFrame::Unblocked { device } = reply else {
+        bail!("unexpected reply from ccd: {reply:?}");
+    };
+    println!("Allowed again: {} ({})", device.name, device.device_id);
     Ok(())
 }
 
@@ -285,7 +314,8 @@ pub fn revoke(args: &[String]) -> Result<()> {
 
     println!("{} ({})", device.device_id, device.name);
     if token_revoked {
-        println!("  token     revoked; that device can no longer connect");
+        println!("  token     revoked; that device can no longer connect, nor can any other");
+        println!("            device signed in from the same Tailscale device");
     } else {
         println!("  token     was already revoked");
     }

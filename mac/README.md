@@ -157,7 +157,8 @@ codeconnect daemon uninstall      # stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
 codeconnect devices               # paired devices
-codeconnect revoke <device>       # revoke a device's token
+codeconnect revoke <device>       # revoke a device, and every other on its Tailscale device
+codeconnect unblock <device>      # let a revoked device sign in again
 codeconnect token                 # the static fallback token
 ```
 
@@ -711,6 +712,31 @@ it once in `hello_ack{device_token}`; the app keeps it in the Keychain. Only the
 token's hash is stored here, so a leaked database cannot be replayed as a
 credential.
 
+### Your own Tailscale devices need no code
+
+A `hello` with neither a token nor a code is paired as a code would pair it
+(protocol minor 32) when it comes from one of this computer's own Tailscale
+user's devices and neither end is tagged: the same rule Mail uses between
+computers, read from a fresh `tailscale status` on each such `hello`. The ack
+carries a new device token. From anywhere else (another Tailscale user's device,
+a tagged one, an address Tailscale does not know, this computer itself) it gets
+`unauthorized`, and a code still pairs. Trust is per device, not per person: every
+account on a trusted computer, and every app on a trusted phone, is let in.
+
+Each device remembers the Tailscale device it was seen from (its stable node id),
+from a token, from a code or from such a `hello`. `codeconnect revoke` revokes
+every device with the same node at once, so the phone or computer stays out,
+and Mail refuses it too; `codeconnect unblock <device>` forgets it so it may sign
+in again. A device paired before this release and revoked before it was seen
+through Tailscale cannot be placed, so while one is listed every such `hello` is
+refused; `codeconnect devices` says so, and unblocking it lifts that.
+
+After its ack, a paired device is sent `peers`: this computer's Tailscale state
+and login, and the owner's other computers it can reach (the ones Mail may
+message, less the computer the device connects from), each by MagicDNS name
+and port. It is read again every minute and sent
+when it changes. `fixtures/wire/peers.json` holds the frames this build emits.
+
 ### Both ends refuse what is unreachable by definition
 
 `ccd` resolves its address **once, at startup**, and every code minted afterwards
@@ -758,7 +784,8 @@ The static `codeconnect token` credential stays valid alongside device tokens. D
 `~/.codeconnect/token` is the only thing that retires it.
 
 `codeconnect revoke` takes effect on connections that are **already open**, and takes
-effect *immediately*. Three mechanisms, in order of how fast they act:
+effect *immediately*, for every device on the same Tailscale device. Three
+mechanisms, in order of how fast they act:
 
 1. **A cancellation is published the instant the token is revoked.** Every open
    socket is subscribed to it and closes the moment its own device id appears.

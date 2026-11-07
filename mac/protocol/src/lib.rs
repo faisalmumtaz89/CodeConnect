@@ -661,7 +661,21 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         and [`ws::ServerMessage::MachineStats`] — one sample of CPU, memory and
 ///         disk. A daemon below 31 answers `bad_request`, so a client asks only
 ///         when the capability is advertised.
-pub const PROTOCOL_MINOR: u32 = 31;
+///   * `32` — **The owner's own devices sign in through Tailscale, and learn the
+///     owner's other computers.**
+///
+///     Additive:
+///       - A [`ws::ClientMessage::Hello`] with neither `token` nor `pairing_code`,
+///         from a device of this computer's Tailscale user that is not tagged, is
+///         paired as a code would pair it: the ack carries a fresh `device_token`.
+///         A daemon below 32, or any other source, answers `unauthorized`, and
+///         the client offers a code.
+///       - [`ws::ServerMessage::Peers`] — sent to a paired device after its
+///         `hello_ack`, and again when it changes: this computer's Tailscale state
+///         and the owner's other computers it can reach. A `hello` names no client
+///         minor, so it goes to every paired device: an app from before 32 reads it
+///         as a frame it cannot read and asks to be updated.
+pub const PROTOCOL_MINOR: u32 = 32;
 
 #[cfg(test)]
 mod ledger_tests {

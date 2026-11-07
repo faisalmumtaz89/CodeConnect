@@ -511,6 +511,15 @@ async fn read_loop(
                 };
                 let _ = tx.send(frame).await;
             }
+            ClientFrame::UnblockDevice { device } => {
+                let frame = match daemon.unblock(&device).await {
+                    Ok(device) => DaemonFrame::Unblocked { device },
+                    Err(err) => DaemonFrame::Error {
+                        message: format!("{err:#}"),
+                    },
+                };
+                let _ = tx.send(frame).await;
+            }
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
@@ -754,7 +763,13 @@ mod tests {
     async fn paired_device(daemon: &Arc<Daemon>) -> DeviceSummary {
         let (code, _) = daemon.create_pairing(300).await.unwrap();
         daemon
-            .authenticate("static-token-for-tests", None, Some(&code), Some("iPhone"))
+            .authenticate(
+                "static-token-for-tests",
+                None,
+                Some(&code),
+                Some("iPhone"),
+                None,
+            )
             .await;
         let devices = daemon.list_devices().await.unwrap();
         assert_eq!(devices.len(), 1, "the pairing code must buy one device");

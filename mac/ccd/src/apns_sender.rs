@@ -1473,6 +1473,7 @@ mod tests {
                     &format!("iPhone ({device})"),
                     &format!("hash-{device}"),
                     "2026-08-01T00:00:00Z",
+                    None,
                 )
                 .unwrap();
             store

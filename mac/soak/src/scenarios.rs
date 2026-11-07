@@ -4219,6 +4219,8 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             last_seen_at: None,
             revoked_at: revoked.then(|| "2026-01-01T00:01:00Z".to_string()),
+            tailnet_node: None,
+            paired_before_nodes: false,
         }
     }
 

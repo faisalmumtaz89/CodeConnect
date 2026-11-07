@@ -1458,7 +1458,13 @@ mod tests {
     async fn a_paired_phone_is_rung_for_an_approval_and_a_finished_turn() {
         let store = Arc::new(crate::store::Store::open_temp("ccd-relay-codex-rings"));
         store
-            .insert_device("phone", "iPhone", "hash-phone", "2026-10-23T00:00:00Z")
+            .insert_device(
+                "phone",
+                "iPhone",
+                "hash-phone",
+                "2026-10-23T00:00:00Z",
+                None,
+            )
             .unwrap();
         store
             .set_push_token("phone", TOKEN, "sandbox", Some("bearer-phone"))

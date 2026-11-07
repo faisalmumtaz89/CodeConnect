@@ -2064,10 +2064,15 @@ mod tests {
              computer's CPU, memory and disk (`get_machine_stats`, `machine_stats` \
              capability) are minor 31"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 32,
+            "a hello with neither token nor code from the owner's own Tailscale device, and \
+             the `peers` frame, are minor 32"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 31);
+        assert_eq!(crate::PROTOCOL_MINOR, 32);
     }
 
     /// **The tags, pinned on this side too.**

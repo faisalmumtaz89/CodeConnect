@@ -117,6 +117,13 @@ pub enum ClientFrame {
         #[serde(default)]
         ssh_only: bool,
     },
+    /// `codeconnect unblock <device>`: forget a revoked device, and every revoked
+    /// device on the same Tailscale device, so it may sign in again. Answered with
+    /// [`DaemonFrame::Unblocked`]; an active device is refused.
+    UnblockDevice {
+        /// A device id, a device id prefix, or an exact name.
+        device: String,
+    },
     /// "Who is answering this socket?" — asked by `codeconnect daemon status` and by
     /// `codeconnect daemon install` before it decides whether it is about to fight a
     /// daemon somebody started by hand.
@@ -309,6 +316,11 @@ pub enum DaemonFrame {
         #[serde(default)]
         orphan_events: u64,
         dry_run: bool,
+    },
+    /// The answer to [`ClientFrame::UnblockDevice`]: the device as it was listed
+    /// before it was forgotten.
+    Unblocked {
+        device: crate::pairing::DeviceSummary,
     },
     Revoked {
         device: crate::pairing::DeviceSummary,
@@ -2096,6 +2108,8 @@ mod tests {
                 created_at: "2026-07-31T10:00:00.000Z".into(),
                 last_seen_at: None,
                 revoked_at: Some("2026-07-31T10:05:00.000Z".into()),
+                tailnet_node: None,
+                paired_before_nodes: false,
             },
             token_revoked: true,
             ssh_key_removed: AlwaysFalse,

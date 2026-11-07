@@ -192,6 +192,16 @@ pub struct DeviceSummary {
     /// "this device was revoked on the 3rd" is a fact worth keeping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
+    /// The Tailscale device it was last seen connecting from, by stable node id.
+    /// Revoking any device with one revokes every device with the same one: they
+    /// are one phone or one computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet_node: Option<String>,
+    /// Paired before this daemon recorded Tailscale devices. Revoked with no
+    /// `tailnet_node`, it pauses every sign-in that comes with neither a token nor
+    /// a code, because the daemon cannot tell which device it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paired_before_nodes: bool,
 }
 
 impl DeviceSummary {
@@ -307,9 +317,13 @@ mod tests {
             created_at: "2026-07-31T10:00:00.000Z".into(),
             last_seen_at: None,
             revoked_at: None,
+            tailnet_node: None,
+            paired_before_nodes: false,
         };
         let encoded = serde_json::to_string(&device).unwrap();
-        assert!(!encoded.contains("revoked_at"), "{encoded}");
+        for field in ["revoked_at", "tailnet_node", "paired_before_nodes"] {
+            assert!(!encoded.contains(field), "{encoded}");
+        }
         assert!(device.is_active());
         assert_eq!(device, serde_json::from_str(&encoded).unwrap());
     }

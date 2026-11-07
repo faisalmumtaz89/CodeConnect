@@ -70,6 +70,7 @@ const MAIL_MINOR: u32 = 27;
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
 /// How long `tailscale status` gets to answer.
+#[cfg(not(test))]
 const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long reaching another computer's daemon may take before nothing has been
@@ -106,7 +107,7 @@ impl Daemon {
         text: &str,
         reply_to: Option<&str>,
     ) -> MailStatus {
-        let tailnet = read_tailnet().await;
+        let tailnet = self.read_tailnet().await;
         self.send_agent_message_on(tailnet.as_ref(), from_uid, to, text, reply_to)
             .await
     }
@@ -454,7 +455,7 @@ impl Daemon {
     fn tell_senders_soon(self: &Arc<Self>) {
         let daemon = Arc::clone(self);
         tokio::spawn(async move {
-            if let Some(tailnet) = read_tailnet().await {
+            if let Some(tailnet) = daemon.read_tailnet().await {
                 daemon.tell_senders(&tailnet).await;
             }
         });
@@ -544,7 +545,7 @@ impl Daemon {
         source: IpAddr,
         request: PeerRequest,
     ) -> PeerReply {
-        let tailnet = read_tailnet().await;
+        let tailnet = self.read_tailnet().await;
         self.serve_peer_on(tailnet.as_ref(), source, request).await
     }
 
@@ -562,6 +563,21 @@ impl Daemon {
             return refuse("the receiving computer is not connected to Tailscale");
         };
         let computer = match tailnet.sender(source) {
+            // A computer revoked as a viewer is kept out of Mail too: it is the
+            // same device, and Mail is the one route that skips the hello.
+            Ok(node)
+                if self
+                    .db
+                    .tailnet_node_blocked(node.id.clone())
+                    .await
+                    .unwrap_or(true) =>
+            {
+                crate::log_warn!(
+                    "refused a peer request from {source}: {} is blocked",
+                    node.name
+                );
+                return refuse("the sending computer was removed from this one");
+            }
             Ok(node) => node.name.clone(),
             Err(refusal) => {
                 crate::log_warn!("refused a peer request from {source}: {refusal:?}");
@@ -643,7 +659,7 @@ impl Daemon {
         &self,
         from_uid: &str,
     ) -> Result<(AgentEntry, Vec<AgentEntry>, Vec<String>), String> {
-        let tailnet = read_tailnet().await;
+        let tailnet = self.read_tailnet().await;
         let (peers, unreachable) = match &tailnet {
             Some(tailnet) => self.ask_peers(tailnet).await,
             None => (Vec::new(), Vec::new()),
@@ -925,7 +941,7 @@ pub async fn run_mail_sweeps(daemon: Arc<Daemon>) {
     let mut ticker = tokio::time::interval(SWEEP_EVERY);
     loop {
         ticker.tick().await;
-        let tailnet = read_tailnet().await;
+        let tailnet = daemon.read_tailnet().await;
         daemon.sweep_mail_on(tailnet.as_ref()).await;
     }
 }
@@ -1001,31 +1017,33 @@ async fn dial_peer(
     }
 }
 
-/// The reading [`read_tailnet`] gives instead of `tailscale status`, for a test
-/// that has to be a computer of its own.
-#[cfg(test)]
-pub(crate) static TEST_TAILNET: std::sync::Mutex<Option<Tailnet>> = std::sync::Mutex::new(None);
-
-/// This computer's tailnet, or `None` when Tailscale is missing, down or slow.
-async fn read_tailnet() -> Option<Tailnet> {
-    #[cfg(test)]
-    if let Some(tailnet) = TEST_TAILNET
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-    {
-        return Some(tailnet);
+impl Daemon {
+    /// This computer's tailnet, or `None` when Tailscale is missing, down or slow.
+    ///
+    /// In a test, the reading the test gave this daemon in
+    /// [`Daemon::test_tailnet`], and none until it gives one: no test asks this
+    /// computer's own Tailscale, and one daemon's tailnet is never another's.
+    pub(crate) async fn read_tailnet(&self) -> Option<Tailnet> {
+        #[cfg(test)]
+        return self
+            .test_tailnet
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        #[cfg(not(test))]
+        {
+            let bin = protocol::pairing::tailscale_bin()?;
+            let run = tokio::process::Command::new(bin)
+                .args(["status", "--json"])
+                .kill_on_drop(true)
+                .output();
+            let output = tokio::time::timeout(TAILSCALE_TIMEOUT, run)
+                .await
+                .ok()?
+                .ok()?;
+            Tailnet::parse(&String::from_utf8_lossy(&output.stdout))
+        }
     }
-    let bin = protocol::pairing::tailscale_bin()?;
-    let run = tokio::process::Command::new(bin)
-        .args(["status", "--json"])
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(TAILSCALE_TIMEOUT, run)
-        .await
-        .ok()?
-        .ok()?;
-    Tailnet::parse(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn refusal_sentence(refusal: Refusal, computer: &str) -> String {
