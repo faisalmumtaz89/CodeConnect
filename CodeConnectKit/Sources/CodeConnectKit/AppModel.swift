@@ -2035,6 +2035,9 @@ public final class AppModel {
             starter.receive(listing, answering: requestID)
         case .createFolderResult(let requestID, let refusal):
             starter.resolveCreate(requestID, refusal: refusal)
+        case .machineStats:
+            // Only asked for by a screen that shows them; this model never does.
+            break
         case .startSessionResult(let requestID, let outcome):
             starter.resolve(requestID, outcome)
             // The new session reaches the fleet on its own; asking now shortens
