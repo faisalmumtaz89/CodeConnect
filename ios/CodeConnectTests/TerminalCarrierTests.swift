@@ -2,6 +2,7 @@ import SwiftTerm
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The phone's half of the live terminal: the wire shape the daemon parses, and
 /// the rules that keep a terminal from lying about being live.

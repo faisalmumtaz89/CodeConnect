@@ -14,7 +14,7 @@ Recorded 2026-08-17. This section is the empirical status of the plan below; the
 - **Phase 0 (privacy truth):** `site/privacy.md`, `site/support.md`, `SECURITY.md`, `docs/ARCHITECTURE.md`, and the Mac/iOS READMEs distinguish direct from relay-backed notifications and carry the relay data inventory and retention. `ios/CodeConnect/PrivacyInfo.xcprivacy` declares the relay enrollment record.
 - **Phase 1 (relay service):** `mac/push-core` and `mac/push-relay` build and test; `ops/push-relay` holds the Render deployment assets. App Attest verification, the generic-only payload (`payload.rs`, title always `CodeConnect`), hash-only storage for APNs tokens, bearer credentials, App Attest key IDs and challenges (other content-free fields — public keys, receipts, environments, counters, bundle metadata, status/reasons, timestamps — stored in clear), rate limits, the `send`/`enrollment` kill switches, and encrypted backup generation with tested restore primitives are implemented (operator restore tooling and the restore drill remain Phase 4).
 - **Phase 2 (daemon + minor 14):** `PushMode::{Off, Direct, Relay}` (`mac/ccd/src/apns.rs`), `push_enabled` (default `true`), `mac/ccd/src/relay_sender.rs` with its content-free DTO, the `devices.push_credential` migration, and the minor-14 protocol fields are implemented; the shared push queue is reused across direct and relay transports.
-- **Phase 3 (iOS App Attest):** `ios/CodeConnect/Net/RelayEnrollment.swift`, `Store/RelayCredential.swift`, the App Attest entitlement, `PushMode` normalization with direct precedence, and foreground credential recovery are implemented.
+- **Phase 3 (iOS App Attest):** `CodeConnectKit/Sources/CodeConnectKit/RelayEnrollment.swift`, `CodeConnectKit/Sources/CodeConnectKit/RelayCredential.swift`, the App Attest entitlement, `PushMode` normalization with direct precedence, and foreground credential recovery are implemented.
 
 **Proven end-to-end on real hardware.**
 
@@ -611,7 +611,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 
 #### Scope
 
-- Extend `ios/CodeConnect/Protocol/WireTypes.swift`.
+- Extend `CodeConnectKit/Sources/CodeConnectKit/WireTypes.swift`.
 - Keep APNs permission/token responsibilities in `PushRegistration.swift`.
 - Add a separate relay-enrollment actor/client.
 - Update `AppModel.swift` orchestration.

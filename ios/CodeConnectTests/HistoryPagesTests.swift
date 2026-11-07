@@ -2,6 +2,7 @@ import SwiftUI
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Earlier pages (protocol minor 23), against the frames a minor-23 daemon sends.
 ///

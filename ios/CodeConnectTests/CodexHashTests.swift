@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **Tier 1.3 — the two mutation hashes, against pinned cross-language vectors.**
 ///

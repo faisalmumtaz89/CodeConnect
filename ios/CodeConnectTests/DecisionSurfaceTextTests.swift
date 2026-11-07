@@ -4,6 +4,7 @@ import Vision
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Every agent-controlled string on a decision surface is drawn and spoken
 /// `displaySafe`, through the model that carries it to the view.

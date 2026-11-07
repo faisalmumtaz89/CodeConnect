@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// One model per paired machine, one fleet made of them: each session stays on
 /// the machine it came from, and one machine leaving takes nothing of another's.

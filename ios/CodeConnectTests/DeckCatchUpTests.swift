@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// A notification tapped mid-catch-up opens the Deck waiting for it — the ring
 /// and "Catching up…" — and the cards come in one go at the release. A Deck

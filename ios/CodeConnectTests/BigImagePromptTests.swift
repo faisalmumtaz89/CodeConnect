@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// A typed prompt whose pasted image takes it over the daemon's payload limit.
 ///

@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// One open swipe row per screen, and a way to shut it.

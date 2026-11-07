@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 // =============================================================================
 //  AppModel orchestration of the relay path, driven through the real handshake

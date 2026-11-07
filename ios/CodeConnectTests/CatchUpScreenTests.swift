@@ -3,6 +3,7 @@ import UIKit
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// What a catch-up's one change looks like on screen: the clock is true on the
 /// first frame back, and an open chat lands on its caught-up rows in one step.

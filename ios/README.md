@@ -87,10 +87,9 @@ pairing and opens no socket, and nothing in it reports a link
 
 | Path | What it is |
 |---|---|
-| `CodeConnect/Protocol/` | `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, and typed reads over raw hook/transcript payloads. |
-| `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket. |
-| `CodeConnect/Store/` | Keychain pairing, this device's identity, preferences, the on-disk event cache. |
-| `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, the unified-diff parser. |
+| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, the session-start model, `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket, Keychain pairing, this device's identity, the relay credential and its enrollment, the unified-diff parser, and the models: every paired computer (`Machines`, one `AppModel` each), event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, preferences, the on-disk event cache, the start-up purge of credentials earlier releases stored, and the `PushRegistrar` seam with `PushWire`. |
+| `CodeConnect/Net/` | `PushRegistration`, which asks iOS for notifications and an APNs token, and the hand-off to Tailscale. |
+| `CodeConnect/Model/` | `Dictation`, speech to text for the compose bar. |
 | `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline, and the terminal from the bar's menu), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
 | `CodeConnectUITests/` | End-to-end. `ApprovalFlowUITests` and `LiveDaemonUITests` need a **real** daemon; `DeckUITests` replays contract-shaped frames. |
@@ -538,7 +537,7 @@ key of its own. `RelayEnrollment` does it lazily — only after a relay-capable
 handshake and an APNs token, single-flight per `(token hash, environment)`. It
 attests to the relay with App Attest, receives an opaque bearer, and stores the
 bearer and the App Attest key ID in the iOS Keychain, `ThisDeviceOnly`
-(`Store/RelayCredential.swift`). The credential then rides `register_push`'s
+(`CodeConnectKit/Sources/CodeConnectKit/RelayCredential.swift`). The credential then rides `register_push`'s
 `relay_credential` to the daemon over the same paired socket; the phone never
 sends the attestation to the daemon and the daemon never mints a credential.
 
@@ -566,7 +565,7 @@ Three surfaces differ, and each is gated rather than assumed.
 gets is decided by the *session's agent*, never by the card's contents
 (`Views/DecisionCard.swift`): a Claude card gets Allow/Deny, a Codex card gets the
 option list the request carried, read verbatim from `tool_input.options[]`
-(`Model/CodexWire.swift`) under the header **Choose one**. An option whose label the
+(`CodeConnectKit/Sources/CodeConnectKit/CodexWire.swift`) under the header **Choose one**. An option whose label the
 daemon did not supply falls back to its id rather than to an invented word, and a card
 whose options this build cannot read is rendered **unanswerable** — never as Allow/Deny,
 which would be a decision nobody offered. *Deny with a reason* is withheld on a Codex
@@ -578,7 +577,7 @@ one. A Codex card shows no raw wire: the `tool_input` / `request_id` / `payload_
 disclosure is Claude-only.
 
 **Stop and the composer are gated by one rule, computed in one place.**
-`CodexLinkState.canActuate(_:)` in `Protocol/WireTypes.swift` is the single gate and
+`CodexLinkState.canActuate(_:)` in `CodeConnectKit/Sources/CodeConnectKit/WireTypes.swift` is the single gate and
 nothing else in the app re-derives it; `CodexProse.stopUnavailable` and
 `CodexProse.composeUnavailable` turn a refusal into the sentence shown under the
 control. Both verbs require the daemon to have advertised the capability
@@ -606,7 +605,7 @@ they are: the first began a turn, the second joined the one already running. Sto
 answers with `aborted`, `duplicate`, `rejected` or `indeterminate`, and the same unknown
 arm. A `rejected` or `indeterminate` message is the daemon's own sentence, rendered
 verbatim and attributed to the Mac rather than paraphrased. The two enums are
-decode-only: nothing in the app constructs one. `Model/CodexControls.swift` holds what
+decode-only: nothing in the app constructs one. `CodeConnectKit/Sources/CodeConnectKit/CodexControls.swift` holds what
 follows from each — an `indeterminate` spends its material so the same words can never
 be sent twice, and an unknown status deliberately spends nothing and keeps the request
 id open.
@@ -621,8 +620,8 @@ drew a whole turn as a lone "Turn complete".
 
 | Fixture | Where it runs | What it pins |
 |---|---|---|
-| `fixtures/codex/phone-turn-stream-0.153.4.json` | app bundle, via `Model/Fixtures.swift` | The `ServerMessage` frames a subscribed phone is actually sent for a Codex turn, replayed in seq order. |
-| `fixtures/codex/refusal-sentences.json` | app bundle, via `Model/CodexRefusals.swift` | Every sentence the daemon can send when a Stop or a compose did not happen, with what the phone may conclude from each. `Rejected` carries a bare reason and no code, so the classifier matches on the sentence — and the file is what keeps that match honest. |
+| `fixtures/codex/phone-turn-stream-0.153.4.json` | app bundle, via `CodeConnectKit/Sources/CodeConnectKit/Fixtures.swift` | The `ServerMessage` frames a subscribed phone is actually sent for a Codex turn, replayed in seq order. |
+| `fixtures/codex/refusal-sentences.json` | app bundle, via `CodeConnectKit/Sources/CodeConnectKit/CodexRefusals.swift` | Every sentence the daemon can send when a Stop or a compose did not happen, with what the phone may conclude from each. `Rejected` carries a bare reason and no code, so the classifier matches on the sentence — and the file is what keeps that match honest. |
 | `fixtures/codex/minor-19-wire.json` | **test bundle only** | That the three fields minor 19 adds decode whole, against bytes the daemon emitted. |
 
 The rule is per-file and worth stating narrowly: those three are emitted, not written.
@@ -641,7 +640,7 @@ stream, and two older-daemon states that prove the controls hide rather than fai
 
 ## The session timeline
 
-`TimelineBuilder` (`Model/Timeline.swift`) turns the event log into rows, a pure
+`TimelineBuilder` (`CodeConnectKit/Sources/CodeConnectKit/Timeline.swift`) turns the event log into rows, a pure
 function of the events:
 
 * an agent reply is drawn without the blank lines Claude puts around a text block
@@ -720,7 +719,7 @@ falls back to the approval layout, read-only):
 
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
-(`AnswerDecision`, `Model/QuestionCard.swift`). The daemon builds Claude's answer
+(`AnswerDecision`, `CodeConnectKit/Sources/CodeConnectKit/QuestionCard.swift`). The daemon builds Claude's answer
 from the question it stored and returns it through Claude's held hook; nothing is
 typed.
 
@@ -753,7 +752,7 @@ is HIGH, where Submit takes Face ID.
 
 `-CC_QUESTION held|at-mac|ended|answered|old-mac` stages one session holding the
 live 2.1.286 four-question card from the daemon's own events, its words lengthened
-to the worst case (`Model/QuestionFixtures.swift`, DEBUG only); answers resolve
+to the worst case (`CodeConnectKit/Sources/CodeConnectKit/QuestionFixtures.swift`, DEBUG only); answers resolve
 locally as under `-CC_FIXTURE`, so `QuestionCardUITests` drives the phone's half —
 every step, Review and Submit — not the hook. Nine `question-*` render scenarios
 photograph each step, Review, and the read-only card at the Mac, after its hold
@@ -774,17 +773,19 @@ kind is the only thing a notification says about itself.
 # Design system
 
 Dark-only — no light variant and no `@Environment(\.colorScheme)` branching
-anywhere. Tokens live in `CodeConnect/Views/DesignKit.swift`; components live in
-`CodeConnect/Views/DesignSystem/`.
+anywhere. Tokens live in `../CodeConnectKit/Sources/CodeConnectKit/DesignTokens.swift`, in the
+shared package; the modifiers that apply them live in `CodeConnect/Views/DesignKit.swift`, and
+components in `CodeConnect/Views/DesignSystem/`.
 
 Four principles the rest of this section is downstream of: colour appears only to
 carry state, never decoration; separation comes from hairlines and spacing rather
 than fills; identifiers, commands, diffs and durations are monospace and prose
 never is; and motion is confirmation, not decoration.
 
-**Raw hex appears exactly once**, in the private `Hex` enum in `DesignKit.swift`.
-Every colour elsewhere is a semantic token. If you type a hex value or `.blue`
-outside that file, it is a bug.
+**Raw hex appears exactly once**, in the private `Hex` enum in `DesignTokens.swift`, apart
+from the three logo-band colours in `CodeConnect/Views/DesignSystem/CCMark.swift`. Every colour
+elsewhere is a semantic token. If you type a hex value or `.blue` outside those two files, it
+is a bug.
 
 ## Force-dark
 

@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Combine
 import SwiftTerm
 import SwiftUI
@@ -1240,12 +1241,6 @@ final class TerminalPaneView: TerminalView {
             (other as? UITapGestureRecognizer).map { $0.numberOfTapsRequired > 1 } ?? false
         }
     }
-}
-
-/// A pane's size in cells, as the daemon states it.
-struct PaneSize: Equatable {
-    let cols: Int
-    let rows: Int
 }
 
 /// The terminal pane, and the view onto it once it is drawn at its own size.

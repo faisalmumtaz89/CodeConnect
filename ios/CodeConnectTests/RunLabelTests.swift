@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// What a run is called, and when the app admits it cannot tell two apart.
 final class RunLabelTests: XCTestCase {

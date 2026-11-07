@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The two rules that decide what a tap costs, and the order a queue is emptied
 /// in. Both are behaviour a user can be hurt by, and neither is visible from a

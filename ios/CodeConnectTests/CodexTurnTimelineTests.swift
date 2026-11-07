@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **The bug the operator found on a real phone: a Codex turn ran and the
 /// timeline showed only "Turn complete".**

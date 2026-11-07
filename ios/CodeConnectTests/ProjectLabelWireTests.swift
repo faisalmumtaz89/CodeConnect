@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The minor-11 wire: a run named by the project it is working in, and where a
 /// tapped notification goes.

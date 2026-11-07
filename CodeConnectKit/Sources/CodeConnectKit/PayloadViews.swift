@@ -1,0 +1,593 @@
+import Foundation
+
+/// Typed reads over the untyped `Event.payload`.
+///
+/// The daemon stores hook stdin and transcript lines verbatim
+/// (`ccd/src/state.rs` `hook_event`, `ccd/src/tailer.rs` `transcript_event`),
+/// so every accessor here is written against a shape recorded from a real
+/// session in `fixtures/`. Nothing throws: an absent or reshaped field means
+/// "unknown", which the UI renders as unknown rather than guessing.
+extension JSONValue {
+    /// Round-trips through JSON so `Codable` types defined against the wire can
+    /// be read straight out of a payload.
+    public func decoded<T: Decodable>(_ type: T.Type) -> T? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+}
+
+extension Event {
+    // MARK: Truncation
+
+    /// The daemon replaces an oversized payload rather than dropping the fact.
+    /// A user line whose content is blocks keeps its fields and text, every
+    /// block that is not text cut to its `type`, when that fits; otherwise it
+    /// is replaced too.
+    public var isTruncated: Bool { payload["_codeconnect_truncated"]?.boolValue == true }
+
+    // MARK: Hook facts
+
+    var hookEventName: String? { payload["hook_event_name"]?.stringValue }
+    /// The hook says `tool_name`; the Codex adapter says `tool`
+    /// (`tool_call_payload`: `command_execution` / `file_change`). Read through
+    /// the hook's spelling alone, every Codex tool row was labelled "tool".
+    ///
+    /// The two Codex families are spoken in the card's words rather than the
+    /// adapter's, because the same daemon already names them that way where a
+    /// human reads them: `codex_approval.rs` `Family::tool_name` is `command`
+    /// and `file change`. `ToolSummary` exists so "the timeline row, the
+    /// decision card and the fleet subtitle can never disagree about what a
+    /// call *is*" — a row saying `command_execution` above a card saying
+    /// `command` is that disagreement. Only these two, because only these two
+    /// exist: an item type this build does not model never reaches `tool_call`
+    /// at all (`on_item_started` returns nothing for it).
+    public var toolName: String? {
+        if let name = payload["tool_name"]?.stringValue { return name }
+        switch payload["tool"]?.stringValue {
+        case "command_execution": return "command"
+        case "file_change": return "file change"
+        case let other: return other
+        }
+    }
+    /// The hook nests its arguments under `tool_input`; the Codex adapter puts
+    /// `command`, `cwd` and `changes` at the top level, so for those the
+    /// payload **is** the input.
+    public var toolInput: JSONValue? {
+        if let input = payload["tool_input"] { return input }
+        return payload["tool"] == nil ? nil : payload
+    }
+    /// Hook events carry it at the top level and also in `item_id`; a transcript
+    /// `tool_result` hides it inside the message block. `item_id` is *not* a
+    /// valid fallback for transcript events, where it holds the entry uuid.
+    public var toolUseID: String? {
+        if let direct = payload["tool_use_id"]?.stringValue { return direct }
+        if source == .transcript { return transcriptToolResult?.toolUseID }
+        return itemID
+    }
+    public var toolResponse: JSONValue? { payload["tool_response"] }
+
+    /// **What a Codex `tool_result` says became of the call.**
+    ///
+    /// Measured from `codex_adapter.rs` `tool_result_payload`, which is the
+    /// only shape that reaches this arm: `status` (`completed` when the item
+    /// ended normally, otherwise the item's own word, and `interrupted` when
+    /// the terminal was synthesized by an abort), `exit_code` for a command,
+    /// and `aggregated_output` for what it printed. Nothing here is inferred:
+    /// a status this build does not know leaves the verdict to the caller
+    /// rather than guessing at success.
+    public var codexToolOutcome: (status: ToolStatus, output: String?)? {
+        guard kind == .toolResult, payload["tool"] != nil else { return nil }
+        let output = payload["aggregated_output"]?.stringValue
+        if payload["interrupted"]?.boolValue == true { return (.interrupted, output) }
+        // A command that ran and returned non-zero **failed**, whatever the
+        // item's own status says: the status describes the item's lifecycle,
+        // the exit code describes the work.
+        if let exit = payload["exit_code"]?.intValue, exit != 0 { return (.failed, output) }
+        switch payload["status"]?.stringValue {
+        case "completed": return (.succeeded, output)
+        case "failed": return (.failed, output)
+        case "interrupted": return (.interrupted, output)
+        default: return nil
+        }
+    }
+    public var durationMS: Int? { payload["duration_ms"]?.intValue }
+    var permissionMode: String? { payload["permission_mode"]?.stringValue }
+    public var modelName: String? { payload["model"]?.stringValue }
+    var cwd: String? { payload["cwd"]?.stringValue }
+
+    // MARK: Approvals
+
+    public var approvalCard: ApprovalCard? { payload["card"]?.decoded(ApprovalCard.self) }
+    public var approvalOutcome: AnswerOutcome? { payload.decoded(AnswerOutcome.self) }
+
+    /// A `question_hold` event: which question card it is about, and whether
+    /// the phone can answer it now.
+    public var questionHoldChange: (requestID: String, hold: QuestionHold)? {
+        guard kind == .questionHold, let requestID = payload["request_id"]?.stringValue,
+            let hold = payload["question_hold"]?.stringValue
+        else { return nil }
+        return (requestID, QuestionHold(wire: hold))
+    }
+
+    /// **What became of a Codex approval.**
+    ///
+    /// A Codex `approval_resolved` payload is a **bare `CodexResolution`** —
+    /// not an `AnswerOutcome`, not wrapped in one — so `approvalOutcome` reads
+    /// it as nil and a second accessor is the only way to see it at all. This is
+    /// the single most dangerous divergence between the agents: without it a
+    /// Codex card stays live and tappable after it has already been decided.
+    public var codexResolution: CodexResolution? {
+        // `kind` is checked here rather than at the call site because a
+        // `CodexResolution` decoder is total by design — every unrecognised
+        // status has a case — so it would happily "decode" an unrelated
+        // payload's object into `.unrecognisedStatus`, and a tool result would
+        // start retiring cards.
+        guard kind == .approvalResolved else { return nil }
+        return payload.decoded(CodexResolution.self)
+    }
+
+    /// Which card a Codex resolution belongs to.
+    ///
+    /// The daemon puts `request_id` in the payload additively, in the same
+    /// spelling and position as Claude's. **`source_event_id` is deliberately
+    /// not parsed**: it carries `"resolved:<request_id>"`, and prefix-parsing an
+    /// id-bearing string is precisely the kind of correlation that fails
+    /// silently — a rename, a second prefix, or an id that happens to contain a
+    /// colon all produce a wrong answer rather than no answer. A resolution with
+    /// no `request_id` correlates to nothing, and the card stays live, which is
+    /// the safe direction.
+    public var codexResolvedRequestID: String? {
+        guard kind == .approvalResolved else { return nil }
+        return payload["request_id"]?.stringValue
+    }
+
+    /// The `source_event_id` of the fact a Codex item belongs immediately before,
+    /// when the Mac read it back from the thread's history after later facts of its
+    /// turn were filed (protocol `BELONGS_BEFORE`). Nil for an item filed in place.
+    public var codexBelongsBefore: String? {
+        guard source == .codex else { return nil }
+        return payload["belongs_before"]?.stringValue
+    }
+
+    /// The daemon's risk block, wherever it put it.
+    ///
+    /// `protocol/src/ws.rs` puts it inside `card`, which `ApprovalCard` already
+    /// decodes. This is the fallback for an event that carries it beside the
+    /// card instead — two lines that mean a placement change downgrades to the
+    /// local heuristic instead of going unnoticed. Interpreting the class is
+    /// `RiskAssessment`'s job, not this accessor's.
+    public var declaredRisk: WireRisk? {
+        if let beside = payload["risk"]?.decoded(WireRisk.self) { return beside }
+        return nil
+    }
+
+    // MARK: Notifications
+
+    public var notificationType: String? { payload["notification_type"]?.stringValue }
+    public var notificationMessage: String? { payload["message"]?.stringValue }
+
+    /// `capture-pane` text the daemon attaches to a `permission_prompt`
+    /// notification — the only place the phone can learn Claude's *exact*
+    /// option list, which is what makes `Option{index}` safe to offer. Drawn
+    /// on the card, so `displaySafe`.
+    public var paneSnapshot: String? { payload["_codeconnect_pane"]?.stringValue?.displaySafe }
+
+    // MARK: Lifecycle
+
+    /// From feature level 1 the turn boundary has its own kind. Before that, the
+    /// `Stop` hook was filed as `EventKind::SessionEnd` even though the session
+    /// was still very much alive, and the raw hook name was the only way to tell
+    /// the two apart.
+    ///
+    /// The legacy clause is kept for older daemons and is inert against a newer
+    /// one by construction — a daemon that emits `turn_complete` for `Stop`
+    /// never emits a `session_end` carrying `hook_event_name: "Stop"`. Which
+    /// build we are talking to is still checked explicitly, in
+    /// `DaemonProfile.trustsTurnCompleteKind`, so the fallback is a fallback and
+    /// not a second source of truth.
+    public var isTurnComplete: Bool {
+        if kind == .turnComplete { return true }
+        return kind == .sessionEnd && hookEventName == "Stop"
+    }
+
+    var isSessionExit: Bool {
+        kind == .sessionEnd && !isTurnComplete
+    }
+
+    public var exitCode: Int? { payload["exit_code"]?.intValue }
+    var lastAssistantMessage: String? { payload["last_assistant_message"]?.stringValue }
+
+    public var linkStateFact: (link: String, reason: String?)? {
+        guard kind == .linkState, let link = payload["link"]?.stringValue else { return nil }
+        return (link, payload["reason"]?.stringValue)
+    }
+
+    public var resyncSkipped: Int? {
+        guard kind == .resync else { return nil }
+        return payload["skipped"]?.intValue
+    }
+
+    // MARK: Transcript facts
+
+    /// The session's permission mode, from a `type: "permission-mode"` transcript
+    /// line — `bypassPermissions`, `acceptEdits`, `default`, `plan`.
+    ///
+    /// Read here rather than from a card because the mode that matters most is the
+    /// one under which **no card is ever raised**. A run started with
+    /// `--dangerously-skip-permissions`, or on a Mac whose settings allow
+    /// everything, will never ask a human anything — so the phone shows a session
+    /// that streams tools, results and turns and simply never needs you. That is
+    /// correct behaviour and it is indistinguishable from a broken link unless the
+    /// app says which one it is looking at.
+    public var permissionModeChange: String? {
+        guard case .other(let raw) = kind, raw == "transcript_permission-mode" else { return nil }
+        return payload["permissionMode"]?.stringValue
+    }
+
+    /// The transcript's local-command shape, when this user line is one —
+    /// see `LocalCommandLine`. Checked before `userText` by the timeline
+    /// builder, so command markup never renders as a person's words.
+    public var localCommand: LocalCommandLine? {
+        guard kind == .userMessage,
+            let content = payload["message"]?["content"]?.stringValue
+        else { return nil }
+        return LocalCommandLine.parse(content)
+    }
+
+    /// The background-task report this user line is — see `TaskNotification`.
+    /// Claude Code stamps one `origin.kind: "task-notification"`; a line with
+    /// no origin at all is still read by its shape, as the TUI reads it, and a
+    /// line stamped as anything else never is.
+    public var taskNotification: TaskNotification? {
+        guard kind == .userMessage,
+            let content = payload["message"]?["content"]?.stringValue
+        else { return nil }
+        if let origin = payload["origin"], origin != .null,
+            origin["kind"]?.stringValue != "task-notification"
+        {
+            return nil
+        }
+        return TaskNotification.parse(content)
+    }
+
+    /// Claude Code's own record that the person stopped the turn: an unstamped,
+    /// non-meta user line whose content is exactly one text block reading
+    /// `[Request interrupted by user]` or `[Request interrupted by user for tool
+    /// use]` (2.1.304, recorded). Claude writes it on Esc and on "No" at a tool's
+    /// prompt, and an Esc writes no turn end at all — not a Stop hook, not a
+    /// `turn_duration` — so this line is where the turn ended. A typed prompt is
+    /// stamped `origin.kind: "human"` and is never this, whatever it says.
+    public var isClaudeInterrupt: Bool {
+        guard kind == .userMessage,
+            payload["isMeta"]?.boolValue != true,
+            (payload["origin"] ?? .null) == .null,
+            let blocks = payload["message"]?["content"]?.arrayValue,
+            blocks.count == 1,
+            blocks[0]["type"]?.stringValue == "text",
+            let text = blocks[0]["text"]?.stringValue
+        else { return false }
+        return text == "[Request interrupted by user]"
+            || text == "[Request interrupted by user for tool use]"
+    }
+
+    /// Claude Code's own placeholder reply: resuming a session whose last line
+    /// is an interrupt, it inserts an assistant line from model `<synthetic>`
+    /// reading exactly "No response requested." so the conversation alternates
+    /// (2.1.304, recorded: written with the next prompt). Its TUI never draws
+    /// it, and it is not the agent answering anything. Claude's own test, here
+    /// as there: not an API error, and the text the whole content — one text
+    /// block, as in all 399 `<synthetic>` replies in the owner's transcripts.
+    public var isClaudePlaceholderReply: Bool {
+        guard kind == .agentMessage,
+            payload["isApiErrorMessage"]?.boolValue != true,
+            payload["message"]?["model"]?.stringValue == "<synthetic>",
+            let content = payload["message"]?["content"]
+        else { return false }
+        guard let blocks = content.arrayValue, blocks.count == 1,
+            blocks[0]["type"]?.stringValue == "text"
+        else { return false }
+        return blocks[0]["text"]?.stringValue == "No response requested."
+    }
+
+    /// A user line Claude Code recorded without handing it to the agent
+    /// (`queueTranscriptOnly`, queued with `shouldQuery: false`) — measured, a
+    /// background task that "didn't finish before the previous session ended",
+    /// or an agent's result that arrived when no turn could take it. It is
+    /// history, and starts no turn.
+    public var isTranscriptOnly: Bool { payload["queueTranscriptOnly"]?.boolValue == true }
+
+    /// A prompt handed to the agent, which starts a turn whether or not it
+    /// draws a row. Claude Code stamps `promptSource` on exactly the lines it
+    /// submits as a prompt (2.1.305, recorded): typed, queued or accepted
+    /// suggestions, and — `"system"` — background reports, scheduled prompts,
+    /// another session's message and the continuation after a usage limit.
+    /// Its own notes to the model carry none: Stop hook feedback, reminders,
+    /// attachments, compaction summaries, local commands, the interrupt
+    /// marker. A line recorded without being delivered starts nothing.
+    ///
+    /// `turnOrigin` alone starts a turn too. A built-in command that asks the
+    /// model — `/plan <description>`, `/goal <condition>` — stamps its output
+    /// line with it and no `promptSource`, and Claude replies: the one recorded
+    /// case of a turn started from idle by that stamp (2.1.308; `/model`
+    /// stamps nothing). In the owner's transcripts 11,066 user lines carry
+    /// both stamps and 204 carry `turnOrigin` alone (2.1.278–2.1.303): 194
+    /// automatic compaction summaries, each written after a tool's result
+    /// (163) or a prompt (31) inside a turn already running, and 10 that draw
+    /// a row of their own (`!` command output, skill invocations). Counting
+    /// them changes no status. No line recorded without being delivered
+    /// carries `turnOrigin`.
+    ///
+    /// A skill's invocation starts a turn too, stamped or not. Claude Code
+    /// records it `<command-message>` first and then runs the skill, and it
+    /// draws as a command row, which the fleet does not count as work. Of the
+    /// six real skill lines every one was answered, and one — 2.1.220
+    /// `/code-review` — carries neither stamp; counted by its stamps alone, that
+    /// run read Done for the 29 s Claude worked on it.
+    public var startsTurn: Bool {
+        guard kind == .userMessage, !isTranscriptOnly else { return false }
+        if let source = payload["promptSource"]?.stringValue, !source.isEmpty { return true }
+        if payload["turnOrigin"]?.stringValue != nil { return true }
+        return payload["message"]?["content"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<command-message>") == true
+    }
+
+    /// Whether this user line is the person's own words, by Claude Code's own
+    /// test (2.1.304): not `isMeta`, not a compaction summary, and either
+    /// unstamped or stamped `origin.kind: "human"`. Everything else in a
+    /// `type:"user"` line was written by the system for the model — another
+    /// session's message, a scheduled prompt, Stop hook feedback, the summary
+    /// that continues a compacted conversation — and the Mac draws none of it
+    /// as something the person said. A Codex message carries none of these
+    /// fields and is always the person's.
+    public var isPersonsWords: Bool {
+        guard kind == .userMessage,
+            payload["isMeta"]?.boolValue != true,
+            payload["isCompactSummary"]?.boolValue != true
+        else { return false }
+        guard let origin = payload["origin"], origin != .null else { return true }
+        return origin["kind"]?.stringValue == "human"
+    }
+
+    /// **A message that is a flat `text`, which is how Codex sends one.**
+    ///
+    /// `ccd/src/codex_adapter.rs` `message_payload` builds exactly
+    /// `{"text": …, "interrupted": …}` for both `userMessage` and
+    /// `agentMessage` items — no `message`, no `content`, no blocks. Read
+    /// through Claude's shape it is nil, and a nil message draws no row: the
+    /// operator's phone showed a Codex turn as a lone "Turn complete" while
+    /// the daemon's log held both halves of the conversation.
+    ///
+    /// Empty is nil, not "": the adapter defaults `text` to the empty string
+    /// when an item carries none, and a blank row is a worse lie than no row.
+    private var flatText: String? {
+        guard let text = payload["text"]?.stringValue, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// **Interrupted, as the wire states it.** The adapter synthesises a
+    /// terminal item with `interrupted: true` when a turn is aborted mid-item,
+    /// so a reply that was cut short says so on the row rather than being drawn
+    /// as a finished thought.
+    public var isInterruptedItem: Bool { payload["interrupted"]?.boolValue == true }
+
+    /// A user turn's prose. `message.content` is a bare string for typed
+    /// prompts and a block array when the CLI attaches context; Codex sends a
+    /// flat `text` instead. Exactly those two measured shapes — an unknown
+    /// third stays unknown.
+    public var userText: String? {
+        guard kind == .userMessage else { return nil }
+        guard let content = payload["message"]?["content"] else { return flatText }
+        if let text = content.stringValue { return text }
+        guard let blocks = content.arrayValue else { return nil }
+        let joined =
+            blocks
+            .filter { $0["type"]?.stringValue == "text" }
+            .compactMap { $0["text"]?.stringValue }
+            .joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
+    }
+
+    /// Prose from an assistant turn. `tool_use` blocks are deliberately skipped:
+    /// the PreToolUse hook already reported those as `tool_call` events with a
+    /// daemon-assigned seq, and rendering both would double every tool call.
+    ///
+    /// **Without its outer blank lines.** Claude starts a text block that
+    /// follows a tool call or a thinking block with `"\n\n"` (measured, 2.1.289),
+    /// and some blocks are nothing else: drawn verbatim, each reply sat under two
+    /// empty lines of reading type and a whitespace-only block drew an empty row.
+    /// Only the blank lines around the text go; indentation on its first line,
+    /// paragraph breaks and code blocks inside it are the agent's.
+    public var agentText: String? {
+        guard kind == .agentMessage else { return nil }
+        guard let blocks = payload["message"]?["content"]?.arrayValue else {
+            return flatText.flatMap(Self.withoutOuterBlankLines)
+        }
+        let joined =
+            blocks
+            .filter { $0["type"]?.stringValue == "text" }
+            .compactMap { $0["text"]?.stringValue }
+            .joined(separator: "\n")
+        return Self.withoutOuterBlankLines(joined)
+    }
+
+    /// `text` from the start of its first non-blank line to its last visible
+    /// character, or nil when every line is blank.
+    static func withoutOuterBlankLines(_ text: String) -> String? {
+        guard let first = text.firstIndex(where: { !$0.isWhitespace }),
+            let last = text.lastIndex(where: { !$0.isWhitespace })
+        else { return nil }
+        let lineStart = text[..<first].lastIndex(where: \.isNewline).map(text.index(after:))
+            ?? text.startIndex
+        return String(text[lineStart...last])
+    }
+
+    /// Tool-use blocks announced by the assistant turn, used only as a fallback
+    /// when no hook `tool_call` carried the same id.
+    public var agentToolUses: [(id: String, name: String, input: JSONValue)] {
+        guard kind == .agentMessage, let blocks = payload["message"]?["content"]?.arrayValue
+        else { return [] }
+        return blocks.compactMap { block in
+            guard block["type"]?.stringValue == "tool_use",
+                let id = block["id"]?.stringValue,
+                let name = block["name"]?.stringValue
+            else { return nil }
+            return (id, name, block["input"] ?? .null)
+        }
+    }
+
+    /// A transcript `tool_result` block, which — unlike the PostToolUse hook —
+    /// carries Claude's own `is_error` verdict.
+    public var transcriptToolResult: (toolUseID: String, isError: Bool, text: String?)? {
+        guard kind == .toolResult, source == .transcript,
+            let blocks = payload["message"]?["content"]?.arrayValue
+        else { return nil }
+        for block in blocks where block["type"]?.stringValue == "tool_result" {
+            guard let id = block["tool_use_id"]?.stringValue else { continue }
+            let isError = block["is_error"]?.boolValue ?? false
+            let text = block["content"]?.stringValue
+            return (id, isError, text)
+        }
+        return nil
+    }
+}
+
+// MARK: - Tool rendering
+
+/// One-line renderings of a tool call. Kept in one place so the timeline row,
+/// the decision card and the fleet subtitle can never disagree about what a
+/// call "is".
+public enum ToolSummary {
+    /// The argument that actually identifies the call — the command for Bash,
+    /// the path for a file tool. Verbatim: never elided, never re-wrapped, and
+    /// `displaySafe`, because every caller draws or speaks it.
+    public static func principalArgument(tool: String, input: JSONValue?) -> String? {
+        argument(tool: tool, input: input)?.displaySafe
+    }
+
+    private static func argument(tool: String, input: JSONValue?) -> String? {
+        guard let input else { return nil }
+        switch tool {
+        case "Bash", "BashOutput":
+            return input.firstString("command")
+        case "Read", "Write", "Edit", "NotebookEdit":
+            return input.firstString("file_path", "notebook_path")
+        case "Glob", "Grep":
+            let pattern = input.firstString("pattern") ?? ""
+            if let path = input.firstString("path") { return "\(pattern)  in \(path)" }
+            return pattern.isEmpty ? nil : pattern
+        case "WebFetch", "WebSearch":
+            return input.firstString("url", "query")
+        case "Task", "Agent":
+            return input.firstString("description", "prompt")
+        // **Codex's two families**, whose arguments are not where a Claude
+        // tool's are. A command carries `command` at the top level (the
+        // `default` arm below finds it); a file change carries no path at all
+        // except inside `changes[]`, so read through the default arm it drew a
+        // row naming a file it never named.
+        case "file change":
+            guard let changes = input["changes"]?.arrayValue, !changes.isEmpty else { return nil }
+            if changes.count == 1 { return changes[0]["path"]?.stringValue }
+            return "\(changes.count) files"
+        // Claude's question: what it asks, never the JSON carrying it.
+        case "AskUserQuestion":
+            return input["questions"]?.arrayValue?.first?["question"]?.stringValue
+        case "TodoWrite":
+            guard let todos = input["todos"]?.arrayValue else { return nil }
+            return "\(todos.count) item\(todos.count == 1 ? "" : "s")"
+        default:
+            return input.firstString(
+                "command", "file_path", "path", "pattern", "url", "query", "description")
+        }
+    }
+
+    /// A fuller, still-single-purpose description for the decision card header.
+    public static func intent(tool: String, input: JSONValue?) -> String? {
+        input?.firstString("description")?.displaySafe
+    }
+
+    public static func symbol(tool: String) -> String {
+        switch tool {
+        case "Bash", "BashOutput", "KillShell": return "terminal-window"
+        case "Read", "NotebookRead": return "file-text"
+        case "Write": return "note-pencil"
+        case "Edit", "NotebookEdit": return "pencil-line"
+        case "Glob": return "magnifying-glass"
+        case "Grep": return "magnifying-glass"
+        case "WebFetch", "WebSearch": return "globe"
+        case "Task", "Agent": return "users"
+        // **Codex's two families.** Same glyphs as Claude's equivalents: a
+        // command is a terminal and a file change is an edit, whichever agent
+        // ran it, or the same act reads as two different kinds of thing.
+        case "command": return "terminal-window"
+        case "file change": return "pencil-line"
+        case "TodoWrite": return "list-checks"
+        default: return "wrench"
+        }
+    }
+
+    /// The phone's own reading of a tool call, used when the daemon offers no
+    /// classification. Deliberately coarse and deliberately pessimistic: an
+    /// unrecognised tool is never LOW.
+    public static func risk(tool: String, input: JSONValue?) -> RiskClass {
+        switch tool {
+        case "Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "WebSearch":
+            return .low
+        case "Bash", "BashOutput":
+            guard let command = input?.firstString("command") else { return .high }
+            return commandRisk(command)
+        case "Write", "Edit", "NotebookEdit":
+            return .medium
+        default:
+            return .medium
+        }
+    }
+
+    private static let destructiveNeedles = [
+        "rm -rf", "rm -fr", "rm -r", "sudo", "mkfs", "dd if=", "shutdown", "reboot",
+        "chmod 777", "curl | sh", "curl|sh", "wget | sh", "| sh", "> /dev/",
+        "git push --force", "git push -f", "git reset --hard", "git clean -fd",
+        "drop table", "drop database", "truncate table", "killall", "launchctl unload",
+        "defaults delete", "security delete", "npm publish", "cargo publish",
+    ]
+
+    private static func commandRisk(_ command: String) -> RiskClass {
+        let lowered = command.lowercased()
+        if destructiveNeedles.contains(where: { lowered.contains($0) }) { return .high }
+        // Network or install side effects leave the worktree behind.
+        if lowered.contains("curl ") || lowered.contains("wget ")
+            || lowered.contains("npm install") || lowered.contains("pip install")
+            || lowered.contains("brew install") || lowered.contains("git push")
+        {
+            return .medium
+        }
+        return .low
+    }
+}
+
+/// Ordered low < medium < high so that reconciling two classifiers is a `max`
+/// rather than a nest of `if`s (`RiskAssessment`).
+public enum RiskClass: Int, Sendable, Hashable, Comparable {
+    case low = 0
+    case medium = 1
+    case high = 2
+
+    public static func < (lhs: RiskClass, rhs: RiskClass) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    public var label: String {
+        switch self {
+        case .low: return "LOW"
+        case .medium: return "MEDIUM"
+        case .high: return "HIGH"
+        }
+    }
+
+    /// What the class *means*, spelled out — a badge nobody can decode is a
+    /// badge that gets ignored.
+    public var rationale: String {
+        switch self {
+        case .low: return "Reads, or a shell command with no obvious side effect."
+        case .medium: return "Writes files, installs, or reaches the network."
+        case .high: return "Destructive, credentialed, or publishes something."
+        }
+    }
+}

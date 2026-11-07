@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		CC0000000000000000000101 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F1 /* SwiftTerm */; };
+		CC0000000000000000000102 /* CodeConnectKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F2 /* CodeConnectKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,6 +71,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CC0000000000000000000101 /* SwiftTerm in Frameworks */,
+				CC0000000000000000000102 /* CodeConnectKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -140,6 +142,7 @@
 			name = CodeConnect;
 			packageProductDependencies = (
 				CC00000000000000000000F1 /* SwiftTerm */,
+				CC00000000000000000000F2 /* CodeConnectKit */,
 			);
 			productName = CodeConnect;
 			productReference = CC00000000000000000000A5 /* CodeConnect.app */;
@@ -246,6 +249,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CC00000000000000000000E1 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				CC00000000000000000000E2 /* XCLocalSwiftPackageReference "../CodeConnectKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CC00000000000000000000A3 /* Products */;
@@ -413,7 +417,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -442,7 +446,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -460,7 +464,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 74;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -476,7 +480,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 74;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -493,7 +497,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 74;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -511,7 +515,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 74;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -528,7 +532,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 74;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote.renderharness;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -544,7 +548,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 74;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.15;
+				MARKETING_VERSION = 1.1.16;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.remote.renderharness;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -604,6 +608,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		CC00000000000000000000E2 /* XCLocalSwiftPackageReference "../CodeConnectKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../CodeConnectKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		CC00000000000000000000E1 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -620,6 +631,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CC00000000000000000000E1 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		CC00000000000000000000F2 /* CodeConnectKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC00000000000000000000E2 /* XCLocalSwiftPackageReference "../CodeConnectKit" */;
+			productName = CodeConnectKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

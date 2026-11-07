@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **The phone's greying rule, decided by the daemon's own categories.**
 ///

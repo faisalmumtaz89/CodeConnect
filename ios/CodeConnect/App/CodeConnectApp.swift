@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 @main
@@ -5,7 +6,7 @@ struct CodeConnectApp: App {
     /// Apple delivers the APNs token — and a notification tap — to a
     /// `UIApplicationDelegate`, and SwiftUI's `App` has none, so one is adopted.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    @State private var machines = Machines()
+    @State private var machines = Machines(makePushRegistrar: { PushRegistration() })
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {

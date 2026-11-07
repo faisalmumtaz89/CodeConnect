@@ -4,6 +4,7 @@ import UIKit
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// What the terminal tab *renders*, measured on a real screen.
 ///

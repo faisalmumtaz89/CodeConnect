@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// A pairing code the phone can prove is dead must be refused before it is used.
 ///

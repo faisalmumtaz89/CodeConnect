@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **Starting a session from the phone, against the daemon's own bytes.**
 ///

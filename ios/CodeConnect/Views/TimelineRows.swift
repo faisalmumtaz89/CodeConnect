@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// One row of the semantic timeline.

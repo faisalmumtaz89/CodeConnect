@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The fixtures are JSON decoded by the app's real decoders, so they are a
 /// protocol test as well as a test rig. If one of them stops matching the wire

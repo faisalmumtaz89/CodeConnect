@@ -3,6 +3,7 @@ import DeviceCheck
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 // =============================================================================
 //  The relay enrollment actor and the two client-data hashes it must match.

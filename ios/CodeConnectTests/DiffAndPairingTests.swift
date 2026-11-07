@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The diff parser and the QR payload — two places where being almost right is
 /// indistinguishable from being right until it matters.

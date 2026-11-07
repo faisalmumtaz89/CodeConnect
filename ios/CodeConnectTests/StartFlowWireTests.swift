@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **The New session steps against the daemon's own bytes:** minor 29 (a
 /// repository's checkouts, and starting in a worktree) and minor 30 (browsing

@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The fleet is shown once it is caught up with the Mac, not while it fills in.
 ///

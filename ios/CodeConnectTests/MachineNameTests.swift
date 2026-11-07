@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Which computer the phone is paired with (protocol minor 25).
 ///

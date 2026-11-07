@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The slash-command policy: native adapters for the eight commands the app
 /// answers itself, a static guard for the dialog class whose injection

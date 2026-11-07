@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The wire format at feature level 1, tested against JSON written by hand
 /// from `mac/protocol/src`.

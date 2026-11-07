@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Removing a session is the phone's first destructive verb, so the rules that
 /// keep it safe are pinned here.

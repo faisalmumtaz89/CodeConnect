@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The Swift half of `protocol/src/hash.rs::send_text_hash`. One pinned
 /// literal on each side is what proves the two implementations are the same
