@@ -1333,7 +1333,7 @@ public final class DaemonConnection {
                 "This phone cannot read a “\(Self.boundedType(type))” message from the computer."
             unreadableFrameAt = Date()
         case .pong, .sessions, .event, .historyEnd, .projects, .startSessionResult, .projectGit, .folderListing,
-            .createFolderResult:
+            .createFolderResult, .machineStats:
             break
         }
         onMessage?(message)
