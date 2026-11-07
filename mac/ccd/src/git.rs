@@ -84,6 +84,69 @@ pub async fn branch(cwd: &str, configured_bin: Option<&str>, timeout: Duration) 
     (out.ok && !name.is_empty()).then(|| name.to_string())
 }
 
+/// A working tree as the session list shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeFacts {
+    pub branch: Option<String>,
+    pub diff_stat: Option<protocol::event::DiffStat>,
+}
+
+/// The branch and line counts of the working tree at `cwd`, each `None` when git
+/// cannot say.
+pub async fn tree_facts(cwd: &str, configured_bin: Option<&str>, timeout: Duration) -> TreeFacts {
+    TreeFacts {
+        branch: branch(cwd, configured_bin, timeout).await,
+        diff_stat: diff_stat(cwd, configured_bin, timeout).await,
+    }
+}
+
+/// Lines added and removed in tracked files against `HEAD`, or against the
+/// index in a repository with no commits yet. `None` outside a repository, or
+/// when git fails or says more than [`LISTING_CAP`]: a partial count would be a
+/// wrong one. Run with the same switches as the diff, so no configured program
+/// runs.
+pub async fn diff_stat(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Option<protocol::event::DiffStat> {
+    let git = git_bin(configured_bin)?;
+    let has_head = run(
+        &git,
+        cwd,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?
+    .ok;
+    let mut args = diff_args(false);
+    args.push("--numstat");
+    if has_head {
+        args.push("HEAD");
+    }
+    let out = run(&git, cwd, &args, timeout, LISTING_CAP).await.ok()?;
+    (out.ok && !out.stdout_truncated).then(|| parse_numstat(&out.stdout))
+}
+
+/// Sum `git diff --numstat`: added and removed counts, a tab, the path. A binary
+/// file's counts are `-` and add nothing.
+fn parse_numstat(listing: &str) -> protocol::event::DiffStat {
+    let mut stat = protocol::event::DiffStat {
+        added: 0,
+        removed: 0,
+    };
+    for line in listing.lines() {
+        let mut columns = line.split('\t');
+        let added = columns.next().and_then(|n| n.parse::<u64>().ok());
+        let removed = columns.next().and_then(|n| n.parse::<u64>().ok());
+        stat.added += added.unwrap_or(0);
+        stat.removed += removed.unwrap_or(0);
+    }
+    stat
+}
+
 /// Ceiling for a listing of worktrees or branch names.
 const LISTING_CAP: usize = 1024 * 1024;
 
@@ -657,6 +720,93 @@ mod tests {
         );
         assert!(diff.unified.contains("loose.txt"), "{}", diff.unified);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn tree_of(dir: &Path) -> TreeFacts {
+        tree_facts(dir.to_str().unwrap(), None, Duration::from_secs(30)).await
+    }
+
+    /// **The session list's branch and line counts**: tracked edits counted
+    /// against `HEAD`, a binary change counted as nothing, an untracked file left
+    /// out (the written miss), and nothing at all outside a repository.
+    #[tokio::test]
+    async fn tree_facts_count_tracked_lines_on_the_checked_out_branch() {
+        let dir = temp_dir("tree");
+        git_sync(&dir, &["init", "-q", "-b", "feature/x"]);
+        std::fs::write(dir.join("a.txt"), "1\n2\n3\n").unwrap();
+        std::fs::write(dir.join("b.bin"), b"\0\x01\x02").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "first"]);
+        assert_eq!(
+            tree_of(&dir).await,
+            TreeFacts {
+                branch: Some("feature/x".into()),
+                diff_stat: Some(protocol::event::DiffStat {
+                    added: 0,
+                    removed: 0
+                }),
+            },
+            "a clean tree is zero lines, not unknown"
+        );
+
+        std::fs::write(dir.join("a.txt"), "1\ntwo\n3\n4\n").unwrap();
+        std::fs::write(dir.join("b.bin"), b"\0\x09").unwrap();
+        std::fs::write(dir.join("new.txt"), "untracked\n").unwrap();
+        git_sync(&dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("c.txt"), "never committed\n").unwrap();
+        assert_eq!(
+            tree_of(&dir).await.diff_stat,
+            Some(protocol::event::DiffStat {
+                added: 2,
+                removed: 1
+            }),
+            "staged and unstaged tracked edits against HEAD; binary and untracked add nothing"
+        );
+
+        git_sync(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(
+            tree_of(&dir).await.branch,
+            None,
+            "a detached head has no branch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let plain = temp_dir("tree-plain");
+        assert_eq!(tree_of(&plain).await, TreeFacts::default());
+        let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    #[tokio::test]
+    async fn tree_facts_without_commits_count_unstaged_lines() {
+        let dir = temp_dir("tree-nohead");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+        git_sync(&dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "x\ny\nz\n").unwrap();
+        assert_eq!(
+            tree_of(&dir).await,
+            TreeFacts {
+                branch: Some("main".into()),
+                diff_stat: Some(protocol::event::DiffStat {
+                    added: 2,
+                    removed: 0
+                }),
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn numstat_sums_counts_and_skips_binary_rows() {
+        let stat =
+            parse_numstat("3\t1\ta.txt\n-\t-\timg.png\n10\t0\tdir/b c.rs\n0\t4\told => new\n");
+        assert_eq!(
+            stat,
+            protocol::event::DiffStat {
+                added: 13,
+                removed: 5
+            }
+        );
     }
 
     #[tokio::test]
