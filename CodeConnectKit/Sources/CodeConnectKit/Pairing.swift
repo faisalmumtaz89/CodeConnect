@@ -168,9 +168,12 @@ public struct DaemonEndpoint: Codable, Sendable, Hashable {
 
 // MARK: - QR payload
 
-/// The JSON `codeconnect pair` renders as a QR code.
+/// What a pairing QR code carries.
 ///
-/// Locked shape: `{"v":1,"host":"<MagicDNS-or-tailnet-ip>","port":8787,"code":"<8 chars>"}`.
+/// The daemon puts a link in it, `https://codeconnect.sh/p#v=1&h=<host>&p=<port>&c=<code>`,
+/// which the camera opens in the app, or in the App Store page without it. An older
+/// daemon prints the JSON the link replaced, with the same fields:
+/// `{"v":1,"host":"<MagicDNS-or-tailnet-ip>","port":8787,"code":"<8 chars>"}`.
 /// Parsing is strict about the version and permissive about nothing else: a
 /// payload this build cannot vouch for is refused with a reason rather than
 /// half-understood.
@@ -260,11 +263,10 @@ public struct PairingQRPayload: Sendable, Hashable {
         return nil
     }
 
+    /// A scanned code or an opened link: the pairing link, or the JSON an older
+    /// daemon still prints. Both are read by the same checks.
     public static func decode(_ scanned: String) -> Result<PairingQRPayload, Failure> {
-        guard let data = scanned.data(using: .utf8),
-            let value = try? JSONDecoder().decode(JSONValue.self, from: data),
-            case .object = value
-        else { return .failure(.notJSON) }
+        guard let value = linkFields(scanned) ?? jsonFields(scanned) else { return .failure(.notJSON) }
 
         let version = value["v"]?.intValue ?? 0
         guard version == supportedVersion else { return .failure(.unsupportedVersion(version)) }
@@ -282,6 +284,37 @@ public struct PairingQRPayload: Sendable, Hashable {
         }
 
         return .success(PairingQRPayload(host: host, port: port, code: code))
+    }
+
+    private static func jsonFields(_ scanned: String) -> JSONValue? {
+        guard let data = scanned.data(using: .utf8),
+            let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+            case .object = value
+        else { return nil }
+        return value
+    }
+
+    /// `https://codeconnect.sh/p#v=1&h=<host>&p=<port>&c=<code>`, read as the JSON
+    /// fields it carries. The secret is after `#`, which a browser never sends,
+    /// so the page that link opens without the app never sees it.
+    private static func linkFields(_ scanned: String) -> JSONValue? {
+        guard let link = URLComponents(string: scanned), link.scheme == "https",
+            link.host?.lowercased() == "codeconnect.sh", link.path == "/p",
+            let fragment = link.percentEncodedFragment,
+            let items = URLComponents(string: "?" + fragment)?.queryItems
+        else { return nil }
+        var fields: [String: JSONValue] = [:]
+        for item in items {
+            guard let value = item.value else { continue }
+            switch item.name {
+            case "v": fields["v"] = Int64(value).map(JSONValue.int) ?? .string(value)
+            case "p": fields["port"] = Int64(value).map(JSONValue.int) ?? .string(value)
+            case "h": fields["host"] = .string(value)
+            case "c": fields["code"] = .string(value)
+            default: break
+            }
+        }
+        return .object(fields)
     }
 
     /// The endpoint to open while exchanging the code for a device token.
