@@ -12,11 +12,20 @@ public struct HostDevice: Sendable, Equatable {
     public let biometric: String
     /// What it falls back to.
     public let secret: String
+    /// How a computer that will not let this device in without its code is
+    /// added: the iPhone scans the code, a Mac has it entered.
+    public let addWithCode: String
+    /// What to do after a code was refused.
+    public let codeAgain: String
 
     public static let iPhone = HostDevice(
-        name: "iPhone", noun: "phone", biometric: "Face ID", secret: "passcode")
+        name: "iPhone", noun: "phone", biometric: "Face ID", secret: "passcode",
+        addWithCode: "Scan this computer's code to add it.",
+        codeAgain: "Scan the current code on your computer again.")
     public static let mac = HostDevice(
-        name: "Mac", noun: "Mac", biometric: "Touch ID", secret: "password")
+        name: "Mac", noun: "Mac", biometric: "Touch ID", secret: "password",
+        addWithCode: "Add it with its pairing code.",
+        codeAgain: "Enter the current pairing code from that computer again.")
 
     #if os(macOS)
         public static let current = HostDevice.mac

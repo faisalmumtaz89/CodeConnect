@@ -1754,6 +1754,36 @@ public struct MachineStats: Decodable, Sendable, Hashable {
     public var capturedDate: Date? { ISO8601.parse(capturedAt) }
 }
 
+// MARK: - Peers
+
+/// The owner's other computers a daemon can reach on Tailscale, and that
+/// computer's own Tailscale state, as `peers` carries them. Every computer
+/// listed is the same Tailscale user as the daemon's, untagged and online.
+public struct PeerDirectory: Decodable, Sendable, Hashable {
+    /// `running`, `not_running` or `not_installed`.
+    public let tailnet: String
+    /// The daemon's computer's Tailscale login, while Tailscale runs there.
+    public let login: String?
+    /// The daemon's computer is a tagged device, so every connection to it
+    /// needs a code.
+    public let tagged: Bool
+    public let computers: [PeerComputer]
+}
+
+/// One computer in a `peers` frame: where its daemon listens.
+public struct PeerComputer: Decodable, Sendable, Hashable {
+    /// The first label of its MagicDNS name.
+    public let name: String
+    /// Its whole MagicDNS name, or its IPv4 address when it has none.
+    public let host: String
+    public let port: Int
+
+    /// Where to ask its daemon to let this device in, with no credential.
+    var endpoint: DaemonEndpoint {
+        DaemonEndpoint(host: host, port: port, credential: .tailnet, useTLS: false)
+    }
+}
+
 // MARK: - Diff
 
 /// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
@@ -1812,6 +1842,10 @@ public enum HelloCredential: Sendable, Hashable {
     /// Single-use, 5-minute code straight off the QR. The daemon answers with a
     /// device token, which is what gets stored.
     case pairingCode(String)
+    /// No credential: the daemon lets this device in by its Tailscale identity
+    /// — the same user as the computer, untagged — and answers with a device
+    /// token, which is what gets stored. Anything else it refuses.
+    case tailnet
 }
 
 /// Everything the phone can say to a daemon.
@@ -1969,6 +2003,10 @@ extension ClientMessage: Encodable {
                 // looked at — pairing would fail with an authentication error
                 // that had nothing to do with the code.
                 try c.encode(code, forKey: .pairingCode)
+            case .tailnet:
+                // Neither key: a hello carrying no credential is the one the
+                // daemon checks against Tailscale.
+                break
             }
             try c.encodeIfPresent(clientID, forKey: .clientID)
             try c.encodeIfPresent(clientName, forKey: .clientName)
@@ -2393,6 +2431,9 @@ public enum ServerMessage: Sendable {
     case createFolderResult(requestID: String, refusal: String?)
     /// The answer to `get_machine_stats`.
     case machineStats(MachineStats)
+    /// The daemon's list of the owner's other computers, after `hello_ack` and
+    /// whenever it changes.
+    case peers(PeerDirectory)
     case error(code: String, message: String)
     case pong
     /// A message type this build does not know. Kept rather than thrown away so
@@ -2563,6 +2604,8 @@ extension ServerMessage: Decodable {
                 refusal: result.status == "created" ? nil : result.detail ?? result.status)
         case "machine_stats":
             self = .machineStats(try MachineStats(from: decoder))
+        case "peers":
+            self = .peers(try PeerDirectory(from: decoder))
         case "pong":
             self = .pong
         case let other:

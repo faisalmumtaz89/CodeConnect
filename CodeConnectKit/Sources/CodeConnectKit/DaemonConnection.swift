@@ -15,6 +15,10 @@ public enum ConnectionError: LocalizedError, Sendable {
     /// this cannot say *why*, and must not pretend to. What it can do is name the
     /// thing the reader is holding, which is a code, not a token.
     case rejectedPairingCode
+    /// A hello with no credential that the daemon would not let in: this device
+    /// is not on its owner's Tailscale user, or that computer is tagged, or it
+    /// has blocked this device. Only its code adds it.
+    case notAdmitted
     /// The daemon speaks a protocol this app does not. Terminal: retrying cannot
     /// change it, and the fix is at the Mac.
     case incompatible(String)
@@ -47,7 +51,8 @@ public enum ConnectionError: LocalizedError, Sendable {
         case .unauthorized: return "The daemon rejected this token"
         case .rejectedPairingCode:
             return
-                "\(HostDevice.current.computer("The computer")) rejected that pairing code. It may have expired, already been used, or been mistyped. Run `codeconnect pair` again for a fresh one."
+                "\(HostDevice.current.computer("The computer")) rejected that pairing code. It may have expired, already been used, or been mistyped. \(HostDevice.current.codeAgain)"
+        case .notAdmitted: return HostDevice.current.addWithCode
         case .incompatible(let detail): return detail
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
@@ -408,7 +413,15 @@ public final class DaemonConnection {
                 // Terminal refusals: the same attempt will be refused forever, so
                 // backing off would only hide the answer behind a spinner.
                 switch error {
-                case .unauthorized, .rejectedPairingCode, .incompatible:
+                case .unauthorized where !dialIsForPairing:
+                    // **A saved token the computer no longer takes** — revoked,
+                    // or blocked and then allowed again — is asked once more
+                    // with no credential. The computer may let this device in
+                    // by its Tailscale identity and hand it a new token, which
+                    // replaces the dead one; if not, that is the refusal.
+                    self.endpoint?.credential = .tailnet
+                    continue
+                case .unauthorized, .rejectedPairingCode, .notAdmitted, .incompatible:
                     phase = .failed(reason: error.localizedDescription)
                     return
                 case .hostUnresolvable:
@@ -767,10 +780,11 @@ public final class DaemonConnection {
                 case "unauthorized":
                     // The same wire code covers a rejected device token and a
                     // rejected pairing code; only this side knows which was sent.
-                    if case .pairingCode = credential {
-                        throw ConnectionError.rejectedPairingCode
+                    switch credential {
+                    case .pairingCode: throw ConnectionError.rejectedPairingCode
+                    case .tailnet: throw ConnectionError.notAdmitted
+                    case .token: throw ConnectionError.unauthorized
                     }
-                    throw ConnectionError.unauthorized
                 case "protocol_mismatch":
                     // Terminal, and it used to be neither: it fell through to the
                     // generic reconnect, so an app and a Mac helper that could
@@ -1333,7 +1347,7 @@ public final class DaemonConnection {
                 "This \(HostDevice.current.noun) cannot read a “\(Self.boundedType(type))” message from \(HostDevice.current.computer("the computer", named: helloAck?.machineName))."
             unreadableFrameAt = Date()
         case .pong, .sessions, .event, .historyEnd, .projects, .startSessionResult, .projectGit, .folderListing,
-            .createFolderResult, .machineStats:
+            .createFolderResult, .machineStats, .peers:
             break
         }
         onMessage?(message)
