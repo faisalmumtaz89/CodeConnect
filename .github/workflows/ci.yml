@@ -202,12 +202,15 @@ jobs:
             | sed 's/[[:space:]]*$//' | awk 'NR==1')
           test -n "$device" || { echo "::error::no iPhone simulator available"; exit 1; }
           echo "using simulator: $device"
+          # Signed to run locally: ad hoc, with no team, certificate or profile. A
+          # binary the build leaves unsigned gets no Keychain on the simulator
+          # (errSecMissingEntitlement, -34018), and the unit tests read and write it.
           xcodebuild test \
             -project CodeConnect.xcodeproj \
             -scheme CodeConnect \
             -destination "platform=iOS Simulator,name=$device" \
             -only-testing:CodeConnectTests \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
 
   workflows:
     name: Workflow lint
