@@ -9286,47 +9286,10 @@ impl Connection<'_> {
     }
 }
 
-/// A test database that removes itself, siblings and all.
-///
-/// SQLite leaves a `-wal` and a `-shm` beside the file it is given, so "delete the
-/// db" has to mean all three. Shared with [`crate::codex_link_live`], and not
-/// fussiness: a suite that leaves one database per run in the temp directory is how
-/// a machine ends up with tens of gigabytes of them.
-#[cfg(test)]
-pub struct TempDb(PathBuf);
-
-#[cfg(test)]
-impl TempDb {
-    pub fn new(stem: &str) -> TempDb {
-        let path = std::env::temp_dir().join(format!("{stem}.db"));
-        let db = TempDb(path);
-        db.remove();
-        db
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-
-    fn remove(&self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = self.0.clone().into_os_string();
-            path.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(path));
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for TempDb {
-    fn drop(&mut self) {
-        self.remove();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::TempDb;
     use protocol::agent::AgentKind;
 
     fn registration(agent: AgentKind) -> RegisterSession {

@@ -818,9 +818,6 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use std::io::Write;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     /// A run to file the scanned lines under. The tailer never invents one —
     /// it is handed a key by the session registry — so the tests do the same.
@@ -861,15 +858,8 @@ mod tests {
         store
     }
 
-    fn temp_paths() -> (std::path::PathBuf, std::path::PathBuf) {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
-            "ccd-tail-{}-{}-{}",
-            std::process::id(),
-            n,
-            protocol::time::now_unix_ms()
-        ));
-        (base.with_extension("db"), base.with_extension("jsonl"))
+    fn temp_paths() -> (crate::store::TempDb, std::path::PathBuf) {
+        crate::store::TempDb::unique_with_file("ccd-tail", "jsonl")
     }
 
     /// A watcher with nowhere to send nudges, for exercising the bookkeeping.

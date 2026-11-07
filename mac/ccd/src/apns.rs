@@ -614,15 +614,7 @@ mod tests {
 
     /// A store nobody else is using, for the selection rules that need one.
     fn temp_store() -> std::sync::Arc<crate::store::Store> {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-push-build-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        std::sync::Arc::new(crate::store::Store::open(&path).unwrap())
+        std::sync::Arc::new(crate::store::Store::open_temp("ccd-push-build"))
     }
 
     /// A real P-256 key in the PEM the `.p8` is written in, minted here rather

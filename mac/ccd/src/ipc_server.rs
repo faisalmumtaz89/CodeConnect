@@ -673,9 +673,7 @@ mod tests {
             protocol::time::now_unix_ms()
         );
 
-        let db = std::env::temp_dir().join(format!("ccd-ipc-{stamp}.db"));
-        let _ = std::fs::remove_file(&db);
-        let store = Arc::new(crate::store::Store::open(&db).unwrap());
+        let store = Arc::new(crate::store::Store::open_temp("ccd-ipc"));
 
         let (tail_tx, tail_rx) = mpsc::unbounded_channel();
         // Kept alive: a dropped receiver fails every transcript registration,

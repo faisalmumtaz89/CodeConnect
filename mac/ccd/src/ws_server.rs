@@ -3257,15 +3257,7 @@ mod tests {
     }
 
     fn daemon_with_a_device() -> (Arc<Daemon>, String) {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-ws-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let store = Arc::new(crate::store::Store::open_temp("ccd-ws"));
         let now = protocol::time::now_rfc3339();
         let device_id = "abcd1234".to_string();
         store
@@ -3828,17 +3820,10 @@ mod tests {
         Arc<Daemon>,
         String,
         Arc<crate::store::Store>,
-        std::path::PathBuf,
+        crate::store::TempDb,
     ) {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-ws-live-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let store = Arc::new(crate::store::Store::open_temp("ccd-ws-live"));
+        let path = store.temp_db();
         let now = protocol::time::now_rfc3339();
         let device_id = "abcd1234".to_string();
         let device_token = "device-token-for-tests";

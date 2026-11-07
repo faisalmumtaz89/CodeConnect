@@ -37,17 +37,7 @@ fn run() -> protocol::event::SessionKey {
 }
 
 fn temp_store() -> Store {
-    // The counter is load-bearing: tests run in parallel threads, and a
-    // millisecond timestamp alone lets two of them share one database.
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "ccd-fixture-{}-{}-{}.db",
-        std::process::id(),
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        protocol::time::now_unix_ms()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Store::open(&path).unwrap()
+    Store::open_temp("ccd-fixture")
 }
 
 fn seed_session(store: &Store, run: &protocol::event::SessionKey) {
