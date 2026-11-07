@@ -1726,10 +1726,8 @@ public struct WireRisk: Codable, Sendable, Hashable {
     }
 }
 
-// MARK: - Diff
+// MARK: - Machine stats
 
-/// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
-/// are about to read it, never a thing that streams at you.
 /// One sample of a computer's load, as `machine_stats` carries it. Each value
 /// is `nil` when the computer could not read it.
 public struct MachineStats: Decodable, Sendable, Hashable {
@@ -1756,6 +1754,10 @@ public struct MachineStats: Decodable, Sendable, Hashable {
     public var capturedDate: Date? { ISO8601.parse(capturedAt) }
 }
 
+// MARK: - Diff
+
+/// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
+/// are about to read it, never a thing that streams at you.
 public struct SessionDiff: Sendable, Hashable {
     public let sessionID: String
     /// `git -C <cwd> diff HEAD` plus untracked names, exactly as the daemon
