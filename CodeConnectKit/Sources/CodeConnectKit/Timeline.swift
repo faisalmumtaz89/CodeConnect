@@ -703,7 +703,7 @@ public enum TimelineBuilder {
                 // Built as a sentence rather than glued to the message with
                 // punctuation: the daemon does not always send one, and a
                 // conjunction with nothing before it reads as a truncated string.
-                detail: [event.notificationMessage, "No card arrived, so it can only be answered at the computer."]
+                detail: [event.notificationMessage, "No card arrived, so it can only be answered at \(HostDevice.current.computer("the computer"))."]
                     .compactMap { $0 }
                     .filter { !$0.isEmpty }
                     .joined(separator: " "),
