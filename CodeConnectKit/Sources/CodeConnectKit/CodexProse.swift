@@ -100,14 +100,14 @@ public enum CodexProse {
         case .cleared(.itemCompleted):
             return Banner(
                 title: "This step finished",
-                message: "It was settled at the computer. Codex is still working.",
+                message: "It was settled at \(HostDevice.current.computer("the computer")). Codex is still working.",
                 icon: "check-circle", tone: .info)
 
         case .cleared(.unknown(let raw)):
             return Banner(
                 title: "The question was withdrawn",
                 message:
-                    "The computer gave a reason this app does not recognise (\(raw)). "
+                    "\(HostDevice.current.computer("The computer")) gave a reason this app does not recognise (\(raw)). "
                     + "Nothing was approved and nothing was denied.",
                 icon: "question", tone: .warning)
 
@@ -125,16 +125,16 @@ public enum CodexProse {
             return Banner(
                 title: "Sent, outcome unknown",
                 message:
-                    "\(who) was written and the computer did not learn what became of it. "
-                    + "\(writeStage(stage)) It will not be sent again — check the computer. (\(cause))",
+                    "\(who) was written and \(HostDevice.current.computer("the computer")) did not learn what became of it. "
+                    + "\(writeStage(stage)) It will not be sent again — check \(HostDevice.current.computer("the computer")). (\(cause))",
                 icon: "question", tone: .warning)
 
         case .unrecognisedStatus(let raw):
             return Banner(
                 title: "Ending not recognised",
                 message:
-                    "The computer reported an ending this app has never seen (\(raw)), so it cannot say "
-                    + "what became of this question. Check the computer.",
+                    "\(HostDevice.current.computer("The computer")) reported an ending this app has never seen (\(raw)), so it cannot say "
+                    + "what became of this question. Check \(HostDevice.current.computer("the computer")).",
                 icon: "question", tone: .warning)
         }
     }
@@ -151,7 +151,7 @@ public enum CodexProse {
         // so the daemon knows somebody answered and not what they chose.
         case .local:
             return Banner(
-                title: "Answered at the computer",
+                title: "Answered at \(HostDevice.current.computer("the computer"))",
                 message:
                     "Someone answered at the keyboard before this \(HostDevice.current.noun) did. "
                     + "Codex does not report which choice they made.",
@@ -160,7 +160,7 @@ public enum CodexProse {
             return Banner(
                 title: "Answered",
                 message:
-                    "The computer names an answerer this app does not recognise (\(raw)), "
+                    "\(HostDevice.current.computer("The computer")) names an answerer this app does not recognise (\(raw)), "
                     + "so it cannot say where this was decided.",
                 icon: "question", tone: .warning)
         }
@@ -183,7 +183,7 @@ public enum CodexProse {
         case .answered(.local, nil):
             return "Not known. The Codex wire carries no provenance for a keyboard answer."
         case .answered(_, nil):
-            return "Not known. The computer recorded who answered but not what they chose."
+            return "Not known. \(HostDevice.current.computer("The computer")) recorded who answered but not what they chose."
         case .unknown(_, .some(.optionId(let id)), _, _):
             return "The option “\(id)” was written, and its outcome was never confirmed."
         case .cleared, .timeout:
@@ -193,7 +193,7 @@ public enum CodexProse {
         // choice landed — and the adjacent banner says so. Saying "Nothing"
         // beside it would be the same screen contradicting itself.
         case .unknown, .unrecognisedStatus:
-            return "Not known. The computer could not account for what became of this."
+            return "Not known. \(HostDevice.current.computer("The computer")) could not account for what became of this."
         }
     }
 
@@ -234,7 +234,7 @@ public enum CodexProse {
         // verbatim; the title says who refused, which the sentence does not.
         case .rejected(let reason):
             return Banner(
-                title: "The computer refused this",
+                title: "\(HostDevice.current.computer("The computer")) refused this",
                 message: reason,
                 icon: "warning-fill", tone: .warning,
                 messageIsVerbatim: true)
@@ -259,8 +259,8 @@ public enum CodexProse {
     /// interpret says nothing about whether the mutation happened, and the copy
     /// must not decide for it in either direction.
     static func unknownStatusSentence(_ status: String) -> String {
-        "The computer answered with a status this app does not know (“\(status)”), so what became "
-            + "of this is not something the app can say. Update the app, and check the computer."
+        "\(HostDevice.current.computer("The computer")) answered with a status this app does not know (“\(status)”), so what became "
+            + "of this is not something the app can say. Update the app, and check \(HostDevice.current.computer("the computer"))."
     }
 
     // MARK: What became of a message
@@ -296,7 +296,7 @@ public enum CodexProse {
                 icon: "copy", tone: .info)
         case .rejected(let reason):
             return Banner(
-                title: "The computer refused this",
+                title: "\(HostDevice.current.computer("The computer")) refused this",
                 message: reason,
                 icon: "warning-fill", tone: .warning,
                 messageIsVerbatim: true)
@@ -338,7 +338,7 @@ public enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex session can be stopped from here." }
         guard daemonHonoursStop else {
-            return "This computer's CodeConnect is too old to stop a Codex turn. Update it."
+            return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Codex turn. Update it."
         }
         // **The one honest hide** is the absent turn: with nothing to name there
         // is nothing to send, so the control is absent rather than dead.
@@ -352,7 +352,7 @@ public enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex session is spoken to this way." }
         guard daemonUnderstandsCompose else {
-            return "This computer's CodeConnect is too old to carry a message to Codex. Update it."
+            return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to carry a message to Codex. Update it."
         }
         return link.blockedReason(for: .compose)
     }

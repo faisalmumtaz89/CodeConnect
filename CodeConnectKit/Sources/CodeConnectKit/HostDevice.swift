@@ -23,4 +23,15 @@ public struct HostDevice: Sendable, Equatable {
     #else
         public static let current = HostDevice.iPhone
     #endif
+
+    /// The computer the agents run on, in a sentence that says `phrase` on the
+    /// iPhone. The iPhone keeps `phrase`. A Mac is a computer itself, so there
+    /// "the computer" would read as this Mac: it says the computer's own name
+    /// where the sentence has one, otherwise "the agent's computer", capitalised
+    /// when `phrase` is.
+    public func computer(_ phrase: String, named name: String? = nil) -> String {
+        guard self == .mac else { return phrase }
+        if let name { return name }
+        return phrase.first?.isUppercase == true ? "The agent's computer" : "the agent's computer"
+    }
 }

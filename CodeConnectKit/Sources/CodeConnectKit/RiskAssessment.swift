@@ -92,14 +92,14 @@ public struct RiskAssessment: Sendable, Hashable {
         case .daemon:
             if escalatedLocally {
                 return
-                    "The computer classified this \(declared?.label ?? "-"); this app reads the command as \(heuristic.label) and applied the stricter one."
+                    "\(HostDevice.current.computer("The computer")) classified this \(declared?.label ?? "-"); this app reads the command as \(heuristic.label) and applied the stricter one."
             }
-            return "Classified at the computer."
+            return "Classified at \(HostDevice.current.computer("the computer"))."
         case .daemonSilent:
             return
                 heuristic > .medium
-                ? "The computer sent no class for this card. This app reads the command as \(heuristic.label)."
-                : "The computer sent no class for this card, so it is treated as MEDIUM."
+                ? "\(HostDevice.current.computer("The computer")) sent no class for this card. This app reads the command as \(heuristic.label)."
+                : "\(HostDevice.current.computer("The computer")) sent no class for this card, so it is treated as MEDIUM."
         case .local:
             return "This daemon does not classify risk; read from the command by this app."
         }

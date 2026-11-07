@@ -1239,7 +1239,7 @@ public final class AppModel {
     ) -> String {
         let requestID = starter.start(
             project: project, place: place, agent: agent, prompt: prompt,
-            machineName: machineName ?? "this computer")
+            machineName: machineName ?? HostDevice.current.computer("this computer"))
         #if DEBUG
             if fixturesActive {
                 answerFixtureStart(requestID)
@@ -3126,16 +3126,16 @@ public final class AppModel {
     }
 
     private static let noUidSentence =
-        "The computer has not given this run an id of its own, so nothing was sent."
+        "\(HostDevice.current.computer("The computer")) has not given this run an id of its own, so nothing was sent."
 
     private static func alreadyIssuedSentence(verb: String) -> String {
         "This was already sent and what became of it is not known; it will not be \(verb) again. "
-            + "Check the computer."
+            + "Check \(HostDevice.current.computer("the computer"))."
     }
 
     private static func sentNoAnswerSentence(verb: String) -> String {
-        "This left the \(HostDevice.current.noun) and the computer never answered, so what became of it is not known; "
-            + "it will not be \(verb) again. Check the computer."
+        "This left the \(HostDevice.current.noun) and \(HostDevice.current.computer("the computer")) never answered, so what became of it is not known; "
+            + "it will not be \(verb) again. Check \(HostDevice.current.computer("the computer"))."
     }
 
     /// A typed refusal in the app's own words. **Never dressed as the daemon's**
@@ -3146,7 +3146,7 @@ public final class AppModel {
         switch refusal {
         case .notAdvertised:
             return
-                "The computer's CodeConnect never said it could \(verb), so nothing was sent. Update it."
+                "\(HostDevice.current.computer("The computer"))'s CodeConnect never said it could \(verb), so nothing was sent. Update it."
         case .notACodexSession(let agent):
             return "This is a \(agent) session, so nothing was sent."
         case .nothingToSend(let reason):
@@ -3169,7 +3169,7 @@ public final class AppModel {
         // had left the fleet sent an `allow` for an agent nobody could name.
         guard let agent = summary(for: item.sessionKey)?.agent else {
             return .rejected(
-                "This run is no longer on the fleet, so nothing was sent. Answer it at the computer.")
+                "This run is no longer on the fleet, so nothing was sent. Answer it at \(HostDevice.current.computer("the computer", named: machineName)).")
         }
         if let mismatch = Self.decisionMismatch(
             decision: decision, agent: agent,
@@ -3209,7 +3209,7 @@ public final class AppModel {
             return AnswerAttempt.classify(duplicate: outcome, staleHash: false)
         }
         if card.codexResolution != nil {
-            return .failed("This card was resolved on the computer before your answer left, so nothing was sent.")
+            return .failed("This card was resolved on \(HostDevice.current.computer("the computer", named: machineName)) before your answer left, so nothing was sent.")
         }
         return nil
     }
@@ -3240,22 +3240,22 @@ public final class AppModel {
                     + "so nothing was sent."
             }
             guard answersQuestions else {
-                return "The computer's CodeConnect is too old to answer Claude's questions from the "
-                    + "\(HostDevice.current.noun), so nothing was sent. Answer at the computer."
+                return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer Claude's questions from the "
+                    + "\(HostDevice.current.noun), so nothing was sent. Answer at \(HostDevice.current.computer("the computer"))."
             }
             return nil
         case (.claude, _) where isQuestion:
             return "Claude is asking a question, which is answered by choosing its answers, "
                 + "so nothing was sent."
         case (.claude, _) where !answersApprovalsByHook:
-            return "The computer's CodeConnect is too old to answer Claude's approvals from the "
-                + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at the computer."
+            return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer Claude's approvals from the "
+                + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
         case (.codex, _) where !resolvesCodexCards:
             // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
             // an answered card can never be retired. A card that cannot be
             // retired must not be answered from here, by any vocabulary.
-            return "The computer's CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
-                + "so nothing was sent. Update it, or answer at the computer."
+            return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
+                + "so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
         case (.codex, .allow), (.codex, .deny), (.codex, .option),
             (.codex, .text), (.codex, .answers), (.codex, .decline):
             return "A Codex card is answered by naming one of the options it offered, "
@@ -3383,7 +3383,7 @@ public final class AppModel {
         // which is a dead end in a fleet whose banner says nothing is
         // connected.
         if sampleFleetActive {
-            return .failed("These agents are not real. Pair with your computer to talk to your own.")
+            return .failed("These agents are not real. Pair with \(HostDevice.current.computer("your computer")) to talk to your own.")
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }

@@ -176,8 +176,8 @@ public struct DaemonProfile: Sendable, Hashable {
     /// and clipped its own last two words off the bottom of the screen.
     public var codexAnswerCaveat: String? {
         guard !resolvesCodexCards else { return nil }
-        return "This computer's CodeConnect is too old for answers from the \(HostDevice.current.noun); answer it at "
-            + "the computer. Update it to answer here."
+        return "\(HostDevice.current.computer("This computer", named: machineName))'s CodeConnect is too old for answers from the \(HostDevice.current.noun); answer it at "
+            + "\(HostDevice.current.computer("the computer", named: machineName)). Update it to answer here."
     }
 
     /// Why Codex's controls are absent on a daemon that is otherwise working,
@@ -188,16 +188,16 @@ public struct DaemonProfile: Sendable, Hashable {
         // Returning nil left the Codex surface silent on a dropped link while
         // the diff surface beside it said what was wrong.
         guard isConnected else {
-            return "Not connected. The computer has not said what it can do for a Codex session."
+            return "Not connected. \(HostDevice.current.computer("The computer", named: machineName)) has not said what it can do for a Codex session."
         }
         switch (stopsCodexTurns, composesToCodex) {
         case (true, true): return nil
         case (true, false):
-            return "The computer's CodeConnect can stop a Codex turn but cannot carry a message to one. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect can stop a Codex turn but cannot carry a message to one. Update it."
         case (false, true):
-            return "The computer's CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
         case (false, false):
-            return "The computer's CodeConnect cannot stop or speak to a Codex session. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect cannot stop or speak to a Codex session. Update it."
         }
     }
 

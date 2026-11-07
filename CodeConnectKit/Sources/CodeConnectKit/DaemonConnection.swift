@@ -47,14 +47,14 @@ public enum ConnectionError: LocalizedError, Sendable {
         case .unauthorized: return "The daemon rejected this token"
         case .rejectedPairingCode:
             return
-                "The computer rejected that pairing code. It may have expired, already been used, or been mistyped. Run `codeconnect pair` again for a fresh one."
+                "\(HostDevice.current.computer("The computer")) rejected that pairing code. It may have expired, already been used, or been mistyped. Run `codeconnect pair` again for a fresh one."
         case .incompatible(let detail): return detail
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
         case .hostUnresolvable: return "The daemon's address is not resolving"
         case .sentButUnanswered:
-            return "This left the \(HostDevice.current.noun) and the computer never answered."
+            return "This left the \(HostDevice.current.noun) and \(HostDevice.current.computer("the computer")) never answered."
         }
     }
 }
@@ -497,7 +497,7 @@ public final class DaemonConnection {
     static func pairingUnreachable(host: String, port: Int, detail: String?) -> String {
         let said = detail.map { " (\($0.hasSuffix(".") ? String($0.dropLast()) : $0))" } ?? ""
         return
-            "Could not reach the computer at \(host):\(port)\(said). On the computer, `codeconnect daemon status` shows whether the daemon is running and the address it listens on; this \(HostDevice.current.name) has to be able to reach that address, over Tailscale by default."
+            "Could not reach \(HostDevice.current.computer("the computer")) at \(host):\(port)\(said). On \(HostDevice.current.computer("the computer")), `codeconnect daemon status` shows whether the daemon is running and the address it listens on; this \(HostDevice.current.name) has to be able to reach that address, over Tailscale by default."
     }
 
     /// Which scheme this attempt should use.
@@ -745,7 +745,7 @@ public final class DaemonConnection {
                 let type =
                     (try? decoder.decode(FrameType.self, from: payload))?.type ?? "unrecognised"
                 unreadableFrame =
-                    "This \(HostDevice.current.noun) could not read a “\(Self.boundedType(type))” message from the computer."
+                    "This \(HostDevice.current.noun) could not read a “\(Self.boundedType(type))” message from \(HostDevice.current.computer("the computer", named: helloAck?.machineName))."
                 unreadableFrameAt = Date()
                 lastErrorMessage = unreadableFrame
                 continue
@@ -779,7 +779,7 @@ public final class DaemonConnection {
                     // the few refusals it explains.
                     throw ConnectionError.incompatible(
                         message.isEmpty
-                            ? "This computer's helper speaks a protocol this app does not. Update it and try again."
+                            ? "\(HostDevice.current.computer("This computer"))'s helper speaks a protocol this app does not. Update it and try again."
                             : message)
                 default:
                     break
@@ -1215,7 +1215,7 @@ public final class DaemonConnection {
     static func incompatibility(of ack: HelloAck) -> String? {
         guard ack.protocolVersion != Wire.protocolVersion else { return nil }
         return
-            "This computer's helper speaks protocol \(ack.protocolVersion); this app speaks \(Wire.protocolVersion). Update CodeConnect on the computer and try again."
+            "\(HostDevice.current.computer("This computer", named: ack.machineName))'s helper speaks protocol \(ack.protocolVersion); this app speaks \(Wire.protocolVersion). Update CodeConnect on \(HostDevice.current.computer("the computer", named: ack.machineName)) and try again."
     }
 
     // MARK: - Inbound
@@ -1330,7 +1330,7 @@ public final class DaemonConnection {
             // adds message types, and the reader deserves to know the Mac is
             // telling them something this app cannot hear.
             unreadableFrame =
-                "This \(HostDevice.current.noun) cannot read a “\(Self.boundedType(type))” message from the computer."
+                "This \(HostDevice.current.noun) cannot read a “\(Self.boundedType(type))” message from \(HostDevice.current.computer("the computer", named: helloAck?.machineName))."
             unreadableFrameAt = Date()
         case .pong, .sessions, .event, .historyEnd, .projects, .startSessionResult, .projectGit, .folderListing,
             .createFolderResult:
@@ -1349,7 +1349,7 @@ public final class DaemonConnection {
         guard let expected = mutationSessions[requestID] else { return true }
         guard expected == sessionID else {
             unreadableFrame =
-                "The computer answered this \(HostDevice.current.name)'s \(kind) for one session with another session's "
+                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)'s \(kind) for one session with another session's "
                 + "result. It was ignored."
             unreadableFrameAt = Date()
             return false

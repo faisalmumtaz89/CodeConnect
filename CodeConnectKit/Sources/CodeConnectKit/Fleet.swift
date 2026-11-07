@@ -446,7 +446,7 @@ public enum FleetStatusRule {
             return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
             return .observe(
-                reason: "No supervisor is attached to this session. It can only be answered at the computer."
+                reason: "No supervisor is attached to this session. It can only be answered at \(HostDevice.current.computer("the computer"))."
             )
         case .stale:
             return .observe(reason: "The daemon has not heard from this session recently.")

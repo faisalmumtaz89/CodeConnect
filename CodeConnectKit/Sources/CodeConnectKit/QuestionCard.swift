@@ -276,22 +276,22 @@ public enum QuestionCardStatus: Sendable, Hashable {
             return nil
         case .askingAtMac:
             return (
-                "Asking at the computer",
-                "Claude is asking this at the computer, so it can only be answered there.",
+                "Asking at \(HostDevice.current.computer("the computer"))",
+                "Claude is asking this at \(HostDevice.current.computer("the computer")), so it can only be answered there.",
                 .info, "desktop"
             )
         case .answerAtMac:
             return (
-                "Answer at the computer",
+                "Answer at \(HostDevice.current.computer("the computer"))",
                 "This question can no longer be answered from the \(HostDevice.current.noun). It may still be open "
-                    + "at the computer.",
+                    + "at \(HostDevice.current.computer("the computer")).",
                 .warning, "desktop"
             )
         case .macTooOld:
             return (
-                "Answer at the computer",
-                "This computer's CodeConnect is too old to answer Claude's questions from the "
-                    + "\(HostDevice.current.noun). Answer it at the computer, or update it to answer here.",
+                "Answer at \(HostDevice.current.computer("the computer"))",
+                "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to answer Claude's questions from the "
+                    + "\(HostDevice.current.noun). Answer it at \(HostDevice.current.computer("the computer")), or update it to answer here.",
                 .warning, "desktop"
             )
         case .unreachable(let reason):
@@ -303,20 +303,20 @@ public enum QuestionCardStatus: Sendable, Hashable {
             )
         case .answeredAtMac:
             return (
-                "Answered at the computer",
-                "This question was answered at the computer. Nothing from this \(HostDevice.current.noun) was used.",
+                "Answered at \(HostDevice.current.computer("the computer"))",
+                "This question was answered at \(HostDevice.current.computer("the computer")). Nothing from this \(HostDevice.current.noun) was used.",
                 .info, "desktop"
             )
         case .declined:
             return (
-                "Declined", "Declined from the \(HostDevice.current.noun), as Escape does at the computer.", .info,
+                "Declined", "Declined from the \(HostDevice.current.noun), as Escape does at \(HostDevice.current.computer("the computer")).", .info,
                 "x-circle"
             )
         case .unconfirmed:
             return (
                 "Unconfirmed",
-                "The computer took this answer but could not confirm Claude received it. "
-                    + "Check the computer.",
+                "\(HostDevice.current.computer("The computer")) took this answer but could not confirm Claude received it. "
+                    + "Check \(HostDevice.current.computer("the computer")).",
                 .warning, "question"
             )
         case .closed:

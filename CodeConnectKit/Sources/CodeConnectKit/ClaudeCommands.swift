@@ -171,7 +171,7 @@ public enum ClaudeCommandPolicy {
                     command: command,
                     reason:
                         "/\(command) takes no arguments here. Remove the "
-                        + "extra text to capture the computer's view.")
+                        + "extra text to capture \(HostDevice.current.computer("the computer"))'s view.")
             }
             guard recoversComposer else {
                 return .blocked(
@@ -187,7 +187,7 @@ public enum ClaudeCommandPolicy {
             return .blocked(
                 command: command,
                 reason:
-                    "/\(command) opens a view on the computer that Esc does not close, so "
+                    "/\(command) opens a view on \(HostDevice.current.computer("the computer")) that Esc does not close, so "
                     + "CodeConnect cannot recover the composer for you. "
                     + "Use the Terminal tab to run it.")
         }
@@ -195,7 +195,7 @@ public enum ClaudeCommandPolicy {
             return .blocked(
                 command: command,
                 reason:
-                    "/\(command) opens a view on the computer and would take over this "
+                    "/\(command) opens a view on \(HostDevice.current.computer("the computer")) and would take over this "
                     + "composer. Use the Terminal tab to run it.")
         }
         if unobservableCommands.contains(command) {
@@ -203,7 +203,7 @@ public enum ClaudeCommandPolicy {
                 command: command,
                 reason:
                     "/\(command) changes something CodeConnect cannot yet observe. "
-                    + "Use the Terminal tab until the computer reports it back to the app.")
+                    + "Use the Terminal tab until \(HostDevice.current.computer("the computer")) reports it back to the app.")
         }
         // Everything else — a measured-inline built-in, a custom skill, a
         // project command, a typo — is typed. The supervisor's recovery

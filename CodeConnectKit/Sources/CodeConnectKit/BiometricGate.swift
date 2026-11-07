@@ -39,7 +39,7 @@ public enum BiometricGate {
     /// class: an authentication prompt that does not say what it authorises is a
     /// prompt people learn to clear reflexively.
     public static func reason(for toolName: String) -> String {
-        "Approve a high-risk \(toolName) on your computer"
+        "Approve a high-risk \(toolName) on \(HostDevice.current.computer("your computer"))"
     }
 
     public static func confirm(reason: String) async -> Outcome {
@@ -58,7 +58,7 @@ public enum BiometricGate {
             let detail = accessError?.takeRetainedValue().localizedDescription
                 ?? "the access policy could not be created"
             return .unavailable(
-                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret), and this \(HostDevice.current.name) could not set that up (\(detail)). Answer this one at the computer."
+                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret), and this \(HostDevice.current.name) could not set that up (\(detail)). Answer this one at \(HostDevice.current.computer("the computer"))."
             )
         }
 
@@ -97,21 +97,21 @@ public enum BiometricGate {
     private static func unavailableReason(_ error: NSError?) -> String {
         guard let error, let code = LAError.Code(rawValue: error.code) else {
             return
-                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret) and this \(HostDevice.current.name) cannot run that check. Answer this one at the computer."
+                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret) and this \(HostDevice.current.name) cannot run that check. Answer this one at \(HostDevice.current.computer("the computer"))."
         }
         switch code {
         case .passcodeNotSet:
             return
-                "This \(HostDevice.current.name) has no \(HostDevice.current.secret), so it cannot prove who is holding it. High-risk approvals have to be answered at the computer."
+                "This \(HostDevice.current.name) has no \(HostDevice.current.secret), so it cannot prove who is holding it. High-risk approvals have to be answered at \(HostDevice.current.computer("the computer"))."
         case .biometryNotEnrolled:
             return
-                "\(HostDevice.current.biometric) is not set up on this \(HostDevice.current.name). Set it up, or answer high-risk approvals at the computer, the \(HostDevice.current.secret) alone is offered when \(HostDevice.current.biometric) is available but unrecognised."
+                "\(HostDevice.current.biometric) is not set up on this \(HostDevice.current.name). Set it up, or answer high-risk approvals at \(HostDevice.current.computer("the computer")), the \(HostDevice.current.secret) alone is offered when \(HostDevice.current.biometric) is available but unrecognised."
         case .biometryNotAvailable:
             return
-                "\(HostDevice.current.biometric) is unavailable on this \(HostDevice.current.name). High-risk approvals need it, or the \(HostDevice.current.secret); answer this one at the computer."
+                "\(HostDevice.current.biometric) is unavailable on this \(HostDevice.current.name). High-risk approvals need it, or the \(HostDevice.current.secret); answer this one at \(HostDevice.current.computer("the computer"))."
         default:
             return
-                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret): \(error.localizedDescription). Answer this one at the computer."
+                "High-risk approvals need \(HostDevice.current.biometric) or a \(HostDevice.current.secret): \(error.localizedDescription). Answer this one at \(HostDevice.current.computer("the computer"))."
         }
     }
 
