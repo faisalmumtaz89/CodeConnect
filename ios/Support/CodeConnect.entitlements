@@ -17,5 +17,13 @@
 	     App Attest capability on the App ID in the Apple Developer portal. -->
 	<key>com.apple.developer.devicecheck.appattest-environment</key>
 	<string>development</string>
+	<!-- The pairing link a QR code holds, https://codeconnect.sh/p#…, opens this
+	     app rather than the page, once codeconnect.sh serves
+	     .well-known/apple-app-site-association naming this App ID. Requires the
+	     Associated Domains capability on the App ID. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:codeconnect.sh</string>
+	</array>
 </dict>
 </plist>
