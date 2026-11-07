@@ -1089,7 +1089,16 @@ runs; a clean filter configured for a file, such as Git LFS's, does, as it does
 for `get_diff`; a binary file and a file git does not track add nothing). They are read when a turn ends, when the
 run registers and when the daemon starts, never on a `sessions` request, and
 omitted outside a repository, before the first read, and on a detached head
-(the branch).
+(the branch). It also answers `get_machine_stats` (the `machine_stats`
+capability, offered to every connection) with one `machine_stats {cpu?,
+memory_used?, memory_total?, disk_used?, disk_total?, captured_at}`, taken when
+asked and never stored: `cpu` is the share of all cores busy over half a
+second, 0 to 1; memory is in bytes, used being total less what is available for
+new work (Activity Monitor's Memory Used on macOS, `MemTotal - MemAvailable` on
+Linux); disk is in bytes for the volume holding the daemon user's home folder,
+used being its size less what that user can still write. A value that cannot be
+read is omitted. The sample is answered off the connection's loop, so nothing
+else on it waits for the half second.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

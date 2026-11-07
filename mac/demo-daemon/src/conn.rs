@@ -286,6 +286,18 @@ where
             )
             .await?
         }
+        // Not advertised (`machine_stats` is false): answered as a daemon below
+        // minor 31 answers it.
+        ClientMessage::GetMachineStats => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    code: "bad_request".into(),
+                    message: "the demo daemon does not report machine stats".into(),
+                },
+            )
+            .await?
+        }
         ClientMessage::Sessions => {
             send(
                 sink,
@@ -541,6 +553,7 @@ fn capabilities() -> Capabilities {
         start_session: false,
         start_worktree: false,
         browse_folders: false,
+        machine_stats: false,
     }
 }
 
