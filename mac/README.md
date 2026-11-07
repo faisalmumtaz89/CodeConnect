@@ -439,7 +439,11 @@ CodeConnect update available · 0.2.0 → 0.3.0
 It ends with the one fix: `codeconnect update`, which downloads that release,
 proves it is signed by CodeConnect's Apple team, and replaces all three
 binaries in a single directory exchange — so an interrupted update leaves the
-complete old set or the complete new one, never a mixture. A failed check
+complete old set or the complete new one, never a mixture. Where CodeConnect.app
+installed the binaries (it leaves `~/.codeconnect/bin/.installed-by-app`), the
+app keeps them current: there is no advisory, and `codeconnect update` refuses
+with "CodeConnect.app keeps these up to date; update the app.", followed by the
+way back: delete that file if CodeConnect.app was removed. A failed check
 renders as silence: an advisory that can be wrong is worse than none. The
 `update_check` config switch disables the background check; identity stays
 visible through `--version` and `daemon status`.
