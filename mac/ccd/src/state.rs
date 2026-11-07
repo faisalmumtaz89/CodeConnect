@@ -612,6 +612,10 @@ struct Inner {
     /// [`Daemon::recover`] and kept current by every ingest after it. One entry
     /// per run that has ingested anything, the same bound as `last_seen_ms`.
     session_facts: HashMap<String, protocol::facts::SessionFacts>,
+    /// Per run: its working tree's branch and line counts as git last read them,
+    /// for the session list. Filled by [`Daemon::refresh_tree`] when a turn
+    /// ends, when the run registers, and at start; never on a listing.
+    tree_facts: HashMap<String, crate::git::TreeFacts>,
     /// When pairing attempts failed, inside the current window.
     ///
     /// Oldest first, and never longer than `pairing_max_attempts`, so this is a
@@ -2282,6 +2286,9 @@ impl Daemon {
         };
         let mut rebuilt = Vec::with_capacity(rows.len());
         for row in rows {
+            if row.lifecycle == Lifecycle::Live {
+                self.refresh_tree(&row.session_uid);
+            }
             match self.db.session_facts(row.session_uid.clone()).await {
                 Ok(facts) => rebuilt.push((row.session_uid, facts)),
                 Err(err) => crate::log_error!(
@@ -2826,8 +2833,12 @@ impl Daemon {
                 .observe(event);
             inner
                 .last_seen_ms
-                .insert(session_uid, protocol::time::now_unix_ms());
+                .insert(session_uid.clone(), protocol::time::now_unix_ms());
             note_tool_result(&mut inner, event);
+            drop(inner);
+            if event.kind == EventKind::TurnComplete {
+                self.refresh_tree(&session_uid);
+            }
         }
         Ok(event)
     }
@@ -2898,6 +2909,12 @@ impl Daemon {
             inner
                 .last_seen_ms
                 .insert(session_uid.to_string(), protocol::time::now_unix_ms());
+        }
+        if events
+            .iter()
+            .any(|event| event.kind == EventKind::TurnComplete)
+        {
+            self.refresh_tree(session_uid);
         }
         // **A prompt filed for the first time is the run moving** — the only
         // word of a prompt typed at the Mac, since no hook fires for one. Only
@@ -8593,6 +8610,7 @@ impl Daemon {
             session.uid,
             info.protocol_minor
         );
+        self.refresh_tree(&session.uid);
         Ok(Registration { session, epoch })
     }
 
@@ -9630,6 +9648,7 @@ impl Daemon {
                 .collect();
             pending.sort_by_key(|card| card.seq);
             let facts = inner.session_facts.get(&row.session_uid);
+            let tree = inner.tree_facts.get(&row.session_uid);
             // **One read, two fields.** The thread this run is on and the state of
             // the link carrying it are both answers about the same addressee, and
             // resolving it twice would let one summary disagree with itself: the
@@ -9693,6 +9712,10 @@ impl Daemon {
                 pending,
                 model: facts.and_then(|facts| facts.model.clone()),
                 permission_mode: facts.and_then(|facts| facts.permission_mode.clone()),
+                // Read from the cache `refresh_tree` fills, never from git here:
+                // this listing is answered on every fleet refresh.
+                git_branch: tree.and_then(|tree| tree.branch.clone()),
+                diff_stat: tree.and_then(|tree| tree.diff_stat),
             });
         }
         out
@@ -10486,6 +10509,24 @@ impl Daemon {
             Duration::from_millis(self.config.diff_timeout_ms),
         )
         .await)
+    }
+
+    /// Read a run's branch and line counts from git into the session list, on a
+    /// task of its own so no caller waits on git. A run whose row is gone is
+    /// left alone.
+    fn refresh_tree(&self, session_uid: &str) {
+        let db = self.db.clone();
+        let inner = Arc::clone(&self.inner);
+        let git_bin = self.config.git_bin.clone();
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let session_uid = session_uid.to_string();
+        tokio::spawn(async move {
+            let Ok(Some(row)) = db.get_session(session_uid.clone()).await else {
+                return;
+            };
+            let tree = crate::git::tree_facts(&row.cwd, git_bin.as_deref(), timeout).await;
+            inner.lock().await.tree_facts.insert(session_uid, tree);
+        });
     }
 
     // --------------------------------------------------------- pairing
@@ -15163,6 +15204,92 @@ mod tests {
                 "a finished turn is not a finished session: {kinds:?}"
             );
         }
+    }
+
+    /// **The session list's branch and line counts are read when a turn ends,
+    /// and only then**: a listing between turns runs no git and shows the last
+    /// read, however the tree has moved since.
+    #[tokio::test]
+    async fn a_turn_end_reads_the_tree_into_the_session_list() {
+        let repo = std::env::temp_dir().join(format!(
+            "ccd-tree-facts-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new(crate::git::git_bin(None).unwrap())
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "first"]);
+        std::fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+
+        let daemon = test_daemon();
+        let stop = || HookPost {
+            session_id: "cc-1".into(),
+            session_uid: Some(TEST_UID.to_string()),
+            event: "Stop".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": repo}),
+            wait: false,
+            holds_questions: false,
+            holds_approvals: false,
+        };
+        let read_after = |added: u64| {
+            let daemon = Arc::clone(&daemon);
+            async move {
+                for _ in 0..200 {
+                    let summary = summary_of(&daemon, TEST_UID).await;
+                    if summary.diff_stat.map(|stat| stat.added) == Some(added) {
+                        return summary;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                panic!("the tree was not read within 10 s");
+            }
+        };
+
+        daemon.handle_hook(stop()).await;
+        let summary = read_after(1).await;
+        assert_eq!(summary.git_branch.as_deref(), Some("main"));
+        assert_eq!(
+            summary.diff_stat,
+            Some(protocol::event::DiffStat {
+                added: 1,
+                removed: 0
+            })
+        );
+
+        std::fs::write(repo.join("a.txt"), "a\nb\nc\n").unwrap();
+        git(&["checkout", "-q", "-b", "next"]);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let between = summary_of(&daemon, TEST_UID).await;
+        assert_eq!(
+            (
+                between.git_branch.as_deref(),
+                between.diff_stat.map(|s| s.added)
+            ),
+            (Some("main"), Some(1)),
+            "a listing between turns reads no git"
+        );
+
+        daemon.handle_hook(stop()).await;
+        let summary = read_after(2).await;
+        assert_eq!(summary.git_branch.as_deref(), Some("next"));
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// Claude runs the Stop hook before its final reply reaches the transcript

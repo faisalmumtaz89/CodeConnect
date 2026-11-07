@@ -714,6 +714,25 @@ where
                     continue;
                 }
 
+                // Off the loop: the sample waits half a second for the CPU, and
+                // nothing else on this connection may wait behind it.
+                if matches!(parsed, ClientMessage::GetMachineStats) {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let stats = crate::machine::stats(home.as_deref()).await;
+                        let _ = replies.send(ServerMessage::MachineStats {
+                            cpu: stats.cpu,
+                            memory_used: stats.memory_used,
+                            memory_total: stats.memory_total,
+                            disk_used: stats.disk_used,
+                            disk_total: stats.disk_total,
+                            captured_at: protocol::time::now_rfc3339(),
+                        });
+                    });
+                    continue;
+                }
+
                 // Starting an agent carries a terminal's authority, so it is
                 // open to exactly the connections a terminal is.
                 if matches!(
@@ -1119,7 +1138,8 @@ where
         | ClientMessage::GetProjectGit { .. }
         | ClientMessage::ListFolder { .. }
         | ClientMessage::CreateFolder { .. }
-        | ClientMessage::StartSession { .. } => {}
+        | ClientMessage::StartSession { .. }
+        | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -3107,6 +3127,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         start_session: terminal_allowed,
         start_worktree: terminal_allowed,
         browse_folders: terminal_allowed,
+        machine_stats: true,
     }
 }
 
@@ -8533,6 +8554,46 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// **A machine-stats sample holds nothing up**: it is advertised, its answer
+    /// carries every value, and a `sessions` asked right behind it on the same
+    /// connection is answered first, well inside the sample's half second.
+    #[tokio::test]
+    async fn machine_stats_is_answered_without_holding_up_the_connection() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["machine_stats"], true, "{ack}");
+
+        let asked = std::time::Instant::now();
+        for request in [ClientMessage::GetMachineStats, ClientMessage::Sessions] {
+            phone
+                .send(Message::Text(serde_json::to_string(&request).unwrap()))
+                .await
+                .unwrap();
+        }
+        let first = next_json(&mut phone).await.unwrap();
+        let sessions_after = asked.elapsed();
+        assert_eq!(first["type"], "sessions", "{first}");
+        assert!(
+            sessions_after < crate::machine::CPU_WINDOW / 2,
+            "sessions waited {sessions_after:?} behind the sample"
+        );
+
+        let stats = next_json(&mut phone).await.unwrap();
+        assert_eq!(stats["type"], "machine_stats", "{stats}");
+        assert!(asked.elapsed() >= crate::machine::CPU_WINDOW, "{stats}");
+        for key in [
+            "cpu",
+            "memory_used",
+            "memory_total",
+            "disk_used",
+            "disk_total",
+        ] {
+            assert!(stats[key].is_number(), "{key}: {stats}");
+        }
+    }
+
     /// **Browsing and making folders answer only a paired device**, as starting
     /// does: the bootstrap token is refused, and a paired phone gets its listing and
     /// its new folder.
@@ -8730,6 +8791,105 @@ mod tests {
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// **The session-list fields and machine stats a minor-31 daemon sends,
+    /// emitted by this build.** The Mac app's tests read the copy under `ios/`
+    /// (byte-identical, by `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_31_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-31-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_31_wire().await,
+            committed,
+            "the committed minor-31 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_31_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-31-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_31_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_31_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-31-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The capabilities a paired phone is offered over a live socket, the
+    /// `get_machine_stats` request, and the two answers it can get, whole and
+    /// with the disk unread; and a session list with and without a branch and
+    /// line counts. The answers are this build's encoding of fixed values, so the
+    /// fixture is the same on every machine: how they are read is covered by the
+    /// tests of `machine` and of the turn-end refresh.
+    async fn derived_minor_31_wire() -> serde_json::Value {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (_phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let stats = |disk: Option<(u64, u64)>| ServerMessage::MachineStats {
+            cpu: Some(0.38),
+            memory_used: Some(76_235_669_504),
+            memory_total: Some(206_158_430_208),
+            disk_used: disk.map(|(used, _)| used),
+            disk_total: disk.map(|(_, total)| total),
+            captured_at: "2026-11-07T04:00:00.000Z".into(),
+        };
+        let summary = |uid: &str, name: &str, cwd: &str, tree: Option<(&str, u64, u64)>| {
+            protocol::event::SessionSummary {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                cwd: cwd.into(),
+                lifecycle: protocol::event::Lifecycle::Live,
+                link: protocol::event::Link::Attached,
+                claude_session_id: None,
+                transcript_path: None,
+                last_seq: 12,
+                created_at: "2026-11-07T03:00:00.000Z".into(),
+                updated_at: "2026-11-07T04:00:00.000Z".into(),
+                blocked_on: Vec::new(),
+                project_label: crate::project_label::project_label(cwd),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_link: protocol::event::CodexLink::None,
+                pending: Vec::new(),
+                model: None,
+                permission_mode: None,
+                git_branch: tree.map(|(branch, _, _)| branch.to_string()),
+                diff_stat: tree
+                    .map(|(_, added, removed)| protocol::event::DiffStat { added, removed }),
+            }
+        };
+        serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "get_machine_stats_request": serde_json::to_value(ClientMessage::GetMachineStats)
+                .unwrap(),
+            "machine_stats": serde_json::to_value(stats(Some((1_400_000_000_000, 4_000_000_000_000))))
+                .unwrap(),
+            "machine_stats_partial": serde_json::to_value(stats(None)).unwrap(),
+            "sessions": serde_json::to_value(ServerMessage::Sessions {
+                sessions: vec![
+                    summary(
+                        "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+                        "cc-1",
+                        "/tmp/ccd-minor-31/app",
+                        Some(("feature/fleet", 120, 7)),
+                    ),
+                    summary("01K1B3XQ8ZC0DE5FGH7JKMNPQS", "cc-2", "/tmp/ccd-minor-31/notes", None),
+                ],
+            })
+            .unwrap(),
+        })
     }
 
     /// A folder's folders, a new folder, a start in a folder no session has run in,

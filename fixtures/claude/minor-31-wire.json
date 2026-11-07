@@ -1,0 +1,92 @@
+{
+  "get_machine_stats_request": {
+    "type": "get_machine_stats"
+  },
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "machine_stats": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "terminal_pty": true,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "machine_stats": {
+    "captured_at": "2026-11-07T04:00:00.000Z",
+    "cpu": 0.38,
+    "disk_total": 4000000000000,
+    "disk_used": 1400000000000,
+    "memory_total": 206158430208,
+    "memory_used": 76235669504,
+    "type": "machine_stats"
+  },
+  "machine_stats_partial": {
+    "captured_at": "2026-11-07T04:00:00.000Z",
+    "cpu": 0.38,
+    "memory_total": 206158430208,
+    "memory_used": 76235669504,
+    "type": "machine_stats"
+  },
+  "sessions": {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-11-07T03:00:00.000Z",
+        "cwd": "/tmp/ccd-minor-31/app",
+        "diff_stat": {
+          "added": 120,
+          "removed": 7
+        },
+        "git_branch": "feature/fleet",
+        "last_seq": 12,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "app",
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "cc-1",
+        "updated_at": "2026-11-07T04:00:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-11-07T03:00:00.000Z",
+        "cwd": "/tmp/ccd-minor-31/notes",
+        "last_seq": 12,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "notes",
+        "session_id": "cc-2",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "tmux_session": "cc-2",
+        "updated_at": "2026-11-07T04:00:00.000Z"
+      }
+    ],
+    "type": "sessions"
+  }
+}
