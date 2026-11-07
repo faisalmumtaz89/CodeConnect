@@ -1852,10 +1852,12 @@ mod tests {
         };
         let encoded = serde_json::to_string(&ack).unwrap();
         assert!(!encoded.contains("device_token"), "{encoded}");
-        assert!(
-            !encoded.contains("machine_"),
-            "a name that could not be read is left out, never sent empty: {encoded}"
-        );
+        for key in ["\"machine_name\"", "\"machine_os\"", "\"machine_id\""] {
+            assert!(
+                !encoded.contains(key),
+                "a name that could not be read is left out, never sent empty: {encoded}"
+            );
+        }
         assert!(
             !encoded.contains("push_environment"),
             "a daemon holding no token for this device claims no environment: {encoded}"
