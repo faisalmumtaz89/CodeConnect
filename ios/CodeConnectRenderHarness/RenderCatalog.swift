@@ -899,7 +899,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet 5")
+                try driver.tapRow(app, "Sonnet")
                 try driver.require(
                     driver.text(containing: "was not changed", in: app),
                     "the honest no-change line")
@@ -913,7 +913,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet 5")
+                try driver.tapRow(app, "Sonnet")
                 // The watch stays armed — this is the moment it stops claiming
                 // a receipt is coming, and gives the controls back rather than
                 // leaving the sheet inert with a spinner nobody can stop.
@@ -930,7 +930,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet 5")
+                try driver.tapRow(app, "Sonnet")
                 try driver.require(
                     driver.text(containing: "pressed Esc", in: app),
                     "the observed-facts-only line")

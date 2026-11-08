@@ -409,6 +409,21 @@ final class ModelChangeWatchTests: XCTestCase {
         XCTAssertNil(ModelChangeWatch.outcome(after: 0, requested: "opus", signal: nil))
     }
 
+    /// **A row asks for a family, and Claude Code answers with the version it
+    /// chose.** Measured on Claude Code 2.1.319: `/model opus` writes this line
+    /// to its transcript, the name a code span. The tap is answered whatever
+    /// version the family is at, with Claude Code's name, unwrapped.
+    func testATapOnAFamilyIsAnsweredByTheModelClaudeCodeSet() {
+        let outcome = ModelCommandOutcome.parse(
+            "Set model to `Opus 5.5` and saved as your default for new sessions")
+        XCTAssertEqual(outcome, .receipt(.set("Opus 5.5")))
+        let received = outcome.map { signal($0, 2) }
+        XCTAssertEqual(ModelChangeWatch.outcome(after: 1, requested: "opus", signal: received), outcome)
+        XCTAssertNil(
+            ModelChangeWatch.outcome(after: 1, requested: "sonnet", signal: received),
+            "an Opus receipt does not answer a tap on Sonnet")
+    }
+
     /// A cancelled confirmation for the requested value is reported as the
     /// non-change it is — never as the answer the sheet hoped for.
     func testAKeptReceiptAboveTheFenceIsAKeptReceipt() {
@@ -419,6 +434,40 @@ final class ModelChangeWatchTests: XCTestCase {
             return XCTFail("\(String(describing: outcome))")
         }
         XCTAssertFalse(receipt.isChange)
+    }
+}
+
+/// The run's model reads the same whichever side named it. A daemon of 0.17.2
+/// sends a 2.1.319 receipt's name as it was written, a code span, and its fact
+/// wins over the phone's own parse when it is the newer.
+@MainActor
+final class DaemonModelFactTests: XCTestCase {
+    func testABacktickedDaemonFactReadsAsTheModelItNames() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("model-fact-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(cache: EventCache(root: root))
+        let summary = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data(
+                #"""
+                {"session_uid":"01K8N0AAAAAAAAAAAAAAAAAAAA","session_id":"cc-1","tmux_session":"cc-1",
+                 "cwd":"/tmp/alpha","project_label":"alpha","agent":"claude","lifecycle":"live","link":"attached",
+                 "last_seq":9,"created_at":"2026-11-09T09:00:00Z","updated_at":"2026-11-09T10:00:00Z","blocked_on":[],
+                 "model":{"value":"`Opus 5.5`","seq":9,"source":"command","at":"2026-11-09T10:00:00Z"}}
+                """#.utf8))
+        model.adoptSummariesForTesting([summary])
+        let name = try XCTUnwrap(model.confirmedModel(for: summary.sessionKey)).name
+        XCTAssertEqual(name, "Opus 5.5")
+    }
+}
+
+/// The Model sheet's rows are Claude Code's families, named as its own model
+/// list names them, with no version for this build to keep up to date.
+final class ModelFamilyRowTests: XCTestCase {
+    func testARowIsItsFamilysName() {
+        XCTAssertEqual(
+            ["fable", "opus", "sonnet", "haiku"].map { ModelDisplay.from($0).name },
+            ["Fable", "Opus", "Sonnet", "Haiku"])
     }
 }
 
@@ -433,6 +482,24 @@ final class ModelCommandOutcomeTests: XCTestCase {
     func testReceiptsStillWin() {
         XCTAssertEqual(
             ModelCommandOutcome.parse("Kept model as Fable 5"), .receipt(.kept("Fable 5")))
+    }
+
+    /// The rule the phone and the daemon share, case by case, from the
+    /// transcript line as it arrives: the name out of one code span around it,
+    /// and nothing else.
+    func testTheReceiptRuleThePhoneAndTheDaemonShare() {
+        let cases: [(String, ModelConfirmation?)] = [
+            ("Set model to `Opus 5.5` and saved as your default for new sessions", .set("Opus 5.5")),
+            ("Kept model as `Opus 5.5`", .kept("Opus 5.5")),
+            ("Set model to ``", .set("``")),
+            ("Set model to ` `", .set(" ")),
+            ("Set model to `opus` (claude-opus-5[1m])", .set("`opus` (claude-opus-5[1m])")),
+        ]
+        for (line, expected) in cases {
+            guard case .output(let text)? = LocalCommandLine.parse("<local-command-stdout>\(line)</local-command-stdout>")
+            else { XCTFail(line); continue }
+            XCTAssertEqual(ModelConfirmation.parse(text), expected, line)
+        }
     }
 
     /// Matched by its measured shape and nothing looser.

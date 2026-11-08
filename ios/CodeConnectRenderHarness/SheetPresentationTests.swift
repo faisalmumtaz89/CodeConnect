@@ -39,7 +39,7 @@ final class SheetPresentationTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
 
         let title = try driver.require(app.staticTexts["Model"].firstMatch, "the sheet title")
-        let row = try driver.require(app.staticTexts["Opus 5"].firstMatch, "a chooser row")
+        let row = try driver.require(app.staticTexts["Opus"].firstMatch, "a chooser row")
         let titleBefore = title.frame
         let rowBefore = row.frame
 

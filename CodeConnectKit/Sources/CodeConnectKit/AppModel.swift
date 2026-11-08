@@ -1934,7 +1934,7 @@ public final class AppModel {
         let shown = shown(for: key)
         if let fact = shownSummary(for: key)?.model, fact.seq > shown?.confirmedModelSeq ?? 0 {
             return ConfirmedModel(
-                name: fact.value, provenance: ModelProvenance(fact.source),
+                name: ModelConfirmation.unwrapped(fact.value), provenance: ModelProvenance(fact.source),
                 at: ISO8601.parse(fact.at) ?? .distantPast)
         }
         return shown?.confirmedModel

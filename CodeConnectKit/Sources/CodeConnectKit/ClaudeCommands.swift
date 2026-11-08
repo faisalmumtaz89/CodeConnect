@@ -245,21 +245,18 @@ public struct ModelDisplay: Equatable {
     /// already and are NOT a raw fallback.
     public var isRawFallback: Bool
 
-    /// The four shipped families and their current display versions — also
-    /// the alias table, because `/model sonnet` and `claude-sonnet-5` are
-    /// the same choice wearing two spellings.
-    private static let families: [String: String] = [
-        "fable": "Fable 5",
-        "opus": "Opus 5",
-        "sonnet": "Sonnet 5",
-        "haiku": "Haiku 4.5",
-    ]
+    /// Claude Code's model families, which `/model` takes as aliases for the
+    /// newest of each, named as its own model list names them. Names only:
+    /// which version an alias stands for is Claude Code's to say, in its
+    /// receipt, and the versions this table used to carry went stale with a
+    /// release.
+    private static let families = ["fable", "opus", "sonnet", "haiku"]
 
     public static func from(_ raw: String) -> ModelDisplay {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowered = trimmed.lowercased()
-        if let known = families[lowered] {
-            return ModelDisplay(name: known, meta: nil, isRawFallback: false)
+        if families.contains(lowered) {
+            return ModelDisplay(name: word(lowered), meta: nil, isRawFallback: false)
         }
         guard lowered.hasPrefix("claude-") else {
             // Not an API id shape. Claude's own words ("Sonnet 5"), or some
@@ -280,20 +277,30 @@ public struct ModelDisplay: Equatable {
         // Only the known families earn an invented display name; a family
         // this build has never heard of stays visibly machine-shaped rather
         // than being dressed in a name nobody vouched for.
-        guard let family = tokens.first, families.keys.contains(family),
+        guard let family = tokens.first, families.contains(family),
             tokens.dropFirst().allSatisfy({ $0.allSatisfy(\.isNumber) })
         else {
             return ModelDisplay(name: trimmed, meta: nil, isRawFallback: true)
         }
         let versions = tokens.dropFirst()
-        let name: String
-        if versions.isEmpty {
-            name = families[family] ?? family
-        } else {
-            name = family.prefix(1).uppercased() + family.dropFirst() + " "
-                + versions.joined(separator: ".")
-        }
+        let name = versions.isEmpty ? word(family) : word(family) + " " + versions.joined(separator: ".")
         return ModelDisplay(name: name, meta: meta, isRawFallback: false)
+    }
+
+    /// The family a model belongs to: `opus` for `opus`, `Opus 5.5` and
+    /// `claude-opus-5-5[1m]` alike; nil outside the known families.
+    public static func family(of raw: String) -> String? {
+        let display = from(raw)
+        guard !display.isRawFallback,
+            let first = display.name.split(separator: " ").first?.lowercased(),
+            families.contains(first)
+        else { return nil }
+        return first
+    }
+
+    /// `opus` → `Opus`.
+    private static func word(_ family: String) -> String {
+        family.prefix(1).uppercased() + family.dropFirst()
     }
 }
 
@@ -368,10 +375,11 @@ public struct ModelCommandSignal: Sendable, Hashable {
 /// lands above the fence, and reporting `Model set to Opus 5` over a tap that
 /// asked for Sonnet is the same phantom state wearing a fresher timestamp.
 ///
-/// So both. Names are compared through `ModelDisplay`, because the request
-/// carries an alias (`sonnet`) and the receipt carries a display name
-/// (`Sonnet 5`); the error carries the argument Claude Code quoted back, which
-/// is compared to the argument that was sent.
+/// So both. A family is matched by family, because the request carries an
+/// alias (`sonnet`) and the receipt the model Claude Code chose for it
+/// (`Sonnet 5.5`); any other value is matched by its display name. The error
+/// carries the argument Claude Code quoted back, which is compared to the
+/// argument that was sent.
 ///
 /// What survives is still only ever *Claude Code's own report* — the sheet
 /// never claims to know which actor caused it, only that what it is showing
@@ -388,7 +396,7 @@ public enum ModelChangeWatch {
         // else's switch lands above the fence too, and reporting it here would
         // be the same phantom state wearing a fresher timestamp.
         case .receipt(.set(let name)):
-            return ModelDisplay.from(name).name == asked ? signal.outcome : nil
+            return answers(requested, with: name) ? signal.outcome : nil
         // **`Kept model as X` names the model still in force, not the one
         // asked for** — measured: `/model sonnet`, cancelled, prints
         // `Kept model as Opus 5`. Matching it against the request would mean a
@@ -404,6 +412,18 @@ public enum ModelChangeWatch {
             return Self.quotedValue(in: line).map { ModelDisplay.from($0).name } == asked
                 ? signal.outcome : nil
         }
+    }
+
+    /// Whether a model named `name` is what a request for `requested` asks
+    /// for: any model of a family, for the family's alias (a row of the
+    /// sheet), because which version it stands for is Claude Code's to say;
+    /// the same model, for any other value.
+    public static func answers(_ requested: String, with name: String) -> Bool {
+        let alias = requested.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ModelDisplay.family(of: alias) == alias {
+            return ModelDisplay.family(of: name) == alias
+        }
+        return ModelDisplay.from(name).name == ModelDisplay.from(requested).name
     }
 
     /// The value between the first pair of single quotes, if any.
@@ -472,14 +492,23 @@ public enum ModelConfirmation: Sendable, Hashable {
             } else {
                 name = rest.trimmingCharacters(in: .whitespaces)
             }
-            return name.isEmpty ? nil : .set(name)
+            return name.isEmpty ? nil : .set(unwrapped(name))
         }
         if line.hasPrefix("Kept model as ") {
             let name = line.dropFirst("Kept model as ".count)
                 .trimmingCharacters(in: .whitespaces)
-            return name.isEmpty ? nil : .kept(name)
+            return name.isEmpty ? nil : .kept(unwrapped(name))
         }
         return nil
+    }
+
+    /// The name out of its code span: Claude Code 2.1.319 writes
+    /// ``Set model to `Opus 5.5` and saved…`` to its transcript, and draws the
+    /// name plain. One rule for a receipt's name wherever it is read — this
+    /// parse, and the daemon's model fact, which a daemon of 0.17.2 sends as it
+    /// was written — and the daemon's own parse keeps the same one.
+    static func unwrapped(_ name: String) -> String {
+        name.count > 2 && name.hasPrefix("`") && name.hasSuffix("`") ? String(name.dropFirst().dropLast()) : name
     }
 }
 

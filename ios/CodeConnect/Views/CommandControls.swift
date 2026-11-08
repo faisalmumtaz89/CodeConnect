@@ -376,7 +376,9 @@ struct ModelSheet: View {
 
     private func aliasRow(_ alias: String) -> some View {
         let display = ModelDisplay.from(alias)
-        let isCurrent = current.map { $0.name == display.name } ?? false
+        // The row a receipt for the current model would answer: a family's
+        // row for any model of it.
+        let isCurrent = current.map { ModelChangeWatch.answers(alias, with: $0.name) } ?? false
         // The spinner tracks `busy`, not the request: once the wait goes quiet
         // the row is tappable again, and a ring still turning on a live control
         // would say it is not.
