@@ -33,7 +33,7 @@ fn a_question_is_held_for_as_long_as_the_daemon_takes() {
         .arg("--socket")
         .arg(&socket)
         .env_remove("CODECONNECT_DEBUG")
-        .env_remove(protocol::ENV_SESSION_UID)
+        .env(protocol::ENV_SESSION_UID, "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

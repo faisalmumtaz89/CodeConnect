@@ -542,8 +542,10 @@ fn claude_argv_and_env(
     // Spawn hygiene, measured rather than assumed:
     //   * FORCE_SESSION_PERSIST — without it an inherited CHILD_SESSION makes
     //     Claude write no transcript at all, silently.
-    //   * CODECONNECT_SESSION / _UID — a fallback identity for hooks; the
-    //     generated settings also pass both explicitly.
+    //   * CODECONNECT_SESSION / _UID — the run's identity for its hooks and its
+    //     `codeconnect mcp`, the only one they take: the generated settings also
+    //     pass it as flags, but a passthrough copied from an earlier run carries
+    //     that run's.
     // CLAUDE_CODE_CHILD_SESSION is unset inside the session by the `sh -c`
     // wrapper in tmux::new_session, because the pane carries the caller's
     // environment, which may hold it.

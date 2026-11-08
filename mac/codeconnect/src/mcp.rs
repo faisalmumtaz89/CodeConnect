@@ -1,10 +1,13 @@
 //! **`codeconnect mcp`: the tool a hosted agent messages other agents with.**
 //!
 //! A stdio MCP server, started by Claude Code (`--mcp-config`) or by Codex's
-//! app-server (`-c mcp_servers.codeconnect…`) for one session, and named after it:
-//! `codeconnect mcp --session-uid <uid> --socket <ccd.sock>`. The socket is an
-//! argument rather than read from `CODECONNECT_HOME`, because Codex starts its MCP
-//! servers with an environment of its own.
+//! app-server (`-c mcp_servers.codeconnect…`) for one session:
+//! `codeconnect mcp --session-uid <uid> --socket <ccd.sock>`. The session it speaks
+//! for is the `CODECONNECT_SESSION_UID` its agent's launcher set, which Claude Code
+//! passes on and Codex is given as the server's `env`; the `--session-uid` it is
+//! still passed is not read (see [`parse`]). The socket is an argument rather than
+//! read from `CODECONNECT_HOME`, because Codex starts its MCP servers with an
+//! environment of its own.
 //!
 //! It offers three tools, `list_agents`, `send_message` and `read_messages`, and
 //! each call is one round trip to the daemon. Everything the agent is told comes
@@ -25,7 +28,10 @@ use serde_json::{json, Value};
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn run(args: &[String]) -> Result<()> {
-    let (session_uid, socket) = parse(args)?;
+    let launcher = std::env::var(protocol::ENV_SESSION_UID)
+        .ok()
+        .filter(|uid| !uid.is_empty());
+    let (session_uid, socket) = parse(args, launcher)?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -56,21 +62,32 @@ pub fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn parse(args: &[String]) -> Result<(String, PathBuf)> {
-    let (mut uid, mut socket) = (None, None);
+/// The session this server speaks for and the daemon's socket. The session is the
+/// uid the launcher set on the agent this server was started by, and no other: the
+/// `--session-uid` flag comes from a config file, and a command line copied from
+/// an earlier run carries that run's. With none, this agent is no CodeConnect
+/// session's, and the server does not start.
+fn parse(args: &[String], launcher: Option<String>) -> Result<(String, PathBuf)> {
+    let mut socket = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let value = it.next();
         match (flag.as_str(), value) {
-            ("--session-uid", Some(value)) => uid = Some(value.clone()),
+            ("--session-uid", Some(_)) => {}
             ("--socket", Some(value)) => socket = Some(PathBuf::from(value)),
             _ => bail!("usage: codeconnect mcp --session-uid <uid> --socket <path>"),
         }
     }
-    match (uid, socket) {
-        (Some(uid), Some(socket)) => Ok((uid, socket)),
-        _ => bail!("usage: codeconnect mcp --session-uid <uid> --socket <path>"),
-    }
+    let Some(socket) = socket else {
+        bail!("usage: codeconnect mcp --session-uid <uid> --socket <path>");
+    };
+    let Some(uid) = launcher else {
+        bail!(
+            "no CodeConnect session started this agent: {} is not set",
+            protocol::ENV_SESSION_UID
+        );
+    };
+    Ok((uid, socket))
 }
 
 /// The reply to one JSON-RPC line, and the offer of messages it carries when it
@@ -399,6 +416,19 @@ mod tests {
 
     fn no_daemon(_: &ClientFrame) -> Result<DaemonFrame> {
         bail!("cannot reach the CodeConnect daemon")
+    }
+
+    /// A config copied from an earlier run names that run. The session is the one
+    /// the launcher started the agent as; an agent no launcher started has none,
+    /// whatever its config says.
+    #[test]
+    fn only_the_launcher_says_which_session_the_server_speaks_for() {
+        let copied = server_args("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Path::new("/tmp/ccd.sock"));
+        let (uid, socket) =
+            parse(&copied[1..], Some("01K1B3XQ8ZC0DE5FGH7JKMNPZZ".to_string())).unwrap();
+        assert_eq!(uid, "01K1B3XQ8ZC0DE5FGH7JKMNPZZ");
+        assert_eq!(socket, Path::new("/tmp/ccd.sock"));
+        assert!(parse(&copied[1..], None).is_err());
     }
 
     #[test]
