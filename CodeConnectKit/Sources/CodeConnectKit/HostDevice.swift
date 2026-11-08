@@ -21,7 +21,7 @@ public struct HostDevice: Sendable, Equatable {
     public static let iPhone = HostDevice(
         name: "iPhone", noun: "phone", biometric: "Face ID", secret: "passcode",
         addWithCode: "Scan this computer's code to add it.",
-        codeAgain: "Scan the current code on your computer again.")
+        codeAgain: "Show a new code on your computer and scan it (codeconnect.sh/support shows how).")
     public static let mac = HostDevice(
         name: "Mac", noun: "Mac", biometric: "Touch ID", secret: "password",
         addWithCode: "Add it with its pairing code.",
@@ -42,5 +42,13 @@ public struct HostDevice: Sendable, Equatable {
         guard self == .mac else { return phrase }
         if let name { return name }
         return phrase.first?.isUppercase == true ? "The agent's computer" : "the agent's computer"
+    }
+
+    /// The computer a pairing sentence is about: the iPhone keeps `phrase`; a
+    /// Mac names the computer from its Add sheet, so there it is "that
+    /// computer", capitalised when `phrase` is.
+    public func pairingComputer(_ phrase: String) -> String {
+        guard self == .mac else { return phrase }
+        return phrase.first?.isUppercase == true ? "That computer" : "that computer"
     }
 }

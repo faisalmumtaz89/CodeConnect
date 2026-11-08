@@ -1047,14 +1047,14 @@ enum RenderCatalog {
 
         RenderScenario(
             name: "machine",
-            purpose: "one machine's own screen: its link, transport, what its daemon advertises, Remove",
+            purpose: "one machine's own screen: its link, its encryption in plain words, Remove",
             arguments: secondMachineArguments,
             reach: { app, driver in
                 try driver.openSettings(app)
                 try driver.require(secondMachineRow(app), "the offline machine's row").tap()
                 try driver.require(
                     app.navigationBars[secondMachine], "that machine's own screen, by its name")
-                try driver.require(app.buttons["Remove this machine"], "Remove this machine")
+                try driver.require(app.buttons["Remove this computer"], "Remove this computer")
             }),
 
         RenderScenario(

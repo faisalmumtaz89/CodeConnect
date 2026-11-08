@@ -142,13 +142,17 @@ struct StartingSessionView: View {
                 actionTitle: copy.action, action: onChooseAgain,
                 secondaryActionTitle: "Back to Projects", secondaryAction: { dismiss() }
             ) {
-                VStack(alignment: .leading, spacing: CC.space.xxs) {
-                    Text("\(start.machineName.uppercased()) SAID")
-                        .ccType(CC.type.fieldLabel, color: nil)
-                    CCMonoBlock(detail)
+                // The computer's own words only where they are the error itself;
+                // for a missing agent or folder they are its command line's text.
+                if reason == .launchFailed {
+                    VStack(alignment: .leading, spacing: CC.space.xxs) {
+                        Text("\(start.machineName.uppercased()) SAID")
+                            .ccType(CC.type.fieldLabel, color: nil)
+                        CCMonoBlock(detail)
+                    }
+                    .frame(maxWidth: 320)
+                    .padding(.top, CC.space.xs)
                 }
-                .frame(maxWidth: 320)
-                .padding(.top, CC.space.xs)
             }
             .padding(.top, CC.space.xxl)
         }

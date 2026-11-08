@@ -44,8 +44,12 @@ final class UpdateCompatibilityTests: XCTestCase {
         let refusal = DaemonConnection.incompatibility(of: ack(version: Wire.protocolVersion + 1))
         XCTAssertNotNil(refusal, "a newer major must be refused")
         XCTAssertTrue(
-            refusal?.contains("Update CodeConnect on the computer") == true,
+            refusal?.contains("has a newer CodeConnect. Update CodeConnect on this iPhone") == true,
             "the refusal names the fix: \(refusal ?? "nil")")
+        let older = DaemonConnection.incompatibility(of: ack(version: Wire.protocolVersion - 1))
+        XCTAssertTrue(
+            older?.contains("has an older CodeConnect. Update CodeConnect on it") == true,
+            "an older computer is the one to update: \(older ?? "nil")")
 
         XCTAssertNil(
             DaemonConnection.incompatibility(of: ack(version: Wire.protocolVersion)),

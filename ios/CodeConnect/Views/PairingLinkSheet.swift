@@ -55,7 +55,7 @@ struct PairingLinkSheet: View {
     @ViewBuilder
     private func confirm(_ payload: PairingQRPayload) -> some View {
         CCProse(
-            "This link pairs your iPhone with the computer below. Pair only if you just ran `codeconnect pair` on it.",
+            "This pairs your iPhone with the computer below. Pair only if this code is showing on your computer right now.",
             color: CC.text.secondary
         )
         .fixedSize(horizontal: false, vertical: true)

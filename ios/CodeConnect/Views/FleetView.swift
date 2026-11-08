@@ -1121,10 +1121,12 @@ struct FleetView: View {
 
     // MARK: States
 
-    /// What to run, and where, to put an agent on this screen: the two agents
-    /// as equal choices, centred in the viewport.
+    /// How an agent gets onto this screen, in words and never a command, with a
+    /// button to start one from here when a paired computer can. Centred in the
+    /// viewport.
     private var emptyState: some View {
-        ZStack {
+        let start: (() -> Void)? = canStart ? { openStart() } : nil
+        return ZStack {
             // At least the viewport's height, so the instruction sits on its
             // centre; taller content at the largest sizes still scrolls.
             Color.clear.containerRelativeFrame(.vertical)
@@ -1132,30 +1134,9 @@ struct FleetView: View {
                 glyph: "terminal-window",
                 title: "Start an agent on your computer",
                 message:
-                    "Start one with CodeConnect and its project shows up here, ready to follow and answer from this phone."
-            ) {
-                VStack(spacing: CC.space.md) {
-                    command("Claude Code", "codeconnect claude")
-                    command("Codex", "codeconnect codex")
-                }
-                .frame(maxWidth: 300)
-                .padding(.top, CC.space.xs)
-                Text("Run it in Terminal, in a project’s folder on a paired computer.")
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.tertiary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 300)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, CC.space.xs)
-            }
-        }
-    }
-
-    private func command(_ agent: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: CC.space.xxs) {
-            Text(agent.uppercased())
-                .ccType(CC.type.fieldLabel, color: nil)
-            CCMonoBlock(text)
+                    "Start one with CodeConnect and its project shows up here, ready to follow and answer from this phone.",
+                actionTitle: start == nil ? nil : "Start an agent",
+                action: start)
         }
     }
 
@@ -2389,7 +2370,7 @@ struct LinkHealthSheet: View {
         case .stale: return "Stale"
         case .connecting: return "Connecting"
         case .offline: return "Offline"
-        case .rejected: return "Token rejected"
+        case .rejected: return "Pair again"
         }
     }
 

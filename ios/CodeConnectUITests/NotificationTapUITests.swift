@@ -183,7 +183,7 @@ final class NotificationTapUITests: XCTestCase {
         XCUIDevice.shared.system.open(
             URL(string: "codeconnect://session/fx-2?request=toolu_fixture_medium")!)
         XCTAssertTrue(
-            app.staticTexts["Verified against the daemon's hash."]
+            app.staticTexts["Matches what your computer sent."]
                 .waitForExistence(timeout: 25),
             "a decision card opens")
         XCTAssertTrue(

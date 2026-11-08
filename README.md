@@ -49,7 +49,7 @@ The installer checks the release's signature before installing anything, install
 
 Run again, it picks up where it stopped. It uses sudo only on Linux, for `tailscale up --qr` and, where systemd needs it, `loginctl enable-linger`. To read it first: `curl -fsSL https://codeconnect.sh -o codeconnect-install.sh`, `less codeconnect-install.sh`, then `sh codeconnect-install.sh`. On a Linux machine where you have only root, or in a container, read [On Linux](site/support.md#on-linux) first.
 
-To add another computer, run the same command there, then in the app go to Settings → Machines → Add a machine.
+To add another computer, run the same command there, then in the app go to Settings → Computers → Add a computer.
 
 ## Use
 

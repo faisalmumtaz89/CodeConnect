@@ -47,38 +47,37 @@ final class PairingFailureTests: XCTestCase {
             Staying in `.waiting` is what left the pairing screen spinning on a code \
             that had already expired.
             """)
-        // And it says where it looked and how to find out why, not only the
-        // system's own sentence.
+        // And it says where it looked and what to check, in words and no command.
         guard case .failed(let reason) = connection.phase else { return }
-        XCTAssertTrue(reason.contains("Could not reach the computer at 127.0.0.1:1"), reason)
-        XCTAssertTrue(reason.contains("`codeconnect daemon status`"), reason)
+        XCTAssertTrue(reason.contains("Couldn't reach your computer at 127.0.0.1."), reason)
+        XCTAssertTrue(reason.contains("Turn on Tailscale on this iPhone"), reason)
+        XCTAssertFalse(reason.contains("codeconnect "), reason)
     }
 
-    /// The transport footnote claims protection only as far as the daemon vouched
+    /// The connection's encryption is claimed only as far as the daemon vouched
     /// for it: to a paired phone, the terminal is offered exactly on a private
-    /// connection.
-    func testTheTransportFootnoteClaimsOnlyWhatTheDaemonVouchedFor() {
+    /// connection. Every answer is in plain words.
+    func testTheTransportClaimsOnlyWhatTheDaemonVouchedFor() {
         let offered = Capabilities(extra: ["terminal_pty": .bool(true)])
         let withheld = Capabilities(extra: ["terminal_pty": .bool(false)])
         let silent = Capabilities(extra: [:])
-        let tailnet = PairingView.transportFootnote(
-            encrypted: false, paired: true, capabilities: offered)
-        XCTAssertTrue(tailnet.contains("WireGuard"), tailnet)
-        let lan = PairingView.transportFootnote(
-            encrypted: false, paired: true, capabilities: withheld)
-        XCTAssertTrue(lan.contains("not encrypted by CodeConnect"), lan)
-        XCTAssertFalse(lan.contains("WireGuard"), lan)
-        for unknown in [
-            PairingView.transportFootnote(encrypted: false, paired: false, capabilities: withheld),
-            PairingView.transportFootnote(encrypted: false, paired: true, capabilities: silent),
-        ] {
-            XCTAssertFalse(unknown.contains("WireGuard carries"), unknown)
-            XCTAssertFalse(unknown.contains("not encrypted by CodeConnect"), unknown)
+        let tailnet = PairingView.transport(encrypted: false, paired: true, capabilities: offered)
+        XCTAssertEqual(tailnet.value, "Encrypted by Tailscale")
+        let lan = PairingView.transport(encrypted: false, paired: true, capabilities: withheld)
+        XCTAssertEqual(lan.value, "Not encrypted")
+        let unknown = [
+            PairingView.transport(encrypted: false, paired: false, capabilities: withheld),
+            PairingView.transport(encrypted: false, paired: true, capabilities: silent),
+        ]
+        XCTAssertEqual(unknown.map(\.value), ["Unknown", "Unknown"])
+        let tls = PairingView.transport(encrypted: true, paired: true, capabilities: offered)
+        XCTAssertEqual(tls.value, "Encrypted")
+        XCTAssertFalse(tls.note.contains("Tailscale"), "a certificate can be the operator's own")
+        for answer in [tailnet, lan, tls] + unknown {
+            for word in ["ws://", "wss", "daemon", "WireGuard", "tailnet", "`"] {
+                XCTAssertFalse(answer.value.contains(word) || answer.note.contains(word), answer.note)
+            }
         }
-        XCTAssertFalse(
-            PairingView.transportFootnote(encrypted: true, paired: true, capabilities: offered)
-                .contains("tailscale cert"),
-            "a certificate can be the operator's own")
     }
 
     /// A token typed at the pairing screen is still a pairing: nothing is saved

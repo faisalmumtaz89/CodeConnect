@@ -41,14 +41,15 @@ final class PairingReachabilityTests: XCTestCase {
         }
     }
 
-    /// The message has to name the address and the fix, because the person reading
-    /// it is standing at the Mac that produced it.
+    /// The message has to name the address and the fix, in words and no command,
+    /// because the person reading it is standing at the Mac that produced it.
     func testTheRefusalNamesTheHostAndTheRecovery() {
         guard case .failure(let failure) = PairingQRPayload.decode(qr(host: "127.0.0.1")),
             let message = failure.errorDescription
         else { return XCTFail("expected a described failure") }
         XCTAssertTrue(message.contains("127.0.0.1"), message)
-        XCTAssertTrue(message.contains("codeconnect daemon restart"), message)
+        XCTAssertTrue(message.hasSuffix(HostDevice.current.codeAgain), message)
+        XCTAssertFalse(message.contains("codeconnect "), message)
     }
 
     // MARK: What must NOT be refused

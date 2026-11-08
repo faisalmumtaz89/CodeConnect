@@ -140,7 +140,12 @@ final class PeerDirectoryTests: XCTestCase {
     /// Mac itself.
     func testACodeIsAskedForInTheReadersOwnWords() {
         XCTAssertEqual(HostDevice.iPhone.addWithCode, "Scan this computer's code to add it.")
-        XCTAssertEqual(HostDevice.iPhone.codeAgain, "Scan the current code on your computer again.")
+        XCTAssertEqual(
+            HostDevice.iPhone.codeAgain,
+            "Show a new code on your computer and scan it (codeconnect.sh/support shows how).")
+        XCTAssertEqual(HostDevice.mac.pairingComputer("Your computer"), "That computer")
+        XCTAssertEqual(HostDevice.mac.computer("the computer"), "the agent's computer")
+        XCTAssertEqual(HostDevice.iPhone.pairingComputer("your computer"), "your computer")
         for sentence in [HostDevice.mac.addWithCode, HostDevice.mac.codeAgain] {
             XCTAssertFalse(sentence.lowercased().contains("scan"), sentence)
             XCTAssertFalse(sentence.contains("this computer"), sentence)

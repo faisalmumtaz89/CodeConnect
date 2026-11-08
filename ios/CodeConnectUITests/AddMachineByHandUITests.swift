@@ -39,7 +39,7 @@ final class AddMachineByHandUITests: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 15))
         settings.tap()
 
-        let add = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Add a machine"))
+        let add = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Add a computer"))
             .firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 10))
         add.tap()
@@ -51,7 +51,7 @@ final class AddMachineByHandUITests: XCTestCase {
         byHand.tap()
 
         let address = app.textFields["Address"]
-        let code = app.textFields["Code or token"]
+        let code = app.textFields["Code"]
         XCTAssertTrue(address.waitForExistence(timeout: 10))
         XCTAssertTrue(code.exists)
         XCTAssertFalse(

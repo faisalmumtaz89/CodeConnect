@@ -124,15 +124,21 @@ final class LiveDaemonUITests: XCTestCase {
     func testDaemonAdvertisesItsCapabilities() throws {
         let app = try launchApp()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
-        app.buttons["Settings"].tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
-        // What a daemon advertises is on its machine's own screen, behind its row.
-        let machine = app.buttons.matching(NSPredicate(format: "label ENDSWITH 'Live'")).firstMatch
-        XCTAssertTrue(machine.waitForExistence(timeout: 10), "the connected machine's row")
-        machine.tap()
+        // What a daemon advertises is in Link health, under the computer in the
+        // session bar's menu.
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'"))
+            .firstMatch
+        try XCTSkipUnless(row.waitForExistence(timeout: 25), "no session to open Link health from")
+        row.tap()
+        let more = app.buttons["session-more"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")
+        more.tap()
+        let link = app.buttons["Link health"].firstMatch
+        XCTAssertTrue(link.waitForExistence(timeout: 10), "Link health in the session bar's menu")
+        link.tap()
 
         let advertised = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'What this daemon advertises'")
+            NSPredicate(format: "label CONTAINS 'What this daemon can do'")
         ).firstMatch
         app.swipeUp()
         app.swipeUp()

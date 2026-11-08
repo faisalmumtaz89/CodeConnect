@@ -85,7 +85,7 @@ final class ApprovalFlowUITests: XCTestCase {
         attachScreenshot(app, name: "decision-card")
 
         // The card must say, in so many words, that the text is the hashed text.
-        let verified = app.staticTexts["Verified against the daemon's hash."]
+        let verified = app.staticTexts["Matches what your computer sent."]
         XCTAssertTrue(
             verified.waitForExistence(timeout: 5),
             "payload_hash verification must pass for a card straight off the wire")
@@ -155,7 +155,7 @@ final class ApprovalFlowUITests: XCTestCase {
             proceed.waitForExistence(timeout: 5), "the pending decision is not a Codex approval")
         XCTAssertTrue(
             app.staticTexts.matching(
-                NSPredicate(format: "label BEGINSWITH 'Verified against the daemon'")
+                NSPredicate(format: "label BEGINSWITH 'Matches what your computer sent'")
             ).firstMatch.exists,
             "payload_hash verification must pass for a card straight off the wire")
         // "N waiting for you": an answered card leaves the stack, so N falls. A

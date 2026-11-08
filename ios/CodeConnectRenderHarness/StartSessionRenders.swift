@@ -271,7 +271,7 @@ extension RenderCatalog {
         RenderScenario(name: "start2-c2-no-codex", purpose: "steps: the agent, Codex not installed", arguments: args(noCodex: true)) {
             app, driver in
             try toAgents(app, driver)
-            try driver.requireExists(driver.text(containing: "can’t start on", in: app), "the computer's reason")
+            try driver.requireExists(driver.text(containing: "can’t start on", in: app), "the agent's plain reason")
         },
         RenderScenario(name: "start2-d-branch", purpose: "steps: the branch", arguments: args()) {
             app, driver in

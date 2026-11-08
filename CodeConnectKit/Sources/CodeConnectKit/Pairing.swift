@@ -202,16 +202,16 @@ public struct PairingQRPayload: Sendable, Hashable {
             switch self {
             case .notJSON:
                 return "That QR code is not a CodeConnect pairing code."
-            case .unsupportedVersion(let version):
+            case .unsupportedVersion:
                 return
-                    "That pairing code is version \(version); this app understands version \(PairingQRPayload.supportedVersion). Update the app or the daemon."
+                    "This code is from a newer version of CodeConnect. Update CodeConnect on this \(HostDevice.current.name). \(HostDevice.current.codeAgain)"
             case .missingField(let field):
                 return "That pairing code is missing its \(field)."
             case .badPort(let port):
                 return "That pairing code has an impossible port (\(port))."
-            case .unreachableHost(let host, let why):
+            case .unreachableHost(let host, _):
                 return
-                    "That pairing code points at \(host), which \(why). Connect \(HostDevice.current.computer("the computer")) to the network your \(HostDevice.current.name) reaches it on (Tailscale, by default), run `codeconnect daemon restart`, then `codeconnect pair` again."
+                    "Your \(HostDevice.current.name) can't reach the address in this code (\(host)). Connect \(HostDevice.current.pairingComputer("your computer")) to a network your \(HostDevice.current.name) can reach, such as Tailscale. \(HostDevice.current.codeAgain)"
             }
         }
     }
@@ -364,8 +364,8 @@ public enum PairingCredentialInput {
     /// What the app understood, so the user can see it before committing.
     public static func describe(_ credential: HelloCredential) -> String {
         switch credential {
-        case .token: return "Read as a device token."
-        case .pairingCode(let code): return "Read as the single-use pairing code \(code)."
+        case .token: return "Read as a key from \(HostDevice.current.pairingComputer("your computer")), not a pairing code."
+        case .pairingCode(let code): return "Read as the pairing code \(code)."
         case .tailnet: return "Read as nothing: this device's Tailscale identity."
         }
     }
@@ -383,20 +383,20 @@ public enum PairingCredentialInput {
     /// Why the form cannot be submitted yet: nil once both fields hold something.
     public static func blockedReason(address: String, code: String) -> String? {
         if address.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "An address is needed - the one `codeconnect pair` printed."
+            return "Enter the address shown with the code."
         }
         if code.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "A pairing code or a `codeconnect token` is needed."
+            return "Enter the code \(HostDevice.current.pairingComputer("your computer")) shows."
         }
         return nil
     }
 
     public static func submission(address: String, code: String) -> Submission {
         guard let credential = classify(code) else {
-            return .refused("That is neither an eight-character pairing code nor a `codeconnect token`.")
+            return .refused("That isn't a pairing code: it's eight letters and digits.")
         }
         guard let endpoint = DaemonEndpoint.parse(address: address, credential: credential) else {
-            return .refused("That address could not be parsed. Try 100.x.y.z or ws://host:8787.")
+            return .refused("That address isn't valid. Enter it exactly as \(HostDevice.current.pairingComputer("your computer")) shows it.")
         }
         // A typed code is the same one-shot exchange the QR performs; it must
         // not be stored, so it goes through the pairing path.
@@ -735,7 +735,7 @@ public final class PairingStore {
         guard let endpoint = machine(id: id)?.endpoint else { return }
         tlsUnavailableReasons[id] =
             unusable
-            ? "This daemon serves TLS, but the pairing points at the address \(endpoint.host) and a `tailscale cert` certificate only covers the MagicDNS name. Scan a fresh QR code to move onto the encrypted connection."
+            ? "\(HostDevice.current.pairingComputer("Your computer"))'s own encryption works only at its Tailscale name, not at the address \(endpoint.host). \(HostDevice.current.codeAgain)"
             : nil
     }
 

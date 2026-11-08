@@ -10,26 +10,26 @@ final class PairingSubmissionTests: XCTestCase {
     func testAnEmptyAddressBlocksTheFormFirst() {
         XCTAssertEqual(
             PairingCredentialInput.blockedReason(address: "  ", code: ""),
-            "An address is needed - the one `codeconnect pair` printed.")
+            "Enter the address shown with the code.")
     }
 
     func testAnEmptyCodeBlocksTheForm() {
         XCTAssertEqual(
             PairingCredentialInput.blockedReason(address: "100.64.0.1", code: " "),
-            "A pairing code or a `codeconnect token` is needed.")
+            "Enter the code your computer shows.")
         XCTAssertNil(PairingCredentialInput.blockedReason(address: "100.64.0.1", code: "abc"))
     }
 
     func testACodeOfNeitherShapeIsRefused() {
         XCTAssertEqual(
             PairingCredentialInput.submission(address: "100.64.0.1", code: "abc"),
-            .refused("That is neither an eight-character pairing code nor a `codeconnect token`."))
+            .refused("That isn't a pairing code: it's eight letters and digits."))
     }
 
     func testAnAddressThatDoesNotParseIsRefused() {
         XCTAssertEqual(
             PairingCredentialInput.submission(address: "ws://", code: "35AG-AE55"),
-            .refused("That address could not be parsed. Try 100.x.y.z or ws://host:8787."))
+            .refused("That address isn't valid. Enter it exactly as your computer shows it."))
     }
 
     func testAReadyFormPairsByCodeOrConnectsByToken() {

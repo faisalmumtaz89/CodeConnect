@@ -46,18 +46,18 @@ public enum ConnectionError: LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .notConnected: return "Not connected to the daemon"
-        case .timedOut: return "The daemon did not answer in time"
-        case .unauthorized: return "The daemon rejected this token"
+        case .notConnected: return "Not connected to \(HostDevice.current.pairingComputer("your computer"))"
+        case .timedOut: return "\(HostDevice.current.pairingComputer("Your computer")) didn't answer in time"
+        case .unauthorized: return "\(HostDevice.current.pairingComputer("Your computer")) didn't accept this code."
         case .rejectedPairingCode:
             return
-                "\(HostDevice.current.computer("The computer")) rejected that pairing code. It may have expired, already been used, or been mistyped. \(HostDevice.current.codeAgain)"
+                "\(HostDevice.current.pairingComputer("The computer")) rejected this pairing code. It may have expired, already been used, or been mistyped. \(HostDevice.current.codeAgain)"
         case .notAdmitted: return HostDevice.current.addWithCode
         case .incompatible(let detail): return detail
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
-        case .hostUnresolvable: return "The daemon's address is not resolving"
+        case .hostUnresolvable: return "\(HostDevice.current.pairingComputer("Your computer"))'s address can't be found"
         case .sentButUnanswered:
             return "This left the \(HostDevice.current.noun) and \(HostDevice.current.computer("the computer")) never answered."
         }
@@ -403,8 +403,8 @@ public final class DaemonConnection {
                 try await runConnection(url: url, credential: endpoint.credential)
                 // A clean close is still a disconnect; reconnect promptly.
                 ledger.reset()
-                dialFailure = .other(message: "The daemon closed the connection")
-                lastErrorMessage = "The daemon closed the connection"
+                dialFailure = .other(message: "\(HostDevice.current.pairingComputer("Your computer")) closed the connection")
+                lastErrorMessage = "\(HostDevice.current.pairingComputer("Your computer")) closed the connection"
             } catch let error as ConnectionError {
                 // A dial that had completed its handshake before dying ends
                 // the failure run: what follows is a fresh outage, not
@@ -458,8 +458,7 @@ public final class DaemonConnection {
             // swapped once would turn a recoverable setup into a dead end.
             if dialIsForPairing, ledger.attempts >= Self.pairingAttemptLimit {
                 phase = .failed(
-                    reason: Self.pairingUnreachable(
-                        host: endpoint.host, port: endpoint.port, detail: lastErrorMessage))
+                    reason: Self.pairingUnreachable(host: endpoint.host))
                 return
             }
 
@@ -503,14 +502,10 @@ public final class DaemonConnection {
     /// failed.
     static let pairingAttemptLimit = 4
 
-    /// What a pairing that never reached the Mac says: where it looked, what the
-    /// system reported, and the one check on the Mac that tells the causes
-    /// apart — no daemon running, a different address, or a network between
-    /// that does not carry this phone to it.
-    static func pairingUnreachable(host: String, port: Int, detail: String?) -> String {
-        let said = detail.map { " (\($0.hasSuffix(".") ? String($0.dropLast()) : $0))" } ?? ""
-        return
-            "Could not reach \(HostDevice.current.computer("the computer")) at \(host):\(port)\(said). On \(HostDevice.current.computer("the computer")), `codeconnect daemon status` shows whether the daemon is running and the address it listens on; this \(HostDevice.current.name) has to be able to reach that address, over Tailscale by default."
+    /// What a pairing that never reached the computer says: where it looked, and
+    /// the two fixes, the commonest first (Tailscale off on this device).
+    static func pairingUnreachable(host: String) -> String {
+        "Couldn't reach \(HostDevice.current.pairingComputer("your computer")) at \(host). Turn on Tailscale on this \(HostDevice.current.name), make sure CodeConnect is running on \(HostDevice.current.pairingComputer("your computer")), then try again."
     }
 
     /// Which scheme this attempt should use.
@@ -712,7 +707,7 @@ public final class DaemonConnection {
             try? await Task.sleep(for: Self.handshakeTimeout)
             guard let self, !Task.isCancelled, self.socket === socket, !self.phase.isConnected
             else { return }
-            self.lastErrorMessage = "The daemon accepted the connection but never answered hello"
+            self.lastErrorMessage = "\(HostDevice.current.pairingComputer("Your computer")) connected but didn't answer"
             // Cancelling the socket makes the receive below throw, which drops
             // into the normal backoff path.
             socket.cancel(with: .goingAway, reason: nil)
@@ -775,7 +770,7 @@ public final class DaemonConnection {
                 // the mismatch — a terminal state presented as a working one.
                 throw ConnectionError.incompatible(refusal)
             }
-            if case .error(let code, let message) = decoded {
+            if case .error(let code, _) = decoded {
                 switch code {
                 case "unauthorized":
                     // The same wire code covers a rejected device token and a
@@ -789,12 +784,10 @@ public final class DaemonConnection {
                     // Terminal, and it used to be neither: it fell through to the
                     // generic reconnect, so an app and a Mac helper that could
                     // never speak to each other retried forever instead of saying
-                    // so once. The daemon's own words are kept — this is one of
-                    // the few refusals it explains.
+                    // so once. Said in plain words: the daemon's own names its
+                    // protocol, and the frame does not say which side is older.
                     throw ConnectionError.incompatible(
-                        message.isEmpty
-                            ? "\(HostDevice.current.computer("This computer"))'s helper speaks a protocol this app does not. Update it and try again."
-                            : message)
+                        "\(HostDevice.current.pairingComputer("This computer")) runs a different version of CodeConnect. Update CodeConnect on it and on this \(HostDevice.current.name), then try again.")
                 default:
                     break
                 }
@@ -1228,8 +1221,10 @@ public final class DaemonConnection {
     /// never refused.
     static func incompatibility(of ack: HelloAck) -> String? {
         guard ack.protocolVersion != Wire.protocolVersion else { return nil }
-        return
-            "\(HostDevice.current.computer("This computer", named: ack.machineName))'s helper speaks protocol \(ack.protocolVersion); this app speaks \(Wire.protocolVersion). Update CodeConnect on \(HostDevice.current.computer("the computer", named: ack.machineName)) and try again."
+        let computer = HostDevice.current.computer("This computer", named: ack.machineName)
+        return ack.protocolVersion < Wire.protocolVersion
+            ? "\(computer) has an older CodeConnect. Update CodeConnect on it, then try again."
+            : "\(computer) has a newer CodeConnect. Update CodeConnect on this \(HostDevice.current.name), then try again."
     }
 
     // MARK: - Inbound
