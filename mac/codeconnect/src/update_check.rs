@@ -168,10 +168,6 @@ pub fn may_install(candidate: &str, running: &str) -> Result<(), String> {
 /// Read the cache, revalidating the stored version — a cache written by
 /// anything, including a future or corrupted build, gets the same trust
 /// boundary as the network response.
-pub fn read_cache() -> UpdateCache {
-    read_cache_from(&cache_path())
-}
-
 fn read_cache_from(path: &std::path::Path) -> UpdateCache {
     let Ok(bytes) = std::fs::read(path) else {
         return UpdateCache::default();
@@ -386,12 +382,12 @@ pub fn render_update(advisory: &UpdateAdvisory, style: Style) -> String {
 
 // ---------------------------------------------------------------- checker
 
-/// Spawn the detached checker if the throttle permits. Fire-and-forget: null
-/// stdio, its own process group, never waited on — the attach that follows
+/// Spawn the detached checker if one is due ([`checker_due_at`]). Fire-and-forget:
+/// null stdio, its own process group, never waited on — the attach that follows
 /// replaces this process, and the child must outlive it without owning the
 /// terminal.
 pub fn spawn_checker_if_due() {
-    if !attempt_due(&read_cache(), unix_now()) {
+    if !checker_due_at(&protocol::root_dir(), unix_now()) {
         return;
     }
     let Ok(current) = std::env::current_exe() else {
@@ -405,6 +401,13 @@ pub fn spawn_checker_if_due() {
         .stderr(std::process::Stdio::null())
         .process_group(0)
         .spawn();
+}
+
+/// Whether a check is due: never where the app installed the binaries, which
+/// shows no advisory ([`cached_advisory_at`]), so GitHub is not asked; elsewhere
+/// when the 24-hour throttle permits.
+fn checker_due_at(root: &std::path::Path, now_unix: u64) -> bool {
+    !installed_by_app(root) && attempt_due(&read_cache_from(&cache_path_at(root)), now_unix)
 }
 
 /// The hidden child: ask GitHub for the latest release and update the cache.
@@ -2451,6 +2454,19 @@ mod tests {
         assert!(cached_advisory_at(&fixture.root).is_some());
         std::fs::write(fixture.live.join(INSTALLED_BY_APP), "").unwrap();
         assert!(cached_advisory_at(&fixture.root).is_none());
+    }
+
+    /// With no advisory to show, an app install asks GitHub nothing either.
+    #[test]
+    fn an_app_install_asks_github_nothing() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let now = 2_000_000_000;
+        assert!(
+            checker_due_at(&fixture.root, now),
+            "no check yet: one is due"
+        );
+        std::fs::write(fixture.live.join(INSTALLED_BY_APP), "").unwrap();
+        assert!(!checker_due_at(&fixture.root, now));
     }
 
     #[test]
