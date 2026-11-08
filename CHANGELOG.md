@@ -3,6 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A session restarted from a copied command shows once
+
+- A session restarted with a command copied from an earlier one, with that session's `--settings` and
+  `--mcp-config` files in it, showed twice on the phone: the ended session came back every minute
+  with the new one's activity, and the new one said "Nothing recorded yet". Its messages to other
+  agents went out as the ended session too. A session's hooks and its message tool now name only the
+  session CodeConnect started, so a copied command, or Claude Code resumed outside CodeConnect with
+  one, no longer brings an ended session back.
+
 ## Many more sessions on one computer
 
 - One computer was limited to 128 connections to CodeConnect, and an idle Claude session holds two
