@@ -728,6 +728,8 @@ pub(crate) fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<
 /// The `-c` overrides that give the app-server the `codeconnect` MCP server for this
 /// session, pre-approved: Codex asks for MCP tool approval only at the computer's
 /// keyboard, so an unapproved send would stall a session the person is away from.
+/// The session goes in the server's `env`, which is how `codeconnect mcp` knows it:
+/// Codex starts its MCP servers with an environment of its own, not the pane's.
 /// Placed after `--listen`, on the app-server only — the TUI gets nothing new.
 /// Each value is TOML, and a JSON string or array of strings is one.
 fn mcp_overrides(codeconnect: &Path, session_uid: &str, socket: &Path) -> Vec<String> {
@@ -742,6 +744,12 @@ fn mcp_overrides(codeconnect: &Path, session_uid: &str, socket: &Path) -> Vec<St
         format!(
             "mcp_servers.codeconnect.args={}",
             serde_json::Value::from(args)
+        ),
+        "-c".into(),
+        format!(
+            "mcp_servers.codeconnect.env.{}={}",
+            protocol::ENV_SESSION_UID,
+            serde_json::Value::from(session_uid)
         ),
         "-c".into(),
         "mcp_servers.codeconnect.default_tools_approval_mode=\"approve\"".into(),
@@ -3169,7 +3177,8 @@ mod tests {
     use super::*;
 
     /// **The app-server is given the `codeconnect` tool for its own session,
-    /// pre-approved**, in three `-c` values that are TOML.
+    /// pre-approved**, in four `-c` values that are TOML; the session is in the
+    /// server's `env`, the one place `codeconnect mcp` reads it.
     #[test]
     fn the_app_server_gets_the_codeconnect_tool_for_its_session() {
         let overrides = mcp_overrides(
@@ -3184,6 +3193,8 @@ mod tests {
                 r#"mcp_servers.codeconnect.command="/opt/cc/bin/codeconnect""#,
                 "-c",
                 r#"mcp_servers.codeconnect.args=["mcp","--session-uid","01K1B3XQ8ZC0DE5FGH7JKMNPQR","--socket","/Users/u/.codeconnect/ccd.sock"]"#,
+                "-c",
+                r#"mcp_servers.codeconnect.env.CODECONNECT_SESSION_UID="01K1B3XQ8ZC0DE5FGH7JKMNPQR""#,
                 "-c",
                 r#"mcp_servers.codeconnect.default_tools_approval_mode="approve""#,
             ]

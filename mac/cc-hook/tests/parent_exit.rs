@@ -27,6 +27,7 @@ fn a_held_hook_exits_when_its_parent_dies() {
         .arg(r#""$0" --gate --socket "$1" < "$2" > /dev/null & echo $!; wait"#)
         .arg(env!("CARGO_BIN_EXE_cc-hook"))
         .arg(&socket)
+        .env(protocol::ENV_SESSION_UID, "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
         .arg(&payload)
         .stdout(Stdio::piped())
         .spawn()

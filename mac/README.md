@@ -520,7 +520,7 @@ Three things behave differently on a Mac that has been running for a while.
   column, drop whatever depends on it — the logged error names it — and restart.
   Nothing is written at all when nothing is retired, which is every boot after
   the first. Two writes run on every open, outside those tables and outside that
-  guarantee. Adopted sessions — the `claude:*` rows cc-hook mints for runs this
+  guarantee. Adopted sessions — the `claude:*` rows an earlier cc-hook minted for runs this
   daemon did not launch — have `tmux_session` and `tmux_socket` cleared, because
   empty is the honest answer for a process this daemon cannot locate; a location
   a newer build recorded there does not survive the trip down. And
@@ -1089,8 +1089,8 @@ run, so it is not an identity a destructive request may be pointed at. For a
 hosted run the daemon refuses anything whose lifecycle is not `exited`, and
 anything it still holds a supervisor or an open approval for. An **adopted**
 run — empty `tmux_session`; CodeConnect never launched it, so no probe can
-ever prove it ended — is deletable at any lifecycle, and its deletion also
-stops observation of that conversation until a new session start re-adopts it.
+ever prove it ended — is deletable at any lifecycle. Only an earlier `cc-hook`
+recorded such runs: this one reports only for a run its launcher started.
 A refusal is a `delete_session_result`, not an error. It deletes the daemon's own record only:
 Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
 `codeconnect claude --resume <id>` still works afterwards.
