@@ -1,0 +1,109 @@
+{
+  "projects": {
+    "agents": [
+      {
+        "agent": "claude",
+        "available": true,
+        "models": [
+          {
+            "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+            "label": "Default (recommended)",
+            "value": "default"
+          },
+          {
+            "detail": "Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok",
+            "label": "Opus",
+            "value": "opus"
+          },
+          {
+            "detail": "Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per Mtok",
+            "label": "Fable",
+            "value": "fable"
+          },
+          {
+            "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+            "label": "Sonnet",
+            "value": "sonnet"
+          },
+          {
+            "detail": "Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok ($0.50/$2.50 for prompts over 100k)",
+            "label": "Haiku",
+            "value": "haiku"
+          }
+        ],
+        "signed_in": false
+      },
+      {
+        "agent": "codex",
+        "available": true,
+        "models": [
+          {
+            "detail": "Latest workhorse model for coding and everyday work.",
+            "label": "GPT-6.1-Sol",
+            "value": "gpt-6.1-sol"
+          },
+          {
+            "detail": "Frontier intelligence for the most demanding work.",
+            "label": "GPT-6-Astra",
+            "value": "gpt-6-astra"
+          },
+          {
+            "detail": "Previous generation workhorse model.",
+            "label": "GPT-6-Sol",
+            "value": "gpt-6-sol"
+          },
+          {
+            "detail": "Fast and affordable model for easier tasks.",
+            "label": "GPT-6-Luna",
+            "value": "gpt-6-luna"
+          },
+          {
+            "detail": "Older generation workhorse model.",
+            "label": "GPT-5.6-Sol",
+            "value": "gpt-5.6-sol"
+          },
+          {
+            "detail": "GPT-6.1 Terra Codex model.",
+            "label": "GPT-6.1 Terra",
+            "value": "gpt-6.1-terra"
+          },
+          {
+            "detail": "Older balanced model for straightforward work.",
+            "label": "GPT-5.6-Terra",
+            "value": "gpt-5.6-terra"
+          },
+          {
+            "detail": "Older fast and efficient model.",
+            "label": "GPT-5.6-Luna",
+            "value": "gpt-5.6-luna"
+          },
+          {
+            "detail": "Legacy coding model.",
+            "label": "GPT-5.5",
+            "value": "gpt-5.5"
+          }
+        ],
+        "signed_in": true
+      }
+    ],
+    "projects": [
+      {
+        "exists": true,
+        "git_branch": "main",
+        "last_agent": "claude",
+        "last_used": "2026-11-08T09:00:00.000Z",
+        "name": "app",
+        "path": "/tmp/ccd-minor-33/app"
+      }
+    ],
+    "type": "projects"
+  },
+  "start_session_request": {
+    "agent": "claude",
+    "model": "haiku",
+    "path": "/tmp/ccd-minor-33/app",
+    "prompt": "fix the tests",
+    "request_id": "r1",
+    "type": "start_session"
+  }
+}

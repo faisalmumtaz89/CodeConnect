@@ -1,7 +1,8 @@
-//! `codeconnect claude` with no terminal to show a session in — run from a script,
-//! a pipe or `ssh host command` — runs claude as claude runs directly. Whether a
-//! launch hosts anything is only visible from outside the binary, with its
-//! terminal taken away one way at a time, which is why this runs the built binary.
+//! `codeconnect claude` and `codeconnect codex` with no terminal to show a session
+//! in — run from a script, a pipe or `ssh host command` — run the agent as it runs
+//! directly. Whether a launch hosts anything is only visible from outside the
+//! binary, with its terminal taken away one way at a time, which is why this runs
+//! the built binary.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
@@ -49,12 +50,13 @@ fn pty() -> (OwnedFd, OwnedFd) {
     }
 }
 
-/// The launch's exit status and what it printed, wherever it printed it.
-fn launch(home: &Path, missing: Missing) -> (Option<i32>, String) {
+/// The exit status of `codeconnect <args>` and what it printed, wherever it
+/// printed it.
+fn launch(home: &Path, missing: Missing, args: &[&str]) -> (Option<i32>, String) {
     let (primary, secondary) = pty();
     let mut command = Command::new(env!("CARGO_BIN_EXE_codeconnect"));
     command
-        .args(["claude", "--version"])
+        .args(args)
         .env("HOME", home)
         .env("CODECONNECT_HOME", home.join("cc"))
         .env("TMUX_TMPDIR", home);
@@ -102,7 +104,7 @@ fn launch(home: &Path, missing: Missing) -> (Option<i32>, String) {
         }
         bytes
     });
-    let run = command.output().expect("running codeconnect claude");
+    let run = command.output().expect("running codeconnect");
     // Every copy of the terminal's other end closed — the command holds some too —
     // so the reader sees the end.
     drop(command);
@@ -140,7 +142,7 @@ fn with_no_terminal_to_show_a_session_claude_runs_as_it_runs_directly() {
         ("input not a terminal", Missing::Input),
         ("output not a terminal", Missing::Output),
     ] {
-        let (status, printed) = launch(&home, missing);
+        let (status, printed) = launch(&home, missing, &["claude", "--version"]);
         let hosted = home.join("cc/sessions").exists();
         verdicts.push((name, status, printed, hosted));
     }
@@ -149,7 +151,7 @@ fn with_no_terminal_to_show_a_session_claude_runs_as_it_runs_directly() {
     // never host: claude is handed its `--mcp-config` and `--settings`, and the command
     // exits 0.
     let control = protocol::tmux::tmux_bin().map(|_| {
-        let (status, printed) = launch(&home, Missing::Nothing);
+        let (status, printed) = launch(&home, Missing::Nothing, &["claude", "--version"]);
         (status, printed, home.join("cc/sessions").exists())
     });
     std::fs::remove_dir_all(&home).unwrap();
@@ -168,5 +170,39 @@ fn with_no_terminal_to_show_a_session_claude_runs_as_it_runs_directly() {
             !hosted,
             "{name}: a session was created that nothing could show"
         );
+    }
+}
+
+/// The same for `codeconnect codex`, whose launch otherwise takes only the
+/// interactive session: with no terminal, any codex command runs as codex runs it,
+/// `login status` among them, with codex's own output and exit status.
+#[test]
+fn with_no_terminal_to_show_a_session_codex_runs_as_it_runs_directly() {
+    let home = std::path::PathBuf::from(format!(
+        "/tmp/cc-noterm-{}",
+        protocol::uid::new().expect("a unique test directory")
+    ));
+    std::fs::create_dir_all(home.join("cc")).unwrap();
+    let codex = home.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\necho \"STAND-IN $*\"\nexit 3\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        home.join("cc/config.json"),
+        format!(r#"{{"codex_bin": {:?}, "update_check": false}}"#, codex),
+    )
+    .unwrap();
+
+    let mut verdicts = Vec::new();
+    for (name, missing) in [
+        ("no controlling terminal", Missing::Controlling),
+        ("input not a terminal", Missing::Input),
+        ("output not a terminal", Missing::Output),
+    ] {
+        verdicts.push((name, launch(&home, missing, &["codex", "login", "status"])));
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+    for (name, (status, printed)) in verdicts {
+        assert_eq!(status, Some(3), "{name}: {printed}");
+        assert_eq!(printed, "STAND-IN login status\n", "{name}");
     }
 }

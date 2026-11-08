@@ -90,9 +90,11 @@ codeconnect codex                 # in any project directory
 ```
 
 A new Codex session uses the launching terminal's measured columns and rows before
-the TUI starts, including when the tmux server is already running. Its keyboard and
-screen must both be terminals: as native `codex` does, `codeconnect codex` refuses with
-"stdin is not a terminal" or "stdout is not a terminal" before it starts anything.
+the TUI starts, including when the tmux server is already running. With no terminal to
+show a session in — a script, a pipe, `ssh` without `-t` — `codeconnect codex` hosts
+nothing and runs the `codex` it would have hosted directly, with the same arguments, so
+`codeconnect codex exec …` or `codeconnect codex login status` in a script behaves as
+`codex` does, and the TUI refuses in Codex's own words.
 
 Codex has no hooks, so a Codex session is hosted differently: the launcher puts a broker
 in front of Codex's own JSON-RPC app server, and the broker is what makes a phone answer
@@ -1137,6 +1139,27 @@ Linux); disk is in bytes for the volume holding the daemon user's home folder,
 used being its size less what that user can still write. A value that cannot be
 read is omitted. The sample is answered off the connection's loop, so nothing
 else on it waits for the half second.
+`>= 33` lets a start pick the agent's model. Each agent in `projects` carries
+`models`, `{value, label, detail?}` in the agent's own order and words, and
+`signed_in`, to show (a start does not depend on it). The daemon asks the agent
+itself, through the launcher from the home folder, once `--version` says it is
+there: Claude Code as `codeconnect claude -p --input-format stream-json
+--output-format stream-json --verbose --no-session-persistence
+--strict-mcp-config --settings '{"disableAllHooks":true}'`, which answers one
+`initialize` with its models, its own `default` first with the model that is now;
+Codex as `codeconnect codex app-server`, which answers `model/list` (hidden models
+left out) and `account/read`. Claude Code with no token and no API key, for
+Anthropic's own API, is signed out; Codex is signed in when it holds an account or
+needs no OpenAI sign-in. An agent keeps its own books as it starts: Claude Code
+refreshes its caches in `~/.claude.json`, and Codex begins a plugin sync that the
+ask cuts short, leaving a 4 KB `~/.codex/.tmp/git-*` it never removes. So an
+answer that says signed in is kept until the agent's `--version` changes or the
+daemon restarts; any other answer is asked again at the next list, except a
+signed-out Codex's, asked again only once `codex login status`, which starts
+nothing, says it is signed in. An agent that does not answer within the check's
+10 s offers no models. `start_session`'s `model` is given to the agent as one
+argument, `--model=<value>`, after `--no-attach`; absent, or Claude Code's
+`default`, the agent gets no `--model` and starts with the model its settings name.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

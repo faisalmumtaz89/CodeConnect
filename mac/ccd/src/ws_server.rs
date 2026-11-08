@@ -9290,6 +9290,7 @@ mod tests {
                     &AgentKind::Claude,
                     None,
                     None,
+                    None,
                 )
                 .await
             }
@@ -9320,6 +9321,7 @@ mod tests {
                 agent: AgentKind::Claude,
                 prompt: None,
                 worktree: None,
+                model: None,
             })
             .unwrap(),
             "start_session_unlisted_started": reply(start(at(&src.join("new-app"))).await),
@@ -9459,6 +9461,7 @@ mod tests {
                     &agent,
                     None,
                     Some(&worktree),
+                    None,
                 )
                 .await
             }
@@ -9477,6 +9480,7 @@ mod tests {
                 agent,
                 prompt: None,
                 worktree: Some(worktree),
+                model: None,
             })
             .unwrap()
         };
@@ -9614,11 +9618,15 @@ esac
                 agent: AgentKind::Claude,
                 available: true,
                 detail: None,
+                models: Vec::new(),
+                signed_in: None,
             },
             AgentAvailability {
                 agent: AgentKind::Codex,
                 available: false,
                 detail: Some("could not find the codex binary: install Codex".into()),
+                models: Vec::new(),
+                signed_in: None,
             },
         ]);
 
@@ -9645,6 +9653,7 @@ esac
                     &path,
                     &agent,
                     prompt,
+                    None,
                     None,
                 )
                 .await
@@ -9674,6 +9683,7 @@ esac
                 agent: AgentKind::Claude,
                 prompt: Some("fix the \"login\" test; then run it\nand commit;".into()),
                 worktree: None,
+                model: None,
             })
             .unwrap(),
             "projects": projects,
