@@ -1495,14 +1495,15 @@ public final class DaemonConnection {
         /// `deviceID` defaults to a real-looking id because that is what a
         /// paired connection has; pass `nil` to model a static-token session,
         /// which has no device row and whose push registration the daemon
-        /// refuses outright.
+        /// refuses outright. `machineName` is the computer's own name, as a
+        /// daemon of minor 25 or later reports it.
         func simulateCapabilitiesForTesting(
-            _ capabilities: Capabilities, minor: UInt32, deviceID: String? = "dev-test"
+            _ capabilities: Capabilities, minor: UInt32, deviceID: String? = "dev-test", machineName: String? = nil
         ) {
             helloAck = HelloAck(
                 protocolVersion: Wire.protocolVersion, protocolMinor: minor,
                 serverTime: "", capabilities: capabilities, deviceToken: nil,
-                deviceID: deviceID, deviceName: nil)
+                deviceID: deviceID, deviceName: nil, machineName: machineName)
             self.capabilities = capabilities
         }
     #endif

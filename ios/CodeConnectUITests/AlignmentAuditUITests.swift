@@ -115,23 +115,23 @@ final class AlignmentAuditUITests: XCTestCase {
             app, label: "Command", body: "Classified at the computer", size: .ax5)
     }
 
-    // MARK: Fleet — the section header against the screen's own text
+    // MARK: Fleet — the Ended footer against the screen's own text
 
-    func testFleetBandHeaderSharesTheScreenEdge() {
-        let app = launch(fixture: "deck", size: .medium)
+    func testFleetEndedFooterSharesTheScreenEdge() {
+        let app = launch(fixture: "ended", size: .medium)
         sleep(3)
         let all = edges(app)
-        guard let band = all.first(where: { $0.label.caseInsensitiveCompare("Waiting for you") == .orderedSame })?.x,
+        guard let footer = all.first(where: { $0.label.hasSuffix(" ended") })?.x,
             let headline = all.first(where: { $0.label == "Projects" })?.x
         else {
-            XCTFail("expected a Waiting for you section and the Projects title on the fleet screen")
+            XCTFail("expected the Ended footer and the Projects title on the fleet screen")
             return
         }
         XCTAssertEqual(
-            band, headline, accuracy: tolerance,
+            footer, headline, accuracy: tolerance,
             """
-            The WAITING FOR YOU section header sits at \(band) while the screen's own \
-            text sits at \(headline). Both are screen-level text and must share one edge.
+            The Ended footer sits at \(footer) while the screen's own text sits at \
+            \(headline). Both are screen-level text and must share one edge.
             """)
     }
 

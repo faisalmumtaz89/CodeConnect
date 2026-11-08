@@ -26,7 +26,7 @@ final class FleetApprovalLineTests: XCTestCase {
     /// not `blocked`, a prompt typed into it at the same moment instead.
     private func model(
         command: String = "git status\r\ngit push --force origin main", blocked: Bool = true,
-        acted: Bool = true, cwd: String = "/tmp/work"
+        acted: Bool = true, cwd: String = "/tmp/work", cards: Int = 1
     ) throws -> AppModel {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("fleet-line-\(UUID().uuidString)")
@@ -59,10 +59,11 @@ final class FleetApprovalLineTests: XCTestCase {
                             "session_uid": .string(WireRecording.uid), "session_id": .string("cc-1"),
                             "tmux_session": .string("cc-1"), "cwd": .string(cwd),
                             "project_label": .string("work"), "lifecycle": .string("live"),
-                            "link": .string("attached"), "last_seq": .int(2),
+                            "link": .string("attached"), "last_seq": .int(Int64(1 + cards)),
                             "created_at": .string("2026-10-08T00:00:00Z"),
                             "updated_at": .string("2026-10-08T00:00:00Z"),
-                            "blocked_on": .array(blocked ? [.string("toolu_allowed")] : []),
+                            "blocked_on": .array(
+                                blocked ? ["toolu_allowed", "toolu_second"].prefix(cards).map { .string($0) } : []),
                         ])
                     ]),
                 ])))
@@ -74,14 +75,28 @@ final class FleetApprovalLineTests: XCTestCase {
         }
         model.connection.injectForTesting(
             try frame(.object(["type": .string("event"), "event": .object(request)])))
+        if blocked, cards > 1 {
+            card["request_id"] = .string("toolu_second")
+            card["prompt_id"] = .string("p2")
+            payload["card"] = .object(card)
+            request["payload"] = .object(payload)
+            request["seq"] = .int(3)
+            request["source_event_id"] = .string("perm:toolu_second")
+            model.connection.injectForTesting(
+                try frame(.object(["type": .string("event"), "event": .object(request)])))
+        }
         return model
     }
 
-    private func blockedRow(_ model: AppModel) async throws -> FleetRow {
+    private func blockedRow(_ model: AppModel, cards: Int = 1) async throws -> FleetRow {
         for _ in 0..<100 {
             // Blocked from the summary at once; its card reaches the row when
             // the session has rebuilt its timeline.
-            if let row = model.fleet.first, row.status == .blocked, row.activity != nil { return row }
+            if let row = model.fleet.first, row.status == .blocked, row.activity != nil,
+                row.blockedCount == cards
+            {
+                return row
+            }
             try await Task.sleep(for: .milliseconds(20))
         }
         return try XCTUnwrap(nil, "no blocked row with its card: \(model.fleet)")
@@ -131,11 +146,18 @@ final class FleetApprovalLineTests: XCTestCase {
     private func spokenRow(
         command: String = "ls", blocked: Bool = true, acted: Bool = true
     ) async throws -> String {
+        try await drawnRow(command: command, blocked: blocked, acted: acted).label
+    }
+
+    /// The run's row as drawn: what VoiceOver says on it, and where it is.
+    private func drawnRow(
+        command: String = "ls", blocked: Bool = true, acted: Bool = true, cards: Int = 1
+    ) async throws -> (label: String, frame: CGRect) {
         try setAccessibility(true)
         defer { try? setAccessibility(false) }
-        let model = try model(command: command, blocked: blocked, acted: acted)
+        let model = try model(command: command, blocked: blocked, acted: acted, cards: cards)
         if blocked {
-            _ = try await blockedRow(model)
+            _ = try await blockedRow(model, cards: cards)
         } else {
             try await Task.sleep(for: .milliseconds(500))
         }
@@ -145,11 +167,13 @@ final class FleetApprovalLineTests: XCTestCase {
         window.isHidden = false
         window.rootViewController?.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(2))
-        let found = labels(in: window)
+        let found = elements(in: window)
         window.isHidden = true
         // The row, not its card's header, which also starts with the project.
-        return try XCTUnwrap(
-            found.first { $0.hasPrefix("work, Claude Code session, ") }, "no row: \(found)")
+        let row = try XCTUnwrap(
+            found.first { ($0.accessibilityLabel ?? "").hasPrefix("work, Claude Code session, ") },
+            "no row: \(found.map { $0.accessibilityLabel ?? "" })")
+        return (row.accessibilityLabel ?? "", row.accessibilityFrame)
     }
 
     /// The blocked row speaks the command's first line and nothing after it.
@@ -188,7 +212,9 @@ final class FleetApprovalLineTests: XCTestCase {
         window.isHidden = true
         XCTAssertEqual(
             names.filter { $0 == "1 waiting for you" }.count, 2, names.joined(separator: " | "))
-        XCTAssertTrue(
+        // No section above the cards says it again: a waiting card turns amber
+        // where it is.
+        XCTAssertFalse(
             names.contains { $0.caseInsensitiveCompare("Waiting for you") == .orderedSame },
             names.joined(separator: " | "))
         XCTAssertEqual(
@@ -354,5 +380,19 @@ final class FleetApprovalLineTests: XCTestCase {
         let row = try await spokenRow(blocked: false)
         XCTAssertNotNil(
             row.range(of: #", last activity \d+ hours ago(,|$)"#, options: .regularExpression), row)
+    }
+
+    /// A run is as tall waiting on one card as on two, running or idle, so a
+    /// run whose state changes moves nothing below it: the same mis-tap as a
+    /// card changing place.
+    func testARunKeepsItsHeightWhateverItIsDoing() async throws {
+        let waiting = try await drawnRow(command: "git push --force origin main").frame
+        let waitingOnTwo = try await drawnRow(command: "git push --force origin main", cards: 2).frame
+        let running = try await drawnRow(blocked: false).frame
+        let idle = try await drawnRow(blocked: false, acted: false).frame
+        XCTAssertEqual(
+            waitingOnTwo.height, waiting.height, accuracy: 0.5, "two cards \(waitingOnTwo), one \(waiting)")
+        XCTAssertEqual(running.height, waiting.height, accuracy: 0.5, "running \(running), waiting \(waiting)")
+        XCTAssertEqual(idle.height, waiting.height, accuracy: 0.5, "idle \(idle), waiting \(waiting)")
     }
 }

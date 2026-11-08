@@ -41,7 +41,8 @@ extension RunLabel {
     /// one that admits it does not know.
     static let unknown = RunLabel(project: "Unknown project", qualifier: nil)
 
-    /// Labels for a whole fleet, keyed by `sessionKey`.
+    /// Labels for a whole fleet, or for the runs one card holds, keyed by
+    /// `sessionKey`.
     ///
     /// **The qualifier is earned, not assumed.** Two runs in one project are
     /// ordinary — a second agent on the same checkout — and a bare repetition
@@ -58,7 +59,7 @@ extension RunLabel {
     ///
     /// When it cannot be both, the runs share a label. That is honest: they are
     /// two agents in one project, and nothing this app knows separates them.
-    static func labels(for summaries: [SessionSummary]) -> [String: RunLabel] {
+    public static func labels(for summaries: [SessionSummary]) -> [String: RunLabel] {
         var labels: [String: RunLabel] = [:]
         // **Grouped by what is rendered, not by what arrived.** A directory may
         // legitimately be called `Unknown project`, and grouping on the raw
