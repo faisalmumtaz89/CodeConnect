@@ -16098,6 +16098,236 @@ mod tests {
         assert!(filed, "the transcript's last line was not filed");
     }
 
+    /// A run started after `TEST_UID`, and one started before it.
+    const LATER_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPZZ";
+    const EARLIER_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNP00";
+
+    /// A run's row naming `path`, as its hooks would leave it.
+    fn transcript_row(
+        uid: &str,
+        path: &std::path::Path,
+        lifecycle: protocol::event::Lifecycle,
+    ) -> crate::store::SessionRow {
+        let now = protocol::time::now_rfc3339();
+        crate::store::SessionRow {
+            session_uid: uid.into(),
+            session_id: "cc-1".into(),
+            tmux_session: "cc-1".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+            lifecycle,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        }
+    }
+
+    /// A transcript line with id `id`, appended to `path`.
+    fn write_line(path: &std::path::Path, id: &str) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{}", json!({"type": "user", "uuid": id})).unwrap();
+    }
+
+    /// The transcript line ids filed under `uid`.
+    fn filed_lines(store: &Store, uid: &str) -> Vec<String> {
+        store
+            .events_after(uid, 0, 1_000)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| event.source_event_id)
+            .collect()
+    }
+
+    /// Whether `uid` files the line `id` within 5 s.
+    async fn files_line(store: &Store, uid: &str, id: &str) -> bool {
+        for _ in 0..500 {
+            if filed_lines(store, uid).iter().any(|filed| filed == id) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// A tailer over `store`, as a start brings one up; abort the handle to stop it.
+    fn start_tailer(store: &Arc<Store>) -> (Arc<Daemon>, tokio::task::JoinHandle<()>) {
+        let (daemon, tails) = daemon_watching_tails(
+            Arc::clone(store),
+            Config {
+                fsevents: false,
+                tail_poll_ms: 20,
+                ..Config::default()
+            },
+        );
+        let task = tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
+        (daemon, task)
+    }
+
+    /// A run naming `path`, as its hook does: the row says so, and the tailer is told.
+    fn claims(daemon: &Arc<Daemon>, store: &Store, uid: &str, path: &std::path::Path) {
+        store
+            .upsert_session(&transcript_row(uid, path, protocol::event::Lifecycle::Live))
+            .unwrap()
+            .assert_present();
+        daemon
+            .transcript_tx
+            .send(crate::tailer::TailCommand::Follow {
+                session_uid: uid.into(),
+                path: path.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+    }
+
+    /// A run ending as `mark_exited` ends it for the tailer: the row ended, then
+    /// its tail is stopped. Returns once its transcript is forgotten, or after a
+    /// second if it never is, so a test of a tree that does not forget fails on
+    /// what it checks rather than here.
+    async fn ends(daemon: &Arc<Daemon>, store: &Store, uid: &str, path: &std::path::Path) {
+        store
+            .upsert_session(&transcript_row(
+                uid,
+                path,
+                protocol::event::Lifecycle::Exited,
+            ))
+            .unwrap()
+            .assert_present();
+        daemon
+            .transcript_tx
+            .send(crate::tailer::TailCommand::Stop {
+                session_uid: uid.into(),
+            })
+            .unwrap();
+        for _ in 0..100 {
+            if store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .transcript_path
+                .is_none()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The original: a run ends, a later run `--resume`s its conversation, the
+    /// daemon restarts. The ended run keeps what it wrote and is given nothing of
+    /// the later run's, then or at the start.
+    #[tokio::test]
+    async fn an_ended_run_is_not_read_again_once_its_conversation_is_resumed() {
+        let path = long_transcript_path("resumed");
+        let store = shared_store();
+        let (daemon, first) = start_tailer(&store);
+        claims(&daemon, &store, TEST_UID, &path);
+        write_line(&path, "a1");
+        assert!(files_line(&store, TEST_UID, "a1").await);
+        ends(&daemon, &store, TEST_UID, &path).await;
+        claims(&daemon, &store, LATER_UID, &path);
+        write_line(&path, "b1");
+        assert!(files_line(&store, LATER_UID, "b1").await);
+
+        first.abort();
+        let (_daemon, _second) = start_tailer(&store);
+        write_line(&path, "b2");
+        let after_start = files_line(&store, LATER_UID, "b2").await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(after_start, "the running run is followed after the start");
+        assert_eq!(filed_lines(&store, TEST_UID), ["a1"]);
+    }
+
+    /// The same after the later run has moved to a new transcript (`/clear`,
+    /// `/branch`, an in-session `/resume`): no run names the old file any more, and
+    /// the ended run is still not given what the later run wrote to it.
+    #[tokio::test]
+    async fn an_ended_run_stays_unread_after_its_resumer_moves_to_a_new_file() {
+        let old = long_transcript_path("resumed-then-cleared");
+        let new = long_transcript_path("cleared-to");
+        let store = shared_store();
+        let (daemon, first) = start_tailer(&store);
+        claims(&daemon, &store, TEST_UID, &old);
+        write_line(&old, "a1");
+        assert!(files_line(&store, TEST_UID, "a1").await);
+        ends(&daemon, &store, TEST_UID, &old).await;
+        claims(&daemon, &store, LATER_UID, &old);
+        write_line(&old, "b1");
+        assert!(files_line(&store, LATER_UID, "b1").await);
+        claims(&daemon, &store, LATER_UID, &new);
+        write_line(&new, "c1");
+        assert!(files_line(&store, LATER_UID, "c1").await);
+
+        first.abort();
+        let (_daemon, _second) = start_tailer(&store);
+        write_line(&new, "c2");
+        let after_start = files_line(&store, LATER_UID, "c2").await;
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(&new).unwrap();
+        assert!(
+            after_start,
+            "the running run is followed on its new file after the start"
+        );
+        assert_eq!(filed_lines(&store, TEST_UID), ["a1"]);
+    }
+
+    /// A run started earlier that, still running, resumes a conversation a later
+    /// run named and has since ended: it is followed on that file across a start.
+    #[tokio::test]
+    async fn a_running_run_that_resumes_an_ended_runs_file_is_followed_after_a_start() {
+        let own = long_transcript_path("earlier-own");
+        let resumed = long_transcript_path("earlier-resumes");
+        let store = shared_store();
+        let (daemon, first) = start_tailer(&store);
+        claims(&daemon, &store, EARLIER_UID, &own);
+        write_line(&own, "x1");
+        assert!(files_line(&store, EARLIER_UID, "x1").await);
+        claims(&daemon, &store, TEST_UID, &resumed);
+        write_line(&resumed, "t1");
+        assert!(files_line(&store, TEST_UID, "t1").await);
+        ends(&daemon, &store, TEST_UID, &resumed).await;
+        claims(&daemon, &store, EARLIER_UID, &resumed);
+        write_line(&resumed, "e1");
+        assert!(files_line(&store, EARLIER_UID, "e1").await);
+
+        first.abort();
+        let (_daemon, _second) = start_tailer(&store);
+        write_line(&resumed, "e2");
+        let after_start = files_line(&store, EARLIER_UID, "e2").await;
+        std::fs::remove_file(&own).unwrap();
+        std::fs::remove_file(&resumed).unwrap();
+        assert!(after_start, "the earlier run lost its lines at the start");
+        assert_eq!(filed_lines(&store, TEST_UID), ["t1"]);
+    }
+
+    /// Two runs on one conversation at once: a later run resuming it does not
+    /// take the file from the one still running, which goes on filing its lines.
+    #[tokio::test]
+    async fn a_run_still_running_keeps_its_file_when_a_later_run_resumes_it() {
+        let path = long_transcript_path("two-live");
+        let store = shared_store();
+        let (daemon, _tailer) = start_tailer(&store);
+        claims(&daemon, &store, TEST_UID, &path);
+        write_line(&path, "a1");
+        assert!(files_line(&store, TEST_UID, "a1").await);
+        claims(&daemon, &store, LATER_UID, &path);
+        assert!(files_line(&store, LATER_UID, "a1").await);
+        write_line(&path, "a2");
+        let kept = files_line(&store, TEST_UID, "a2").await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            kept,
+            "the run still running lost its own line to the later one"
+        );
+    }
+
     /// A run that ends within moments of `/clear` still has the start of its
     /// new transcript read.
     #[tokio::test]

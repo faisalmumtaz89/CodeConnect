@@ -121,7 +121,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     agents. `answer_claims` and `text_mutations` are deliberately NOT split:
 ///     nothing writes a Codex row into either, and a table split ahead of its
 ///     producer is the speculative half-surface this design refuses.
-const SCHEMA_VERSION: i64 = 5;
+///   * `6` — an ended run's transcript is forgotten once read through
+///     (`tailer::finish`), so no start reads a file a later run has resumed.
+///     Rows that ended before that rule existed still name theirs, and the
+///     first start would read each one again, filing whatever runs that resumed
+///     it wrote since; so on the way up they are forgotten once. **A version
+///     gate, as `3` is:** run every start, it would drop the final read of a run
+///     whose last read a killed daemon left unfinished. No schema changes, so an
+///     older daemon reads everything; a rollback writes its own number back,
+///     and the way back up forgets the rows it ended, once more.
+const SCHEMA_VERSION: i64 = 6;
 
 pub struct Store {
     /// The only connection that writes. One, so `BEGIN IMMEDIATE` never has to
@@ -1332,6 +1341,13 @@ impl Store {
         // additions so the columns it names are present on a legacy database.
         if from_version < 3 {
             normalize_push_tuples(&conn)?;
+        }
+        // The one-shot for `6`: see [`SCHEMA_VERSION`].
+        if from_version < 6 {
+            conn.execute(
+                "UPDATE sessions SET transcript_path = NULL WHERE lifecycle = 'exited'",
+                [],
+            )?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -4893,6 +4909,19 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// An ended run's transcript, read through, is no longer its to read: the
+    /// tailer forgets it so no later start reads the file again (see
+    /// `tailer::finish`). Only an ended row, so a run a late hook brought back
+    /// keeps the file it is still writing.
+    pub fn forget_transcript(&self, session_uid: &str) -> Result<()> {
+        self.write().execute(
+            "UPDATE sessions SET transcript_path = NULL
+              WHERE session_uid = ?1 AND lifecycle = 'exited'",
+            params![session_uid],
+        )?;
+        Ok(())
     }
 
     pub fn load_cursor(&self, session_uid: &str) -> Result<Option<TailCursor>> {
@@ -8588,6 +8617,60 @@ mod tests {
         assert!(store.get_session(&codex.uid).unwrap().is_some());
         assert!(store.get_session(&claude.uid).unwrap().is_some());
         assert_eq!(store.count_events(&claude.uid).unwrap(), 1);
+    }
+
+    /// A run's row naming its transcript, in `lifecycle`.
+    fn with_transcript(store: &Store, session: &SessionKey, lifecycle: Lifecycle) {
+        let mut row = session_row(session);
+        row.lifecycle = lifecycle;
+        row.transcript_path = Some(format!("/tmp/{}.jsonl", session.uid));
+        store.upsert_session(&row).unwrap().assert_present();
+    }
+
+    fn transcript_of(store: &Store, session: &SessionKey) -> Option<String> {
+        store
+            .get_session(&session.uid)
+            .unwrap()
+            .unwrap()
+            .transcript_path
+    }
+
+    /// On the way up to `6`, every run that had ended forgets its transcript, once,
+    /// and a running one keeps its own. Past the transition the gate is shut: a
+    /// run whose end a later start has still to read keeps its transcript.
+    #[test]
+    fn runs_that_ended_before_version_6_forget_their_transcripts_once() {
+        let (store, path) = temp_store();
+        let (ended, live) = (key("EE", "cc-1"), key("BB", "cc-2"));
+        with_transcript(&store, &ended, Lifecycle::Exited);
+        with_transcript(&store, &live, Lifecycle::Live);
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", 5i64).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(transcript_of(&store, &ended), None);
+        assert!(transcript_of(&store, &live).is_some());
+
+        with_transcript(&store, &ended, Lifecycle::Exited);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(transcript_of(&store, &ended).is_some());
+    }
+
+    /// The tailer forgets an ended run's transcript once it has read it through,
+    /// and never a running one's: a late hook may have brought it back.
+    #[test]
+    fn only_an_ended_run_forgets_its_transcript() {
+        let (store, _path) = temp_store();
+        let (ended, live) = (key("EE", "cc-1"), key("BB", "cc-2"));
+        with_transcript(&store, &ended, Lifecycle::Exited);
+        with_transcript(&store, &live, Lifecycle::Live);
+        store.forget_transcript(&ended.uid).unwrap();
+        store.forget_transcript(&live.uid).unwrap();
+        assert_eq!(transcript_of(&store, &ended), None);
+        assert!(transcript_of(&store, &live).is_some());
     }
 
     /// The ten-column `INSERT … ON CONFLICT DO UPDATE` v0.6.0's `upsert_session`
@@ -13609,7 +13692,7 @@ mod tests {
         // Written out rather than compared against the constant that produced
         // it: a version on disk is a fact other builds read, and a test that
         // asks the schema what the schema said would agree with any answer.
-        assert_eq!(version, 5, "the schema version other builds will read");
+        assert_eq!(version, 6, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         // **One answer ledger, and it is the generalized one.** `mutation_ledger`
         // was built for "answer, compose, interrupt" and its conflict law is
