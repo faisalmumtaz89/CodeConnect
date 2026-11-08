@@ -47,6 +47,7 @@ final class DiffTruncationUITests: XCTestCase {
             NSPredicate(format: "identifier BEGINSWITH 'session-'")
         ).firstMatch
         XCTAssertTrue(session.waitForExistence(timeout: 30), "the fixture fleet has rows")
+        session.scrollClearOfTheBar(in: app)
         session.tap()
         let more = app.buttons["session-more"]
         XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")

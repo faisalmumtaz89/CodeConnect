@@ -1,5 +1,6 @@
 import CodeConnectKit
 import SwiftUI
+import UniformTypeIdentifiers
 import UserNotifications
 
 /// Where a navigation route points: one *run*, by its key, never by its tmux
@@ -40,19 +41,19 @@ private struct PendingRemoval {
     }
 }
 
-/// The 2am glance. Fixed sort, every fact stamped with its age, one card per
-/// project saying where it is, and the one number that matters — how many
-/// agents need you — directly under the title.
+/// The 2am glance. One list of projects in the owner's own order, every fact
+/// stamped with its age, one card per project saying where it is, and the one
+/// number that matters — how many agents need you — directly under the title.
 ///
 /// Three rules do most of the work here:
 ///
-///  * **Visual weight follows urgency.** A row is two lines unless the third
-///    carries something non-redundant. A calm fleet of eight running agents is
-///    sixteen lines of text; two blockers grow exactly two rows.
-///  * **Colour is information.** The only coloured container on the screen is
-///    the border of a card led by a failed run. Blocked is carried by its
-///    section, its position at the top and the count under the title, and
-///    risk by a tag that is brightness, not hue.
+///  * **Nothing moves on its own.** A card's place is the owner's
+///    (`ProjectOrder`): a status or an event changes what a card says, never
+///    where it is or how tall it is, so a tap lands on the card it was aimed
+///    at. Only a drag moves a card, and a new project arrives on top.
+///  * **Colour is information.** Two borders are coloured: amber round a card
+///    with a run waiting for you, red round one with a failed run. Risk is a
+///    tag that is brightness, not hue.
 ///  * **One banner, ever.** Every candidate goes to `CCBannerSlot` and it picks
 ///    by rank: rejected beats offline beats stale beats cached. Facts that lose
 ///    still appear per-element: a cached row gets a hollow dot, never the word
@@ -111,6 +112,18 @@ struct FleetView: View {
     /// — as a swipe-back begins, or as the Deck starts to close — so the reader
     /// never sees it.
     @State private var hidden: FleetScreen?
+    /// The project being dragged, while a hold-and-drag is moving it.
+    @State private var dragging: ProjectKey?
+    /// What the list shows while it is in sight: each project and the runs in
+    /// it. A project or a run that arrives or leaves waits here, named by the
+    /// header's pill, until the owner lets it in (the pill, a pull, coming back
+    /// to the screen), so nothing moves under a finger. Nil, or empty, until
+    /// there is a card to hold.
+    @State private var held: [ProjectKey: Set<String>]?
+    /// The last row of every run the list holds, drawn once the fleet no longer
+    /// has it.
+    @State private var heldRows: [String: FleetRow] = [:]
+    @Environment(\.scenePhase) private var scenePhase
     /// The dot's own Dynamic Type ramp, mirrored so that the text column a band
     /// header lands on is the text column its rows land on.
     ///
@@ -142,179 +155,254 @@ struct FleetView: View {
         #endif
         let screen = hidden ?? liveScreen()
         return NavigationStack(path: $path) {
-            ScrollView {
-                // A `VStack`, **not** a `LazyVStack`. Each card and the Ended
-                // band is one item holding all its rows, so at the accessibility
-                // sizes one item can be several screens tall, and over items that
-                // tall the lazy stack never settled its placement: one of the
-                // first few drags pinned the main thread for over a minute
-                // (`sample`: spinning in `LazySubviewPlacements`), the same
-                // failure the timeline had before it became a `List`. The items
-                // are eager inside, and the eager stack measured no cost
-                // at the largest real fleet — 45 ended runs expanded, default
-                // size: expanding 1.59–1.62s lazy against 1.61–1.63s eager,
-                // drags alike, idle CPU 12.7–14.4% against 11.6–12.5%.
-                VStack(alignment: .leading, spacing: 0) {
-                    // An empty fleet is one instruction, not a list with no rows:
-                    // a header above it would name the same emptiness again.
-                    if !screen.isEmpty { scrollHeader(screen) }
-                    content(screen)
-                }
-                // Whether the fleet is in the window, which is whether any of it
-                // can be on screen: the navigation controller takes it out when
-                // a chat has covered it and puts it back as a pop or a back
-                // swipe begins. Not `onAppear`/`onDisappear`: a chat pushed as
-                // the fleet first appears — a link followed at launch — leaves
-                // those saying "appeared" until it is gone, and silent after.
-                // Back in the window under the Deck — a Deck link followed from
-                // a chat pops the chat beneath it — the fleet is still covered.
-                .background(
-                    FleetWindowPresence { inWindow in inWindow && !showDeck ? thaw() : freeze() })
-                // The scroll view's width, which the lazy stack took on its own.
-                // A `VStack` is as wide as its widest row, and a long MCP tool
-                // name makes a row wider than the screen: the scroll view then
-                // centred the whole fleet on that row, and every band header
-                // sat off the left edge.
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                // The Deck bar's own height is reserved by `safeAreaInset`, and
-                // that height triples at AX5 — a hard-coded 76 would leave the
-                // last row under the bar exactly when the rows are tallest.
-                .padding(.bottom, CC.space.xl)
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: FleetScrollKey.self,
-                            value: proxy.frame(in: .named(Self.scrollSpace)).minY)
-                    }
+            fleet(screen)
+        }
+        #if DEBUG
+            .overlay(alignment: .topLeading) { FleetRowRenderProbe() }
+        #endif
+    }
+
+    /// The list and everything it answers to, a stage at a time, each stage's
+    /// modifiers in the order they apply. One expression, it was more than the
+    /// compiler would type-check in reasonable time.
+    private func fleet(_ screen: FleetScreen) -> some View {
+        let scroll = fleetScroll(screen)
+        let held = holdingChanges(scroll, screen)
+        let navigated = navigation(held, screen)
+        let presented = presentations(navigated, screen)
+        return lifecycle(presented)
+    }
+
+    private func fleetScroll(_ screen: FleetScreen) -> some View {
+        ScrollView {
+            // A `VStack`, **not** a `LazyVStack`. Each card and the Ended
+            // band is one item holding all its rows, so at the accessibility
+            // sizes one item can be several screens tall, and over items that
+            // tall the lazy stack never settled its placement: one of the
+            // first few drags pinned the main thread for over a minute
+            // (`sample`: spinning in `LazySubviewPlacements`), the same
+            // failure the timeline had before it became a `List`. The items
+            // are eager inside, and the eager stack measured no cost
+            // at the largest real fleet — 45 ended runs expanded, default
+            // size: expanding 1.59–1.62s lazy against 1.61–1.63s eager,
+            // drags alike, idle CPU 12.7–14.4% against 11.6–12.5%.
+            VStack(alignment: .leading, spacing: 0) {
+                // An empty fleet is one instruction, not a list with no rows:
+                // a header above it would name the same emptiness again.
+                if !screen.isEmpty || !screen.projects.isEmpty { scrollHeader(screen) }
+                content(screen)
+            }
+            // Whether the fleet is in the window, which is whether any of it
+            // can be on screen: the navigation controller takes it out when
+            // a chat has covered it and puts it back as a pop or a back
+            // swipe begins. Not `onAppear`/`onDisappear`: a chat pushed as
+            // the fleet first appears — a link followed at launch — leaves
+            // those saying "appeared" until it is gone, and silent after.
+            // Back in the window under the Deck — a Deck link followed from
+            // a chat pops the chat beneath it — the fleet is still covered.
+            .background(
+                FleetWindowPresence { inWindow in inWindow && !showDeck ? thaw() : freeze() })
+            // The scroll view's width, which the lazy stack took on its own.
+            // A `VStack` is as wide as its widest row, and a long MCP tool
+            // name makes a row wider than the screen: the scroll view then
+            // centred the whole fleet on that row, and every band header
+            // sat off the left edge.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            // The Deck bar's own height is reserved by `safeAreaInset`, and
+            // that height triples at AX5 — a hard-coded 76 would leave the
+            // last row under the bar exactly when the rows are tallest.
+            .padding(.bottom, CC.space.xl)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: FleetScrollKey.self,
+                        value: proxy.frame(in: .named(Self.scrollSpace)).minY)
                 }
             }
-            .coordinateSpace(name: Self.scrollSpace)
-            .onPreferenceChange(FleetScrollKey.self) { minY in
-                // 24pt of travel, with a 4pt dead band so a bounce at the top
-                // cannot flap the title.
-                let next = titleVisible ? (-minY > 20) : (-minY > 24)
-                if next != titleVisible { titleVisible = next }
-            }
-            // Scrolling stands an open swipe row down, the way a `List` would.
-            // A simultaneous gesture, not the scroll-offset preference:
-            // measured on this OS, `FleetScrollKey` delivers its value once at
-            // setup and never again mid-drag, so an offset-diffing close signal
-            // simply never fired. It recognises alongside the scroll without
-            // claiming the touch — the guard tests in `SwipeToRemoveUITests`
-            // are the proof that scrolling itself stays fluid — and it no-ops
-            // through the coordinator's nothing-is-open guard on every
-            // ordinary interaction. Deliberately no tap equivalent: a blanket
-            // tap-closes-everything fired on the revealed Remove button itself,
-            // closing the row before its refusal could be shown. Taps are
-            // handled where they mean something — the open row's own catcher,
-            // and the navigation/sheet observers below.
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12).onChanged { value in
-                    // The same 2:1-past-a-floor intent gate the app's other
-                    // drags use. A bare "more vertical than horizontal" check
-                    // fired on the first millimetres of a *horizontal* row
-                    // swipe — early jitter is often vertical-biased — and the
-                    // resulting pulse yanked shut the very row being dragged
-                    // open. Measured, then gated.
-                    let h = abs(value.translation.height)
-                    let w = abs(value.translation.width)
-                    if h > 24, h > w * 2 {
-                        swipeCloses.closeAll()
-                    }
+        }
+        .coordinateSpace(name: Self.scrollSpace)
+        .onPreferenceChange(FleetScrollKey.self) { minY in
+            // 24pt of travel, with a 4pt dead band so a bounce at the top
+            // cannot flap the title.
+            let next = titleVisible ? (-minY > 20) : (-minY > 24)
+            if next != titleVisible { titleVisible = next }
+        }
+        // Scrolling stands an open swipe row down, the way a `List` would.
+        // A simultaneous gesture, not the scroll-offset preference:
+        // measured on this OS, `FleetScrollKey` delivers its value once at
+        // setup and never again mid-drag, so an offset-diffing close signal
+        // simply never fired. It recognises alongside the scroll without
+        // claiming the touch — the guard tests in `SwipeToRemoveUITests`
+        // are the proof that scrolling itself stays fluid — and it no-ops
+        // through the coordinator's nothing-is-open guard on every
+        // ordinary interaction. Deliberately no tap equivalent: a blanket
+        // tap-closes-everything fired on the revealed Remove button itself,
+        // closing the row before its refusal could be shown. Taps are
+        // handled where they mean something — the open row's own catcher,
+        // and the navigation/sheet observers below.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12).onChanged { value in
+                // The same 2:1-past-a-floor intent gate the app's other
+                // drags use. A bare "more vertical than horizontal" check
+                // fired on the first millimetres of a *horizontal* row
+                // swipe — early jitter is often vertical-biased — and the
+                // resulting pulse yanked shut the very row being dragged
+                // open. Measured, then gated.
+                let h = abs(value.translation.height)
+                let w = abs(value.translation.width)
+                if h > 24, h > w * 2 {
+                    swipeCloses.closeAll()
                 }
-            )
-            .background(CC.color.bg)
-            .scrollIndicators(.hidden)
-            .ccCollectsToolColumn(into: $toolLabelWidths)
-            .refreshable { machines.refreshFleet() }
+            }
+        )
+        .background(CC.color.bg)
+        .scrollIndicators(.hidden)
+        .ccCollectsToolColumn(into: $toolLabelWidths)
+        .refreshable {
+            applyHeld()
+            machines.refreshFleet()
+        }
+    }
+
+    /// What the list holds while it is in sight, kept as the fleet changes.
+    private func holdingChanges(_ list: some View, _ screen: FleetScreen) -> some View {
+        list
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { applyHeld() }
+            }
+            // The first fleet, and any while nothing is on screen (no card and
+            // no Ended band), is let in at once: there is nothing to move.
+            .onChange(of: screen.live, initial: true) { _, live in
+                if held == nil || (held?.isEmpty == true && screen.ended == nil) { held = live }
+            }
+            .onChange(of: screen.rows, initial: true) { _, rows in
+                guard let held else { return }
+                let keys = Set(held.values.flatMap { $0 })
+                for row in rows where keys.contains(row.summary.sessionKey) && heldRows[row.summary.sessionKey] != row {
+                    heldRows[row.summary.sessionKey] = row
+                }
+            }
+            // A project seen for the first time keeps the top place it appeared
+            // in: written down once, so nothing later can move it.
+            .onChange(of: screen.projects.map(\.id), initial: true) { _, keys in
+                let saved = machines.settings.projectOrder
+                let next = ProjectOrder.recording(keys, into: saved)
+                if next != saved { machines.settings.projectOrder = next }
+            }
+    }
+
+    private func navigation(_ list: some View, _ screen: FleetScreen) -> some View {
+        list
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
             .ccNavigationChrome()
             .navigationTitle("Projects")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: SessionRoute.self) { route in
-                // One chat per session. A link that swaps the chat on top for
-                // another session's lands at the same place in the stack, and
-                // SwiftUI would otherwise keep the old chat's view — its draft,
-                // its open sheets, its timeline wiring — under the new key, and
-                // never show it appearing, so the link it came by stays unread.
-                if let requestID = route.startRequestID {
-                    StartingSessionView(
-                        requestID: requestID,
-                        onLive: { path = [SessionRoute(key: $0, focusComposer: $1)] },
-                        onChooseAgain: {
-                            path = []
-                            Task {
-                                try? await Task.sleep(for: .milliseconds(450))
-                                openStart()
-                            }
-                        }
-                    )
-                    .environment(
-                        machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
-                } else {
-                    SessionDetailView(route: route)
-                        .environment(owner(route.key))
-                        .id(route.key)
-                }
-            }
-            .toolbar {
-                if canStart {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            CCHaptic.light.fire()
-                            openStart()
-                        } label: {
-                            HStack(spacing: CC.space.xxs) {
-                                CCIcon("plus", size: 16)
-                                Text("New")
-                                    .ccType(CC.type.body)
-                            }
-                            .foregroundStyle(CC.text.primary)
-                            .fixedSize()
-                            .ccHitTarget()
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("New session")
-                        .accessibilityIdentifier("start-entry")
-                    }
-                    .ccPlainToolbarItem()
-                }
-                ToolbarItem(placement: .principal) {
-                    // The same word the scroll header carries, arriving only as
-                    // that header leaves. Two titles at once is the bug this
-                    // fade exists to prevent.
-                    Text("Projects")
-                        .ccType(CC.type.headline)
-                        .foregroundStyle(CC.text.primary)
-                        .opacity(titleVisible ? 1 : 0)
-                        .ccAnimation(CC.motion.small, value: titleVisible)
-                        .accessibilityHidden(true)
-                }
-                .ccPlainToolbarItem()
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        CCHaptic.light.fire()
-                        showSettings = true
-                    } label: {
-                        Text("Settings")
-                            .ccType(CC.type.body)
-                            .foregroundStyle(CC.text.primary)
-                            .ccHitTarget()
-                    }
-                    .buttonStyle(.plain)
-                }
-                .ccPlainToolbarItem()
-            }
+            .navigationDestination(for: SessionRoute.self) { route in destination(route) }
+            .toolbar { toolbarItems }
             // The bar prints the header's own number, not its own count of the
             // cards it happens to hold — see `FleetCount`.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if selecting {
-                    selectionBar(screen.selectable)
-                } else {
-                    deckBar(screen)
+            .safeAreaInset(edge: .bottom, spacing: 0) { footer(screen) }
+    }
+
+    // One chat per session. A link that swaps the chat on top for
+    // another session's lands at the same place in the stack, and
+    // SwiftUI would otherwise keep the old chat's view — its draft,
+    // its open sheets, its timeline wiring — under the new key, and
+    // never show it appearing, so the link it came by stays unread.
+    @ViewBuilder
+    private func destination(_ route: SessionRoute) -> some View {
+        if let requestID = route.startRequestID {
+            StartingSessionView(
+                requestID: requestID,
+                onLive: { path = [SessionRoute(key: $0, focusComposer: $1)] },
+                onChooseAgain: {
+                    path = []
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(450))
+                        openStart()
+                    }
                 }
+            )
+            .environment(
+                machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
+        } else {
+            SessionDetailView(route: route)
+                .environment(owner(route.key))
+                .id(route.key)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarItems: some ToolbarContent {
+        if canStart {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    CCHaptic.light.fire()
+                    openStart()
+                } label: {
+                    HStack(spacing: CC.space.xxs) {
+                        CCIcon("plus", size: 16)
+                        Text("New")
+                            .ccType(CC.type.body)
+                    }
+                    .foregroundStyle(CC.text.primary)
+                    .fixedSize()
+                    .ccHitTarget()
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New session")
+                .accessibilityIdentifier("start-entry")
             }
+            .ccPlainToolbarItem()
+        }
+        ToolbarItem(placement: .principal) {
+            // The same word the scroll header carries, arriving only as
+            // that header leaves. Two titles at once is the bug this
+            // fade exists to prevent.
+            Text("Projects")
+                .ccType(CC.type.headline)
+                .foregroundStyle(CC.text.primary)
+                .opacity(titleVisible ? 1 : 0)
+                .ccAnimation(CC.motion.small, value: titleVisible)
+                .accessibilityHidden(true)
+        }
+        .ccPlainToolbarItem()
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                CCHaptic.light.fire()
+                showSettings = true
+            } label: {
+                Text("Settings")
+                    .ccType(CC.type.body)
+                    .foregroundStyle(CC.text.primary)
+                    .ccHitTarget()
+            }
+            .buttonStyle(.plain)
+        }
+        .ccPlainToolbarItem()
+    }
+
+    private func footer(_ screen: FleetScreen) -> some View {
+        VStack(spacing: 0) {
+            // The link's banner sits at the foot, over the list, not in
+            // it: coming or going it changes how far the list scrolls,
+            // never where a card is. At the accessibility sizes it is
+            // in the list instead (`content`): pinned there, it and the
+            // bar would cover most of the screen. Its own view, and
+            // deliberately: it reads the link's age, and read from here
+            // that read belonged to the whole fleet.
+            if !typeSize.isAccessibilitySize { FleetBanner { showSettings = true } }
+            if selecting {
+                selectionBar(screen.selectable)
+            } else {
+                deckBar(screen)
+            }
+        }
+    }
+
+    private func presentations(_ list: some View, _ screen: FleetScreen) -> some View {
+        list
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
                 StartStepsSheet(contexts: startContexts, onStarted: started, onClose: { startOpen = false })
                 .ccTallSheet()
@@ -339,7 +427,9 @@ struct FleetView: View {
             // swipe row down. A destructive control must not sit armed under
             // whatever the user comes back to.
             .onChange(of: overlayFingerprint) { swipeCloses.closeAll() }
-            .sheet(isPresented: $showSettings) { PairingView().environment(machines.current) }
+            .sheet(isPresented: $showSettings, onDismiss: applyHeld) {
+                PairingView().environment(machines.current)
+            }
             .sheet(item: $capabilityReason) { CapabilitySheet(reason: $0.text) }
             .fullScreenCover(isPresented: $showDeck) {
                 // A mode, not an inspection — and the presentation is
@@ -364,6 +454,10 @@ struct FleetView: View {
             } message: { removal in
                 Text(removal.message)
             }
+    }
+
+    private func lifecycle(_ list: some View) -> some View {
+        list
             .onChange(of: machines.pendingDeepLink) { _, _ in consumeDeepLink() }
             // A name that waited out a catch-up is resolved at its release.
             .onChange(of: machines.isCatchingUp) { _, _ in consumeDeepLink() }
@@ -389,10 +483,6 @@ struct FleetView: View {
                     thaw()
                 }
             }
-        }
-        #if DEBUG
-            .overlay(alignment: .topLeading) { FleetRowRenderProbe() }
-        #endif
     }
 
     // MARK: Screen
@@ -402,9 +492,13 @@ struct FleetView: View {
     /// the model when they run.
     private struct FleetScreen {
         let rows: [FleetRow]
-        /// Every live run, one card per working directory, the project holding
-        /// the most urgent run first.
+        /// The runs the list holds, one card per working directory, in the
+        /// owner's order.
         let projects: [Project]
+        /// Which runs make up which project in the fleet as it is now.
+        let live: [ProjectKey: Set<String>]
+        /// What the list is holding back, or nil when it holds nothing.
+        let change: HeldChange?
         /// The runs that have ended, as one band; nil with none.
         let ended: Band?
         /// The rows a selection can hold, in fleet order: ended, and removable.
@@ -433,7 +527,59 @@ struct FleetView: View {
         guard hidden != nil else { return }
         var unanimated = Transaction()
         unanimated.disablesAnimations = true
-        withTransaction(unanimated) { hidden = nil }
+        withTransaction(unanimated) {
+            hidden = nil
+            applyHeld()
+        }
+    }
+
+    /// Let in what the list has held back: the arrivals take their places and
+    /// what left goes.
+    private func applyHeld() {
+        let rows = machines.fleet
+        let membership = Self.membership(of: rows)
+        let keys = Set(membership.values.flatMap { $0 })
+        held = membership
+        heldRows = Dictionary(
+            rows.filter { keys.contains($0.summary.sessionKey) }.map { ($0.summary.sessionKey, $0) },
+            uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Which runs make up which project, from the runs that have not ended.
+    private static func membership(of rows: [FleetRow]) -> [ProjectKey: Set<String>] {
+        rows.filter { $0.status != .ended }.reduce(into: [:]) { held, row in
+            held[ProjectKey(machineID: row.machineID, folder: row.summary.shownCwd), default: []]
+                .insert(row.summary.sessionKey)
+        }
+    }
+
+    /// What the list holds back: in plain words, "1 new project · 1 ended", and
+    /// as a count, "2 changes", for when the words do not fit on one line.
+    struct HeldChange {
+        let words: String
+        let count: String
+    }
+
+    private static func change(
+        from shown: [ProjectKey: Set<String>], to live: [ProjectKey: Set<String>]
+    ) -> HeldChange? {
+        let newProjects = live.keys.filter { shown[$0] == nil }.count
+        var newRuns = 0
+        var ended = 0
+        for (key, runs) in shown {
+            let now = live[key] ?? []
+            newRuns += now.subtracting(runs).count
+            ended += runs.subtracting(now).count
+        }
+        let words = [
+            newProjects > 0 ? "\(newProjects) new \(newProjects == 1 ? "project" : "projects")" : nil,
+            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "agent" : "agents")" : nil,
+            ended > 0 ? "\(ended) ended" : nil,
+        ].compactMap { $0 }
+        let total = newProjects + newRuns + ended
+        return words.isEmpty
+            ? nil
+            : HeldChange(words: words.joined(separator: " · "), count: "\(total) \(total == 1 ? "change" : "changes")")
     }
 
     /// The fleet as the model has it now.
@@ -453,13 +599,20 @@ struct FleetView: View {
         // daemon walked two dozen logs a frame and took the main thread down for
         // thirty seconds. Measured.
         let deck = machines.deck
+        let live = Self.membership(of: rows)
+        let shown = held ?? live
+        let inCards = Set(shown.values.flatMap { $0 })
         return FleetScreen(
             rows: rows,
             // Everything each row draws, read here and nowhere below: a model
             // read inside a row's own builders would redraw that row on any
             // session's event. See `FleetRowCell`.
-            projects: projects(of: rows),
-            ended: bands(of: rows.filter { $0.status == .ended }).first,
+            projects: projects(of: rows, shown: shown),
+            live: live,
+            change: Self.change(from: shown, to: live),
+            // A run the list still holds in its card is not listed again here.
+            ended: bands(of: rows.filter { $0.status == .ended && !inCards.contains($0.summary.sessionKey) })
+                .first,
             selectable: selectableKeys(rows),
             decisions: FleetCount.decisions(in: rows),
             // Each card at the risk its own card shows.
@@ -485,29 +638,59 @@ struct FleetView: View {
     /// `Projects` in the iOS large-title place, then the shape of the work in one
     /// quiet line. When decisions wait, their count comes between the two, in the
     /// warning hue the accessory bar's dot uses, so it is the first thing read
-    /// after the screen's own name and it cannot be mistaken for the summary.
+    /// after the screen's own name and it cannot be mistaken for the summary. The
+    /// block is as tall with the count as without it.
     private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            Text("Projects")
-                .ccType(CC.type.display)
-                .foregroundStyle(CC.text.primary)
-                .accessibilityAddTraits(.isHeader)
-            if let alert = alert(screen) {
-                Text(alert.text)
-                    .ccType(CC.type.headline)
-                    .foregroundStyle(alert.colour)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .contentTransition(.numericText(countsDown: true))
+            CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
+                Text("Projects")
+                    .ccType(CC.type.display)
+                    .foregroundStyle(CC.text.primary)
+                    .accessibilityAddTraits(.isHeader)
+                CCAdaptiveSpacer(minLength: CC.space.sm)
+                // The pill is always in its place, unseen and inert while the list
+                // holds nothing back, and always one line: the whole change where
+                // it fits, its count where it does not. So it comes and goes
+                // without moving anything.
+                ViewThatFits(in: .horizontal) {
+                    heldPill(screen.change?.words ?? "Up to date", change: screen.change)
+                    heldPill(screen.change?.count ?? "Up to date", change: screen.change)
+                }
             }
+            // The line is always there, empty while nothing needs a person, so
+            // the first decision to arrive moves no card below it.
+            let alert = alert(screen)
+            Text(alert?.text ?? " ")
+                .ccType(CC.type.headline)
+                .foregroundStyle(alert?.colour ?? .clear)
+                .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.numericText(countsDown: true))
+                .accessibilityHidden(alert == nil)
+            // One line at reading sizes for the same reason: a count that grows
+            // a word must not wrap and push the cards down.
             Text(summaryLine(screen))
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.secondary)
+                .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, CC.space.md)
         .padding(.top, CC.space.xs)
         .padding(.bottom, CC.space.xl)
+    }
+
+    private func heldPill(_ title: String, change: HeldChange?) -> some View {
+        CCButton(title, variant: .secondary, size: .sm) {
+            withAnimation(CC.motion.small) { applyHeld() }
+        }
+        .lineLimit(1)
+        .opacity(change == nil ? 0 : 1)
+        .allowsHitTesting(change != nil)
+        .accessibilityHidden(change == nil)
+        .accessibilityLabel(change?.words ?? title)
+        .accessibilityHint("Shows them in the list")
+        .accessibilityIdentifier("fleet-held-changes")
     }
 
     /// What needs a person: the decisions, in the canonical words — the same
@@ -547,27 +730,20 @@ struct FleetView: View {
 
     @ViewBuilder
     private func content(_ screen: FleetScreen) -> some View {
-        // Its own view, and deliberately: it reads the link's age, and read from
-        // here that read belonged to the whole fleet.
-        FleetBanner { showSettings = true }
+        // At the accessibility sizes the banner scrolls away with the list, as
+        // everything there wraps and moves anyway; at reading sizes it is at the
+        // foot of the screen (the bottom inset).
+        if typeSize.isAccessibilitySize { FleetBanner { showSettings = true } }
 
-        if screen.isEmpty {
+        if screen.isEmpty && screen.projects.isEmpty {
             emptyState
-        } else if screen.rows.isEmpty {
+        } else if screen.rows.isEmpty && screen.projects.isEmpty {
             loadingState
         } else {
-            // A decision outranks the grouping: the projects holding one come
-            // first, under a header that says why.
-            let waiting = screen.projects.filter(\.needsYou)
-            let others = screen.projects.filter { !$0.needsYou }
-            if !waiting.isEmpty {
-                sectionHeader("Waiting for you")
-                ForEach(waiting, id: \.id) { projectCard($0) }
-                if !others.isEmpty {
-                    sectionHeader("Other projects").padding(.top, CC.space.md)
-                }
-            }
-            ForEach(others, id: \.id) { projectCard($0) }
+            // One list in the owner's order: a card that starts waiting turns
+            // amber where it is, rather than moving to the top under a header.
+            let keys = screen.projects.map(\.id)
+            ForEach(screen.projects, id: \.id) { projectCard($0, shown: keys) }
             if let ended = screen.ended {
                 if showEnded {
                     bandView(ended).padding(.top, CC.space.lg)
@@ -584,11 +760,7 @@ struct FleetView: View {
     private struct Project {
         /// The computer and the working directory as drawn, which together make
         /// two runs one project: one folder on two computers is two.
-        struct ID: Hashable {
-            let machineID: String?
-            let folder: String
-        }
-        let id: ID
+        let id: ProjectKey
         let name: String
         /// The folder as a shell prints it: `~/infra`.
         let path: String
@@ -608,47 +780,61 @@ struct FleetView: View {
         return (["~"] + parts.dropFirst(3)).joined(separator: "/")
     }
 
-    /// Grouped in fleet order, which is urgency order: a project's place is its
-    /// most urgent run's, and its runs keep their order inside it.
-    private func projects(of rows: [FleetRow]) -> [Project] {
-        var order: [Project.ID] = []
-        var groups: [Project.ID: [FleetRow]] = [:]
+    /// The projects and runs the list holds (`shown`), in the owner's order
+    /// (`ProjectOrder`), the new ones on top in fleet order, and each project's
+    /// runs in the order they started: no status and no event moves a card or
+    /// a row. A held run the fleet no longer has is drawn as it last was.
+    private func projects(of rows: [FleetRow], shown: [ProjectKey: Set<String>]) -> [Project] {
+        let byKey = Dictionary(rows.map { ($0.summary.sessionKey, $0) }, uniquingKeysWith: { first, _ in first })
+        var present: [ProjectKey] = []
         for row in rows where row.status != .ended {
-            let id = Project.ID(machineID: row.machineID, folder: row.summary.shownCwd)
-            if groups[id] == nil { order.append(id) }
-            groups[id, default: []].append(row)
+            let id = ProjectKey(machineID: row.machineID, folder: row.summary.shownCwd)
+            if shown[id] != nil, !present.contains(id) { present.append(id) }
         }
-        return order.compactMap { id in
-            guard let members = groups[id], let lead = members.first else { return nil }
+        present += shown.keys.filter { !present.contains($0) }
+        return ProjectOrder.arrange(present, saved: machines.settings.projectOrder).compactMap { id in
+            let members = (shown[id] ?? []).compactMap { byKey[$0] ?? heldRows[$0] }.sorted(by: Self.startOrder)
+            guard let lead = members.first else { return nil }
+            // Told apart among the runs this card holds, so a run held back
+            // from it adds no line to the ones it shows.
+            let labels = RunLabel.labels(for: members.map(\.summary))
+            let waiting = members.contains { $0.status == .blocked }
             return Project(
                 id: id,
                 name: lead.label.project,
                 path: Self.shellPath(id.folder),
                 machineName: lead.machineName,
                 // Control is the promise and its presence is not news, so a
-                // card has no header note and an observe-only row says so on
-                // its own line.
-                cells: members.enumerated().map { index, row in
-                    cellContent(
+                // card has no header note and an observe-only row says so
+                // beside what it last did.
+                cells: members.enumerated().map { index, member in
+                    var row = member
+                    row.label = labels[row.summary.sessionKey] ?? row.label
+                    return cellContent(
                         row, bandCapability: .control, isLast: index == members.count - 1,
                         titledByAgent: true)
                 },
-                border: bandBorder(lead.status),
-                needsYou: lead.status == .blocked)
+                border: waiting
+                    ? CC.color.warning.opacity(0.55)
+                    : bandBorder(members.contains { $0.status == .failed } ? .failed : lead.status),
+                needsYou: waiting)
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        CCSectionHeader(title)
-            .padding(.horizontal, CC.space.md)
-            .frame(minHeight: CC.space.xxl)
-            .padding(.bottom, CC.space.xs)
+    /// When a run started, then its key: an order no event changes.
+    private static func startOrder(_ lhs: FleetRow, _ rhs: FleetRow) -> Bool {
+        let left = lhs.summary.createdDate
+        let right = rhs.summary.createdDate
+        if left != right { return left < right }
+        return lhs.summary.sessionKey < rhs.summary.sessionKey
     }
 
     /// One card per project, headed by where it is — its name, its folder and
-    /// the computer it is on — with each run below named by its agent.
-    private func projectCard(_ project: Project) -> some View {
-        CCCard(padding: 0, border: project.border) {
+    /// the computer it is on — with each run below named by its agent. Held and
+    /// dragged, it moves; VoiceOver moves it with the header's own actions.
+    private func projectCard(_ project: Project, shown keys: [ProjectKey]) -> some View {
+        let index = keys.firstIndex(of: project.id)
+        return CCCard(padding: 0, border: project.border) {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
@@ -676,12 +862,35 @@ struct FleetView: View {
                 .padding(.vertical, CC.space.sm)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
+                .accessibilityActions {
+                    if let index, index > 0 {
+                        Button("Move up") { move(project.id, to: keys[index - 1], shown: keys) }
+                    }
+                    if let index, index < keys.count - 1 {
+                        Button("Move down") { move(project.id, to: keys[index + 1], shown: keys) }
+                    }
+                }
                 CCHairline()
                 ForEach(project.cells, id: \.row.id) { rowCell($0) }
             }
         }
         .padding(.horizontal, CC.space.md)
         .padding(.bottom, CC.space.sm)
+        .onDrag {
+            dragging = project.id
+            return NSItemProvider(object: project.name as NSString)
+        }
+        .onDrop(
+            of: [.text],
+            delegate: CardDrop(target: project.id, shown: keys, dragging: $dragging) { key, target in
+                withAnimation(.snappy) { move(key, to: target, shown: keys) }
+            })
+    }
+
+    /// `key` put where `target` is: the one way a card changes place.
+    private func move(_ key: ProjectKey, to target: ProjectKey, shown: [ProjectKey]) {
+        machines.settings.projectOrder = ProjectOrder.moving(
+            key, to: target, shown: shown, saved: machines.settings.projectOrder)
     }
 
     // MARK: Start
@@ -787,10 +996,8 @@ struct FleetView: View {
         .padding(.bottom, CC.space.xl)
     }
 
-    /// A card led by a failed run has the only coloured border on the screen,
-    /// and the only place the fleet spends a hue on something other than a dot.
-    /// Blocked is neutral like every other card: its section at the top of the
-    /// list and the count under the title already say it needs you.
+    /// Red round a failed run's card or band; a project card with a run
+    /// waiting for you is amber instead (`projects(of:)`).
     private func bandBorder(_ status: FleetStatus) -> Color {
         switch status {
         case .failed: return CC.color.danger.opacity(0.30)
@@ -851,7 +1058,12 @@ struct FleetView: View {
         let owner = owner(of: cell.row)
         return FleetRowCell(
             content: cell,
-            remove: { await owner.removeSession(summary).refusal },
+            remove: {
+                let refusal = await owner.removeSession(summary).refusal
+                // The owner's own removal is not news: it leaves at once.
+                if refusal == nil { applyHeld() }
+                return refusal
+            },
             confirm: { removal in
                 pendingRemoval = PendingRemoval(row: summary, model: owner, remove: removal)
             },
@@ -964,6 +1176,8 @@ struct FleetView: View {
                 let refused = await machines.removeSessions(keys: keys)
                 batchRunning = false
                 batchRefused = refused
+                // The owner's own removal is not news: it leaves at once.
+                applyHeld()
                 // What the batch did not remove is exactly what it has a reason
                 // for. Still choosing, that is what stays chosen; if the link
                 // went and choosing ended, the note is what is left to say so.
@@ -1343,19 +1557,54 @@ struct BlockedCard: Equatable {
 /// to the whole list. Nothing when the computer has no name — nothing is paired
 /// and no daemon has named one, the sample fleet among them, whose dot would
 /// report a link that does not exist.
+/// A card dragged over another takes that card's place, live, so the drop
+/// only has to let go; the order is already kept.
+private struct CardDrop: DropDelegate {
+    let target: ProjectKey
+    let shown: [ProjectKey]
+    @Binding var dragging: ProjectKey?
+    let move: (ProjectKey, ProjectKey) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != target, shown.contains(dragging) else { return }
+        move(dragging, target)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        return true
+    }
+}
+
 private struct MachineLabel: View {
     @Environment(Machines.self) private var machines
+    @Environment(\.dynamicTypeSize) private var typeSize
     let machineID: String?
     let name: String?
 
     var body: some View {
         if let name, let model = machines.model(for: machineID) {
             let level = model.linkHealth.level
-            CCMachineLabel(name: name, level: level)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("On \(name), \(level.machineMark.word ?? "connected")")
+            // At reading sizes one line, as wide as it is with its widest
+            // word, so the word coming and going takes no width from the
+            // project's name and the card's header keeps its height.
+            ZStack(alignment: .trailing) {
+                if !typeSize.isAccessibilitySize {
+                    ForEach(Self.worded.indices, id: \.self) { index in
+                        CCMachineLabel(name: name, level: Self.worded[index], lineLimit: 1).hidden()
+                    }
+                }
+                CCMachineLabel(name: name, level: level, lineLimit: typeSize.isAccessibilitySize ? nil : 1)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("On \(name), \(level.machineMark.word ?? "connected")")
         }
     }
+
+    /// Every level that says a word beside the computer's name.
+    private static let worded: [LinkHealth.Level] = [.stale, .connecting, .offline, .rejected]
 }
 
 /// **The banner, clocked by itself.**
@@ -1370,6 +1619,7 @@ private struct FleetBanner: View {
     /// reached.
     @Environment(AppModel.self) private var model
     @Environment(Machines.self) private var machines
+    @Environment(\.dynamicTypeSize) private var typeSize
     let onSettings: () -> Void
 
     var body: some View {
@@ -1378,7 +1628,10 @@ private struct FleetBanner: View {
             if candidates.contains(where: { $0 != nil }) {
                 CCBannerSlot(candidates)
                     .padding(.horizontal, CC.space.md)
-                    .padding(.bottom, CC.space.xl)
+                    .padding(.vertical, CC.space.sm)
+                    .frame(maxWidth: .infinity)
+                    .background(CC.color.bg)
+                    .padding(.bottom, typeSize.isAccessibilitySize ? CC.space.xl : 0)
             }
         }
     }
@@ -1408,7 +1661,7 @@ private struct FleetBanner: View {
     /// untouched: the age of the card is still true, it was the age of the
     /// observation that was missing.
     private var bannerCandidates: [CCBannerItem?] {
-        // Permanently, and at the top: the sample fleet is the whole context for
+        // Permanently, and before any other: the sample fleet is the whole context for
         // everything under it, and it is the only state here that a reader can
         // leave rather than wait out.
         if model.sampleFleetActive {
@@ -1847,6 +2100,8 @@ struct FleetRowView: View {
                         color: dot, isHollow: row.cachedAt != nil, pulses: false,
                         accessibilityText: nil)
                 }
+            } else if titledByAgent {
+                content { CCStatusDot().hidden() }
             } else {
                 content { EmptyView() }
             }
@@ -1887,8 +2142,10 @@ struct FleetRowView: View {
     /// clock all carry. It stays where it discriminates: hollow means *this row
     /// came off the disk*, which nothing else on the screen says.
     ///
-    /// **So is its column.** A row with no dot starts its title at the card's
-    /// own content edge rather than holding an empty 8pt gutter.
+    /// **So is its column**, outside a project card: a row with no dot starts
+    /// its title at the card's own content edge rather than holding an empty
+    /// 8pt gutter. In a project card the column stays, so a run that starts or
+    /// stops waiting keeps its title where it was.
     private func content<Leading: View>(
         @ViewBuilder leading: @escaping () -> Leading
     ) -> some View {
@@ -1928,22 +2185,46 @@ struct FleetRowView: View {
 
     @ViewBuilder
     private var titleTrailing: some View {
-        if isBlockedOrFailed {
-            // The two facts that decide which row you open first, on the line
-            // the eye is already on. Stacked at accessibility sizes: measured at
-            // AX5, side by side the clock's fixed single line squeezed the badge
-            // to about half its width and `HIGH` broke as `HIG` / `H`.
-            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
-                if let blocked { CCRiskTag(blocked.risk) }
+        // The two facts that decide which row you open first, on the line the
+        // eye is already on. Stacked at accessibility sizes: measured at AX5,
+        // side by side the clock's fixed single line squeezed the badge to
+        // about half its width and `HIGH` broke as `HIG` / `H`.
+        CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
+            riskSlot
+            // A tag's height without one: low risk draws none.
+            if (blocked?.risk ?? .low) == .low { chipHeight(CCRiskTag(.high)) }
+            if isBlockedOrFailed {
                 // `monoSmall`, like every other age on the screen: the wait
                 // is set apart by where it sits, not by its size or a hue.
                 CCWaitClock(since: waitingSince, now: now, prefix: nil)
+            } else {
+                Text(freshness)
+                    .ccType(CC.type.monoSmall)
+                    .foregroundStyle(CC.text.tertiary)
+                    .lineLimit(1)
             }
-        } else {
-            Text(freshness)
-                .ccType(CC.type.monoSmall)
-                .foregroundStyle(CC.text.tertiary)
-                .lineLimit(1)
+        }
+    }
+
+    /// The card this run waits on, at its risk, and how many more wait behind
+    /// it. It fits inside the title's line, so a run that starts or stops
+    /// waiting keeps its height.
+    @ViewBuilder
+    private var riskSlot: some View {
+        if let blocked {
+            HStack(spacing: CC.space.xs) {
+                CCRiskTag(blocked.risk)
+                if row.blockedCount > 1 {
+                    // A bare count, never cut: beside the tag and the clock a
+                    // phone has no room for words.
+                    Text("+\(row.blockedCount - 1)")
+                        .ccType(CC.type.micro)
+                        .foregroundStyle(CC.text.tertiary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .accessibilityHidden(true)
+                }
+            }
         }
     }
 
@@ -1954,35 +2235,52 @@ struct FleetRowView: View {
             // tag only some rows carry reads as an alarm on those rows, and a
             // fleet that mixes agents is read by which one each row is. It
             // leads the activity line rather than sitting beside the title,
-            // where the risk tag and the wait clock already are — unless the
-            // title already is the agent, where an idle run has no line at all.
-            if !titledByAgent || activity != nil || !row.subtitle.isEmpty || onStop != nil {
-                CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
-                    if !titledByAgent { CCTag(agent: row.summary.agent) }
-                    if let activity {
-                        activityLine(
-                            activity,
-                            truncation: blocked?.truncation ?? .head,
-                            // The tool name takes full contrast only where the row
-                            // is asking for something. A Running row's activity is
-                            // not urgent, so it stays one step down and the *face*
-                            // — prose against monospace — is what carries the
-                            // distinction.
-                            tone: blocked == nil ? CC.text.secondary : CC.text.primary)
-                    } else {
-                        // The daemon's own *sentence* — a user message, an agent
-                        // reply, a notice — which has no argument to set as code.
-                        Text(row.subtitle)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.secondary)
-                            .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    CCAdaptiveSpacer(minLength: 0)
-                    stopControl
+            // where the risk tag and the wait clock already are. The line is
+            // always there, empty or not, so a run's height does not change
+            // with what it is doing.
+            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
+                if !titledByAgent { CCTag(agent: row.summary.agent) }
+                if let activity {
+                    activityLine(
+                        activity,
+                        truncation: blocked?.truncation ?? .head,
+                        // The tool name takes full contrast only where the row
+                        // is asking for something. A Running row's activity is
+                        // not urgent, so it stays one step down and the *face*
+                        // — prose against monospace — is what carries the
+                        // distinction.
+                        tone: blocked == nil ? CC.text.secondary : CC.text.primary)
+                } else {
+                    // The daemon's own *sentence* — a user message, an agent
+                    // reply, a notice — which has no argument to set as code.
+                    Text(verbatim: row.subtitle.isEmpty ? " " : row.subtitle)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                CCAdaptiveSpacer(minLength: 0)
+                // Beside what the run last did, which gives up width rather
+                // than wrapping, so a run whose link or life changes what it
+                // can do keeps its height.
+                if showsCapability {
+                    CCBadge(capability: row.capability)
+                } else {
+                    chipHeight(CCBadge(capability: .observe(reason: "")))
+                }
+                stopControl
             }
-            if showsIdentity || showsCapability || row.blockedCount > 1 { exceptionLine }
+            if showsIdentity { exceptionLine }
+        }
+    }
+
+    /// A chip's height, kept on a card's line that does not show the chip, so
+    /// one arriving there moves nothing below it. Not in the stacked form,
+    /// where it would be a blank line of its own.
+    @ViewBuilder
+    private func chipHeight<Chip: View>(_ chip: Chip) -> some View {
+        if titledByAgent, !typeSize.isAccessibilitySize {
+            chip.hidden().frame(width: 0).accessibilityHidden(true)
         }
     }
 
@@ -2040,6 +2338,9 @@ struct FleetRowView: View {
     /// Present-and-greyed is for the bounded window after a link-state refusal,
     /// where the daemon's own sentence has just said to try again shortly — and
     /// there the reason is drawn, never merely hinted.
+    ///
+    /// In a project card a Codex run keeps the control's height while it has
+    /// nothing to stop, so a turn starting or ending moves nothing below it.
     @ViewBuilder
     private var stopControl: some View {
         if let onStop {
@@ -2057,6 +2358,14 @@ struct FleetRowView: View {
             // Width goes to the control first, so its label never breaks beside
             // the agent tag and the activity: the command truncates instead.
             .layoutPriority(1)
+        } else if titledByAgent, row.summary.agent == .codex {
+            CCButton("Stop", icon: "stop-fill", variant: .secondary, size: .sm) {}
+                .hidden()
+                // At its own size: proposed no width, it stood 42 pt taller
+                // than the Stop it holds the place of.
+                .fixedSize()
+                .frame(width: 0)
+                .accessibilityHidden(true)
         }
     }
 
@@ -2065,16 +2374,6 @@ struct FleetRowView: View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
             if let qualifier = row.label.qualifier {
                 Text(verbatim: qualifier)
-                    .ccType(CC.type.micro)
-                    .foregroundStyle(CC.text.tertiary)
-                    .lineLimit(1)
-                    .accessibilityHidden(true)
-            }
-            if showsCapability {
-                CCBadge(capability: row.capability)
-            }
-            if row.blockedCount > 1 {
-                Text("+\(row.blockedCount - 1) more")
                     .ccType(CC.type.micro)
                     .foregroundStyle(CC.text.tertiary)
                     .lineLimit(1)

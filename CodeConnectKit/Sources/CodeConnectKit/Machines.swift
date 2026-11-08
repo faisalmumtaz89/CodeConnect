@@ -18,7 +18,7 @@ import SwiftUI
 @Observable
 public final class Machines {
     let pairing: PairingStore
-    let settings: AppSettings
+    public let settings: AppSettings
     private let cache: EventCache
     private let relayEnrollment: RelayEnrollment
     private let codexSpentLedger: CodexSpentLedger

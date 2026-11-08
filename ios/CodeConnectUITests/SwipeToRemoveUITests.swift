@@ -51,6 +51,7 @@ final class SwipeToRemoveUITests: XCTestCase {
     private func revealEndedRows(_ app: XCUIApplication) {
         let show = app.buttons["Show"]
         XCTAssertTrue(show.waitForExistence(timeout: 20), "no collapsed ended band to open")
+        show.scrollClearOfTheBar(in: app)
         show.tap()
         XCTAssertTrue(
             row(app, endedRow).waitForExistence(timeout: 10), "the ended band did not open")
@@ -420,6 +421,7 @@ final class SwipeToRemoveUITests: XCTestCase {
         XCTAssertTrue(show.waitForExistence(timeout: 20))
         let last = "session-01K1B3XQ8ZC0DE5FGH7JKMNP44"
 
+        show.scrollClearOfTheBar(in: app)
         let started = Date()
         show.tap()
         XCTAssertTrue(
@@ -488,6 +490,7 @@ final class SwipeToRemoveUITests: XCTestCase {
         let hide = app.buttons["Hide"]
         XCTAssertTrue(hide.waitForExistence(timeout: 5))
         hide.tap()
+        app.buttons["Show"].scrollClearOfTheBar(in: app)
         app.buttons["Show"].tap()
 
         XCTAssertTrue(row(app, endedRow).waitForExistence(timeout: 5))
@@ -505,6 +508,7 @@ final class SwipeToRemoveUITests: XCTestCase {
         XCTAssertTrue(show.waitForExistence(timeout: 20))
         let last = "session-01K1B3XQ8ZC0DE5FGH7JKMNP07"
 
+        show.scrollClearOfTheBar(in: app)
         let started = Date()
         show.tap()
         XCTAssertTrue(row(app, last).waitForExistence(timeout: 5))

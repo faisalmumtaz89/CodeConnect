@@ -19,12 +19,14 @@ final class BulkRemoveUITests: XCTestCase {
         app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
         app.launch()
         XCTAssertTrue(app.buttons["Show"].waitForExistence(timeout: 20))
+        app.buttons["Show"].scrollClearOfTheBar(in: app)
         app.buttons["Show"].tap()
         // The ended rows start under the bottom bar; a tap there lands on the bar.
         let live = row(app, "session-fx-1").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         live.press(forDuration: 0.05, thenDragTo: live.withOffset(CGVector(dx: 0, dy: -260)))
         let select = app.buttons["Select"]
         XCTAssertTrue(select.waitForExistence(timeout: 5), "the opened Ended band offers Select")
+        select.scrollClearOfTheBar(in: app)
         select.tap()
         return app
     }
