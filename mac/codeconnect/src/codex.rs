@@ -347,7 +347,12 @@ fn launch(
     if detached {
         wait_until_ready(&session_uid, LAUNCH_PATIENCE, RECORD_POLL)?;
     } else {
-        wait_with_terminal(&session_uid, LAUNCH_PATIENCE, RECORD_POLL)?;
+        wait_with_terminal(
+            &session_uid,
+            LAUNCH_PATIENCE,
+            RECORD_POLL,
+            LaunchTerminal::spawn,
+        )?;
     }
     Ok(crate::no_attach::Started {
         uid: session_uid,
@@ -403,7 +408,14 @@ impl Drop for LaunchTerminal {
     }
 }
 
-fn wait_with_terminal(uid: &str, patience: Duration, poll: Duration) -> Result<()> {
+/// Wait for the launch while showing it in this terminal: `attach` attaches this
+/// terminal to the launch's pane once the record names its server.
+fn wait_with_terminal(
+    uid: &str,
+    patience: Duration,
+    poll: Duration,
+    mut attach: impl FnMut(&protocol::tmux::OwnedSession) -> Result<LaunchTerminal>,
+) -> Result<()> {
     use crate::codex_coordinator::LaunchWait;
     use crate::codex_launch::LaunchState;
 
@@ -432,8 +444,19 @@ fn wait_with_terminal(uid: &str, patience: Duration, poll: Duration) -> Result<(
                     {
                         if let Some(server) = record.server_a {
                             let expected = server.as_pin(protocol::TMUX_SOCKET_NAME, uid);
-                            terminal = Some(LaunchTerminal::spawn(&expected)?);
-                            pin = Some(expected);
+                            match attach(&expected) {
+                                Ok(client) => {
+                                    terminal = Some(client);
+                                    pin = Some(expected);
+                                }
+                                // The launch can fail, and its session go with it, around this
+                                // attach, which then finds none; the record says so a moment
+                                // later. So while the launch is starting, a failed attach is
+                                // tried again at the next look, and only once the launch is
+                                // ready is its error the outcome.
+                                Err(err) if ready => return Err(err),
+                                Err(_) => {}
+                            }
                         }
                     }
                 }
@@ -3008,12 +3031,85 @@ mod tests {
         let poll = Duration::from_millis(5);
 
         ended("quit-launch", true);
-        wait_with_terminal("quit-launch", patience, poll).expect("a quit launch is quiet");
+        wait_with_terminal("quit-launch", patience, poll, LaunchTerminal::spawn)
+            .expect("a quit launch is quiet");
 
         ended("failed-launch", false);
-        let err = wait_with_terminal("failed-launch", patience, poll)
+        let err = wait_with_terminal("failed-launch", patience, poll, LaunchTerminal::spawn)
             .expect_err("a failed launch is reported");
         assert_eq!(err.to_string(), "the reason");
+    }
+
+    /// **A launch that fails while its terminal attaches is reported by its reason.**
+    /// Measured on real launches: when the codex host exits, its session goes with it
+    /// at once, and the coordinator, which looks once a second, writes the launch
+    /// failed up to a second later. An attach in between finds no session; it is tried
+    /// again at the next look, which finds the launch failed. Forced here in that
+    /// order: the first attach fails while the launch is starting, the second fails it
+    /// first.
+    #[test]
+    fn a_launch_whose_session_goes_before_its_record_says_why_says_why() {
+        use crate::codex_launch::{CleanupState, LaunchLock, NewLaunch, ServerA};
+        use protocol::proc_identity::{
+            boot_identity, current_identity, monotonic_now_nanos, BirthIdentity,
+        };
+        let uid = "attach-before-failed";
+        {
+            let lock = LaunchLock::acquire(uid).unwrap();
+            crate::codex_launch::create_pending(
+                &lock,
+                NewLaunch {
+                    launch_nonce: "n".into(),
+                    uid: uid.into(),
+                    session_name: "cc-1".into(),
+                    coordinator: current_identity().unwrap(),
+                    boot: boot_identity().unwrap(),
+                    deadline_monotonic_nanos: monotonic_now_nanos().unwrap() + 60_000_000_000,
+                    created_ms: 1,
+                },
+            )
+            .unwrap();
+            let server = ServerA {
+                session_id: "$9".into(),
+                server_pid: 4242,
+                server_start_time: 7,
+                session_created: 8,
+                server_birth: BirthIdentity {
+                    start_sec: 100,
+                    start_usec: 200,
+                },
+            };
+            crate::codex_launch::record_new_session_created(&lock, uid, server, true).unwrap();
+        }
+        let mut attaches = 0;
+        let err = wait_with_terminal(
+            uid,
+            Duration::from_millis(200),
+            Duration::from_millis(5),
+            |_| {
+                attaches += 1;
+                if attaches == 2 {
+                    let lock = LaunchLock::acquire(uid).unwrap();
+                    crate::codex_launch::to_failed(
+                        &lock,
+                        uid,
+                        "wrapper bring-up failed: the codex host exited before the launch was ready",
+                        CleanupState::Pending,
+                    )
+                    .unwrap();
+                }
+                Err(anyhow!("resolving the codex terminal: NotHosted"))
+            },
+        )
+        .expect_err("the launch failed");
+        assert_eq!(
+            attaches, 2,
+            "the failed attach was tried again while the launch started"
+        );
+        assert_eq!(
+            err.to_string(),
+            "wrapper bring-up failed: the codex host exited before the launch was ready"
+        );
     }
 
     // ----------------------------------------------------- reserved argv grammar

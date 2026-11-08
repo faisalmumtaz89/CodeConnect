@@ -3,6 +3,11 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A Codex start that fails says why
+
+- When a Codex session failed while it was starting, `codeconnect codex` could say "tmux reading the
+  codex pane failed … no server running" instead of why it failed. It now says why it failed.
+
 ## A start picks the model
 
 - A computer now tells the Mac app which models Claude Code and Codex offer on it, in the agents'
