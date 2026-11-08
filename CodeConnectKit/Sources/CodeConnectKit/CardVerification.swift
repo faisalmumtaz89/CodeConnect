@@ -21,8 +21,8 @@ extension ApprovalCard {
 
         public var summary: String {
             hashMatchesDisplayText
-                ? "Verified against the daemon's hash."
-                : "This card's text does not match its hash."
+                ? "Matches what \(HostDevice.current.computer("your computer")) sent."
+                : "This card's text doesn't match what \(HostDevice.current.computer("your computer")) sent."
         }
     }
 

@@ -1238,7 +1238,7 @@ import SwiftUI
                             .cached, title: "Last known state, 6m old",
                             message: "Nothing live has arrived yet this launch."),
                         CCBannerItem(
-                            .rejected, title: "Token rejected",
+                            .rejected, title: "Pair again",
                             message: "The daemon refused this phone's pairing token.",
                             tone: .danger, icon: "lock-open",
                             actionTitle: "Settings", action: { lastAction = "settings" }),
@@ -1261,7 +1261,7 @@ import SwiftUI
                         message: "The start of this session was not loaded.",
                         tone: .info, actionTitle: "Load all", action: { lastAction = "load" })
                     CCBanner(
-                        "Token rejected",
+                        "Pair again",
                         message: "Actions are disabled until the link is back.",
                         tone: .danger, actionTitle: "Settings", action: { lastAction = "settings" })
                     CCBanner(

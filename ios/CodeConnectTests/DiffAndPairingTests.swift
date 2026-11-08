@@ -200,7 +200,9 @@ final class DiffAndPairingTests: XCTestCase {
         let result = PairingQRPayload.decode(#"{"v":2,"host":"h","port":1,"code":"c"}"#)
         guard case .failure(let failure) = result else { return XCTFail("should refuse") }
         XCTAssertEqual(failure, .unsupportedVersion(2))
-        XCTAssertTrue(failure.localizedDescription.contains("version 2"))
+        XCTAssertTrue(
+            failure.localizedDescription.contains("This code is from a newer version of CodeConnect."),
+            failure.localizedDescription)
     }
 
     func testNonCodeConnectQRIsRefused() {

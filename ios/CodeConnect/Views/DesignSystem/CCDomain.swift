@@ -283,7 +283,7 @@ extension LinkHealth {
             return nil
         case .rejected:
             return CCBannerItem(
-                .rejected, title: "Token rejected", message: detail, tone: .danger,
+                .rejected, title: "Pair again", message: detail, tone: .danger,
                 icon: "lock-open", actionTitle: "Settings", action: onSettings)
         case .offline:
             switch cause {

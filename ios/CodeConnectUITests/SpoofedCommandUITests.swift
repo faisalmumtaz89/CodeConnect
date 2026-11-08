@@ -94,7 +94,7 @@ final class SpoofedCommandUITests: XCTestCase {
         // The card vouches for the bytes it hashed, never for the characters
         // drawn, some of which are U+FFFD.
         XCTAssertTrue(
-            app.staticTexts["Verified against the daemon's hash."].exists,
+            app.staticTexts["Matches what your computer sent."].exists,
             "the verification line claims the hash")
 
         let description = app.staticTexts.matching(

@@ -56,15 +56,13 @@ struct StartContext {
     /// When this computer last ran anything the phone can start again.
     var lastUsed: Date? { projects.first?.lastUsed }
 
-    /// Why an agent cannot be started on this computer, or nil when it can.
-    /// The computer's own words when it has them: its check ran the agent,
-    /// and an agent can be there and still not run.
+    /// Why an agent cannot be started on this computer, or nil when it can: in
+    /// plain words, never the computer's own check output, which names its
+    /// command line and its settings file. "Can't start" is true whether the
+    /// agent is missing, its shell is slow or its version check failed.
     func missingReason(_ agent: StartAgent) -> String? {
         guard !starter.availableAgents.contains(agent) else { return nil }
-        guard let detail = starter.agents.first(where: { $0.agent == agent })?.detail else {
-            return "\(agent.displayName) isn’t installed on \(machineName)."
-        }
-        return "\(agent.displayName) can’t start on \(machineName): \(detail)"
+        return "\(agent.displayName) can’t start on \(machineName)."
     }
 }
 

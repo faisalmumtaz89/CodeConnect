@@ -326,8 +326,8 @@ final class FleetApprovalLineTests: XCTestCase {
             .map { $0.accessibilityLabel ?? "" }
         window.isHidden = true
         XCTAssertEqual(headings, ["Start an agent on your computer"], spoken)
-        XCTAssertTrue(spoken.contains("codeconnect claude"), spoken)
-        XCTAssertTrue(spoken.contains("codeconnect codex"), spoken)
+        XCTAssertTrue(spoken.contains("Start one with CodeConnect"), spoken)
+        XCTAssertFalse(spoken.contains("codeconnect "), spoken)
         XCTAssertFalse(spoken.contains("Nothing is waiting for you"), spoken)
         XCTAssertFalse(spoken.contains("No agents running"), spoken)
         XCTAssertFalse(spoken.contains("No agents registered"), spoken)

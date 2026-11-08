@@ -258,7 +258,7 @@ final class ApprovalTextControlsTests: XCTestCase {
             XCTAssertEqual(
                 ApprovalCard.Verification(hashMatchesDisplayText: true, renderMatchesDisplayText: rendered)
                     .summary,
-                "Verified against the daemon's hash.", "render matches: \(rendered)")
+                "Matches what your computer sent.", "render matches: \(rendered)")
         }
     }
 }

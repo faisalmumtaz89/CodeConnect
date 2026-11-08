@@ -502,8 +502,8 @@ public struct LinkHealth: Sendable, Equatable {
 
     public var ageText: String { age.map(Format.age) ?? "-" }
 
-    /// The level in words, as the link's spoken value and each machine's row in
-    /// Settings say it.
+    /// The level in words, as the link's spoken value, each computer's row in
+    /// Settings and its own screen say it.
     public var word: String {
         switch level {
         case .live: return "Live"
@@ -511,7 +511,7 @@ public struct LinkHealth: Sendable, Equatable {
         case .stale: return "Stale"
         case .connecting: return "Connecting"
         case .offline: return "Offline"
-        case .rejected: return "Token rejected"
+        case .rejected: return "Pair again"
         }
     }
 
@@ -523,15 +523,6 @@ public struct LinkHealth: Sendable, Equatable {
         case .connecting: return "arrows-clockwise"
         case .offline: return "plugs"
         case .rejected: return "lock-open"
-        }
-    }
-
-    public var shortText: String {
-        switch level {
-        case .live, .lagging, .stale: return ageText
-        case .connecting: return "connecting"
-        case .offline: return "offline"
-        case .rejected: return "token"
         }
     }
 
