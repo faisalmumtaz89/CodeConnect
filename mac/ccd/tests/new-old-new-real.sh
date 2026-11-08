@@ -20,10 +20,11 @@
 #     session at any generation on the way back up.
 #
 #   * **A REAL schema downgrade, and agent-scoped isolation under it.** The new
-#     binary is now `SCHEMA_VERSION` 5 (agent-scoped session storage at 4,
-#     agent-scoped approval CARDS at 5); v0.6.0 is 3. So a genuine
-#     v3-binary-opens-a-v5-database downgrade happens here, and
-#     the `user_version` really is driven 5 -> 3 -> 5. That is measured, not
+#     binary is now `SCHEMA_VERSION` 6 (agent-scoped session storage at 4,
+#     agent-scoped approval CARDS at 5, ended runs' transcripts forgotten at 6);
+#     v0.6.0 is 3. So a genuine
+#     v3-binary-opens-a-v6-database downgrade happens here, and
+#     the `user_version` really is driven 6 -> 3 -> 6. That is measured, not
 #     assumed: v0.6.0 reads `user_version`, ignores what it finds, and writes 3
 #     back unconditionally — which is also exactly why a version fence could
 #     never have protected anything, and why the isolation does not rest on one.
@@ -64,7 +65,20 @@
 # files here, so it never runs as part of the unit suite.
 #
 # Usage: mac/ccd/tests/new-old-new-real.sh [old_commit]   (default: v0.6.0)
+#   with HOME set to a scratch folder, TMUX_TMPDIR to a 0700 folder of your own, and
+#   CARGO_HOME and RUSTUP_HOME to your Rust toolchain's, which a scratch HOME hides.
 set -euo pipefail
+
+# Refuse to start anywhere a step could reach your own home or tmux server: the
+# daemons and launchers below inherit HOME, and most steps the default
+# TMUX_TMPDIR. Your real home is read from the account database, not from $HOME
+# (macOS's, as the rest of this check is macOS's).
+REAL_HOME="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)"
+if [ -z "$REAL_HOME" ] || [ "$(cd "$HOME" && pwd -P)" = "$(cd "$REAL_HOME" && pwd -P)" ] \
+  || [ ! -d "${TMUX_TMPDIR:-}" ] || [ ! -O "$TMUX_TMPDIR" ] || [ "$(/usr/bin/stat -f %Lp "$TMUX_TMPDIR")" != 700 ]; then
+  echo "REFUSED: run this with HOME set to a scratch folder, TMUX_TMPDIR to a 0700 folder of your own, and CARGO_HOME and RUSTUP_HOME to your Rust toolchain's."
+  exit 1
+fi
 
 OLD_COMMIT="${1:-8e5b172}"
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -257,8 +271,8 @@ assert_old_cli_clean() {
 }
 
 # **Assert** (never merely print) the version at each step. The expected value
-# is a parameter because the whole point is that it CHANGES: 4 after a new
-# migrate, 3 after the old daemon has written its own number back over ours, 4
+# is a parameter because the whole point is that it CHANGES: 6 after a new
+# migrate, 3 after the old daemon has written its own number back over ours, 6
 # again after the new binary reopens. Each of those three is a claim about a
 # different binary's behaviour, and asserting one constant would hide two of
 # them.
@@ -326,7 +340,7 @@ PHONE_EXPECT="dev-phone|th-phone|$PHONE_TOKEN|production|bearer-probe|"
 
 echo "== 1) new ccd migrates the DB =="
 run "$NEW" new1
-assert_uv 5 "after new migrate"
+assert_uv 6 "after new migrate"
 NEW_UV="$LAST_UV"
 assert_seam_columns_exist "after new migrate"
 for object in codex_sessions all_sessions codex_pending_approvals all_pending_approvals \
@@ -478,7 +492,7 @@ echo "  (2) the LIVE Codex run is byte-for-byte untouched by the old daemon, and
 
 echo "== 4) new ccd reopens =="
 run "$NEW" new2
-assert_uv 5 "after new reopen"
+assert_uv 6 "after new reopen"
 [ "$(q "SELECT lifecycle FROM sessions;")" = "exited" ] || { echo "FAIL: lifecycle lost"; exit 1; }
 # The Codex run came through the downgrade untouched and did not leak into the
 # table the old binary sweeps.
@@ -513,7 +527,7 @@ CODECONNECT_HOME="$H" "$OLD" > "$H/old-live.log" 2>&1 &
 OLDPID=$!
 sleep 4
 kill -0 $OLDPID 2>/dev/null || { echo "FAIL: the old daemon died on a database it must tolerate"; tail -20 "$H/old-live.log"; exit 1; }
-echo "  the old daemon is up on a v5 database it does not understand"
+echo "  the old daemon is up on a v6 database it does not understand"
 
 # (1) ENUMERATION. Nothing either old-daemon log says may name the Codex run —
 # not its session name, not its uid, not its thread id, and not the word codex.
@@ -526,7 +540,7 @@ echo "  (1) neither old-daemon log names a Codex session, thread or uid"
 # At 8e5b172 `list()` asks tmux and returns early — printing "no CodeConnect
 # sessions" — whenever tmux is empty, which it is here; the daemon is consulted
 # only for names tmux already returned. So a clean `ls` says the old CLI still
-# runs against a v5 database, which is worth asserting and is all it says.
+# runs against a v6 database, which is worth asserting and is all it says.
 assert_old_cli_clean "ls (command health)" "$OLDCC" ls
 
 # **The binding enumeration probe.** `codeconnect sessions list` at 8e5b172 goes
@@ -608,7 +622,7 @@ sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 1))/" "$H/config.json" > "$H3/c
 run_at() { CODECONNECT_HOME="$3" timeout "$DAEMON_WINDOW" "$1" > "$3/$2.log" 2>&1 || [ $? = 124 ]; }
 run_at "$NEW" new-sharedcard "$H3"
 q3() { sqlite3 "$H3/events.db" "$1"; }
-[ "$(q3 'PRAGMA user_version;')" = "5" ] || { echo "FAIL: (5b) staging home is not at v5"; exit 1; }
+[ "$(q3 'PRAGMA user_version;')" = "6" ] || { echo "FAIL: (5b) staging home is not at v6"; exit 1; }
 q3 "DROP TRIGGER pending_approvals_refuse_codex_card;"
 [ "$(q3 "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='pending_approvals_refuse_codex_card';")" = "0" ] \
   || { echo "FAIL: the pre-trigger staging did not remove the card trigger, so (5b) proves nothing"; exit 1; }
@@ -681,7 +695,7 @@ rm -rf "$H3"
 
 echo "== 6) new ccd reopens after the old prune: the forward path is intact =="
 run "$NEW" new3
-assert_uv 5 "after the final new reopen"
+assert_uv 6 "after the final new reopen"
 [ "$(q "SELECT COUNT(*) FROM codex_sessions WHERE session_uid='$CX';")" = "1" ] \
   || { echo "FAIL: the Codex run did not survive the whole round trip"; exit 1; }
 [ "$(q "SELECT COUNT(*) FROM sessions WHERE agent <> 'claude';")" = "0" ] \
@@ -721,7 +735,7 @@ mkdir -p "$H4"
 sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 2))/" "$H/config.json" > "$H4/config.json"
 run_at "$NEW" new-livedanswer-build "$H4"
 q4() { sqlite3 "$H4/events.db" "$1"; }
-[ "$(q4 'PRAGMA user_version;')" = "5" ] || { echo "FAIL: (6b) staging home is not at v5"; exit 1; }
+[ "$(q4 'PRAGMA user_version;')" = "6" ] || { echo "FAIL: (6b) staging home is not at v6"; exit 1; }
 CARD_JSON='{"request_id":"'"$CX_REQ"'","payload_hash":"h","tool_name":"Bash","tool_input":{"command":"touch /tmp/a"},"display_text":"touch /tmp/a","generation":7,"identity_bound":false}'
 q4 "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
     VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex','live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
@@ -1328,13 +1342,18 @@ CODEX_BEFORE_PREFLIGHT="$(codex_state)"
 CONNS_G_OLD="$(daemon_ipc_conns $OLDPID)"
 [ "$CONNS_G_OLD" -ge 1 ] \
   || { echo "FAIL: lsof sees no unix socket for the step 7(g) daemon, so its connection count proves nothing"; kill $OLDPID 2>/dev/null; exit 1; }
+# A launch at a terminal asks the one mail question until it has been answered;
+# answered here, so both arms below measure the preflight and not the question.
+CODECONNECT_HOME="$H" "$NEWCC" mail-trust off > /dev/null
 PRE_RC=0
-# Under `script`, as the arm below is: with no terminal, `codeconnect codex` runs
-# codex itself and never reaches the preflight. stdin is held open so the pty does
-# not reach EOF while the launch is still being decided; `script` hands back the
-# launcher's own exit status.
+# Under `script` with a size, as the arm below is: with no terminal, `codeconnect
+# codex` runs codex itself and never reaches the preflight, and `script`'s terminal
+# is 0x0 when its own stdin is a pipe, which is no terminal to show a session in.
+# stdin is held open so the pty does not reach EOF while the launch is still being
+# decided; `script` hands back the launcher's own exit status.
 sleep 30 | CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" \
-  timeout 30 script -q /dev/null "$NEWCC" codex > "$H/preflight-old.log" 2>&1 || PRE_RC=$?
+  timeout 30 script -q /dev/null /bin/sh -c 'stty rows 40 cols 120 && exec "$0" codex' "$NEWCC" \
+  > "$H/preflight-old.log" 2>&1 || PRE_RC=$?
 [ "$PRE_RC" -ne 0 ] \
   || { echo "FAIL: the launcher started a Codex session against a daemon that cannot host one"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
 # **Discriminating, because "refusing to launch" is only a prefix.** The tail below
@@ -1407,11 +1426,13 @@ kill -0 $NEWPID 2>/dev/null || { echo "FAIL: the new daemon did not come up for 
 # The count is what ties the line to the launcher: this daemon is fresh, this arm
 # runs one command against it, and `daemon_accepting` only connects — so exactly
 # one negotiation reached it, and it was the launcher's.
-# Under `script`, so the launch has the terminal it shows a session in: with no
-# terminal, `codeconnect codex` runs codex itself and never launches. stdin is
-# held open so the pty does not reach EOF while the launch is still being decided.
+# Under `script` with a size, so the launch has the terminal it shows a session in:
+# with no terminal, `codeconnect codex` runs codex itself and never launches, and
+# `script`'s terminal is 0x0 when its own stdin is a pipe. stdin is held open so the
+# pty does not reach EOF while the launch is still being decided.
 sleep 150 | CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" TMUX_TMPDIR="$GTMUX" \
-  timeout 150 script -q /dev/null "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
+  timeout 150 script -q /dev/null /bin/sh -c 'stty rows 40 cols 120 && exec "$0" codex' "$NEWCC" \
+  > "$H/preflight-new.log" 2>&1 || true
 # The daemon writes its line once the answer is ON the connection's write queue
 # (written before the enqueue and with the result discarded, this line would be
 # an affirmative that a DROPPED answer could still produce). The enqueue and the
@@ -1448,7 +1469,7 @@ fi
 # all the way through the wiring the preflight guards: minted an identity, spawned a
 # coordinator, and waited on its outcome. (Against the OLD daemon, the identical
 # command left none — asserted above.)
-GREC="$(ls "$H"/sessions/*/launch.json 2>/dev/null | head -1)"
+GREC="$(ls "$H"/sessions/*/launch.json 2>/dev/null | head -1 || true)"
 [ -n "$GREC" ] \
   || { echo "FAIL: against a hosting daemon the launcher never started a launch; it stopped somewhere else:"; cat "$H/preflight-new.log"; exit 1; }
 # And it reached a TERMINAL outcome rather than being abandoned mid-flight. The
@@ -1481,12 +1502,14 @@ grep -q '"Failed"' "$GREC" \
 # terminal carries the decoded one, so any reason containing a character JSON
 # escapes would be compared against a string the launcher could never print.
 #
-# So: parse the record as JSON, and require the launcher's WHOLE output to be
-# anyhow's own `Error: <reason>` presentation and nothing else. That is the exact
-# rendering `codex::launch`'s `bail!("{reason}")` produces through
-# `main() -> Result<()>`, and on this path the launcher prints nothing else at all.
+# So: parse the record as JSON, and require the launcher's LAST line, as the
+# terminal shows it, to be anyhow's own `Error: <reason>` presentation, with nothing
+# after it. That is the exact rendering `codex::launch`'s `bail!("{reason}")`
+# produces through `main() -> Result<()>`. Before it, a launch at a terminal shows
+# its advisory, holds for it, and sets the terminal up and back; that draws nothing
+# of the reason and is not compared, and its control sequences are removed.
 CC_REC="$GREC" CC_OUT="$H/preflight-new.log" python3 - <<'PY' || exit 1
-import json, os, sys, unicodedata
+import json, os, re, sys, unicodedata
 
 rec = json.load(open(os.environ["CC_REC"], encoding="utf-8"))
 state = rec.get("state")
@@ -1507,9 +1530,10 @@ if (reason != reason.strip()
              f"cannot compare it verbatim: {reason!r}")
 
 printed = open(os.environ["CC_OUT"], encoding="utf-8", errors="replace").read()
-expected = f"Error: {reason}\n"
-if printed != expected:
-    sys.exit("FAIL: the launcher printed something other than the recorded reason, exactly.\n"
+shown = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>]", "", printed)
+expected = f"Error: {reason}"
+if not shown.endswith("\n") or shown[:-1].split("\n")[-1] != expected:
+    sys.exit("FAIL: the launcher's last line is not the recorded reason, exactly.\n"
              f"  EXPECTED: {expected!r}\n"
              f"  PRINTED:  {printed!r}")
 PY
@@ -1570,8 +1594,8 @@ echo "  (g) the REAL launcher refused to start a Codex session against the rolle
 echo "      naming the daemon's own answer, mutating nothing, leaving no connection AND no"
 echo "      launch record — the refusal lands before a launch is recorded — and the same"
 echo "      command against the new daemon got past the preflight and actually LAUNCHED:"
-echo "      a coordinator wrote a record, the launcher waited on it and printed EXACTLY the"
-echo "      recorded reason and nothing else, and the failed launch left no tmux session, no"
+echo "      a coordinator wrote a record, the launcher waited on it and printed the recorded"
+echo "      reason, exactly, as its last line, and the failed launch left no tmux session, no"
 echo "      run dir and neither of the processes its own record names still running,"
 echo "      with the new daemon's OWN log showing exactly one negotiation — the launcher's —"
 echo "      answered supported=true, so the affirmative control is the launcher's round trip"
