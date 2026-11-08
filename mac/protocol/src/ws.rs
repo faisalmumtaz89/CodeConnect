@@ -457,6 +457,12 @@ pub enum ClientMessage {
     ///
     /// `worktree` (minor 29, `start_worktree`) starts it in another worktree of
     /// that folder's repository instead; absent, it starts in `path` itself.
+    ///
+    /// `model` (minor 33) is the `value` of one of the
+    /// [`AgentAvailability::models`] this computer listed for `agent`, given to the
+    /// agent as `--model=<value>`. Absent, or Claude Code's own `default`, the agent
+    /// is given no `--model` and starts with the model its settings name. A daemon
+    /// below 33 lists no models, so a client sends it only for one listed.
     StartSession {
         request_id: String,
         path: String,
@@ -465,6 +471,8 @@ pub enum ClientMessage {
         prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree: Option<StartWorktree>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
@@ -885,6 +893,31 @@ pub struct AgentAvailability {
     pub agent: crate::agent::AgentKind,
     pub available: bool,
     /// Why not, safe to show verbatim; absent when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The models the agent offers a start (minor 33), in its own order and its
+    /// own words. Claude Code lists its default first, as `default`, its detail
+    /// naming the model that is now; Codex lists no such entry, and a start that
+    /// names no model gets its default. Empty when the agent could not be asked,
+    /// and from a daemon below 33.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<AgentModel>,
+    /// Whether the agent is signed in (minor 33), to show; absent when not known.
+    /// A start does not depend on it: a signed-out agent asks for a sign-in itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+}
+
+/// One model an agent can be started with (minor 33), as the agent names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModel {
+    /// What a [`ClientMessage::StartSession`] names it by, and the agent is given
+    /// as `--model=<value>`.
+    pub value: String,
+    /// The agent's own name for it, safe to show verbatim.
+    pub label: String,
+    /// The agent's own line about it, safe to show verbatim; absent when it gives
+    /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -2069,10 +2102,15 @@ mod tests {
             "a hello with neither token nor code from the owner's own Tailscale device, and \
              the `peers` frame, are minor 32"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 33,
+            "the models each agent offers and whether it is signed in (`models`, \
+             `signed_in`), and `start_session`'s `model`, are minor 33"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 32);
+        assert_eq!(crate::PROTOCOL_MINOR, 33);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3045,6 +3083,7 @@ mod tests {
                 agent: crate::agent::AgentKind::Claude,
                 prompt: Some("-fix \"it\"; $(x)\nnow;".into()),
                 worktree: None,
+                model: None,
             },
             serde_json::json!({"type": "start_session", "request_id": "r1",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -3057,6 +3096,7 @@ mod tests {
                 agent: crate::agent::AgentKind::Codex,
                 prompt: None,
                 worktree: None,
+                model: None,
             },
             serde_json::json!({"type": "start_session", "request_id": "r2",
                 "path": "/srv/x", "agent": "codex"}),
@@ -3087,11 +3127,15 @@ mod tests {
                         agent: crate::agent::AgentKind::Claude,
                         available: true,
                         detail: None,
+                        models: Vec::new(),
+                        signed_in: None,
                     },
                     AgentAvailability {
                         agent: crate::agent::AgentKind::Codex,
                         available: false,
                         detail: Some("codex is not installed".into()),
+                        models: Vec::new(),
+                        signed_in: None,
                     },
                 ],
             },
@@ -3138,6 +3182,61 @@ mod tests {
                     "result": {"status": "failed", "reason": word, "detail": "why"}}),
             );
         }
+    }
+
+    /// **A start that names a model, and the models an agent offers** (minor 33),
+    /// pinned as the apps match them. Without them, both read as minor 32 wrote
+    /// them (above).
+    #[test]
+    fn a_model_and_the_models_an_agent_offers_round_trip_as_the_apps_match_them() {
+        fn round_trip<T>(message: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned,
+        {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: T = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+
+        round_trip(
+            ClientMessage::StartSession {
+                request_id: "r3".into(),
+                path: "/Users/me/src/app".into(),
+                agent: crate::agent::AgentKind::Claude,
+                prompt: None,
+                worktree: None,
+                model: Some("claude-fable-5-1[1m]".into()),
+            },
+            serde_json::json!({"type": "start_session", "request_id": "r3",
+                "path": "/Users/me/src/app", "agent": "claude",
+                "model": "claude-fable-5-1[1m]"}),
+        );
+        round_trip(
+            AgentAvailability {
+                agent: crate::agent::AgentKind::Codex,
+                available: true,
+                detail: None,
+                models: vec![
+                    AgentModel {
+                        value: "gpt-6.1-sol".into(),
+                        label: "GPT-6.1-Sol".into(),
+                        detail: Some("Latest workhorse model for coding and everyday work.".into()),
+                    },
+                    AgentModel {
+                        value: "local".into(),
+                        label: "Local".into(),
+                        detail: None,
+                    },
+                ],
+                signed_in: Some(false),
+            },
+            serde_json::json!({"agent": "codex", "available": true,
+                "models": [
+                    {"value": "gpt-6.1-sol", "label": "GPT-6.1-Sol",
+                     "detail": "Latest workhorse model for coding and everyday work."},
+                    {"value": "local", "label": "Local"}],
+                "signed_in": false}),
+        );
     }
 
     /// A minor-27 ack has no `start_session`, so a client reading it offers no
@@ -3202,6 +3301,7 @@ mod tests {
                     agent: crate::agent::AgentKind::Claude,
                     prompt: None,
                     worktree: Some(worktree),
+                    model: None,
                 },
                 serde_json::json!({"type": "start_session", "request_id": "r1",
                     "path": "/Users/me/src/app", "agent": "claude", "worktree": expected}),

@@ -18,9 +18,10 @@ use futures_util::StreamExt;
 use protocol::agent::AgentKind;
 use protocol::launch_result::{LaunchResult, ENV_LAUNCH_RESULT};
 use protocol::ws::{
-    AgentAvailability, ClientMessage, CreateFolderResult, FolderContents, Project, ProjectGit,
-    ServerMessage, StartFailure, StartSessionResult, StartWorktree, Worktree,
+    AgentAvailability, AgentModel, ClientMessage, CreateFolderResult, FolderContents, Project,
+    ProjectGit, ServerMessage, StartFailure, StartSessionResult, StartWorktree, Worktree,
 };
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
 use crate::state::Daemon;
@@ -102,6 +103,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             agent,
             prompt,
             worktree,
+            model,
         } => {
             let state_dir = protocol::root_dir();
             let launch = launch(
@@ -113,6 +115,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 &agent,
                 prompt.as_deref(),
                 worktree.as_ref(),
+                model.as_deref(),
             );
             ServerMessage::StartSessionResult {
                 result: daemon.starts.once(&request_id, launch).await,
@@ -128,17 +131,35 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
 
 /// Which agents could start, as the last check found: a project list answers
 /// from it rather than wait seconds on login shells. Empty until the first list
-/// after the daemon starts, which waits for the check.
+/// after the daemon starts, which waits for the check. And what each agent last
+/// offered a start, kept by its version ([`offer`]).
 #[derive(Default)]
-pub struct KnownAgents(Mutex<Option<Vec<AgentAvailability>>>);
+pub struct KnownAgents {
+    last: Mutex<Option<Vec<AgentAvailability>>>,
+    offers: Mutex<HashMap<String, (String, Offer)>>,
+}
 
 impl KnownAgents {
     fn get(&self) -> Option<Vec<AgentAvailability>> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.last.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub(crate) fn set(&self, agents: Vec<AgentAvailability>) {
-        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(agents);
+        *self.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(agents);
+    }
+
+    /// What `agent` offered at `version`, if that is the version it was asked at.
+    fn offered(&self, agent: &AgentKind, version: &str) -> Option<Offer> {
+        let offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
+        offers
+            .get(agent.as_str())
+            .filter(|(at, _)| at == version)
+            .map(|(_, offer)| offer.clone())
+    }
+
+    fn keep(&self, agent: &AgentKind, version: &str, offer: Offer) {
+        let mut offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
+        offers.insert(agent.as_str().to_string(), (version.to_string(), offer));
     }
 }
 
@@ -147,16 +168,17 @@ impl KnownAgents {
 async fn agents(daemon: &Arc<Daemon>) -> Vec<AgentAvailability> {
     if let Some(known) = daemon.agents.get() {
         let daemon = Arc::clone(daemon);
-        tokio::spawn(async move { daemon.agents.set(check_agents().await) });
+        tokio::spawn(async move { daemon.agents.set(check_agents(&daemon.agents).await) });
         return known;
     }
-    let checked = check_agents().await;
+    let checked = check_agents(&daemon.agents).await;
     daemon.agents.set(checked.clone());
     checked
 }
 
-async fn check_agents() -> Vec<AgentAvailability> {
-    futures_util::future::join_all(AGENTS.iter().map(agent_availability)).await
+async fn check_agents(known: &KnownAgents) -> Vec<AgentAvailability> {
+    futures_util::future::join_all(AGENTS.iter().map(|agent| agent_availability(agent, known)))
+        .await
 }
 
 /// Starts already asked for, by `request_id`: in memory, so a repeat on this
@@ -204,9 +226,12 @@ fn failed(reason: StartFailure, detail: String) -> StartSessionResult {
     StartSessionResult::Failed { reason, detail }
 }
 
-/// Run `codeconnect <agent> --no-attach [--worktree=<name>] [-- <prompt>]`
-/// through the user's login shell, in `path` or the worktree `worktree` names, and
-/// read what it started from its result line, a file in `state_dir`.
+/// Run `codeconnect <agent> --no-attach [--model=<model>] [--worktree=<name>]
+/// [-- <prompt>]` through the user's login shell, in `path` or the worktree
+/// `worktree` names, and read what it started from its result line, a file in
+/// `state_dir`. The model is one argument, so no value of it can be read as
+/// another flag; Claude Code's own `default` is no flag at all, so the agent
+/// starts with the model its settings name, as typed in a terminal.
 ///
 /// `started` is answered only once the session is in the fleet ([`listed`]): the
 /// launcher reports a Claude start as soon as it has spawned the supervisor, which
@@ -222,6 +247,7 @@ pub(crate) async fn launch(
     agent: &AgentKind,
     prompt: Option<&str>,
     worktree: Option<&StartWorktree>,
+    model: Option<&str>,
 ) -> StartSessionResult {
     if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
         return failed(
@@ -285,6 +311,12 @@ pub(crate) async fn launch(
         OsStr::new(agent.as_str()),
         OsStr::new("--no-attach"),
     ];
+    let model = model
+        .filter(|model| *model != "default")
+        .map(|model| format!("--model={model}"));
+    if let Some(model) = &model {
+        args.push(OsStr::new(model));
+    }
     if let Some(flag) = &place.flag {
         args.push(OsStr::new(flag));
     }
@@ -692,12 +724,15 @@ async fn list_projects(daemon: &Arc<Daemon>) -> ServerMessage {
 }
 
 /// Whether `codeconnect <agent> --version` succeeds from the user's login shell:
-/// the launcher resolves the agent exactly as a start would.
-async fn agent_availability(agent: &AgentKind) -> AgentAvailability {
+/// the launcher resolves the agent exactly as a start would. When it does, what
+/// the agent at the version it printed offers a start ([`offer`]).
+async fn agent_availability(agent: &AgentKind, known: &KnownAgents) -> AgentAvailability {
     let unavailable = |detail: String| AgentAvailability {
         agent: agent.clone(),
         available: false,
         detail: Some(detail),
+        models: Vec::new(),
+        signed_in: None,
     };
     let launcher = match crate::state::codex_launcher() {
         Ok(launcher) => launcher,
@@ -712,7 +747,7 @@ async fn agent_availability(agent: &AgentKind) -> AgentAvailability {
     command
         .current_dir(&home)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
@@ -726,13 +761,216 @@ async fn agent_availability(agent: &AgentKind) -> AgentAvailability {
         }
     };
     if output.status.success() {
+        let version = last_line(&output.stdout).unwrap_or_default();
+        let offer = offer(known, &launcher, agent, &version)
+            .await
+            .unwrap_or_default();
         return AgentAvailability {
             agent: agent.clone(),
             available: true,
             detail: None,
+            models: offer.models,
+            signed_in: offer.signed_in,
         };
     }
     unavailable(last_line(&output.stderr).unwrap_or_else(|| "the agent could not be found".into()))
+}
+
+/// What an agent offers a start: the models it lists, and whether it is signed in.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Offer {
+    models: Vec<AgentModel>,
+    signed_in: Option<bool>,
+}
+
+/// What `agent`, at `version`, offers a start.
+///
+/// Asking starts the agent, and an agent keeps its own books as it starts: Claude
+/// Code refreshes its caches in `~/.claude.json`, and Codex begins a plugin sync
+/// that an ask, over in a fraction of a second, cuts short, leaving a 4 KB
+/// `~/.codex/.tmp/git-*` folder Codex never removes. So an answer that says the
+/// agent is signed in is kept for that version: it is asked again once the agent
+/// is updated or the daemon restarts. Any other answer is asked again at the next
+/// list, so a sign-in shows at once; except a signed-out Codex's, which is asked
+/// again only once `codex login status`, which starts nothing, says it is signed in.
+async fn offer(
+    known: &KnownAgents,
+    launcher: &Path,
+    agent: &AgentKind,
+    version: &str,
+) -> Option<Offer> {
+    if let Some(kept) = known.offered(agent, version) {
+        if kept.signed_in == Some(true)
+            || (*agent == AgentKind::Codex && !codex_signed_in(launcher).await)
+        {
+            return Some(kept);
+        }
+    }
+    let asked = ask(launcher, agent).await?;
+    known.keep(agent, version, asked.clone());
+    Some(asked)
+}
+
+/// What asks Claude Code what it offers: one `initialize`, which it answers
+/// without starting a conversation.
+const CLAUDE_ASK: &str = concat!(
+    r#"{"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}"#,
+    "\n"
+);
+
+/// What asks Codex's app-server what it offers: its handshake, then its models
+/// and its account, which it answers in any order.
+const CODEX_ASK: &str = concat!(
+    r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codeconnect-ccd","title":"CodeConnect daemon","version":""#,
+    env!("CARGO_PKG_VERSION"),
+    r#""}}}"#,
+    "\n",
+    r#"{"method":"initialized"}"#,
+    "\n",
+    r#"{"id":2,"method":"model/list","params":{}}"#,
+    "\n",
+    r#"{"id":3,"method":"account/read","params":{}}"#,
+    "\n"
+);
+
+/// Ask `agent` itself what it offers, as `codeconnect <agent>` with no terminal
+/// runs it from the user's login shell: Claude Code in print mode with no session
+/// file, no MCP server and no hook, or Codex's app-server. From the home folder,
+/// so no project's settings run. Once it has answered, its stdin is closed, which
+/// ends it. None when it could not be asked, or did not finish within
+/// [`PROBE_TIMEOUT`].
+async fn ask(launcher: &Path, agent: &AgentKind) -> Option<Offer> {
+    let (flags, asking): (&[&str], &str) = match agent {
+        AgentKind::Claude => (
+            &[
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--settings",
+                r#"{"disableAllHooks":true}"#,
+            ],
+            CLAUDE_ASK,
+        ),
+        _ => (&["app-server"], CODEX_ASK),
+    };
+    let mut args = vec![launcher.as_os_str(), OsStr::new(agent.as_str())];
+    args.extend(flags.iter().map(OsStr::new));
+    let mut command = login_shell_command(&args);
+    command
+        .current_dir(protocol::home_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let asked = async {
+        let mut child = command.spawn().ok()?;
+        let mut stdin = child.stdin.take()?;
+        stdin.write_all(asking.as_bytes()).await.ok()?;
+        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        let mut said = Vec::new();
+        while !answered(agent, &said) {
+            let line = lines.next_line().await.ok()??;
+            // What the user's shell prints as it starts is not the agent's.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                said.push(value);
+            }
+        }
+        drop(stdin);
+        child.wait().await.ok()?;
+        offer_from(agent, &said)
+    };
+    tokio::time::timeout(PROBE_TIMEOUT, asked).await.ok()?
+}
+
+/// Whether `said` holds every answer `agent` gives to the ask.
+fn answered(agent: &AgentKind, said: &[serde_json::Value]) -> bool {
+    match agent {
+        AgentKind::Claude => said.iter().any(|line| line["type"] == "control_response"),
+        _ => [2, 3]
+            .iter()
+            .all(|id| said.iter().any(|line| line["id"] == *id)),
+    }
+}
+
+/// What `agent`'s answers say it offers: the models it lists, in its order and
+/// words, Claude Code's own `default` among them, and without those Codex hides;
+/// and whether it is signed in. None when they list no models.
+fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
+    let model = |entry: &serde_json::Value, value: &str| {
+        Some(AgentModel {
+            value: entry[value].as_str()?.to_string(),
+            label: entry["displayName"].as_str()?.to_string(),
+            detail: entry["description"].as_str().map(str::to_string),
+        })
+    };
+    match agent {
+        AgentKind::Claude => {
+            let reply = said
+                .iter()
+                .find(|line| line["type"] == "control_response")?;
+            let answer = &reply["response"]["response"];
+            let account = &answer["account"];
+            Some(Offer {
+                models: answer["models"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|entry| model(entry, "value"))
+                    .collect(),
+                // The one signed-out shape measured: no token and no API key, for
+                // Anthropic's own API. An API key alone still says `"none"` here.
+                signed_in: account.is_object().then(|| {
+                    !(account["tokenSource"] == "none"
+                        && account["apiKeySource"].is_null()
+                        && account["apiProvider"] == "firstParty")
+                }),
+            })
+        }
+        _ => {
+            let result = |id: u64| {
+                said.iter()
+                    .find(|line| line["id"] == id)
+                    .map(|line| &line["result"])
+            };
+            let (models, account) = (result(2)?, result(3)?);
+            Some(Offer {
+                models: models["data"]
+                    .as_array()?
+                    .iter()
+                    .filter(|entry| entry["hidden"] != true)
+                    .filter_map(|entry| model(entry, "model"))
+                    .collect(),
+                signed_in: account.is_object().then(|| {
+                    !account["account"].is_null() || account["requiresOpenaiAuth"] == false
+                }),
+            })
+        }
+    }
+}
+
+/// Whether `codex login status` says Codex is signed in. It reads the stored
+/// sign-in and starts nothing, so, unlike an ask, it leaves nothing behind.
+async fn codex_signed_in(launcher: &Path) -> bool {
+    let mut command = login_shell_command(&[
+        launcher.as_os_str(),
+        OsStr::new("codex"),
+        OsStr::new("login"),
+        OsStr::new("status"),
+    ]);
+    command
+        .current_dir(protocol::home_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    matches!(
+        tokio::time::timeout(PROBE_TIMEOUT, command.status()).await,
+        Ok(Ok(status)) if status.success()
+    )
 }
 
 /// `args` run through the user's login shell, as one argv each, never one string,
@@ -964,6 +1202,7 @@ mod tests {
                 &AgentKind::Claude,
                 prompt,
                 None,
+                None,
             )
             .await
         }
@@ -993,6 +1232,7 @@ mod tests {
                 &agent,
                 prompt,
                 Some(&worktree),
+                None,
             )
             .await
         }
@@ -1772,6 +2012,7 @@ mod tests {
                     &agent,
                     Some("x; $(touch PWNED) \"q\""),
                     None,
+                    None,
                 )
                 .await;
                 assert_eq!(
@@ -1999,5 +2240,401 @@ mod tests {
             answered >= Duration::from_secs(2),
             "answered after {answered:?}, before the registration"
         );
+    }
+
+    const CLAUDE_SIGNED_OUT: &str =
+        include_str!("../../../fixtures/claude/initialize-signed-out-2.1.319.jsonl");
+    const CLAUDE_API_KEY: &str =
+        include_str!("../../../fixtures/claude/initialize-api-key-2.1.319.jsonl");
+    const CODEX_SIGNED_OUT: &str =
+        include_str!("../../../fixtures/codex/app-server-models-signed-out-0.167.0.jsonl");
+    const CODEX_API_KEY: &str =
+        include_str!("../../../fixtures/codex/app-server-models-api-key-0.167.0.jsonl");
+
+    /// A launcher that answers an ask as the agent answered it: with the recorded
+    /// reply in `<launcher>.<agent>`, then waiting for its stdin to close, as the
+    /// agents do; `codex login status` with the exit status in `<launcher>.login`.
+    /// Each run goes into `<launcher>.asks`, and its folder into `<launcher>.cwd`.
+    const ANSWERING: &str = r#"printf '%s\n' "$*" >> "$0.asks"; pwd -P > "$0.cwd"
+case "$*" in
+"codex login status") exit "$(cat "$0.login")" ;;
+"claude -p"* | "codex app-server") [ -f "$0.$1" ] || exit 1; cat "$0.$1"; cat > /dev/null ;;
+esac"#;
+
+    fn answer(rig: &Rig, agent: &str, recorded: &str) {
+        std::fs::write(format!("{}.{agent}", rig.launcher.display()), recorded).unwrap();
+    }
+
+    fn login_status(rig: &Rig, status: u8) {
+        std::fs::write(
+            format!("{}.login", rig.launcher.display()),
+            status.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// How many runs of the launcher began with `what`.
+    fn asked(rig: &Rig, what: &str) -> usize {
+        std::fs::read_to_string(format!("{}.asks", rig.launcher.display()))
+            .unwrap_or_default()
+            .lines()
+            .filter(|run| run.starts_with(what))
+            .count()
+    }
+
+    fn said(recorded: &str) -> Vec<serde_json::Value> {
+        recorded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn values(offer: &Offer) -> Vec<&str> {
+        offer
+            .models
+            .iter()
+            .map(|model| model.value.as_str())
+            .collect()
+    }
+
+    /// **What the agents answered, read as what they offer**: their models, in
+    /// their order and words, Claude Code's own `default` first, with the model it
+    /// is now; and whether they are signed in. Signed out, and with an API key,
+    /// which Claude Code still reports with a `tokenSource` of `"none"`.
+    #[test]
+    fn the_agents_answers_say_what_they_offer() {
+        let claude = offer_from(&AgentKind::Claude, &said(CLAUDE_SIGNED_OUT)).unwrap();
+        assert_eq!(
+            values(&claude),
+            ["default", "opus", "fable", "sonnet", "haiku"]
+        );
+        assert_eq!(
+            claude.models[..2],
+            [
+                AgentModel {
+                    value: "default".into(),
+                    label: "Default (recommended)".into(),
+                    detail: Some(
+                        "Use the default model (currently Opus 5.5) · $4/$20 per Mtok".into()
+                    ),
+                },
+                AgentModel {
+                    value: "opus".into(),
+                    label: "Opus".into(),
+                    detail: Some(
+                        "Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok".into()
+                    ),
+                },
+            ]
+        );
+        assert_eq!(claude.signed_in, Some(false));
+        let wire = serde_json::to_value(AgentAvailability {
+            agent: AgentKind::Claude,
+            available: true,
+            detail: None,
+            models: claude.models.clone(),
+            signed_in: claude.signed_in,
+        })
+        .unwrap();
+        assert_eq!(
+            wire["models"][0]["detail"],
+            "Use the default model (currently Opus 5.5) · $4/$20 per Mtok"
+        );
+        let read: AgentAvailability = serde_json::from_value(wire).unwrap();
+        assert_eq!(read.models, claude.models);
+        let with_key = offer_from(&AgentKind::Claude, &said(CLAUDE_API_KEY)).unwrap();
+        assert_eq!(with_key.signed_in, Some(true));
+
+        let codex = offer_from(&AgentKind::Codex, &said(CODEX_SIGNED_OUT)).unwrap();
+        assert_eq!(
+            values(&codex),
+            [
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-sol",
+                "gpt-6.1-terra",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5"
+            ]
+        );
+        assert_eq!(
+            codex.models[0],
+            AgentModel {
+                value: "gpt-6.1-sol".into(),
+                label: "GPT-6.1-Sol".into(),
+                detail: Some("Latest workhorse model for coding and everyday work.".into()),
+            }
+        );
+        assert_eq!(codex.signed_in, Some(false));
+        let with_key = offer_from(&AgentKind::Codex, &said(CODEX_API_KEY)).unwrap();
+        assert_eq!(with_key.signed_in, Some(true));
+    }
+
+    /// A model Codex lists as hidden is not offered (the recording with one entry
+    /// marked so).
+    #[test]
+    fn a_model_codex_hides_is_not_offered() {
+        let mut said = said(CODEX_SIGNED_OUT);
+        let listed = said.iter_mut().find(|line| line["id"] == 2).unwrap();
+        listed["result"]["data"][1]["hidden"] = true.into();
+        let offer = offer_from(&AgentKind::Codex, &said).unwrap();
+        assert_eq!(offer.models.len(), 8);
+        assert!(!values(&offer).contains(&"gpt-6-astra"));
+    }
+
+    /// **An agent is asked through the launcher, from the home folder, and let
+    /// go**: the launcher, like the agents, ends only when its stdin closes.
+    #[tokio::test]
+    async fn an_agent_is_asked_through_the_launcher_and_let_go() {
+        let rig = Rig::new("ask", ANSWERING);
+        answer(&rig, "claude", CLAUDE_SIGNED_OUT);
+        answer(&rig, "codex", CODEX_API_KEY);
+        assert_eq!(
+            ask(&rig.launcher, &AgentKind::Claude).await,
+            offer_from(&AgentKind::Claude, &said(CLAUDE_SIGNED_OUT))
+        );
+        assert_eq!(
+            ask(&rig.launcher, &AgentKind::Codex).await,
+            offer_from(&AgentKind::Codex, &said(CODEX_API_KEY))
+        );
+        assert_eq!(
+            std::fs::read_to_string(format!("{}.asks", rig.launcher.display())).unwrap(),
+            "claude -p --input-format stream-json --output-format stream-json --verbose \
+             --no-session-persistence --strict-mcp-config --settings {\"disableAllHooks\":true}\n\
+             codex app-server\n"
+        );
+        assert_eq!(
+            rig.launcher_cwd(),
+            protocol::home_dir().canonicalize().unwrap()
+        );
+    }
+
+    /// **A signed-out Codex is asked once, and again only once `login status`
+    /// says it is signed in.** Each ask leaves a folder behind in Codex's own
+    /// `.tmp`, so asking at every list would leave one per list. Signed in, it is
+    /// asked once per version.
+    #[tokio::test]
+    async fn a_signed_out_codex_is_asked_again_only_once_login_status_says_signed_in() {
+        let rig = Rig::new("codex-offer", ANSWERING);
+        let known = KnownAgents::default();
+        let codex =
+            |version: &'static str| offer(&known, &rig.launcher, &AgentKind::Codex, version);
+        answer(&rig, "codex", CODEX_SIGNED_OUT);
+        login_status(&rig, 1);
+        for _ in 0..3 {
+            assert_eq!(
+                codex("codex-cli 0.167.0").await.unwrap().signed_in,
+                Some(false)
+            );
+        }
+        assert_eq!(
+            (
+                asked(&rig, "codex app-server"),
+                asked(&rig, "codex login status")
+            ),
+            (1, 2)
+        );
+
+        answer(&rig, "codex", CODEX_API_KEY);
+        login_status(&rig, 0);
+        assert_eq!(
+            codex("codex-cli 0.167.0").await.unwrap().signed_in,
+            Some(true)
+        );
+        assert_eq!(
+            codex("codex-cli 0.167.0").await.unwrap().signed_in,
+            Some(true)
+        );
+        assert_eq!(
+            (
+                asked(&rig, "codex app-server"),
+                asked(&rig, "codex login status")
+            ),
+            (2, 3)
+        );
+        codex("codex-cli 0.168.0").await.unwrap();
+        assert_eq!(asked(&rig, "codex app-server"), 3);
+    }
+
+    /// **Claude Code is asked at every list until it is signed in, then once per
+    /// version**: its own bookkeeping as it starts is what any start of it does.
+    #[tokio::test]
+    async fn claude_is_asked_until_it_is_signed_in_then_once_per_version() {
+        let rig = Rig::new("claude-offer", ANSWERING);
+        let known = KnownAgents::default();
+        let claude =
+            |version: &'static str| offer(&known, &rig.launcher, &AgentKind::Claude, version);
+        answer(&rig, "claude", CLAUDE_SIGNED_OUT);
+        assert_eq!(
+            claude("2.1.319 (Claude Code)").await.unwrap().signed_in,
+            Some(false)
+        );
+        assert_eq!(
+            claude("2.1.319 (Claude Code)").await.unwrap().signed_in,
+            Some(false)
+        );
+        assert_eq!(asked(&rig, "claude -p"), 2);
+
+        answer(&rig, "claude", CLAUDE_API_KEY);
+        assert_eq!(
+            claude("2.1.319 (Claude Code)").await.unwrap().signed_in,
+            Some(true)
+        );
+        assert_eq!(
+            claude("2.1.319 (Claude Code)").await.unwrap().signed_in,
+            Some(true)
+        );
+        assert_eq!(asked(&rig, "claude -p"), 3);
+        claude("2.1.320 (Claude Code)").await.unwrap();
+        assert_eq!(asked(&rig, "claude -p"), 4);
+    }
+
+    /// **An agent that gives no answer offers nothing, and is asked again.**
+    #[tokio::test]
+    async fn an_agent_that_gives_no_answer_is_asked_again() {
+        let rig = Rig::new("no-answer", ANSWERING);
+        let known = KnownAgents::default();
+        for _ in 0..2 {
+            let offered = offer(
+                &known,
+                &rig.launcher,
+                &AgentKind::Codex,
+                "codex-cli 0.167.0",
+            )
+            .await;
+            assert_eq!(offered, None);
+        }
+        assert_eq!(asked(&rig, "codex app-server"), 2);
+        assert_eq!(asked(&rig, "codex login status"), 0);
+    }
+
+    /// **A model reaches the launcher as one argument**, `--model=<value>` after
+    /// `--no-attach`, so nothing in the value is read as a flag of its own or runs;
+    /// and Claude Code's own `default` reaches it as no flag at all.
+    #[tokio::test]
+    async fn a_model_reaches_the_launcher_as_one_argument() {
+        let rig = Rig::new(
+            "model",
+            &format!("printf '%s\\0' \"$@\" > \"$0.argv\"; {STARTED}"),
+        );
+        let marker = rig.root.join("ran");
+        let model = format!("--resume $(touch {})", marker.display());
+        let result = launch(
+            &rig.db,
+            None,
+            Ok(rig.launcher.clone()),
+            &rig.root,
+            &rig.project(),
+            &AgentKind::Claude,
+            Some("hi"),
+            None,
+            Some(&model),
+        )
+        .await;
+        assert!(
+            matches!(result, StartSessionResult::Started { .. }),
+            "{result:?}"
+        );
+        assert_eq!(
+            rig.launcher_argv(),
+            [
+                "claude".to_string(),
+                "--no-attach".into(),
+                format!("--model={model}"),
+                "--".into(),
+                "hi".into()
+            ]
+        );
+        assert!(!marker.exists(), "nothing in the model may run");
+
+        launch(
+            &rig.db,
+            None,
+            Ok(rig.launcher.clone()),
+            &rig.root,
+            &rig.project(),
+            &AgentKind::Claude,
+            None,
+            None,
+            Some("default"),
+        )
+        .await;
+        assert_eq!(rig.launcher_argv(), ["claude", "--no-attach"]);
+    }
+
+    /// **The models a minor-33 daemon offers, and a start that picks one, emitted
+    /// by this build.** It is the contract for the apps' decoders of these fields.
+    #[test]
+    fn the_minor_33_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-33-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_33_wire(),
+            committed,
+            "the committed minor-33 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_33_wire_fixture"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-33-wire.json` with what this build emits.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_minor_33_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_33_wire()).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-33-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A project list whose agents carry what this build reads from the agents'
+    /// own recorded answers (Claude Code signed out, Codex with an API key), and a
+    /// start that names one of the models. From the recordings and fixed values,
+    /// so the fixture is the same on every machine.
+    fn derived_minor_33_wire() -> serde_json::Value {
+        let available = |agent: AgentKind, recorded: &str| {
+            let offer = offer_from(&agent, &said(recorded)).unwrap();
+            AgentAvailability {
+                agent,
+                available: true,
+                detail: None,
+                models: offer.models,
+                signed_in: offer.signed_in,
+            }
+        };
+        serde_json::json!({
+            "projects": serde_json::to_value(ServerMessage::Projects {
+                projects: vec![Project {
+                    path: "/tmp/ccd-minor-33/app".into(),
+                    name: "app".into(),
+                    last_used: "2026-11-08T09:00:00.000Z".into(),
+                    last_agent: AgentKind::Claude,
+                    git_branch: Some("main".into()),
+                    exists: true,
+                }],
+                agents: vec![
+                    available(AgentKind::Claude, CLAUDE_SIGNED_OUT),
+                    available(AgentKind::Codex, CODEX_API_KEY),
+                ],
+            })
+            .unwrap(),
+            "start_session_request": serde_json::to_value(ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: "/tmp/ccd-minor-33/app".into(),
+                agent: AgentKind::Claude,
+                prompt: Some("fix the tests".into()),
+                worktree: None,
+                model: Some("haiku".into()),
+            })
+            .unwrap(),
+        })
     }
 }

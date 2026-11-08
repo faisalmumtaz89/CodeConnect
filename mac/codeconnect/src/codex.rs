@@ -187,8 +187,11 @@ pub fn start(passthrough: &[String], detached: bool) -> Result<crate::no_attach:
 
     // `--help` and `--version` are codex's own answers, printed in this terminal as
     // `codex` prints them — before any refusal and any launch check, because
-    // nothing is launched. See `codex_itself`.
-    if asks_help_or_version(passthrough) {
+    // nothing is launched. So is everything with no terminal to show a session in
+    // (a script, a pipe, `ssh` without `-t`): codex runs as it would run directly,
+    // as `codeconnect claude` runs Claude Code, and refuses or answers in its own
+    // words. See `codex_itself`.
+    if asks_help_or_version(passthrough) || (!detached && !crate::attach::Terminal::available()) {
         use std::os::unix::process::CommandExt;
         let codex = first_codex(codex_candidates_for(&config))?;
         let err = codex_itself(&codex, passthrough).exec();
@@ -297,21 +300,12 @@ fn launch(
     // to avoid.
     let cwd = folder.to_string_lossy().to_string();
 
-    // The session is shown by attaching this terminal to it, which needs a
-    // terminal to read keys from and draw on. Native codex refuses a keyboard or a
-    // screen that is not one, in that order and in these words; so does this,
-    // before a name, a uid or a coordinator exists to be left behind. A detached
-    // launch shows nothing, so it has no terminal to need.
+    // The session is shown by attaching this terminal to it; with no terminal,
+    // `start` ran codex itself instead. A detached launch shows nothing, so it has
+    // no terminal to need.
     let terminal_size = if detached {
         crate::no_attach::SIZE
     } else {
-        use std::io::IsTerminal;
-        if !std::io::stdin().is_terminal() {
-            bail!("stdin is not a terminal");
-        }
-        if !std::io::stdout().is_terminal() {
-            bail!("stdout is not a terminal");
-        }
         crate::tmux::terminal_size().context("reading the terminal size")?
     };
 
@@ -1613,18 +1607,19 @@ fn looks_like_flag(token: &str) -> bool {
 
 /// Codex, run with the caller's own arguments, in the caller's terminal.
 ///
-/// What `codeconnect codex --help` (or `--version`, `-h`, `-V`, in any cluster) becomes:
-/// the answer is codex's, so it is codex that is run, exactly as the caller would have
-/// run it, inheriting stdio and handing back its exit status. The path is the codex a
-/// launch would choose ([`first_codex`]); the launch's hash protects a session this
-/// process hosts, and nothing is hosted here, so it is not paid.
+/// What `codeconnect codex --help` (or `--version`, `-h`, `-V`, in any cluster) becomes,
+/// and any `codeconnect codex` with no terminal to show a session in: the answer is
+/// codex's, so it is codex that is run, exactly as the caller would have run it,
+/// inheriting stdio and handing back its exit status. The path is the codex a launch
+/// would choose ([`first_codex`]); the launch's hash protects a session this process
+/// hosts, and nothing is hosted here, so it is not paid.
 fn codex_itself(codex: &Path, args: &[String]) -> Command {
     let mut command = Command::new(codex);
     command.args(args);
     command
 }
 
-/// The codex a launch would choose, for help and version: the first runnable
+/// The codex a launch would choose, for [`codex_itself`]: the first runnable
 /// candidate, in the launch's own order ([`runnable_codex_candidates`], as
 /// [`resolve_codex_bin`] walks it) — no hash, because nothing is hosted.
 fn first_codex(candidates: Vec<PathBuf>) -> Result<PathBuf> {
@@ -2165,7 +2160,7 @@ mod tests {
         let advise = launch
             .find("crate::advise_before_attach(config)")
             .expect("launch must show the advisories `codeconnect claude` shows");
-        for refusal in ["stdout().is_terminal()", "terminal_size()", "ensure_tmux()"] {
+        for refusal in ["terminal_size()", "ensure_tmux()"] {
             let at = launch.find(refusal).expect("the refusal is in launch()");
             assert!(
                 at < advise,

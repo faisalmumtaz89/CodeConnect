@@ -1,8 +1,8 @@
 //! `codeconnect claude|codex --no-attach`, run as the daemon runs it: no terminal at
 //! all, stdin from nowhere, the outcome in the file `CODECONNECT_LAUNCH_RESULT`
-//! names. It hosts the session a terminal start hosts, at 120x40, with the first
-//! prompt after `--` exactly as given; a missing agent or a refused argument is said
-//! in the result and leaves no session.
+//! names. It hosts the session a terminal start hosts, at 120x40, with the model
+//! it was given and the first prompt after `--` exactly as given; a missing agent or
+//! a refused argument is said in the result and leaves no session.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -317,5 +317,76 @@ fn codex_with_no_terminal_hosts_the_session_and_says_which() {
             "#{session_attached} #{CODECONNECT_SESSION_UID}"
         ]),
         format!("0 {uid}")
+    );
+}
+
+/// The arguments the stand-in agent was handed after `skip` of CodeConnect's own,
+/// once it has written them.
+fn handed(rig: &Rig, skip: usize) -> Vec<String> {
+    let argv = rig.seen("argv");
+    let mut argv: Vec<String> = argv
+        .split(|&byte| byte == 0)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    assert_eq!(argv.pop().as_deref(), Some(""), "{argv:?}");
+    argv.split_off(skip)
+}
+
+/// **A picked model reaches Claude Code as one argument**, `--model=<model>`, before
+/// a new worktree's name and the prompt, in the order the daemon sends them.
+#[test]
+fn a_model_reaches_claude_as_one_argument() {
+    if protocol::tmux::tmux_bin().is_none() {
+        return;
+    }
+    let rig = Rig::new();
+    let claude = rig.claude();
+    rig.config("claude", &claude);
+    for args in [
+        &["--model=haiku"][..],
+        &["--model=haiku", "--", "fix the tests"],
+        &[
+            "--model=claude-fable-5-1[1m]",
+            "--worktree=fix-login",
+            "--",
+            "-p it",
+        ],
+    ] {
+        let _ = std::fs::remove_file(rig.root.join("argv"));
+        let launch: Vec<&str> = ["--no-attach"].iter().chain(args).copied().collect();
+        let (status, printed, result) = rig.launch("claude", &launch);
+        assert_eq!(status, Some(0), "{args:?}: {printed}");
+        assert!(
+            matches!(result, Some(LaunchResult::Started { .. })),
+            "{args:?}: {result:?}"
+        );
+        // After CodeConnect's own `--mcp-config <file> --settings <file>`.
+        assert_eq!(handed(&rig, 4), args, "{args:?}");
+    }
+}
+
+/// **A picked model reaches Codex as one argument**, through the launcher's Codex
+/// grammar, before the prompt.
+#[test]
+fn a_model_reaches_codex_as_one_argument() {
+    if protocol::tmux::tmux_bin().is_none() {
+        return;
+    }
+    let rig = Rig::new();
+    let codex = rig.codex();
+    rig.config("codex", &codex);
+    let (status, printed, result) = rig.launch(
+        "codex",
+        &["--no-attach", "--model=gpt-6.1-sol", "--", "fix the tests"],
+    );
+    assert_eq!(status, Some(0), "{printed}");
+    assert!(
+        matches!(result, Some(LaunchResult::Started { .. })),
+        "{result:?}"
+    );
+    // After CodeConnect's own `--remote <socket>`.
+    assert_eq!(
+        handed(&rig, 2),
+        ["--model=gpt-6.1-sol", "--", "fix the tests"]
     );
 }

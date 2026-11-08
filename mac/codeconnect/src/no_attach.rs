@@ -1,5 +1,5 @@
-//! `codeconnect claude|codex --no-attach [--worktree=<name>] [-- <prompt>]`: start the session a
-//! terminal start would, without showing it. The daemon runs this for a session the
+//! `codeconnect claude|codex --no-attach [--model=<model>] [--worktree=<name>] [-- <prompt>]`: start
+//! the session a terminal start would, without showing it. The daemon runs this for a session the
 //! phone starts, through the user's login shell in the project's folder.
 //!
 //! There is no terminal to take a size or a `TERM` from, so the session starts at
@@ -69,25 +69,35 @@ pub fn run(agent: AgentKind, args: &[String]) -> Result<()> {
     started.map(|_| ())
 }
 
-/// What the agent is handed: a new worktree's name as one `--worktree=<name>`
-/// (the agent's own flag, its value attached so a name that starts with `-` stays
-/// the name), then the first prompt after `--`, so a prompt that starts with `-`
-/// is never read as a flag. Both are optional; nothing else is accepted.
+/// What the agent is handed: the model as one `--model=<model>`, then a new
+/// worktree's name as one `--worktree=<name>` (each the agent's own flag, its value
+/// attached so a value that starts with `-` stays the value), then the first prompt
+/// after `--`, so a prompt that starts with `-` is never read as a flag. Each is
+/// optional, in that order; nothing else is accepted.
 fn agent_args(args: &[String]) -> Result<Vec<String>> {
-    let (worktree, rest) = match args.split_first() {
-        Some((first, rest)) if first.starts_with("--worktree=") => (Some(first), rest),
-        _ => (None, args),
-    };
+    let (model, rest) = leading(args, "--model=");
+    let (worktree, rest) = leading(rest, "--worktree=");
     let prompt = match rest {
         [] => None,
         [dashes, prompt] if dashes == "--" => Some(prompt),
-        _ => bail!("usage: codeconnect claude|codex {FLAG} [--worktree=<name>] [-- <prompt>]"),
+        _ => bail!(
+            "usage: codeconnect claude|codex {FLAG} [--model=<model>] [--worktree=<name>] \
+             [-- <prompt>]"
+        ),
     };
-    let mut passthrough: Vec<String> = worktree.into_iter().cloned().collect();
+    let mut passthrough: Vec<String> = model.into_iter().chain(worktree).cloned().collect();
     if let Some(prompt) = prompt {
         passthrough.extend(["--".to_string(), prompt.clone()]);
     }
     Ok(passthrough)
+}
+
+/// `args`' first argument if it is `flag` with its value attached, and the rest.
+fn leading<'a>(args: &'a [String], flag: &str) -> (Option<&'a String>, &'a [String]) {
+    match args.split_first() {
+        Some((first, rest)) if first.starts_with(flag) => (Some(first), rest),
+        _ => (None, args),
+    }
 }
 
 /// The agent's executable could not be found, which the phone reports as the agent
@@ -139,6 +149,27 @@ mod tests {
     }
 
     #[test]
+    fn a_model_comes_first_as_one_argument() {
+        for args in [
+            &["--model=haiku"][..],
+            &["--model=haiku", "--", "fix the tests"],
+            &[
+                "--model=claude-fable-5-1[1m]",
+                "--worktree=fix-login",
+                "--",
+                "-p it",
+            ],
+            &["--model=-x", "--worktree=-y"],
+        ] {
+            assert_eq!(
+                agent_args(&strings(args)).unwrap(),
+                strings(args),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn anything_else_is_refused() {
         for args in [
             &["--model", "x"][..],
@@ -149,6 +180,9 @@ mod tests {
             &["--worktree", "x"],
             &["--", "hi", "--worktree=x"],
             &["--worktree=a", "--worktree=b"],
+            &["--model=a", "--model=b"],
+            &["--worktree=a", "--model=b"],
+            &["--", "hi", "--model=x"],
         ] {
             assert!(agent_args(&strings(args)).is_err(), "{args:?}");
         }

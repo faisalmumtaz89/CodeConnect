@@ -3,6 +3,17 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A start picks the model
+
+- A computer now tells the Mac app which models Claude Code and Codex offer on it, in the agents'
+  own words (Claude Code's default first, with the model it is now), and whether each is signed in,
+  and starts a session with the model picked. It asks each agent itself, from the home folder, with
+  no hooks, MCP servers or session file; while an agent is signed in it is asked once per version.
+- `codeconnect codex` with no terminal to show a session in — a script, a pipe, `ssh` without
+  `-t` — runs Codex itself, as `codeconnect claude` runs Claude Code, so `codeconnect codex login
+  status` or `codeconnect codex exec …` in a script does what `codex` does. It used to refuse
+  everything there but `--help` and `--version`.
+
 ## An ended session keeps only its own messages
 
 - Claude Code started with `--resume` writes the conversation on into the file of the session it

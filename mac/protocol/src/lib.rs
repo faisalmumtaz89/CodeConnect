@@ -675,7 +675,18 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         and the owner's other computers it can reach. A `hello` names no client
 ///         minor, so it goes to every paired device: an app from before 32 reads it
 ///         as a frame it cannot read and asks to be updated.
-pub const PROTOCOL_MINOR: u32 = 32;
+///   * `33` — **A start picks the agent's model.**
+///
+///     Additive, and gated by the fields themselves rather than a capability:
+///       - [`ws::AgentAvailability::models`] and [`ws::AgentAvailability::signed_in`]
+///         — what each agent offers a start, and whether it is signed in, as the
+///         agent itself answers. A daemon below 33 sends neither, which a client
+///         reads as the agent's default only, and unknown.
+///       - `model` on [`ws::ClientMessage::StartSession`] — one of those models,
+///         given to the agent as `--model=<value>`, except Claude Code's own
+///         `default`, which is no flag. A client sends it only for a model the
+///         daemon listed, so a daemon below 33 never receives it.
+pub const PROTOCOL_MINOR: u32 = 33;
 
 #[cfg(test)]
 mod ledger_tests {
