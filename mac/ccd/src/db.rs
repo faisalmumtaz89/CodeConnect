@@ -112,6 +112,7 @@ db_ops! {
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     fn load_cursor(session_uid: String) -> Option<crate::store::TailCursor>;
+    fn forget_transcript(session_uid: String) -> ();
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
     /// The durable Codex generation high-water for one uid, or

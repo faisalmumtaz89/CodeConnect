@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## An ended session keeps only its own messages
+
+- Claude Code started with `--resume` writes the conversation on into the file of the session it
+  resumes. Each time the daemon started again, after an update or a restart, it read that file once
+  more for the ended session and showed the new session's messages under it as well, more than a
+  thousand at a time for a long conversation. An ended session's file is now read once, when it
+  ends, and then let go; updating lets go of the files of sessions that had already ended.
+
 ## A session restarted from a copied command shows once
 
 - A session restarted with a command copied from an earlier one, with that session's `--settings` and

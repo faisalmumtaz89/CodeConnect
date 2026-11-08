@@ -100,7 +100,8 @@ struct Tail {
 pub enum TailCommand {
     /// This run's transcript is at `path`; follow it.
     Follow { session_uid: String, path: String },
-    /// This run has ended. Read whatever it wrote last, then let it go.
+    /// This run has ended. Read whatever it wrote last, then let it go and
+    /// forget its transcript.
     Stop { session_uid: String },
 }
 
@@ -137,7 +138,7 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
     // can still have transcript bytes nobody consumed, and they are only
     // reachable from here — nothing else will ever look at that file again.
     for tail in final_reads {
-        read_to_end(&daemon, &tail.session, &tail.path).await;
+        finish(&daemon, &tail.session, &[&tail.path]).await;
     }
 
     let (nudge_tx, mut nudge_rx) = mpsc::unbounded_channel::<()>();
@@ -204,10 +205,10 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
                         // permanently — the log's whole promise is that ending
                         // costs nothing. A transcript whose file is already gone
                         // scans to nothing, silently, so this is free for a run
-                        // that ended days ago.
-                        for path in std::iter::once(&tail.path).chain(tail.next.as_ref().map(|(next, _)| next)) {
-                            read_to_end(&daemon, &tail.session, path).await;
-                        }
+                        // that ended days ago. Then the run's transcript is forgotten.
+                        let mut paths = vec![tail.path.as_str()];
+                        paths.extend(tail.next.as_ref().map(|(next, _)| next.as_str()));
+                        finish(&daemon, &tail.session, &paths).await;
                         if let Some(watcher) = watcher.as_mut() {
                             watcher.release_parent_of(&tail.path);
                         }
@@ -254,6 +255,14 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
 ///    final read costs a `stat` — free for a run whose file is already deleted,
 ///    and free again for one whose cursor is already at the end — and then the
 ///    run is let go for good, which is what keeps rule 1's benefit.
+///
+///    Once read through, the run's transcript is forgotten ([`finish`]), at its
+///    `Stop` as here, so an ended run is read once and never again. `--resume`
+///    appends the conversation to the file the run it resumes named, and a read
+///    after that filed the resuming run's lines as the ended one's own: 1,683 of
+///    them on the owner's Mac, into an ended row, at one start. So only a run
+///    whose end was recorded but whose last read never finished, its daemon
+///    killed in between, is still here.
 fn tails_to_resume(rows: Vec<crate::store::SessionRow>) -> (Tails, Vec<Tail>) {
     let mut tails = Tails::new();
     let mut final_reads = Vec::new();
@@ -299,23 +308,44 @@ async fn poll_all(daemon: &Arc<Daemon>, tails: &mut Tails) {
 /// has ended — to the end it has now, however many polls that takes, while each
 /// one moves the run's saved cursor on. A poll whose lines were not filed (the
 /// run was deleted) saves no cursor, and the read stops there rather than
-/// repeat it.
-async fn read_to_end(daemon: &Arc<Daemon>, session: &SessionKey, path: &str) {
+/// repeat it. False when a read or the cursor's lookup failed: the file is then
+/// not known to be read through.
+async fn read_to_end(daemon: &Arc<Daemon>, session: &SessionKey, path: &str) -> bool {
     let end = std::fs::metadata(path).map_or(0, |m| m.len());
     let mut reached = 0;
     loop {
         if let Err(err) = poll_once(daemon, session, path).await {
             crate::log_debug!("tail {}: final read failed: {err:#}", session.name);
-            return;
+            return false;
         }
         let saved = match daemon.db.load_cursor(session.uid.clone()).await {
             Ok(Some(cursor)) => cursor.offset,
-            _ => return,
+            Ok(None) => return true,
+            Err(_) => return false,
         };
         if saved >= end || saved <= reached {
-            return;
+            return true;
         }
         reached = saved;
+    }
+}
+
+/// A run that has ended is read to its end once; after that its transcript is
+/// forgotten, so no later start reads the file again — by then it may hold the
+/// lines of a run that resumed the conversation. A failed read keeps it for the
+/// next start to finish.
+async fn finish(daemon: &Arc<Daemon>, session: &SessionKey, paths: &[&str]) {
+    let mut read_through = true;
+    for path in paths {
+        read_through &= read_to_end(daemon, session, path).await;
+    }
+    if read_through {
+        if let Err(err) = daemon.db.forget_transcript(session.uid.clone()).await {
+            crate::log_warn!(
+                "tail {}: could not forget its transcript: {err:#}",
+                session.name
+            );
+        }
     }
 }
 
