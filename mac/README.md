@@ -735,10 +735,11 @@ from a token, from a code or from such a `hello`. `codeconnect revoke` revokes
 every device with the same node at once, so the phone or computer stays out,
 and this computer has no traffic with it either way: its Mail is refused, no
 message is sent or retried to it, it is not asked for its agents, and no `peers`
-frame names it. `codeconnect unblock <device>` forgets it so it may sign
-in again. A device paired before this release and revoked before it was seen
-through Tailscale cannot be placed, so while one is listed every such `hello` is
-refused; `codeconnect devices` says so, and unblocking it lifts that.
+frame names it. `codeconnect unblock <device>` lets it back in: each of its
+devices keeps its token, so it signs in again as it was. A device paired before
+this release and revoked before it was seen through Tailscale cannot be placed,
+so while one is listed every such `hello` is refused; `codeconnect devices` says
+so, and unblocking it lifts that.
 
 After its ack, a paired device is sent `peers`: this computer's Tailscale state
 and login, and the owner's other computers it can reach (the ones Mail may

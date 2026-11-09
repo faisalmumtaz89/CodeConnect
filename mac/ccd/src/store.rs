@@ -3203,9 +3203,10 @@ impl Store {
         Ok(nodes)
     }
 
-    /// Forget a revoked device, and every revoked device on the same Tailscale
-    /// device, so it may sign in again. Returns how many rows went; zero when the
-    /// device is not revoked, which is refused rather than forgotten.
+    /// Let a revoked device back in, and every revoked device on the same
+    /// Tailscale device. Each keeps its token, so the device signs in again with
+    /// the pairing it already holds. Returns how many rows were restored; zero
+    /// when the device is not revoked, which is refused rather than restored.
     pub fn unblock_device(&self, device_id: &str) -> Result<usize> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3216,19 +3217,20 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let removed = match node {
+        let restored = match node {
             None => 0,
             Some(None) => tx.execute(
-                "DELETE FROM devices WHERE device_id = ?1",
+                "UPDATE devices SET revoked_at = NULL WHERE device_id = ?1",
                 params![device_id],
             )?,
             Some(Some(node)) => tx.execute(
-                "DELETE FROM devices WHERE tailnet_node = ?1 AND revoked_at IS NOT NULL",
+                "UPDATE devices SET revoked_at = NULL
+                  WHERE tailnet_node = ?1 AND revoked_at IS NOT NULL",
                 params![node],
             )?,
         };
         tx.commit()?;
-        Ok(removed)
+        Ok(restored)
     }
 
     /// Authenticate a presented token. Revoked devices are excluded in SQL, so
@@ -12589,13 +12591,17 @@ mod tests {
         );
     }
 
-    /// **Unblock forgets revoked devices only, and the whole Tailscale device
-    /// at once.**
+    /// **Unblock restores revoked devices only, and the whole Tailscale device
+    /// at once**, each with the token it held.
     #[test]
-    fn unblock_forgets_every_revoked_device_on_the_tailscale_device_and_no_active_one() {
+    fn unblock_restores_every_revoked_device_on_the_tailscale_device_and_no_other() {
         let (store, _path) = temp_store();
         admit(&store, "a", "n1");
         admit(&store, "b", "n1");
+        store
+            .insert_device("d", "dev d", "hash-d", NOW, None)
+            .unwrap();
+        store.revoke_device("d", NOW).unwrap();
         assert_eq!(
             store.unblock_device("a").unwrap(),
             0,
@@ -12603,7 +12609,14 @@ mod tests {
         );
         store.revoke_device("a", NOW).unwrap();
         assert_eq!(store.unblock_device("a").unwrap(), 2);
-        assert!(store.list_devices().unwrap().is_empty());
+        for id in ["a", "b"] {
+            let device = store.device_by_token_hash(&format!("hash-{id}")).unwrap();
+            assert_eq!(device.map(|d| d.device_id).as_deref(), Some(id));
+        }
+        assert!(
+            row(&store, "d").revoked_at.is_some(),
+            "another device stays out"
+        );
         assert_eq!(admit(&store, "c", "n1"), Admission::Admitted);
     }
 

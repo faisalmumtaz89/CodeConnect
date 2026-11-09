@@ -117,9 +117,9 @@ pub enum ClientFrame {
         #[serde(default)]
         ssh_only: bool,
     },
-    /// `codeconnect unblock <device>`: forget a revoked device, and every revoked
-    /// device on the same Tailscale device, so it may sign in again. Answered with
-    /// [`DaemonFrame::Unblocked`]; an active device is refused.
+    /// `codeconnect unblock <device>`: let a revoked device back in, and every
+    /// revoked device on the same Tailscale device, each with the token it already
+    /// holds. Answered with [`DaemonFrame::Unblocked`]; an active device is refused.
     UnblockDevice {
         /// A device id, a device id prefix, or an exact name.
         device: String,
@@ -317,8 +317,8 @@ pub enum DaemonFrame {
         orphan_events: u64,
         dry_run: bool,
     },
-    /// The answer to [`ClientFrame::UnblockDevice`]: the device as it was listed
-    /// before it was forgotten.
+    /// The answer to [`ClientFrame::UnblockDevice`]: the device as it now stands,
+    /// no longer revoked.
     Unblocked {
         device: crate::pairing::DeviceSummary,
     },

@@ -394,6 +394,9 @@ public final class DaemonConnection {
     // MARK: - Supervision
 
     private func supervise() async {
+        // Set by a refused token: the next dial alone goes with no credential,
+        // and the endpoint keeps its token for every dial after that one.
+        var withoutCredential = false
         while !Task.isCancelled {
             guard let endpoint else {
                 phase = .failed(reason: ConnectionError.invalidEndpoint.localizedDescription)
@@ -405,11 +408,13 @@ public final class DaemonConnection {
                 return
             }
             usingTLS = tls
+            let credential = withoutCredential ? HelloCredential.tailnet : endpoint.credential
+            withoutCredential = false
 
             phase = .connecting
             do {
                 // Never returns: every end of a dial, a close included, throws.
-                try await runConnection(url: url, credential: endpoint.credential)
+                try await runConnection(url: url, credential: credential)
             } catch let error as ConnectionError {
                 // A dial that had completed its handshake before dying ends
                 // the failure run: what follows is a fresh outage, not
@@ -420,11 +425,13 @@ public final class DaemonConnection {
                 switch error {
                 case .unauthorized where !dialIsForPairing:
                     // **A saved token the computer no longer takes** — revoked,
-                    // or blocked and then allowed again — is asked once more
-                    // with no credential. The computer may let this device in
-                    // by its Tailscale identity and hand it a new token, which
-                    // replaces the dead one; if not, that is the refusal.
-                    self.endpoint?.credential = .tailnet
+                    // or no longer known — is asked once more with no
+                    // credential. The computer may let this device in by its
+                    // Tailscale identity and hand it a new token, which
+                    // replaces the dead one; if not, that is the refusal, and
+                    // the device keeps its token: a computer that allows it
+                    // again takes it back as it was at the next try.
+                    withoutCredential = true
                     continue
                 case .unauthorized, .rejectedPairingCode, .notAdmitted, .incompatible:
                     phase = .failed(reason: error.localizedDescription)

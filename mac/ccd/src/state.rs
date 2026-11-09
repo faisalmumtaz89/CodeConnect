@@ -10959,10 +10959,10 @@ impl Daemon {
         })
     }
 
-    /// `codeconnect unblock <device>`: forget a revoked device, and every revoked
-    /// device on the same Tailscale device, so it may sign in again. Its old token
-    /// matches nothing afterwards, so it signs in afresh: through Tailscale, or
-    /// with a code.
+    /// `codeconnect unblock <device>`: let a revoked device back in, and every
+    /// revoked device on the same Tailscale device. Each keeps its token, so the
+    /// device signs in again with the pairing it already holds, as the same
+    /// device; nothing is paired afresh.
     pub async fn unblock(&self, needle: &str) -> Result<DeviceSummary> {
         let device = match self.db.find_device(needle.to_string()).await? {
             DeviceLookup::Found(device) => *device,
@@ -10979,7 +10979,12 @@ impl Daemon {
             anyhow::bail!("{} is not blocked", device.name);
         }
         crate::log_info!("unblocked device {} ({})", device.device_id, device.name);
-        Ok(device.to_summary())
+        // Re-read so the answer is what is now stored, as `revoke` answers.
+        let fresh = match self.db.find_device(device.device_id.clone()).await? {
+            DeviceLookup::Found(row) => *row,
+            _ => device,
+        };
+        Ok(fresh.to_summary())
     }
 }
 
@@ -13038,27 +13043,64 @@ mod tests {
         assert_eq!(device.tailnet_node.as_deref(), Some("n4"));
     }
 
-    /// `codeconnect unblock` lets a blocked Tailscale device pair again, and is
-    /// refused for a device that is not blocked.
+    /// **`codeconnect unblock` gives a blocked device its own pairing back**: the
+    /// token it already holds signs in again as the same device, whether it paired
+    /// by code or through Tailscale, and its Tailscale device is no longer kept
+    /// out. A device that is not blocked is refused.
     #[tokio::test]
-    async fn unblocking_a_device_lets_its_tailscale_device_pair_again() {
+    async fn unblocking_a_device_lets_its_own_token_sign_in_again() {
         let _home = redirected_home("unblock-node");
         let daemon = test_daemon();
-        let AuthOutcome::Paired { device_id, .. } =
-            hello_through_tailscale(&daemon, Some("n6")).await
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
+        let AuthOutcome::Paired {
+            device_id: phone,
+            token: phone_token,
+            ..
+        } = hello_with_code(&daemon, &code).await
+        else {
+            panic!("pairing must succeed");
+        };
+        let AuthOutcome::Paired {
+            device_id: ipad,
+            token: ipad_token,
+            ..
+        } = hello_through_tailscale(&daemon, Some("n6")).await
         else {
             panic!("a trusted Tailscale device pairs");
         };
-        let refused = daemon.unblock(&device_id).await.unwrap_err().to_string();
+        let refused = daemon.unblock(&ipad).await.unwrap_err().to_string();
         assert_eq!(refused, "iPad is not blocked");
-        daemon.revoke(&device_id).await.unwrap();
-        let unblocked = daemon.unblock(&device_id).await.unwrap();
-        assert_eq!(unblocked.device_id, device_id);
-        assert!(daemon.list_devices().await.unwrap().is_empty());
-        assert!(matches!(
-            hello_through_tailscale(&daemon, Some("n6")).await,
-            AuthOutcome::Paired { .. }
-        ));
+
+        // Each asks as the app asks: blocked, its token is refused and so is a
+        // hello with no credential from where it is; allowed again, its token.
+        for (device_id, token, node) in [
+            (&phone, &phone_token, None),
+            (&ipad, &ipad_token, Some("n6")),
+        ] {
+            daemon.revoke(device_id).await.unwrap();
+            assert!(!token_works(&daemon, token).await);
+            assert!(matches!(
+                hello_through_tailscale(&daemon, node).await,
+                AuthOutcome::Rejected(_)
+            ));
+            let unblocked = daemon.unblock(device_id).await.unwrap();
+            let from = node.ok_or(protocol::tailnet::Refusal::Unknown);
+            match daemon
+                .authenticate(STATIC_TOKEN, Some(token), None, None, from)
+                .await
+            {
+                AuthOutcome::Device(device) => assert_eq!(&device.device_id, device_id),
+                other => panic!("its own token must sign in again: {other:?}"),
+            }
+            assert_eq!(&unblocked.device_id, device_id);
+            assert_eq!(unblocked.revoked_at, None, "answered as it now stands");
+        }
+        assert!(daemon.db.blocked_tailnet_nodes().await.unwrap().is_empty());
+        assert_eq!(
+            daemon.list_devices().await.unwrap().len(),
+            2,
+            "the same two devices, none paired afresh"
+        );
     }
 
     /// A removed computer's hello with no credential is refused for that reason,
