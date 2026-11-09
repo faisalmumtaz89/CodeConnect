@@ -117,7 +117,19 @@ fn model_receipt(content: &str) -> Option<(bool, String)> {
         (true, line.strip_prefix("Kept model as ")?)
     };
     let name = name.trim_matches(is_whitespace);
-    (!name.is_empty()).then(|| (kept, name.to_string()))
+    (!name.is_empty()).then(|| (kept, unwrapped(name).to_string()))
+}
+
+/// The name out of its code span: Claude Code 2.1.319 writes
+/// ``Set model to `Opus 5.5` and saved…`` to its transcript, and draws the name
+/// plain. One backtick off each end of a name longer than two characters, and
+/// nothing else, as `ModelConfirmation.unwrapped` does on the phone.
+fn unwrapped(name: &str) -> &str {
+    if name.chars().count() > 2 && name.starts_with('`') && name.ends_with('`') {
+        &name[1..name.len() - 1]
+    } else {
+        name
+    }
 }
 
 /// The text of a `<local-command-stdout>` line, ANSI stripped and trimmed. An
@@ -209,7 +221,9 @@ mod tests {
     /// Each case is a transcript user line's content; the expected column is what
     /// the iOS app's `LocalCommandLine.parse` then `ModelConfirmation.parse`
     /// produced for it, run on this machine from `ios/CodeConnect/Model/` at
-    /// 7c34442 (`set:` / `kept:` and the name, or none).
+    /// 7c34442 (`set:` / `kept:` and the name, or none). The last five, a model
+    /// name in a code span as Claude Code 2.1.319 writes it, are the phone's
+    /// `testTheReceiptRuleThePhoneAndTheDaemonShare` (`ios/CodeConnectTests/`), run on 5651749f.
     #[test]
     fn the_model_receipt_reads_every_string_exactly_as_the_phone_does() {
         const E: &str = "\u{1b}";
@@ -252,11 +266,16 @@ mod tests {
             ("<local-command-stdout>Set model to \u{85}x</local-command-stdout>".into(), Some("set:\u{85}x")),
             ("<local-command-stdout>Set model to \u{180e}x</local-command-stdout>".into(), Some("set:\u{180e}x")),
             ("<local-command-stdout>Set model to \u{c}x</local-command-stdout>".into(), Some("set:\u{c}x")),
+            ("<local-command-stdout>Set model to `Opus 5.5` and saved as your default for new sessions</local-command-stdout>".into(), Some("set:Opus 5.5")),
+            ("<local-command-stdout>Kept model as `Opus 5.5`</local-command-stdout>".into(), Some("kept:Opus 5.5")),
+            ("<local-command-stdout>Set model to ``</local-command-stdout>".into(), Some("set:``")),
+            ("<local-command-stdout>Set model to ` `</local-command-stdout>".into(), Some("set: ")),
+            ("<local-command-stdout>Set model to `opus` (claude-opus-5[1m])</local-command-stdout>".into(), Some("set:`opus` (claude-opus-5[1m])")),
         ];
         assert_eq!(
             cases.len(),
-            38,
-            "the table the phone was run on has 38 rows"
+            43,
+            "the table the phone was run on has 43 rows"
         );
         for (content, expected) in &cases {
             let got = model_receipt(content)
