@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A notification always has something to answer
+
+- Your phone now rings only while an approval or a question is waiting that you can answer from
+  it, Claude's or Codex's, and the notification is about that decision. Claude going idle or
+  finishing a turn, Codex finishing a turn, and a permission prompt with nothing to approve on the
+  phone no longer ring on their own, so tapping a notification opens a decision to answer. While
+  one is waiting, those moments still remind you of it.
+
 ## A model set with /model reaches the phone by its name
 
 - Claude Code 2.1.319 writes the model `/model` set in backticks (`` `Opus 5.5` ``). The computer
