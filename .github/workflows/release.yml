@@ -1,6 +1,6 @@
-# Builds, signs, notarizes and verifies the Mac binaries for a release. The
-# Linux archives are built by linux-build.yml, which this calls; they are not
-# attached to the release.
+# Builds, signs, notarizes and verifies the Mac binaries, and the Mac app that
+# carries them, for a release. The Linux archives are built by linux-build.yml,
+# which this calls, and attached beside them.
 #
 # **Every run proves a draft end to end; publication is a separate, explicit
 # act.** `codeconnect update` installs whatever `releases/latest` points at, so
@@ -318,7 +318,11 @@ jobs:
   publish:
     name: Sign, notarize, verify${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && ', publish' || '' }}
     needs: [pin, build, linux-sign]
-    runs-on: macos-15
+    # The image that carries Xcode 27.1, the one the Mac app is built and
+    # tested with (macos-15 has 26.3 at most). It is a preview, so "Build the
+    # Mac app" pins Xcode by path and fails loudly if that path is gone. The
+    # steps before it use only lipo, codesign and notarytool.
+    runs-on: xcode-27
     # Promotions run one at a time across ALL tags: the monotonic decision
     # compares against `releases/latest`, and two promotions in parallel
     # could each be newer than the latest they saw and publish out of order.
@@ -484,7 +488,10 @@ jobs:
 
       # The same requirement `codeconnect update` enforces on a user's machine.
       # Running it here means a release cannot be drafted that the product
-      # would then refuse to install.
+      # would then refuse to install. Each binary must also be signed as
+      # itself: macOS keeps a permission a user granted ccd (its access to the
+      # Documents folder) against its identifier as well as the team, so a ccd
+      # signed under another identifier would lose it on the update.
       - name: Verify the way the updater will
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -496,7 +503,7 @@ jobs:
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
           for binary in codeconnect ccd cc-hook cc-tmux; do
             path="$DIR/$binary"
-            codesign --verify --strict --all-architectures -R="$req" "$path"
+            codesign --verify --strict --all-architectures -R="identifier \"$binary\" and $req" "$path"
             # Captured, then searched — not piped into `grep -q`. `grep -q`
             # exits at the first match, and the SIGPIPE that can leave on
             # `codesign` would turn a present timestamp into a failed check.
@@ -530,6 +537,103 @@ jobs:
             echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
             exit 1
           fi
+
+      # The Mac app, built in every run beside the archives and promoted with
+      # them: it carries exactly the binaries this job just signed, notarized
+      # and checked ($DIR, with cc-tmux's notices), so the app and the archives
+      # can never disagree. Its version is the tag's, for Sparkle to compare.
+      # The Xcode is the one the app is built and tested with, pinned by path on
+      # a preview image, so a missing one fails here instead of building with
+      # another compiler.
+      - name: Build the Mac app
+        env:
+          VERSION: ${{ needs.pin.outputs.version }}
+          DIR: ${{ needs.pin.outputs.dir }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+          xcodebuild archive -project macos/CodeConnect.xcodeproj -scheme CodeConnect \
+            -configuration Release -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/CodeConnect.xcarchive" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/packages" \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$VERSION" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$TEAM_ID" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/signing.keychain-db --timestamp" \
+            CODECONNECT_HELPERS="$GITHUB_WORKSPACE/$DIR"
+          # Export for Developer ID re-signs the app and the code nested in it,
+          # Sparkle's Autoupdate, Updater.app and XPC services included.
+          /usr/libexec/PlistBuddy -c "Add :method string developer-id" \
+            -c "Add :signingStyle string manual" \
+            -c "Add :signingCertificate string Developer ID Application" \
+            -c "Add :teamID string $TEAM_ID" "$RUNNER_TEMP/export.plist"
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/CodeConnect.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" -exportPath "$RUNNER_TEMP/export"
+          said="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "$RUNNER_TEMP/export/CodeConnect.app/Contents/Info.plist")"
+          if [ "$said" != "$VERSION" ]; then
+            echo "::error::the app says $said, the tag $VERSION"
+            exit 1
+          fi
+
+      # The .dmg is the one download, for /mac and for Sparkle alike: notarized
+      # and stapled, then signed for Sparkle (the staple changes its bytes, so
+      # that comes after), then checked as Sparkle and Gatekeeper will check
+      # it, each check beside its must-fail (mac-app-verify.sh).
+      - name: Package and notarize the Mac app
+        id: app
+        env:
+          VERSION: ${{ needs.pin.outputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          dmg="CodeConnect-$VERSION.dmg"
+          mkdir "$RUNNER_TEMP/dmg"
+          ditto "$RUNNER_TEMP/export/CodeConnect.app" "$RUNNER_TEMP/dmg/CodeConnect.app"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -quiet -fs HFS+ -format UDZO -volname CodeConnect \
+            -srcfolder "$RUNNER_TEMP/dmg" "$dmg"
+          identity="$(security find-identity -v -p codesigning \
+            | awk '/Developer ID Application/ {print $2; exit}')"
+          codesign --timestamp --sign "$identity" "$dmg"
+          # As for the binaries: a completed notarytool is not an accepted one.
+          if ! xcrun notarytool submit "$dmg" \
+              --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
+              --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notarize-app.json"; then
+            cat "$RUNNER_TEMP/notarize-app.json" || true
+            echo "::error::notarytool did not complete for $dmg"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notarize-app.json"
+          status="$(jq -r '.status // empty' "$RUNNER_TEMP/notarize-app.json")"
+          if [ "$status" != "Accepted" ]; then
+            id="$(jq -r '.id // empty' "$RUNNER_TEMP/notarize-app.json")"
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" --apple-id "$APPLE_ID" \
+                --team-id "$TEAM_ID" --password "$APP_PASSWORD" || true
+            fi
+            echo "::error::notarization of $dmg is '${status:-unknown}', not Accepted"
+            exit 1
+          fi
+          xcrun stapler staple "$dmg"
+          shasum -a 256 "$dmg" > "$dmg.sha256"
+          # Sparkle's own sign_update, from the package the app was built with.
+          # The key exists in a file only for this command.
+          sign_update="$(find "$RUNNER_TEMP/packages/artifacts" -path '*/bin/sign_update' -type f)"
+          if [ "$(printf '%s\n' "$sign_update" | grep -c .)" != 1 ]; then
+            echo "::error::expected one sign_update in the resolved packages, found: $sign_update"
+            exit 1
+          fi
+          key="$RUNNER_TEMP/sparkle.key"
+          ( umask 077; printf '%s' "$SPARKLE_KEY" > "$key" )
+          "$sign_update" --ed-key-file "$key" "$dmg" > appcast-item.xml
+          rm -f "$key"
+          cat appcast-item.xml
+          OPENSSL="$(brew --prefix openssl)/bin/openssl" \
+            bash .github/workflows/mac-app-verify.sh "$dmg" appcast-item.xml notarized
+          echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
 
       - name: Package
         id: package
@@ -632,12 +736,14 @@ jobs:
           RELEASE_ID: ${{ steps.draft.outputs.id }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
           TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
+          DMG: ${{ steps.app.outputs.dmg }}
         run: |
           # By id, to this draft and no other. A rerun may find its own
           # earlier upload under the same name; that asset is deleted first,
           # because two assets cannot share a name and the bytes being
           # attached are the ones this run verified.
-          for file in "$ARCHIVE" "$ARCHIVE.sha256" "$TMUX_ARCHIVE" "$TMUX_ARCHIVE.sha256"; do
+          for file in "$ARCHIVE" "$ARCHIVE.sha256" "$TMUX_ARCHIVE" "$TMUX_ARCHIVE.sha256" \
+              "$DMG" "$DMG.sha256" appcast-item.xml; do
             existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --jq ".assets[] | select(.name == \"$file\") | .id")"
             for asset in $existing; do
@@ -660,8 +766,12 @@ jobs:
           checksum_id="$(asset_id "$ARCHIVE.sha256")"
           tmux_archive_id="$(asset_id "$TMUX_ARCHIVE")"
           tmux_checksum_id="$(asset_id "$TMUX_ARCHIVE.sha256")"
+          dmg_id="$(asset_id "$DMG")"
+          dmg_checksum_id="$(asset_id "$DMG.sha256")"
+          appcast_item_id="$(asset_id appcast-item.xml)"
           if [ -z "$archive_id" ] || [ -z "$checksum_id" ] \
-              || [ -z "$tmux_archive_id" ] || [ -z "$tmux_checksum_id" ]; then
+              || [ -z "$tmux_archive_id" ] || [ -z "$tmux_checksum_id" ] \
+              || [ -z "$dmg_id" ] || [ -z "$dmg_checksum_id" ] || [ -z "$appcast_item_id" ]; then
             echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
             exit 1
           fi
@@ -670,6 +780,9 @@ jobs:
             echo "checksum_id=$checksum_id"
             echo "tmux_archive_id=$tmux_archive_id"
             echo "tmux_checksum_id=$tmux_checksum_id"
+            echo "dmg_id=$dmg_id"
+            echo "dmg_checksum_id=$dmg_checksum_id"
+            echo "appcast_item_id=$appcast_item_id"
           } >> "$GITHUB_OUTPUT"
 
           # The Linux files exactly as `linux-sign` signed them, the same way.
@@ -711,6 +824,10 @@ jobs:
           TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
           TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
           TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
+          DMG: ${{ steps.app.outputs.dmg }}
+          DMG_ID: ${{ steps.assets.outputs.dmg_id }}
+          DMG_CHECKSUM_ID: ${{ steps.assets.outputs.dmg_checksum_id }}
+          APPCAST_ITEM_ID: ${{ steps.assets.outputs.appcast_item_id }}
           LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           DIR: ${{ needs.pin.outputs.dir }}
         run: |
@@ -751,7 +868,7 @@ jobs:
             and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
           for binary in codeconnect ccd cc-hook cc-tmux; do
-            codesign --verify --strict --all-architectures -R="$req" "$DIR/$binary"
+            codesign --verify --strict --all-architectures -R="identifier \"$binary\" and $req" "$DIR/$binary"
           done
           # The pair a user receives agrees: the downloaded tmux is the one
           # the downloaded codeconnect requires. Asked as assignments, so a
@@ -787,6 +904,16 @@ jobs:
             holds_exactly "linux/$tmux" "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
           done
 
+          # The Mac app a user would receive, from /mac or from Sparkle: the
+          # .dmg, its checksum and the appcast's signature line, checked again
+          # as Sparkle and Gatekeeper will check them.
+          fetch "$DMG_ID" "$DMG"
+          fetch "$DMG_CHECKSUM_ID" "$DMG.sha256"
+          fetch "$APPCAST_ITEM_ID" appcast-item.xml
+          shasum -a 256 -c "$DMG.sha256"
+          OPENSSL="$(brew --prefix openssl)/bin/openssl" \
+            bash ../.github/workflows/mac-app-verify.sh "$DMG" appcast-item.xml notarized
+
       - name: Publish
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
         env:
@@ -796,16 +923,20 @@ jobs:
           CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
           TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
           TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
+          DMG_ID: ${{ steps.assets.outputs.dmg_id }}
+          DMG_CHECKSUM_ID: ${{ steps.assets.outputs.dmg_checksum_id }}
+          APPCAST_ITEM_ID: ${{ steps.assets.outputs.appcast_item_id }}
           LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
           TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
+          DMG: ${{ steps.app.outputs.dmg }}
           TAG: ${{ needs.pin.outputs.tag }}
           SHA: ${{ needs.pin.outputs.sha }}
           VERSION: ${{ needs.pin.outputs.version }}
         run: |
           # Publication is a PATCH on the id this run adopted, made only after
           # re-reading what that id holds *now*: still a draft, still this
-          # tag, and exactly the sixteen assets the verification step downloaded —
+          # tag, and exactly the nineteen assets the verification step downloaded —
           # by id, name, and state, because an id survives a rename and the
           # updater selects by name — not whatever a concurrent writer left.
           state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
@@ -820,12 +951,16 @@ jobs:
           held="$(jq -r '[.assets[] | {id, name, state}] | sort_by(.id) | tojson' <<<"$state")"
           expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
             --argjson taid "$TMUX_ARCHIVE_ID" --argjson tcid "$TMUX_CHECKSUM_ID" \
-            --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" \
+            --argjson did "$DMG_ID" --argjson dcid "$DMG_CHECKSUM_ID" --argjson iid "$APPCAST_ITEM_ID" \
+            --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" --arg dmg "$DMG" \
             --argjson linux "$LINUX_ASSETS" \
             '[{id: $aid, name: $archive, state: "uploaded"},
               {id: $cid, name: ($archive + ".sha256"), state: "uploaded"},
               {id: $taid, name: $tmux, state: "uploaded"},
-              {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"}]
+              {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"},
+              {id: $did, name: $dmg, state: "uploaded"},
+              {id: $dcid, name: ($dmg + ".sha256"), state: "uploaded"},
+              {id: $iid, name: "appcast-item.xml", state: "uploaded"}]
               + [$linux[] | {id, name, state: "uploaded"}] | sort_by(.id) | tojson')"
           if [ "$held" != "$(jq -r . <<<"$expected")" ]; then
             echo "::error::draft $RELEASE_ID does not hold exactly the verified assets; refusing"

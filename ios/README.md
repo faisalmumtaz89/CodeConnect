@@ -675,7 +675,7 @@ A Claude approval is answered only through the hook Claude holds for that card's
 own call, never by typing into the prompt on screen, which can be another agent's.
 The card is answerable only from a daemon that advertises `hook_only_approvals`
 (protocol minor 22, `DaemonProfile.answersApprovalsByHook`) and only while its
-`question_hold` is `held` (`DecisionCardView.answerSurface`); the send path refuses
+`question_hold` is `held` (`DecisionCard.answerSurface`); the send path refuses
 the same cases (`AppModel.decisionMismatch`). Otherwise the card is read-only and
 says why (`DecisionCardView.claudeUnanswerableReason`): the Mac's CodeConnect is too
 old, Claude is asking at the Mac, or the phone can no longer answer it.
@@ -699,7 +699,7 @@ ccd's own test emits.
 Claude Code asks every `AskUserQuestion` through a `PermissionRequest`, so the
 question arrives as an approval card — and an Allow on it typed keys that picked
 options nobody chose. This build never offers Allow or an option on such a card,
-under any daemon (`DecisionCardView.answerSurface`), and refuses to send either on
+under any daemon (`DecisionCard.answerSurface`), and refuses to send either on
 the send path as well (`AppModel.decisionMismatch`).
 
 **Protocol minor 21 answers it as a question.** A daemon at minor 21 that

@@ -17,9 +17,18 @@ public enum Keychain {
         }
     }
 
-    private static let service = "com.codeconnect.pairing"
+    #if DEBUG
+        /// Test seam: the service every item is kept under. A Mac run sets it before anything reads
+        /// the keychain: to a run's own service, or to nil, which makes every call find nothing and
+        /// keep nothing without reaching the keychain, so a run never reads or writes the pairing
+        /// the computer holds.
+        nonisolated(unsafe) public static var service: String? = "com.codeconnect.pairing"
+    #else
+        private static let service: String? = "com.codeconnect.pairing"
+    #endif
 
     static func save(_ data: Data, account: String) throws {
+        guard let service else { throw Failure.status(errSecNotAvailable) }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -39,6 +48,7 @@ public enum Keychain {
     }
 
     static func load(account: String) -> Data? {
+        guard let service else { return nil }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -53,6 +63,7 @@ public enum Keychain {
 
     @discardableResult
     public static func delete(account: String) -> Bool {
+        guard let service else { return true }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

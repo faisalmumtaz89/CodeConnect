@@ -57,6 +57,33 @@ final class PairedMachinesTests: XCTestCase {
         XCTAssertEqual(model.machineSystem, "Linux")
     }
 
+    // MARK: Readdress
+
+    /// The Mac's own computer, paired at loopback before its daemon moved to the tailnet, moves with
+    /// it: the same machine, its token and its name, at the new address; nothing else changes.
+    func testAMachineMovesToItsDaemonsNewAddressAndKeepsItsToken() throws {
+        let prefix = try prefix()
+        let store = PairingStore(keychainPrefix: prefix)
+        store.save(
+            DaemonEndpoint(host: "127.0.0.1", port: 8787, credential: .token("local-token-0001"), useTLS: false),
+            id: "this-mac")
+        store.save(endpoint(laptop, token: "laptop-token-0002"), id: "laptop")
+        store.noteMachine(name: "Studio", os: "macos", daemonID: nil, id: "this-mac")
+
+        store.readdress("this-mac", host: studio, port: 8787, useTLS: false)
+
+        let reloaded = PairingStore(keychainPrefix: prefix)
+        XCTAssertEqual(reloaded.machines.map(\.id).sorted(), ["laptop", "this-mac"], "moved, not added")
+        let moved = try XCTUnwrap(reloaded.machine(id: "this-mac"))
+        XCTAssertEqual(moved.endpoint.host, studio)
+        XCTAssertEqual(moved.endpoint.token, "local-token-0001", "the token it was paired with")
+        XCTAssertEqual(moved.name, "Studio")
+        XCTAssertEqual(reloaded.machine(id: "laptop")?.endpoint, endpoint(laptop, token: "laptop-token-0002"))
+
+        store.readdress("nobody", host: "elsewhere", port: 1, useTLS: false)
+        XCTAssertEqual(PairingStore(keychainPrefix: prefix).machines, reloaded.machines, "an unknown id moves nothing")
+    }
+
     // MARK: Migration
 
     func testTheSinglePairingAnEarlierBuildHeldBecomesTheFirstMachine() throws {

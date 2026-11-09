@@ -3,6 +3,51 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A Mac app
+
+- CodeConnect now has a Mac app, `CodeConnect-0.18.0.dmg` on the release page, for macOS 26. Opened
+  the first time, it installs CodeConnect itself (`ccd`, `codeconnect`, `cc-hook` and CodeConnect's
+  own tmux, into `~/.codeconnect/bin`), starts the background service, which then runs at every
+  login, and pairs with it without a code. It keeps them up to date from then on: `codeconnect
+  update` leaves an install the app made to the app, and `codeconnect claude` and `codeconnect codex`
+  no longer ask GitHub for a newer release there.
+- Its window lists the agents running on your computers, grouped by computer or by project, each
+  with its state, what it is doing, its agent and how long ago, and every "… ago" keeps counting. A
+  group says how many decisions wait in it, and folds away.
+- File › New Agent… (⌘N) starts Claude Code or Codex on one of your computers: pick the computer, a
+  folder, and a model from those the agents offer there (choosing the model chooses the agent), and
+  add a first message if you like.
+- File › Add Computer… (⇧⌘N) pairs another computer, and File › Add iPhone… shows the QR code that
+  pairs an iPhone, with its address and code written beneath it.
+- CodeConnect › Settings… lists the phones and computers paired with this Mac. Block keeps one out,
+  and Allow again lets a blocked one back in; each asks first.
+- CodeConnect › Set Up CodeConnect… shows what CodeConnect needs on this Mac: the background service,
+  tmux, Claude Code, Codex, and `codeconnect` in a new Terminal window, which it can add to
+  `~/.zprofile`. It opens by itself only when the background service or tmux isn't working, says
+  what failed in one sentence, and offers Try Again.
+- The app updates itself: it checks once a day, and CodeConnect › Check for Updates… checks now.
+- Every control in the app has an accessibility name and identifier, so automation and assistive
+  tools can find, press and read it.
+
+## Your own Tailscale devices join without a code
+
+- A phone or computer signed in to the same Tailscale account as this computer, with neither of them
+  tagged, is paired without a code when it connects: the rule that already decided which computers
+  may send each other messages. Once one of your computers is paired, the Mac app adds your others
+  this way. A device shared into your tailnet from another account, a tagged device, or a phone off
+  Tailscale still needs a code.
+- Blocking a device (Block in the Mac app, or `codeconnect revoke`) keeps out every device signed in
+  from the same phone or computer, at once and after a restart, and this computer stops exchanging
+  agents' messages with it in either direction.
+- Allow again (or `codeconnect unblock <device>`) lets it back in with the pairing it already holds,
+  as the same device, with no new code.
+
+## The end of a long session is no longer lost
+
+- A session that ended while the daemon was stopped, or before the daemon had read its transcript
+  through, was read only to its first 4 MiB, and the rest of the conversation never reached the
+  phone. It is now read to the end.
+
 ## Reinstalling the daemon over a running one leaves it running
 
 - `codeconnect daemon install` over a daemon that was already running could leave none: the old

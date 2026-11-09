@@ -51,6 +51,8 @@ Run again, it picks up where it stopped. It uses sudo only on Linux, for `tailsc
 
 To add another computer, run the same command there, then in the app go to Settings → Computers → Add a computer.
 
+On a Mac with macOS 26 or later you can use the Mac app instead of step 2: download `CodeConnect-<version>.dmg` from the [latest release](https://github.com/faisalmumtaz89/CodeConnect/releases/latest) or [codeconnect.sh/mac](https://codeconnect.sh/mac), drag CodeConnect to Applications and open it. It installs CodeConnect, starts its daemon and keeps both up to date.
+
 ## Use
 
 In a new terminal, from your project's folder, start the agent through CodeConnect:
@@ -74,7 +76,7 @@ codeconnect mail-trust on     # let your agents act on each other's messages (of
 
 ## Update and uninstall
 
-`codeconnect update` installs the latest signed release; your sessions keep running. The app updates from the App Store. Coming from an older release, read [Upgrading](mac/README.md#upgrading).
+`codeconnect update` installs the latest signed release, unless the Mac app installed CodeConnect, which updates it itself; your sessions keep running. The iPhone app updates from the App Store. Coming from an older release, read [Upgrading](mac/README.md#upgrading).
 
 To uninstall, follow [Uninstalling](site/support.md#uninstalling): end your sessions, remove the daemon, delete `~/.codeconnect`, and remove what the installer added to your shell's startup files.
 
@@ -106,7 +108,7 @@ iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon 
 
 ## Build from source
 
-The Rust workspace is in `mac/` and the app's Xcode project in `ios/`; [CONTRIBUTING.md](CONTRIBUTING.md) has the build and test commands.
+The Rust workspace is in `mac/`, the iPhone app's Xcode project in `ios/` and the Mac app's in `macos/`, both built on the shared `CodeConnectKit/` package; [CONTRIBUTING.md](CONTRIBUTING.md) has the build and test commands.
 
 ## License
 

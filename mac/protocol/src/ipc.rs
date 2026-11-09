@@ -597,7 +597,7 @@ impl DaemonInfo {
     /// True when launchd, and not a human, is responsible for restarting this
     /// process.
     pub fn is_launchd_managed(&self) -> bool {
-        self.launchd_label.as_deref() == Some(crate::LAUNCHD_LABEL)
+        self.launchd_label.as_deref() == Some(crate::launchd_label())
     }
 }
 
@@ -1974,7 +1974,7 @@ mod tests {
             protocol_version: crate::PROTOCOL_VERSION,
             protocol_minor: crate::PROTOCOL_MINOR,
             started_at: "2026-07-31T10:00:00.000Z".into(),
-            launchd_label: Some(crate::LAUNCHD_LABEL.to_string()),
+            launchd_label: Some(crate::launchd_label().to_string()),
             endpoint_host: "host.ts.net".into(),
             bind_ip: Some("100.64.0.7".into()),
             exe_path: Some("/Users/dev/.codeconnect/bin/ccd".into()),
@@ -2138,5 +2138,142 @@ mod tests {
             SupervisorRequest::SendText { submit, .. } => assert!(submit),
             other => panic!("wrong request: {other:?}"),
         }
+    }
+
+    /// The device frames on this computer's own socket, as `codeconnect devices`,
+    /// `revoke` and `unblock` send them and the daemon answers: a phone paired with
+    /// a code, a computer joined through Tailscale, two pairings of one Tailscale
+    /// device, a revoked device with its Tailscale device, and one revoked before
+    /// the daemon recorded Tailscale devices.
+    fn derived_devices_wire() -> serde_json::Value {
+        use crate::pairing::DeviceSummary;
+        let device = |id: &str,
+                      name: &str,
+                      created: &str,
+                      seen: Option<&str>,
+                      revoked: Option<&str>,
+                      node: Option<&str>,
+                      before_nodes: bool| DeviceSummary {
+            device_id: id.into(),
+            name: name.into(),
+            created_at: created.into(),
+            last_seen_at: seen.map(Into::into),
+            revoked_at: revoked.map(Into::into),
+            tailnet_node: node.map(Into::into),
+            paired_before_nodes: before_nodes,
+        };
+        let phone = |revoked: Option<&str>| {
+            device(
+                "a1b2c3d4e5f6",
+                "Jordan’s iPhone",
+                "2026-11-01T09:00:00.000Z",
+                Some("2026-11-09T08:40:00.000Z"),
+                revoked,
+                Some("nP7Kq2CNTRL"),
+                false,
+            )
+        };
+        let ipad = |revoked: Option<&str>| {
+            device(
+                "b7c8d9e0f1a2",
+                "Jordan’s iPad",
+                "2026-10-12T17:30:00.000Z",
+                Some("2026-10-30T21:05:00.000Z"),
+                revoked,
+                Some("nD4Rw8CNTRL"),
+                false,
+            )
+        };
+        serde_json::json!({
+            "list_devices_request": ClientFrame::ListDevices,
+            "revoke_device_request": ClientFrame::RevokeDevice {
+                device: "a1b2c3d4e5f6".into(),
+                ssh_only: false,
+            },
+            "unblock_device_request": ClientFrame::UnblockDevice {
+                device: "b7c8d9e0f1a2".into(),
+            },
+            "devices": DaemonFrame::Devices {
+                devices: vec![
+                    phone(None),
+                    device(
+                        "c3d4e5f6a7b8",
+                        "build-server-eu-west-1",
+                        "2026-11-04T11:15:00.000Z",
+                        Some("2026-11-09T08:55:00.000Z"),
+                        None,
+                        Some("nB2Lx5CNTRL"),
+                        false,
+                    ),
+                    device(
+                        "d5e6f7a8b9c0",
+                        "Jordan’s MacBook Pro",
+                        "2026-10-20T08:00:00.000Z",
+                        Some("2026-11-02T19:10:00.000Z"),
+                        None,
+                        Some("nM9Tz3CNTRL"),
+                        false,
+                    ),
+                    device(
+                        "e7f8a9b0c1d2",
+                        "Jordan’s MacBook Pro",
+                        "2026-11-03T07:45:00.000Z",
+                        Some("2026-11-09T07:20:00.000Z"),
+                        None,
+                        Some("nM9Tz3CNTRL"),
+                        false,
+                    ),
+                    ipad(Some("2026-11-05T12:00:00.000Z")),
+                    device(
+                        "f9a0b1c2d3e4",
+                        "Jordan’s old iPhone",
+                        "2026-09-02T10:00:00.000Z",
+                        Some("2026-09-28T16:00:00.000Z"),
+                        Some("2026-10-01T09:30:00.000Z"),
+                        None,
+                        true,
+                    ),
+                ],
+            },
+            "revoked": DaemonFrame::Revoked {
+                device: phone(Some("2026-11-09T09:00:00.000Z")),
+                token_revoked: true,
+                ssh_key_removed: AlwaysFalse,
+            },
+            "unblocked": DaemonFrame::Unblocked {
+                device: ipad(None),
+            },
+        })
+    }
+
+    /// **The device frames, emitted by this build**, compared as JSON values. The
+    /// file is the fixture for the Mac app's reader of them; the copy under `ios/`
+    /// is byte-identical, by `fixtures/check-duplicated-fixtures.sh`.
+    #[test]
+    fn the_devices_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/wire/devices.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_devices_wire(),
+            committed,
+            "the committed device frames no longer match what this build emits. Regenerate \
+             them with cargo test -p protocol -- --ignored regenerate_the_devices_wire_fixture, \
+             then copy the file over its copy under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/wire/devices.json` with what this build emits.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_devices_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_devices_wire()).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/wire/devices.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
     }
 }

@@ -249,8 +249,8 @@ public struct ModelDisplay: Equatable {
     /// newest of each, named as its own model list names them. Names only:
     /// which version an alias stands for is Claude Code's to say, in its
     /// receipt, and the versions this table used to carry went stale with a
-    /// release.
-    private static let families = ["fable", "opus", "sonnet", "haiku"]
+    /// release. Also the model chooser's rows, in this order.
+    public static let families = ["fable", "opus", "sonnet", "haiku"]
 
     public static func from(_ raw: String) -> ModelDisplay {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

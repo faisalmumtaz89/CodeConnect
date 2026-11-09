@@ -71,6 +71,22 @@ final class PeerDirectoryTests: XCTestCase {
         XCTAssertEqual(store.machines.map(\.endpoint.token), ["device-token"])
     }
 
+    /// Each daemon's word on its own computer's Tailscale stays with that computer: a second computer's frame never
+    /// speaks for the first.
+    func testEachComputersTailscaleIsKeptOnItsOwnModel() throws {
+        let running = try frame("running")
+        let stopped = try frame("not_running")
+        let models = (0..<2).map { _ in
+            AppModel(
+                cache: EventCache(root: temporaryCache()),
+                codexSpentLedger: CodexSpentLedger(defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
+        }
+        models[0].connection.injectForTesting(.peers(running))
+        models[1].connection.injectForTesting(.peers(stopped))
+        XCTAssertEqual(models[0].tailnet, running)
+        XCTAssertEqual(models[1].tailnet, stopped)
+    }
+
     func testAListedComputerIsJoinedOnceAndAPairedOneNotAtAll() throws {
         let running = try frame("running")
         let pairing = PairingStore(ephemeral: true)
@@ -78,7 +94,6 @@ final class PeerDirectoryTests: XCTestCase {
         machines.join(running)
         machines.join(running)
         XCTAssertEqual(machines.joining.map(\.computer.host), ["laptop.tail0000.ts.net"])
-        XCTAssertEqual(machines.tailnet, running)
 
         let paired = PairingStore(ephemeral: true)
         paired.save(

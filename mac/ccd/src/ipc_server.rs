@@ -94,12 +94,12 @@ async fn ask_folder_access() -> DaemonFrame {
 /// The refusal for a ccd that is not CodeConnect's own job, which has no
 /// folder answers to ask for or keep.
 fn not_the_job() -> Option<DaemonFrame> {
-    (crate::state::launchd_label().as_deref() != Some(protocol::LAUNCHD_LABEL)).then(|| {
+    (crate::state::launchd_label().as_deref() != Some(protocol::launchd_label())).then(|| {
         DaemonFrame::Error {
             message: format!(
                 "this ccd was not started as {}, so macOS would keep the answers for \
                  whatever started it; start it with `codeconnect daemon install` and ask again",
-                protocol::LAUNCHD_LABEL
+                protocol::launchd_label()
             ),
         }
     })

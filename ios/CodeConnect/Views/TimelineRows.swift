@@ -50,7 +50,7 @@ struct TimelineRow: View {
         case .tool(let tool):
             ToolRow(tool: tool)
         case .approval(let approval):
-            if let questions = DecisionCardView.questionCard(card: approval.card, agent: agent) {
+            if let questions = DecisionCard.questionCard(card: approval.card, agent: agent) {
                 QuestionRow(
                     approval: approval, questions: questions,
                     risk: approval.assessment(profile: profile).effective,

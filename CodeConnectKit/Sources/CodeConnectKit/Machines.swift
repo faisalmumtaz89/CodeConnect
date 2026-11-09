@@ -36,8 +36,6 @@ public final class Machines {
     /// Machines joined from a list in this launch, until their daemon says which
     /// it is: one that is a removed computer under a new address leaves again.
     private var joinedFromList: Set<String> = []
-    /// What a daemon last said about its computer's Tailscale.
-    public private(set) var tailnet: PeerDirectory?
     /// Where a deep link (a `codeconnect://` URL, or a tapped notification)
     /// wants the UI to go. Cleared by whichever surface consumes it.
     public var pendingDeepLink: DeepLink?
@@ -260,7 +258,6 @@ public final class Machines {
     /// The computers a daemon lists, joined without a code: each this device
     /// has no pairing for, has not removed and is not already joining.
     func join(_ directory: PeerDirectory) {
-        tailnet = directory
         for computer in directory.computers {
             guard pairing.machine(matching: computer.endpoint) == nil,
                 !pairing.isDeclined(host: computer.host), joiningIndex(at: computer.endpoint) == nil

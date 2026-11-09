@@ -585,11 +585,11 @@ final class FleetCountTests: XCTestCase {
     /// Going through `JSONDecoder` is also the house rule for fixtures: a
     /// summary that stopped matching the wire fails here rather than diverging
     /// quietly.
-    private func summary(_ id: String, blockedOn: [String]) -> SessionSummary {
+    private func summary(_ id: String, blockedOn: [String], folder: String? = nil) -> SessionSummary {
         let ids = blockedOn.map { "\"\($0)\"" }.joined(separator: ",")
         let json = """
             {"session_uid":"uid-\(id)","session_id":"\(id)","tmux_session":"\(id)",\
-            "cwd":"/Users/dev/\(id)","lifecycle":"live","link":"attached","last_seq":10,\
+            "cwd":"\(folder ?? "/Users/dev/\(id)")","lifecycle":"live","link":"attached","last_seq":10,\
             "created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z",\
             "blocked_on":[\(ids)]}
             """
@@ -599,13 +599,16 @@ final class FleetCountTests: XCTestCase {
         return try! JSONDecoder().decode(SessionSummary.self, from: Data(json.utf8))
     }
 
-    private func row(_ id: String, _ status: FleetStatus, blockedCount: Int) -> FleetRow {
+    private func row(
+        _ id: String, _ status: FleetStatus, blockedCount: Int, machine: String? = nil, project: String? = nil,
+        folder: String? = nil
+    ) -> FleetRow {
         FleetRow(
-            summary: summary(id, blockedOn: (0..<blockedCount).map { "r\($0)" }),
+            summary: summary(id, blockedOn: (0..<blockedCount).map { "r\($0)" }, folder: folder),
             status: status, subtitle: "", activity: nil,
-            label: RunLabel(project: id, qualifier: nil),
+            label: RunLabel(project: project ?? id, qualifier: nil),
             capability: .control, blockedCount: blockedCount, lastEventAt: nil, cachedAt: nil,
-            machineID: nil, machineName: nil)
+            machineID: machine, machineName: machine.map { "\($0) name" })
     }
 
     /// The state that was invisible in the shipping fixture: three blocked
@@ -644,6 +647,64 @@ final class FleetCountTests: XCTestCase {
     func testTheSentenceAgreesWithItself() {
         XCTAssertEqual(FleetCount.waitingForYou(1), "1 waiting for you")
         XCTAssertEqual(FleetCount.waitingForYou(2), "2 waiting for you")
+    }
+
+    // MARK: Groups
+
+    /// The fleet's order, then each run in its group: groups come in the order of their first rows
+    /// (never by name), and keep that order inside, by computer and by project alike.
+    func testGroupsKeepTheFleetsOrder() {
+        let rows = [
+            row("a", .blocked, blockedCount: 1, machine: "m2", project: "zeta", folder: "/w/zeta"),
+            row("b", .blocked, blockedCount: 1, machine: "m1", project: "alpha", folder: "/w/alpha"),
+            row("c", .running, blockedCount: 0, machine: "m2", project: "alpha", folder: "/w/alpha"),
+            row("d", .idle, blockedCount: 0, machine: "m2", project: "zeta", folder: "/w/zeta"),
+        ]
+        let computers = FleetGroup.groups(rows, by: .computer)
+        XCTAssertEqual(computers.map(\.id), ["m2", "m1"])
+        XCTAssertEqual(computers.map(\.name), ["m2 name", "m1 name"])
+        XCTAssertEqual(computers.map { $0.rows.map(\.id) }, [["uid-a", "uid-c", "uid-d"], ["uid-b"]])
+        let projects = FleetGroup.groups(rows, by: .project)
+        XCTAssertEqual(projects.map(\.name), ["zeta", "alpha", "alpha"])
+        XCTAssertEqual(projects.map { $0.rows.map(\.id) }, [["uid-a", "uid-d"], ["uid-b"], ["uid-c"]])
+    }
+
+    /// A project is one folder on one computer: the same folder on two computers is two, and two
+    /// folders the daemon names alike are two, however their labels read.
+    func testAProjectIsOneFolderOnOneComputer() {
+        let rows = [
+            row("a", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/w/web"),
+            row("b", .running, blockedCount: 0, machine: "m2", project: "web", folder: "/w/web"),
+            row("c", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/old/web"),
+            row("d", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/w/web"),
+        ]
+        let projects = FleetGroup.groups(rows, by: .project)
+        XCTAssertEqual(projects.map { $0.rows.map(\.id) }, [["uid-a", "uid-d"], ["uid-b"], ["uid-c"]])
+        XCTAssertEqual(projects.map(\.name), ["web", "web", "web"])
+    }
+
+    /// A project's folder is printed as a shell prints it, and its computer is its own: the two that
+    /// tell same-named projects apart.
+    func testAProjectSaysItsFolderAndItsComputer() {
+        let rows = [
+            row("a", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/Users/dev/code/web"),
+            row("b", .running, blockedCount: 0, machine: "m2", project: "web", folder: "/home/dev/code/web"),
+            row("c", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/srv/web"),
+        ]
+        let projects = FleetGroup.groups(rows, by: .project)
+        XCTAssertEqual(projects.map(\.folder), ["~/code/web", "~/code/web", "/srv/web"])
+        XCTAssertEqual(projects.map(\.computer), ["m1 name", "m2 name", "m1 name"])
+    }
+
+    /// A group's waiting count is its decisions, not its runs or its blocked runs: one run holding
+    /// three and one holding one is four, in a group of three runs, two of them blocked.
+    func testAGroupCountsDecisionsNotRows() {
+        let rows = [
+            row("a", .blocked, blockedCount: 3, machine: "m1"),
+            row("b", .blocked, blockedCount: 1, machine: "m1"),
+            row("c", .running, blockedCount: 0, machine: "m1"),
+        ]
+        XCTAssertEqual(FleetGroup.groups(rows, by: .computer).map(\.waiting), [4])
     }
 }
 

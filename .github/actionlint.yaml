@@ -1,0 +1,5 @@
+# The release job runs on GitHub's Xcode 27 image (`xcode-27`, a public preview), whose label actionlint's built-in
+# list doesn't carry yet.
+self-hosted-runner:
+  labels:
+    - xcode-27

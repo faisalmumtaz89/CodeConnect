@@ -17,6 +17,8 @@ default = []
 # default, so the binary a user runs cannot record a session whatever its
 # environment says. See `codex_broker::frame_tee`.
 frame-tee = ["codex-broker/frame-tee"]
+# A rig build that installs its daemon job under a test label (`protocol::launchd_label`).
+test-launchd-label = ["protocol/test-launchd-label"]
 
 # The shim/supervisor/coordinator/custodian are deliberately SYNC: they exec away
 # within milliseconds or run a blocking loop, so an async runtime would be pure

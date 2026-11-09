@@ -109,15 +109,33 @@ Each block starts from the repository root.
    is `RELEASE_KEY` in the tagged source
    (`mac/codeconnect/src/update_install.rs`), checks each archive against its
    `.sha256`, signs each `.sha256`, and verifies every signature against the
-   pinned half before handing the files on. The draft then holds the four
-   macOS assets and twelve Linux ones, each downloaded back and checked, and
-   publication requires exactly those sixteen: a Linux build that fails stops
-   the release. The key's private half lives only in that secret and the
+   pinned half before handing the files on. The draft then holds the seven
+   macOS assets (the two archives and their checksums, and the app's `.dmg`,
+   its checksum and `appcast-item.xml`) and twelve Linux ones, each downloaded
+   back and checked, and publication requires exactly those nineteen: a Linux
+   build that fails stops the release. The key's private half lives only in that secret and the
    owner's offline backup. Losing it means a new key and a new `RELEASE_KEY`,
    and every installed Linux updater refuses releases signed with the new key
    until the installer — one that pins the new key — is run again with
    `--reinstall` (`curl -fsSL https://codeconnect.sh | sh -s -- --reinstall`):
    a plain rerun on an existing install finishes its setup and downloads nothing.
+
+   The same job builds the Mac app (`macos/`) from the pinned commit, with the
+   binaries it has just signed and notarized inside it, on GitHub's `xcode-27`
+   image with Xcode 27.1 pinned by path — the Xcode the app is built and
+   tested with. The app is exported for Developer ID and packed as
+   `CodeConnect-X.Y.Z.dmg`, which is notarized, stapled, and signed for Sparkle
+   with the secret `SPARKLE_ED_PRIVATE_KEY`; that signature line is
+   `appcast-item.xml`. `.github/workflows/mac-app-verify.sh` checks the `.dmg`
+   the way Sparkle and Gatekeeper will — the public key baked into the app must
+   verify its signature, Gatekeeper must accept the app as notarized
+   Developer ID, and every library the app loads must be found inside it —
+   once before attaching and again on the bytes downloaded back. The key's
+   private half lives only in that secret and the owner's offline backup.
+   Installed apps accept only updates signed with it, so losing
+   it means their next version is a manual download. After publishing,
+   codeconnect.sh moves its `/mac` link and its appcast (`/mac/appcast.xml`,
+   given the release's `appcast-item.xml`) together, in one deploy.
 
    ```sh
    git tag vX.Y.Z && git push origin vX.Y.Z

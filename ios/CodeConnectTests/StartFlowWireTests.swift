@@ -322,7 +322,7 @@ final class StartFlowWireTests: XCTestCase {
         model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(hello.utf8)))
         await settle()
         let starts = sent.sent.compactMap { message -> StartPlace? in
-            guard case .startSession(let request, _, _, _, let place) = message, request == id else { return nil }
+            guard case .startSession(let request, _, _, _, let place, _) = message, request == id else { return nil }
             return place
         }
         XCTAssertEqual(starts, [.new("fix-login"), .new("fix-login")])

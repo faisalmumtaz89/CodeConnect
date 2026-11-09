@@ -14,7 +14,8 @@ cd mac && ./install.sh               # build and install to ~/.codeconnect/bin
 cd mac && ./soak/run.sh              # chaos gauntlet against a real session
 ```
 
-The Rust workspace is in `mac/`, the app in `ios/`, design notes in `docs/`, and the
+The Rust workspace is in `mac/`, the iPhone app in `ios/`, the Mac app in `macos/`, the
+code both apps share in the `CodeConnectKit/` package, design notes in `docs/`, and the
 recorded hook payloads and transcripts the tests replay in `fixtures/`. The soak is
 described in [mac/README.md](mac/README.md#soaking-it).
 
@@ -23,6 +24,8 @@ one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#ava
 is a runtime check, so the symbol still has to exist in the SDK to compile.
 
 The iOS app is an Xcode project in `ios/`; open `ios/CodeConnect.xcodeproj`. Unit tests need no daemon. The suites named `*LiveUITests` do — they drive the real app against a running `ccd` and skip cleanly when one is not reachable.
+
+The Mac app is an Xcode project in `macos/`; open `macos/CodeConnect.xcodeproj`. It deploys to macOS 26 and builds against the same `CodeConnectKit` package. A Debug build photographs its own window to a PNG and quits when launched with `-CC_RENDER_WINDOW <path>`, and `-CC_RENDER_WINDOW_SIZE <width>x<height>` sets the window's size first: `open -g -n -W CodeConnect.app --args -CC_RENDER_WINDOW out.png`. Launch it in the background (`-g`) but not hidden: the app cannot become active during a render, puts its window behind every other on a plain backdrop, and the window server photographs it, which a hidden app's window cannot be. `-CC_ADD_COMPUTER YES` opens the Add-a-computer sheet, which is photographed with the window; `-CC_RENDER_PAIR "<address> <code>"` submits that pairing in the sheet as if typed, and the window is photographed once the computer has answered: refused, or paired and connected. A launch with any `-CC_` flag uses no keychain, has an installation id of its own that is never saved to the app's defaults, and keeps the app's data in a throwaway folder in the user's temporary folder, removed when its render ends. `-CC_KEYCHAIN_RUN <uuid>` keeps the launch's pairing under a keychain service of its own, `com.codeconnect.pairing.run-<uuid>`, never the computer's own pairing, and its data in a folder of that name in the temporary folder; a later launch with the same id loads both. `-CC_KEYCHAIN_RUN <uuid> -CC_KEYCHAIN_REMOVE YES` removes that service's items and folder and quits. Launch it from the same build that wrote them: the keychain lets only that build remove them without asking.
 
 ## House rules
 

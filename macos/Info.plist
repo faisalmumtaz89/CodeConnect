@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged into the Info.plist Xcode generates for the target. Outside the
+	     CodeConnect folder, so the folder's files never copy it as a resource.
+
+	     The daemon serves plain ws:// bound to the tailnet when the tailnet has
+	     no HTTPS certificate available, so ATS has to be relaxed, as in the
+	     iPhone app (ios/Support/Info.plist). Without it the Mac reaches only its
+	     own loopback daemon. REMOVE THIS BLOCK once ccd serves wss:// via
+	     `tailscale cert`: hello_ack advertises `capabilities.tls`, which is the
+	     signal to flip.
+
+	     NSAllowsLocalNetworking must NOT be added alongside this key: a granular
+	     key makes ATS ignore NSAllowsArbitraryLoads, and a Tailscale address
+	     (100.64/10, CGNAT) is not in any range ATS counts as local. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<!-- Sparkle: the feed web serves, the public half of the release signing key (the
+	     SPARKLE_PUBLIC_KEY build setting), and its daily check on with no first-run question. Debug builds never
+	     start the updater (CodeConnectApp.swift). -->
+	<key>SUFeedURL</key>
+	<string>https://codeconnect.sh/mac/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>$(SPARKLE_PUBLIC_KEY)</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+</dict>
+</plist>

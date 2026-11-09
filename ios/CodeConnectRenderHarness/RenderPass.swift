@@ -62,6 +62,11 @@ final class RenderPass: XCTestCase {
         try render(at: .ax5, RenderCatalog.startSession)
     }
 
+    /// The Model sheet's screens, which read Kit's `ModelDisplay.families`.
+    func testRendersModelSheetAtLarge() throws {
+        try render(at: .large, RenderCatalog.all.filter { $0.name.hasPrefix("session-model-") })
+    }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

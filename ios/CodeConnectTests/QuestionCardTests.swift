@@ -299,12 +299,12 @@ final class QuestionCardTests: XCTestCase {
     func testAQuestionCardNeverOffersOrSendsAllowOrAnOption() throws {
         let card = try heldCard()
         XCTAssertEqual(
-            DecisionCardView.answerSurface(
+            DecisionCard.answerSurface(
                 card: card, agent: .claude, hold: .held, hookOnlyApprovals: true),
             .noneAnswerable, "the fallback layout is read-only for a question")
-        XCTAssertNotNil(DecisionCardView.questionCard(card: card, agent: .claude))
-        XCTAssertNil(DecisionCardView.questionCard(card: card, agent: nil), "unknown agent")
-        XCTAssertNil(DecisionCardView.questionCard(card: card, agent: .codex))
+        XCTAssertNotNil(DecisionCard.questionCard(card: card, agent: .claude))
+        XCTAssertNil(DecisionCard.questionCard(card: card, agent: nil), "unknown agent")
+        XCTAssertNil(DecisionCard.questionCard(card: card, agent: .codex))
 
         for (minor, capable) in [(20, false), (20, true), (21, false), (21, true)] {
             let answers = profile(minor: UInt32(minor), questionCard: capable).answersQuestions

@@ -833,7 +833,7 @@ async fn resolve_bind(config: &Config) -> BindPlan {
              {SERVICE_KIND} manages this daemon, so when one appears this process ends and \
              {SERVICE_MANAGER} starts another, which tries the address for itself. Until a start \
              finds one in time, this daemon stays on loopback and no phone reaches it.",
-            protocol::LAUNCHD_LABEL
+            protocol::launchd_label()
         ),
         // The same watch, and the honest form of the same sentence. Nothing
         // here restarts a daemon CodeConnect's job does not manage, so what the
@@ -844,7 +844,7 @@ async fn resolve_bind(config: &Config) -> BindPlan {
              Watching for one to appear and reporting it when it does — this process is not \
              run by {SERVICE_MANAGER}'s {} {SERVICE_KIND}, so nothing here restarts it. Making \
              this daemon reachable is a restart you run.",
-            protocol::LAUNCHD_LABEL
+            protocol::launchd_label()
         ),
         TailnetWatch::Idle => {}
     }
@@ -965,12 +965,12 @@ fn never_a_tailnet_address(ip: IpAddr) -> bool {
 /// `XPC_SERVICE_NAME` for every process a launchd job starts, so a `ccd` run
 /// from inside another one — a build step, a wrapper script's agent — carries a
 /// label that will never restart it. On Linux only CodeConnect's unit sets
-/// `CODECONNECT_SERVICE`; see [`state::SERVICE_LABEL_VAR`]. Equality with [`protocol::LAUNCHD_LABEL`]
+/// `CODECONNECT_SERVICE`; see [`state::SERVICE_LABEL_VAR`]. Equality with [`protocol::launchd_label`]
 /// is what tells the two apart; anything looser reads "a label exists" as
 /// "something will restart me", which is exactly the promise this must not
 /// make on a process nothing is watching.
 fn managed_by_codeconnect_job() -> bool {
-    state::launchd_label().as_deref() == Some(protocol::LAUNCHD_LABEL)
+    state::launchd_label().as_deref() == Some(protocol::launchd_label())
 }
 
 /// Held for the length of any test that writes [`state::SERVICE_LABEL_VAR`], by way of
@@ -1458,7 +1458,7 @@ fn report_tailnet_change(found: Option<IpAddr>) {
              does not find it in time is on loopback and watching again. Nothing here will do \
              any of that: this process is not run by {SERVICE_MANAGER}'s {} {SERVICE_KIND}, so \
              the restart is yours to run.",
-            protocol::LAUNCHD_LABEL
+            protocol::launchd_label()
         ),
         None => crate::log_warn!(
             "the tailnet address reported earlier is gone again; this daemon is still on \

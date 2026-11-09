@@ -135,11 +135,11 @@ struct StartingSessionView: View {
     // MARK: Failed
 
     private func failure(_ start: SessionStart, reason: StartFailure, detail: String) -> some View {
-        let copy = Self.copy(for: reason, start: start)
+        let words = reason.words(for: start)
         return ScrollView {
             CCEmptyState(
-                glyph: copy.glyph, title: copy.title, message: copy.message, tone: .danger,
-                actionTitle: copy.action, action: onChooseAgain,
+                glyph: Self.glyph(for: reason), title: words.title, message: words.message, tone: .danger,
+                actionTitle: words.action, action: onChooseAgain,
                 secondaryActionTitle: "Back to Projects", secondaryAction: { dismiss() }
             ) {
                 // The computer's own words only where they are the error itself;
@@ -158,26 +158,12 @@ struct StartingSessionView: View {
         }
     }
 
-    private static func copy(for reason: StartFailure, start: SessionStart)
-        -> (glyph: String, title: String, message: String, action: String)
-    {
-        let agent = start.agent.displayName
+    /// The failure's glyph; its words are Kit's (`StartFailure.words(for:)`).
+    private static func glyph(for reason: StartFailure) -> String {
         switch reason {
-        case .folderMissing:
-            return (
-                "folder-dashed", "That folder isn’t there any more",
-                "It was moved, renamed or deleted on \(start.machineName). Nothing was started.",
-                "Start again")
-        case .agentMissing:
-            return (
-                "terminal-window", "\(agent) isn’t installed",
-                "\(start.machineName) has no \(agent). Install it there, then start again from here.",
-                "Start again")
-        case .launchFailed:
-            return (
-                "warning", "\(agent) didn’t start",
-                "\(start.machineName) could not start it. Its own words are below.",
-                "Start again")
+        case .folderMissing: return "folder-dashed"
+        case .agentMissing: return "terminal-window"
+        case .launchFailed: return "warning"
         }
     }
 }

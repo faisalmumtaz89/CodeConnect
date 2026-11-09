@@ -166,6 +166,8 @@ public final class AppModel {
     /// Called with each list of the owner's other computers this machine's
     /// daemon sends.
     @ObservationIgnored var onPeers: ((PeerDirectory) -> Void)?
+    /// What this machine's daemon last said about its own computer's Tailscale.
+    public private(set) var tailnet: PeerDirectory?
 
     /// The Mac's list of runs, as it last said. The truth: what is on screen is
     /// `shownSummaries`.
@@ -1238,10 +1240,10 @@ public final class AppModel {
     /// Start an agent in one of this computer's projects; the answer arrives as
     /// `start_session_result` under the returned request id.
     public func startSession(
-        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String
+        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String
     ) -> String {
         let requestID = starter.start(
-            project: project, place: place, agent: agent, prompt: prompt,
+            project: project, place: place, agent: agent, model: model, prompt: prompt,
             machineName: machineName ?? HostDevice.current.computer("this computer"))
         #if DEBUG
             if fixturesActive {
@@ -1261,7 +1263,7 @@ public final class AppModel {
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
-                    prompt: start.prompt, worktree: start.place))
+                    prompt: start.prompt, worktree: start.place, model: start.model))
         }
     }
 
@@ -1431,7 +1433,7 @@ public final class AppModel {
     #endif
 
     /// The fleet is the root once there is something to show it from.
-    var showsFleet: Bool { pairing.isPaired || fixturesActive }
+    public var showsFleet: Bool { pairing.isPaired || fixturesActive }
 
     /// Manual entry: a host and a token typed by hand.
     ///
@@ -2198,6 +2200,7 @@ public final class AppModel {
             // takes that request's place, so the replies after it stay matched.
             if takeSessionsReply() { catchUp?.progressed = true }
         case .peers(let directory):
+            tailnet = directory
             onPeers?(directory)
         case .answerResult, .sendTextResult, .captureResult, .commandCatalog, .diff, .error,
             .pong, .unknown:
