@@ -4014,29 +4014,20 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         turn_two.len()
     );
 
-    // --- 11b. CLAIM 7b: that turn RANG, and the link says what it is ---------------
+    // --- 11b. CLAIM 7b: that turn did NOT ring: nothing was waiting on the phone ----
     //
-    // The doorbell hangs off a terminal this link watched arrive, and the turn above
-    // is the only one in this run that qualifies — turn 1 was recovered through a
-    // resume answer, and a resume answer never rings. So a doorbell here is a
-    // doorbell for the turn claim 7 just proved was live, and its absence would mean
-    // the trigger is wired to something a real app-server does not produce.
+    // A finished turn is an occasion to ring, and a doorbell rings only for a
+    // decision the phone can answer. This run raised none, so the turn claim 7 just
+    // proved was live must leave the phone alone.
     //
     // Past the dispatch grace first: `dispatch_push` waits out a window before it
     // rings, and reading the probe too early would report silence for a push that was
     // merely still in flight.
     tokio::time::sleep(Duration::from_millis(900)).await;
-    let rang = push
-        .last()
-        .expect("a turn observed finishing live must ring the doorbell");
-    assert_eq!(
-        rang.kind,
-        crate::apns::PushKind::Completed,
-        "the doorbell says a turn finished and carries nothing the agent wrote: {rang:?}"
-    );
-    assert_eq!(
-        rang.session_uid, session.uid,
-        "the doorbell must be about this run: {rang:?}"
+    assert!(
+        push.last().is_none(),
+        "a finished turn with no decision open must not ring: {:?}",
+        push.last()
     );
     // And the resolver's own view of the same connection, taken from the link that
     // has been open since before the TUI existed. **Bound is not subscribed**, and
@@ -4051,10 +4042,9 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
          reads, and anything weaker would resolve a request to nowhere"
     );
     println!(
-        "CLAIM 7b PASS — the live turn rang a content-free {:?} doorbell for this run, \
-         and the link publishes Subscribed{{{thread_id}}} — the addressee an inbound \
-         request resolves to.",
-        rang.kind
+        "CLAIM 7b PASS — the live turn rang no doorbell, nothing the phone can answer \
+         being open, and the link publishes Subscribed{{{thread_id}}} — the addressee \
+         an inbound request resolves to."
     );
 
     // --- 12. CLAIM 8: two turns, re-described, and every fact still ONE ------------

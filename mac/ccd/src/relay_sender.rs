@@ -731,9 +731,6 @@ mod tests {
         for (kind, tag) in [
             (PushKind::Approval, "approval"),
             (PushKind::Question, "question"),
-            (PushKind::NeedsInput, "input"),
-            (PushKind::Completed, "done"),
-            (PushKind::Idle, "idle"),
         ] {
             let mut hint = hint(2);
             hint.kind = kind;
@@ -1498,8 +1495,8 @@ mod tests {
         for (n, sent) in [
             hint(1),
             PushHint {
-                kind: PushKind::Completed,
-                ..hint(0)
+                kind: PushKind::Question,
+                ..hint(1)
             },
             hint(2),
         ]
@@ -1519,11 +1516,11 @@ mod tests {
             posted(&relay),
             [
                 ("bearer-phone".to_string(), "approval".to_string()),
-                ("bearer-phone".to_string(), "done".to_string()),
+                ("bearer-phone".to_string(), "question".to_string()),
                 ("bearer-phone".to_string(), "approval".to_string()),
             ],
-            "an approval, a finished turn and a second approval each reach the \
-             paired phone once"
+            "an approval, a question and a second approval each reach the paired \
+             phone once"
         );
     }
 

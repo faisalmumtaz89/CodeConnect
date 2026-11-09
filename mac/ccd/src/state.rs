@@ -1895,27 +1895,60 @@ fn the_card<'a>(inner: &'a Inner, session_uid: &str, key: &CardKey) -> Option<&'
     inner.pending.get(&(session_uid.to_string(), key.0.clone()))
 }
 
-/// Which runs are holding a decision, and what each is called: the doorbell's
-/// title names the run when exactly one is, however many decisions it holds.
-/// Its count is of the decisions themselves (`pending`), as the app's fleet
-/// counts them — one run can hold several at once, since background agents
-/// each ask their own.
+/// Whether Claude still holds this card's hook, and with it the only way an
+/// answer reaches the call.
+fn hook_is_held(entry: &PendingApproval) -> bool {
+    entry.card.question_hold == Some(QuestionHold::Held) && entry.responder.is_some()
+}
+
+/// Whether an answer from the phone can reach this card now: a Codex card's
+/// through its link, any other card's only through the hook Claude holds for
+/// its call ([`hook_decision`] refuses the rest). Not once the call has run,
+/// and not while an answer is already on its way. A card no hook is held for —
+/// one restored after a restart, or released to the computer — is answered at
+/// the computer, and a doorbell for it would open onto nothing to answer.
+fn phone_can_answer(entry: &PendingApproval) -> bool {
+    !entry.tool_ran
+        && !entry.claimed
+        && (matches!(entry.agent, protocol::agent::AgentKind::Codex) || hook_is_held(entry))
+}
+
+/// The decisions a doorbell may speak of, read under one lock: how many cards
+/// the phone can answer are open, what the one run holding them is called
+/// when exactly one run is (however many it holds), and whether the one
+/// decision is a question. One run can hold several at once, since background
+/// agents each ask their own.
 ///
 /// **Every agent's runs, whichever agent rang.** A phone keeps one CodeConnect
 /// notification — every doorbell shares one collapse id, and a device's queue
 /// replaces a waiting doorbell with the newer one — and its badge is this
-/// count. A count of the ringing agent's runs alone let a finished Codex turn
-/// replace "2 waiting for you" with "Finished a turn" and a badge of 0 while
-/// Claude decisions waited, and the same the other way round.
-fn blocked_runs(inner: &Inner) -> Vec<(String, String)> {
-    let mut by_run: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for pending in inner.pending.values() {
-        by_run.insert(&pending.session.uid, &pending.project_label);
+/// count.
+struct Waiting {
+    decisions: usize,
+    label: Option<String>,
+    question: bool,
+}
+
+impl Waiting {
+    fn of(inner: &Inner) -> Waiting {
+        let open: Vec<&PendingApproval> = inner
+            .pending
+            .values()
+            .filter(|entry| phone_can_answer(entry))
+            .collect();
+        let mut runs: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for entry in &open {
+            runs.insert(&entry.session.uid, &entry.project_label);
+        }
+        Waiting {
+            decisions: open.len(),
+            label: match runs.into_values().collect::<Vec<_>>().as_slice() {
+                [label] => Some(label.to_string()),
+                _ => None,
+            },
+            question: matches!(open.as_slice(), [entry] if entry.question.is_some()),
+        }
     }
-    by_run
-        .into_iter()
-        .map(|(uid, label)| (uid.to_string(), label.to_string()))
-        .collect()
 }
 
 /// The only commands whose recovered pane may be kept. Deliberately three
@@ -3583,29 +3616,15 @@ impl Daemon {
             self.push_gate
                 .admit_decision(&session.uid, &request_id, input.prompt_id.as_deref())
         {
+            // **No tool name and no risk class.** The tool says what an agent is
+            // doing to anyone who can read the payload, and the class is a
+            // judgement the card itself states — with the matched pattern beside
+            // it, which a lock screen has no room for and Apple has no business
+            // holding. What rings is composed from the open decisions when it
+            // goes (`dispatch_push`).
             self.dispatch_push(
                 session.uid.clone(),
                 approval_event.seq,
-                PushHint {
-                    // The project, not the run's tmux name: `cc-1` is the
-                    // lowest free counter and the next run inherits it, so it
-                    // named nothing a reader could recognise.
-                    project_label: label.clone(),
-                    // **No tool name and no risk class.** The tool says what
-                    // an agent is doing to anyone who can read the payload, and the class is a judgement the
-                    // card itself states — with the matched pattern beside it,
-                    // which a lock screen has no room for and Apple has no
-                    // business holding.
-                    kind: if question {
-                        crate::apns::PushKind::Question
-                    } else {
-                        crate::apns::PushKind::Approval
-                    },
-                    // See `describing`: the count belongs to the moment of
-                    // ringing, not the moment of admission.
-                    decisions: 0,
-                    session_uid: session.uid.clone(),
-                },
                 ticket,
                 // A pending decision outlives other tools' progress; only the
                 // session's death, or the card being answered, cancels it.
@@ -3896,6 +3915,13 @@ impl Daemon {
 
     /// Ring the phones that have not seen `trigger_seq`, after a short grace.
     ///
+    /// **It rings only for a decision the phone can answer.** Whatever admitted
+    /// it — a card filed, a run going idle or finishing, a permission notice —
+    /// at the moment it would ring it counts the open cards the phone can
+    /// answer ([`phone_can_answer`]), fleet-wide. None, and it does not ring: a
+    /// tap would open onto nothing to answer. Some, and the doorbell is about
+    /// them ([`PushHint::for_decisions`]), not about the event that admitted it.
+    ///
     /// The grace closes a real race: `ingest` broadcasts the event, the socket
     /// tasks write it and record delivery — and this push races those writes.
     /// Dispatching immediately would ring a phone that is milliseconds from
@@ -3915,7 +3941,7 @@ impl Daemon {
     /// instant; while it stays foregrounded the app declines to present the
     /// banner. Closing the sliver itself needs client delivery
     /// acknowledgements — a protocol change deliberately not taken for a
-    /// doorbell whose whole content is four words and a count.
+    /// doorbell whose whole content is a few words and a count.
     ///
     /// # Held while someone is at the Mac
     ///
@@ -3996,7 +4022,6 @@ impl Daemon {
         self: &Arc<Self>,
         session_uid: String,
         trigger_seq: u64,
-        hint: PushHint,
         ticket: crate::push_gate::Ticket,
         heed_progress: bool,
         needs_card: Option<CardKey>,
@@ -4114,7 +4139,7 @@ impl Daemon {
                     );
                     return;
                 };
-                let (decisions, blocked): (usize, Vec<(String, String)>) = {
+                let waiting = {
                     let held = inner.lock().await;
                     if let Some(key) = &needs_card {
                         if !card_is_open(&held, &session_uid, key) {
@@ -4125,15 +4150,24 @@ impl Daemon {
                             return;
                         }
                     }
-                    (held.pending.len(), blocked_runs(&held))
+                    Waiting::of(&held)
                 };
-                // The subject's name comes out of the same snapshot as the count —
-                // see `PushHint::describing` and `PendingApproval::project_label`.
-                let named = match blocked.as_slice() {
-                    [(_, label)] => Some(label.clone()),
-                    _ => None,
-                };
-                let described = hint.describing(decisions, named);
+                // **The one rule.** Nothing the phone can answer is open, so a tap
+                // would open onto nothing: whatever admitted this push, it does not
+                // ring.
+                if waiting.decisions == 0 {
+                    crate::log_debug!(
+                        "push for {} dropped: nothing the phone can answer is open",
+                        session_uid
+                    );
+                    return;
+                }
+                let described = PushHint::for_decisions(
+                    session_uid,
+                    waiting.decisions,
+                    waiting.label,
+                    waiting.question,
+                );
                 // **The exclusion list is one thing: who already knows.** It carries
                 // the devices whose live socket wrote this event to them during the
                 // grace, and nothing else — a doorbell must not ring a phone that is
@@ -4153,26 +4187,25 @@ impl Daemon {
         let kind = input.notification_type.as_deref().unwrap_or("");
         // Two gates before any ring — see `crate::push_gate`. The ambient
         // classes collapse Claude's repeating "still waiting" hooks into one
-        // ring per state change; `permission_prompt` is the notification twin
-        // of a `PermissionRequest` that already rang, matched to the card it
-        // is about through the prompt it shares with it.
-        // **Admission and copy in one match.** An unadmitted kind never reaches
-        // a sentence, so a `_ =>` arm on the copy side would be a body no
-        // notification could ever carry — a fifth string that reads like a
-        // supported case and is not one.
+        // occasion per state change; `permission_prompt` is the notification
+        // twin of a `PermissionRequest` that already rang, matched to the card
+        // it is about through the prompt it shares with it.
+        //
+        // **An occasion, not a subject.** A run going idle or finishing rings
+        // only if, when the doorbell goes, a decision the phone can answer is
+        // open somewhere — and then it is about that decision
+        // (`dispatch_push`). A card whose own doorbell was held while the
+        // owner was at the computer or looking at the app is often first told
+        // this way.
         let admitted = match kind {
-            "agent_needs_input" => self
+            "agent_needs_input" | "idle_prompt" => self
                 .push_gate
                 .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
-                .map(|t| (t, crate::apns::PushKind::NeedsInput, None)),
-            "idle_prompt" => self
-                .push_gate
-                .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
-                .map(|t| (t, crate::apns::PushKind::Idle, None)),
+                .map(|t| (t, None)),
             "agent_completed" => self
                 .push_gate
                 .admit_ambient(&session.uid, crate::push_gate::Ambient::Done)
-                .map(|t| (t, crate::apns::PushKind::Completed, None)),
+                .map(|t| (t, None)),
             "permission_prompt" => {
                 // **Which gate depends on whether there is a card**, and the
                 // question and the answer are one operation — see
@@ -4190,12 +4223,8 @@ impl Daemon {
                 self.push_gate
                     .admit_notice(&session.uid, input.prompt_id.as_deref(), &cards)
                     .map(|(ticket, notice)| match notice {
-                        crate::push_gate::Notice::Decision(card) => {
-                            (ticket, crate::apns::PushKind::Approval, Some(CardKey(card)))
-                        }
-                        crate::push_gate::Notice::Waiting => {
-                            (ticket, crate::apns::PushKind::NeedsInput, None)
-                        }
+                        crate::push_gate::Notice::Decision(card) => (ticket, Some(CardKey(card))),
+                        crate::push_gate::Notice::Waiting => (ticket, None),
                     })
             }
             _ => None,
@@ -4203,31 +4232,17 @@ impl Daemon {
         // The ticket is minted inside the admission's own critical section:
         // progress landing anywhere after it — even before the dispatch task
         // spawns — reads as a moved epoch and kills the push.
-        let Some((ticket, push_kind, card)) = admitted else {
+        let Some((ticket, card)) = admitted else {
             return;
         };
         // **The doorbell carries no agent text.** `input.message` is the
         // agent's own sentence and routinely names files and commands; an APNs
         // payload passes through Apple, and the documented design is that
-        // nothing an agent wrote ever does. The body is derived from the hook's
-        // *type* alone — the fact that a bell rang, never what it rang about.
-
+        // nothing an agent wrote ever does. What it says is composed from the
+        // open decisions alone, when it rings.
         self.dispatch_push(
             session.uid.clone(),
             trigger.seq,
-            PushHint {
-                // **The cwd the daemon has persisted.** A notification hook may
-                // omit `cwd` entirely, and `ensure_session` keeps the last one
-                // it was told; reading this hook's field directly would leave a
-                // push with no label whenever the hook happened not to carry
-                // one.
-                project_label: self.effective_project_label(&session.uid).await,
-                kind: push_kind,
-                // Overwritten at ring time by `describing`, which reads the
-                // fleet as it is when the doorbell actually goes.
-                decisions: 0,
-                session_uid: session.uid.clone(),
-            },
             ticket,
             // **A decision outlives other tools' progress wherever it was
             // admitted**, exactly as it does on the `PermissionRequest` path;
@@ -4237,7 +4252,7 @@ impl Daemon {
             // otherwise cancel it — while the request's own admission found the
             // prompt key taken and stayed silent. Two silences, and a reader
             // never told there is a card waiting.
-            push_kind != crate::apns::PushKind::Approval,
+            card.is_none(),
             // A notice that turned out to be a decision announces a specific
             // card, and has to still mean it when it rings.
             card,
@@ -4305,8 +4320,8 @@ impl Daemon {
     /// then, when a turn begins on it, only `thread/status/changed` — the
     /// `turn/started` this daemon reads movement from goes to the TUI's connection
     /// alone. So a link waiting to be told the new thread is busy would wait for a
-    /// frame it is measurably never sent, and the stale "Finished a turn" push would
-    /// go out while the agent is demonstrably mid-turn. Reading
+    /// frame it is measurably never sent, and the stale turn-end push would go out
+    /// while the agent is demonstrably mid-turn. Reading
     /// `thread/status/changed` into turn state instead would be building on
     /// semantics nobody has measured; the switch itself is a frame this build already
     /// understands, already acts on, and already knows is broadcast to every
@@ -4604,12 +4619,6 @@ impl Daemon {
                 self.dispatch_push(
                     session.uid.clone(),
                     event.seq,
-                    PushHint {
-                        project_label: label,
-                        kind: crate::apns::PushKind::Approval,
-                        decisions: 0,
-                        session_uid: session.uid.clone(),
-                    },
                     ticket,
                     false,
                     Some(CardKey(request_id.clone())),
@@ -4826,14 +4835,15 @@ impl Daemon {
         Retirement::Retired
     }
 
-    /// **The doorbell for a Codex turn this daemon watched finish.**
+    /// **A Codex turn this daemon watched finish, as an occasion to ring.**
     ///
     /// Codex's analogue of Claude's `agent_completed` notification, and the only
     /// completion signal it has: the design refuses Codex's `notify` hook and its
     /// `PermissionRequest` hook precisely so that `turn/completed` is the one thing
     /// that means a turn ended. So the same gate, the same ticket, the same
-    /// dispatch, the same content-free `PushKind::Completed` sentence — what
-    /// differs is only where the fact came from.
+    /// dispatch — and, like every doorbell, it rings only if a decision the phone
+    /// can answer is open when it goes, and is then about that decision
+    /// (`dispatch_push`). What differs is only where the fact came from.
     ///
     /// # Live-only, and how that is guaranteed rather than checked
     ///
@@ -4861,13 +4871,9 @@ impl Daemon {
     ///
     /// # Only `completed`
     ///
-    /// An `interrupted` or `failed` terminal deliberately does not ring.
-    /// `interrupted` means a human stopped the turn at the keyboard, and the person
-    /// who did it is the person the doorbell would wake. `failed` has no honest
-    /// sentence in [`crate::apns::PushKind`]'s closed vocabulary — "Finished a
-    /// turn" would report a failure as a success — and widening that vocabulary is
-    /// a change to what a lock screen may say, which belongs with the phone work
-    /// that renders it. Both are legible gaps, not oversights.
+    /// An `interrupted` or `failed` terminal is no occasion. `interrupted` means a
+    /// human stopped the turn at the keyboard, and the person who did it is the
+    /// person the doorbell would wake.
     ///
     /// # One ring per turn, except when two turns share a dispatch grace
     ///
@@ -4890,11 +4896,9 @@ impl Daemon {
     /// three shapes were run against the real hook path and all three rang once.
     ///
     /// Which is the right answer for the thing this is: a doorbell whose whole
-    /// content is four words and a count. Two rings 300 ms apart saying "Finished a
-    /// turn" are one fact told twice to somebody whose phone is on a table. The
-    /// contract is therefore *one ring per turn the reader could act on
-    /// separately*, and a turn superseded before its doorbell left the building is
-    /// not one of those.
+    /// content is a few words and a count. Two rings 300 ms apart about the same
+    /// open decisions are one fact told twice to somebody whose phone is on a
+    /// table.
     pub(crate) async fn push_codex_turn_complete(
         self: &Arc<Self>,
         session: &SessionKey,
@@ -4905,20 +4909,12 @@ impl Daemon {
         // between them folds into this ticket and the push it should have cancelled
         // survives its grace.
         let ticket = self.push_gate.admit_turn_end(&session.uid);
+        // **Content-free.** The terminal's payload carries the turn's status,
+        // timings and any error text; none of it is read here. An APNs payload
+        // passes through Apple, and nothing an agent produced ever does.
         self.dispatch_push(
             session.uid.clone(),
             trigger.seq,
-            PushHint {
-                project_label: self.effective_project_label(&session.uid).await,
-                // **Content-free, from the fact's type alone.** The terminal's
-                // payload carries the turn's status, timings and any error text;
-                // none of it is read here. An APNs payload passes through Apple,
-                // and nothing an agent produced ever does.
-                kind: crate::apns::PushKind::Completed,
-                // Overwritten at ring time by `describing`.
-                decisions: 0,
-                session_uid: session.uid.clone(),
-            },
             ticket,
             // A quiet-state push: progress landing during the grace means the run
             // has moved on from the state this announces, and it should not ring.
@@ -11061,7 +11057,7 @@ fn hook_decision(
     entry: &PendingApproval,
     decision: &AnswerDecision,
 ) -> Result<HookDecision, String> {
-    let held = entry.card.question_hold == Some(QuestionHold::Held) && entry.responder.is_some();
+    let held = hook_is_held(entry);
     if entry.question.is_some() {
         return question_hook_decision(entry, decision, held);
     }
@@ -14164,6 +14160,62 @@ mod tests {
         )
     }
 
+    /// [`raise_prompt`], held for the phone: the call is joined by its
+    /// `PreToolUse` and the hook waits, so the phone can answer the card — the
+    /// only kind of approval a doorbell rings for. Returns the card's request id,
+    /// once it is filed.
+    async fn raise_held_prompt(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        prompt_id: &str,
+        command: &str,
+    ) -> String {
+        raise_held_prompt_in(daemon, "cc-1", uid, prompt_id, command).await
+    }
+
+    /// The same, for a named run.
+    async fn raise_held_prompt_in(
+        daemon: &Arc<Daemon>,
+        session_id: &str,
+        uid: &str,
+        prompt_id: &str,
+        command: &str,
+    ) -> String {
+        let tool_input = json!({ "command": command });
+        let call = format!(
+            "toolu_{prompt_id}_{}",
+            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..12]
+        );
+        let hook = |event: &str| {
+            json!({
+                "hook_event_name": event, "cwd": "/tmp", "prompt_id": prompt_id,
+                "tool_name": "Bash", "tool_input": tool_input,
+            })
+        };
+        let mut before = hook("PreToolUse");
+        before["tool_use_id"] = json!(call);
+        let mut pre = post(uid, before, false);
+        pre.session_id = session_id.into();
+        daemon.handle_hook(pre).await;
+        let mut request = post(uid, hook("PermissionRequest"), true);
+        request.session_id = session_id.into();
+        let held = Arc::clone(daemon);
+        tokio::spawn(async move { held.handle_hook(request).await });
+        for _ in 0..200 {
+            if daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), call.clone()))
+            {
+                return call;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the held card {call} was never filed");
+    }
+
     async fn tool_call(daemon: &Arc<Daemon>, name: &str, uid: &str, tool_use_id: &str) {
         daemon
             .handle_hook(HookPost {
@@ -16970,6 +17022,39 @@ mod tests {
         capture_daemon_on(shared_store())
     }
 
+    /// Hold every open card of `uid` for the phone, as Claude's waiting hook
+    /// does. A card filed through a hook that does not wait is answered at the
+    /// computer only, and so rings nothing; the tests that use this are about
+    /// what a doorbell for a card says, not how its hook came to be held.
+    async fn hold_open_cards(daemon: &Daemon, uid: &str) {
+        for entry in daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .values_mut()
+            .filter(|entry| entry.session.uid == uid)
+        {
+            entry.card.question_hold = Some(QuestionHold::Held);
+            entry.responder = Some(oneshot::channel().0);
+        }
+    }
+
+    /// A decision the phone can answer, open on another run (`Ledger`) for the
+    /// rest of the test. Filed straight into the daemon's map, so it rings
+    /// nothing itself: a quiet occasion raised after it has a decision to ring
+    /// about, and rings as that decision.
+    async fn open_a_decision(daemon: &Daemon) {
+        let mut card = pending_card("other-run", "Ledger");
+        card.agent = protocol::agent::AgentKind::Codex;
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .insert(("other-run".into(), "r-open".into()), card);
+    }
+
     /// The same, over a store that already exists — so a test can express "ccd
     /// was killed and came back" and watch what the new one rings about.
     fn capture_daemon_on(store: Arc<Store>) -> (Arc<Daemon>, Arc<CaptureSender>) {
@@ -17027,6 +17112,7 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_rings_once_skips_watchers_and_carries_no_agent_text() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
 
         // A phone was watching live: its socket has delivered past anything
         // this test ingests, so the seen-filter must exclude it at dispatch.
@@ -17051,7 +17137,7 @@ mod tests {
         let rings = capture.0.lock().unwrap();
         assert_eq!(rings.len(), 1, "one quiet state, one ring: {rings:?}");
         let (hint, excluded) = &rings[0];
-        assert_eq!(hint.kind.sentence(), "Waiting for your input");
+        assert_eq!(hint.kind.sentence(), "Waiting on an approval");
         assert!(
             !format!("{hint:?}").contains("deploy_key"),
             "nothing the agent wrote may reach the APNs payload"
@@ -17070,6 +17156,7 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_reopens_on_progress_and_on_state_change() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
 
         let wait = || quiet_hook("agent_needs_input", "waiting");
         let done = || quiet_hook("agent_completed", "all done");
@@ -17091,12 +17178,9 @@ mod tests {
         use crate::apns::PushKind;
         assert_eq!(
             rung_after(&capture, 3).await,
-            vec![
-                PushKind::NeedsInput,
-                PushKind::Completed,
-                PushKind::NeedsInput
-            ],
-            "a superseded wait stays silent; every surviving change rings once"
+            vec![PushKind::Approval; 3],
+            "a superseded wait stays silent; every surviving change rings once, \
+             as the decision it rings about"
         );
     }
 
@@ -17131,29 +17215,79 @@ mod tests {
     /// rather than left to an arrangement no test can build.
     #[test]
     fn two_decisions_on_one_run_are_one_agent() {
+        // Held: the phone can answer it through the hook Claude holds.
+        let held = |uid: &str, label: &str| {
+            let mut card = pending_card(uid, label);
+            card.card.question_hold = Some(QuestionHold::Held);
+            card.responder = Some(oneshot::channel().0);
+            card
+        };
         let mut inner = Inner::default();
         for request in ["r-1", "r-2"] {
             inner.pending.insert(
                 (TEST_UID.to_string(), request.to_string()),
-                pending_card(TEST_UID, "Aion"),
+                held(TEST_UID, "Aion"),
             );
         }
+        let waiting = Waiting::of(&inner);
+        assert_eq!(
+            (
+                waiting.decisions,
+                waiting.label.as_deref(),
+                waiting.question
+            ),
+            (2, Some("Aion"), false),
+            "two cards on one run are one agent, named once"
+        );
+
+        // Only the computer can answer a card no hook is held for, so it
+        // neither counts nor names a run.
         inner.pending.insert(
             ("other-run".to_string(), "r-3".to_string()),
             pending_card("other-run", "Ledger"),
         );
-
-        let mut blocked = blocked_runs(&inner);
-        blocked.sort();
+        let waiting = Waiting::of(&inner);
         assert_eq!(
-            blocked,
-            vec![
-                (TEST_UID.to_string(), "Aion".to_string()),
-                ("other-run".to_string(), "Ledger".to_string())
-            ],
-            "two cards on one run are one agent, named once"
+            (waiting.decisions, waiting.label.as_deref()),
+            (2, Some("Aion"))
         );
-        assert!(blocked_runs(&Inner::default()).is_empty());
+
+        // Nor does a card whose call already ran, or one already being answered.
+        let mut ran = held("other-run", "Ledger");
+        ran.tool_ran = true;
+        inner
+            .pending
+            .insert(("other-run".to_string(), "r-4".to_string()), ran);
+        let mut claimed = held("other-run", "Ledger");
+        claimed.claimed = true;
+        inner
+            .pending
+            .insert(("other-run".to_string(), "r-5".to_string()), claimed);
+        assert_eq!(Waiting::of(&inner).decisions, 2);
+
+        // A Codex card is answered through its link, with no hook to hold.
+        let mut codex = pending_card("other-run", "Ledger");
+        codex.agent = protocol::agent::AgentKind::Codex;
+        inner
+            .pending
+            .insert(("other-run".to_string(), "r-6".to_string()), codex);
+        let waiting = Waiting::of(&inner);
+        assert_eq!(
+            (waiting.decisions, waiting.label.as_deref()),
+            (3, None),
+            "two runs hold decisions, so no one of them is named"
+        );
+
+        assert_eq!(Waiting::of(&Inner::default()).decisions, 0);
+
+        // The one decision waiting is a question, and says so.
+        let mut inner = Inner::default();
+        let mut asked = held(TEST_UID, "Aion");
+        asked.question = Some(QuestionState::default());
+        inner
+            .pending
+            .insert((TEST_UID.to_string(), "q".to_string()), asked);
+        assert!(Waiting::of(&inner).question);
     }
 
     /// **A run that moves takes its open cards with it.**
@@ -17182,6 +17316,7 @@ mod tests {
                 holds_approvals: false,
             })
             .await;
+        hold_open_cards(&daemon, TEST_UID).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         capture.0.lock().unwrap().clear();
 
@@ -17251,6 +17386,7 @@ mod tests {
                 holds_approvals: false,
             })
             .await;
+        hold_open_cards(&daemon, TEST_UID).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         capture.0.lock().unwrap().clear();
 
@@ -17381,23 +17517,22 @@ mod tests {
     async fn the_doorbell_that_speaks_for_the_fleet_names_the_blocked_run() {
         let (daemon, capture) = capture_daemon();
         let blocked_uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(blocked_uid.into()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/srv/dev/aion",
-                    "prompt_id": "p-1",
-                    "tool_name": "Bash",
-                    "tool_input": { "command": "echo hi" },
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
+        // `aion`'s decision, held for the phone: its call joined, its hook waiting.
+        let hook = |event: &str| {
+            json!({
+                "hook_event_name": event,
+                "cwd": "/srv/dev/aion",
+                "prompt_id": "p-1",
+                "tool_name": "Bash",
+                "tool_input": { "command": "echo hi" },
             })
-            .await;
+        };
+        let mut before = hook("PreToolUse");
+        before["tool_use_id"] = json!("toolu_aion");
+        daemon.handle_hook(post(blocked_uid, before, false)).await;
+        let held = Arc::clone(&daemon);
+        let request = post(blocked_uid, hook("PermissionRequest"), true);
+        tokio::spawn(async move { held.handle_hook(request).await });
         // Past the decision's own grace, so what follows is counted alone.
         tokio::time::sleep(Duration::from_millis(700)).await;
         capture.0.lock().unwrap().clear();
@@ -17429,20 +17564,16 @@ mod tests {
         );
     }
 
-    /// **A decision the daemon inherited from its own restart still rings.**
+    /// **A card the daemon inherited from its own restart rings no phone.**
     ///
-    /// Cards are durable; the push gate is memory-only by design. So after a
-    /// restart the decision is in the database with its prompt key unclaimed,
-    /// and the `permission_prompt` Claude repeats is the first thing to admit
-    /// it — as a decision, because the card is right there.
-    ///
-    /// The run then does something ordinary: a tool starts. That records
-    /// progress, which is exactly what cancels a *quiet-state* push waiting out
-    /// its grace. A decision is not a quiet state. If progress cancels it, the
-    /// reader is never told about a card that is still on their screen and
-    /// still on the agent's.
+    /// Cards are durable; the hook Claude held for one is not, so after a
+    /// restart the card is open with no hook behind it and only the computer
+    /// can answer it. The `permission_prompt` Claude repeats admits it as a
+    /// decision, and the run then does something ordinary — a tool starts —
+    /// but whatever happens, a doorbell for it would open onto a card the phone
+    /// cannot answer: the restored card the owner's phone was rung onto.
     #[tokio::test]
-    async fn a_decision_recovered_from_a_restart_survives_the_run_moving() {
+    async fn a_card_recovered_from_a_restart_rings_no_phone() {
         let store = shared_store();
         let before = daemon_on(Arc::clone(&store), Config::default());
         raise_prompt(&before, TEST_UID, "p-open", "echo hi").await;
@@ -17494,11 +17625,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
-        let kinds: Vec<_> = rings.iter().map(|(h, _)| h.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![crate::apns::PushKind::Approval],
-            "a card that is still open still rings, whatever else the run does: {rings:?}"
+        assert!(
+            rings.is_empty(),
+            "only the computer can answer a recovered card: {rings:?}"
         );
     }
 
@@ -17512,8 +17641,8 @@ mod tests {
     #[tokio::test]
     async fn the_badge_counts_the_decisions_waiting_across_runs() {
         let (daemon, capture) = capture_daemon();
-        raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a", "echo a").await;
-        raise_prompt_in(
+        raise_held_prompt_in(&daemon, "cc-1", TEST_UID, "p-a", "echo a").await;
+        raise_held_prompt_in(
             &daemon,
             "cc-2",
             "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
@@ -17541,9 +17670,9 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_counts_every_decision_waiting() {
         let (daemon, capture) = capture_daemon();
-        raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a1", "echo a1").await;
-        raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a2", "echo a2").await;
-        raise_prompt_in(
+        raise_held_prompt_in(&daemon, "cc-1", TEST_UID, "p-a1", "echo a1").await;
+        raise_held_prompt_in(&daemon, "cc-1", TEST_UID, "p-a2", "echo a2").await;
+        raise_held_prompt_in(
             &daemon,
             "cc-2",
             "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
@@ -17595,7 +17724,7 @@ mod tests {
             })
             .await;
         // The structured request for that same prompt, arriving afterwards.
-        raise_prompt(&daemon, TEST_UID, "p-late", "echo hi").await;
+        raise_held_prompt(&daemon, TEST_UID, "p-late", "echo hi").await;
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
@@ -17615,7 +17744,7 @@ mod tests {
     #[tokio::test]
     async fn a_notice_for_a_decision_that_already_rang_is_silent() {
         let (daemon, capture) = capture_daemon();
-        raise_prompt(&daemon, TEST_UID, "p-done", "echo hi").await;
+        raise_held_prompt(&daemon, TEST_UID, "p-done", "echo hi").await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(capture.0.lock().unwrap().len(), 1, "the decision rang");
 
@@ -17648,13 +17777,12 @@ mod tests {
         );
     }
 
-    /// **`Approval` has to mean there is a card to answer.** A
-    /// `permission_prompt` whose `PermissionRequest` never arrived is a notice
-    /// that Claude Code is asking, with nothing in the decision list behind it —
-    /// the phone even has a word for that state. Tagging it `Approval` would
-    /// send a tap to an empty, unactionable list.
+    /// **A notice with no card behind it rings nothing.** A `permission_prompt`
+    /// whose `PermissionRequest` never arrived is Claude Code asking at the
+    /// computer, with nothing the phone can answer — the shape the owner's phone
+    /// was rung with, opening onto nothing.
     #[tokio::test]
-    async fn a_permission_notice_with_no_card_behind_it_does_not_ring_as_a_decision() {
+    async fn a_permission_notice_with_no_card_behind_it_does_not_ring() {
         let (daemon, capture) = capture_daemon();
         daemon
             .handle_hook(HookPost {
@@ -17676,12 +17804,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
-        assert_eq!(rings.len(), 1, "it still rings: {rings:?}");
-        assert_eq!(
-            rings[0].0.kind,
-            crate::apns::PushKind::NeedsInput,
-            "a human is waited on, but there is no card to open"
-        );
+        assert!(rings.is_empty(), "nothing the phone can answer: {rings:?}");
     }
 
     /// A run deleted while a push waits out its dispatch grace must stay
@@ -17740,12 +17863,7 @@ mod tests {
     #[tokio::test]
     async fn a_push_admitted_for_a_run_that_is_already_gone_never_rings() {
         let (daemon, capture) = capture_daemon();
-        let hint = |uid: &str| PushHint {
-            project_label: "Aion".into(),
-            kind: crate::apns::PushKind::NeedsInput,
-            decisions: 1,
-            session_uid: uid.into(),
-        };
+        open_a_decision(&daemon).await;
 
         // Nothing has ever filed a row under this uid, which is the state a
         // deleted run leaves behind.
@@ -17753,7 +17871,7 @@ mod tests {
             .push_gate
             .admit_ambient(TEST_UID, crate::push_gate::Ambient::Waiting)
             .expect("a fresh run admits");
-        daemon.dispatch_push(TEST_UID.into(), 1, hint(TEST_UID), ticket, true, None);
+        daemon.dispatch_push(TEST_UID.into(), 1, ticket, true, None);
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert!(
             capture.0.lock().unwrap().is_empty(),
@@ -17777,14 +17895,7 @@ mod tests {
             .push_gate
             .admit_ambient(&row.session_uid, crate::push_gate::Ambient::Waiting)
             .expect("a new class is news");
-        daemon.dispatch_push(
-            row.session_uid.clone(),
-            1,
-            hint(&row.session_uid),
-            ticket,
-            true,
-            None,
-        );
+        daemon.dispatch_push(row.session_uid.clone(), 1, ticket, true, None);
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
@@ -17801,8 +17912,8 @@ mod tests {
     async fn an_approval_rings_once_and_its_notification_twin_never_does() {
         let (daemon, capture) = capture_daemon();
 
-        raise_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // rings
-                                                                  // Claude's own notification about the same prompt, moments later.
+        raise_held_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // rings
+                                                                       // Claude's own notification about the same prompt, moments later.
         daemon
             .handle_hook(HookPost {
                 session_id: "cc-1".into(),
@@ -17820,12 +17931,12 @@ mod tests {
                 holds_approvals: false,
             })
             .await; // the twin: silent
-        raise_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // replay: silent
-                                                                  // Past the first ring's dispatch grace, so this is a second decision
-                                                                  // announced in its own right rather than one that supersedes a card
-                                                                  // nobody was told about — which is the test below.
+        raise_held_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // replay: silent
+                                                                       // Past the first ring's dispatch grace, so this is a second decision
+                                                                       // announced in its own right rather than one that supersedes a card
+                                                                       // nobody was told about — which is the test below.
         tokio::time::sleep(Duration::from_millis(700)).await;
-        raise_prompt(&daemon, TEST_UID, "p-2", "echo two").await; // new decision: rings
+        raise_held_prompt(&daemon, TEST_UID, "p-2", "echo two").await; // new decision: rings
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
@@ -17912,7 +18023,7 @@ mod tests {
                 None
             }
             Ring::ClaudeApproval => {
-                raise_prompt(daemon, TEST_UID, "p-1", "echo one").await;
+                raise_held_prompt(daemon, TEST_UID, "p-1", "echo one").await;
                 None
             }
             Ring::ClaudeQuestion => Some(raise_question(daemon, TEST_UID, None, true).await),
@@ -17974,21 +18085,38 @@ mod tests {
     /// **The phone rings only once the owner has left the Mac.** Every ring, on
     /// both agents, raised while someone is at the Mac waits — no ring after its
     /// dispatch grace — and rings once, as what it is, as soon as the Mac has
-    /// had no keyboard or mouse input for two minutes.
+    /// had no keyboard or mouse input for two minutes. A Claude approval or
+    /// question and a Codex approval ring as themselves; a quiet occasion rings
+    /// only with a decision open elsewhere, and then as that decision.
     #[tokio::test]
     async fn every_ring_waits_while_someone_is_at_the_mac_and_rings_once_they_have_left() {
         use crate::apns::PushKind;
-        for (ring, kind) in [
-            (Ring::ClaudeQuiet("agent_completed"), PushKind::Completed),
-            (Ring::ClaudeQuiet("idle_prompt"), PushKind::Idle),
-            (Ring::ClaudeQuiet("agent_needs_input"), PushKind::NeedsInput),
-            (Ring::ClaudeQuiet("permission_prompt"), PushKind::NeedsInput),
-            (Ring::ClaudeApproval, PushKind::Approval),
-            (Ring::ClaudeQuestion, PushKind::Question),
-            (Ring::CodexApproval, PushKind::Approval),
-            (Ring::CodexCompleted, PushKind::Completed),
+        for (ring, kind, decision_elsewhere) in [
+            (
+                Ring::ClaudeQuiet("agent_completed"),
+                PushKind::Approval,
+                true,
+            ),
+            (Ring::ClaudeQuiet("idle_prompt"), PushKind::Approval, true),
+            (
+                Ring::ClaudeQuiet("agent_needs_input"),
+                PushKind::Approval,
+                true,
+            ),
+            (
+                Ring::ClaudeQuiet("permission_prompt"),
+                PushKind::Approval,
+                true,
+            ),
+            (Ring::ClaudeApproval, PushKind::Approval, false),
+            (Ring::ClaudeQuestion, PushKind::Question, false),
+            (Ring::CodexApproval, PushKind::Approval, false),
+            (Ring::CodexCompleted, PushKind::Approval, true),
         ] {
             let (daemon, capture) = capture_daemon();
+            if decision_elsewhere {
+                open_a_decision(&daemon).await;
+            }
             crate::presence::set_idle(Some(Duration::ZERO));
             let _open = raise_ring(&daemon, ring).await;
             tokio::time::sleep(Duration::from_millis(700)).await;
@@ -17999,6 +18127,59 @@ mod tests {
                 rung_after(&capture, 1).await,
                 vec![kind],
                 "{ring:?} once the Mac was left"
+            );
+        }
+    }
+
+    /// **A doorbell rings only for a decision the phone can answer.** The
+    /// owner's phone was rung by runs going idle or finishing, and by permission
+    /// notices with no card behind them, and every such tap opened onto nothing
+    /// to answer. Each quiet occasion, raised the way its agent raises it, rings
+    /// nothing while nothing the phone can answer is open — nor while the only
+    /// open card is one the computer alone can answer, no hook being held for
+    /// it. With a decision the phone can answer open, it rings, and is about
+    /// that decision: often the first the owner hears of a card whose own
+    /// doorbell was held while he was at the computer.
+    #[tokio::test]
+    async fn a_quiet_occasion_rings_only_for_a_decision_the_phone_can_answer() {
+        for ring in [
+            Ring::ClaudeQuiet("idle_prompt"),
+            Ring::ClaudeQuiet("agent_needs_input"),
+            Ring::ClaudeQuiet("agent_completed"),
+            Ring::ClaudeQuiet("permission_prompt"),
+            Ring::CodexCompleted,
+        ] {
+            let (daemon, capture) = capture_daemon();
+            let _open = raise_ring(&daemon, ring).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert_eq!(rung(&capture), vec![], "{ring:?} with nothing open");
+
+            let (daemon, capture) = capture_daemon();
+            daemon.inner.lock().await.pending.insert(
+                ("other-run".into(), "r-at-the-computer".into()),
+                pending_card("other-run", "Ledger"),
+            );
+            let _open = raise_ring(&daemon, ring).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert_eq!(
+                rung(&capture),
+                vec![],
+                "{ring:?} with only a card the computer alone can answer"
+            );
+
+            let (daemon, capture) = capture_daemon();
+            open_a_decision(&daemon).await;
+            let _open = raise_ring(&daemon, ring).await;
+            assert_eq!(
+                rung_after(&capture, 1).await,
+                vec![crate::apns::PushKind::Approval],
+                "{ring:?} with a decision the phone can answer open"
+            );
+            let doorbell = newest_doorbell(&capture);
+            assert_eq!(
+                (doorbell.decisions, doorbell.project_label.as_str()),
+                (1, "Ledger"),
+                "{ring:?} rings about the decision, named by its own run"
             );
         }
     }
@@ -18134,6 +18315,7 @@ mod tests {
 
         // The run moves on while its doorbell waits: dropped.
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(AWAY));
         let stalled = daemon.ring_order.lock().await;
         daemon
@@ -18156,6 +18338,7 @@ mod tests {
 
         // The owner comes back while it waits: held, then rung once they leave.
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(AWAY));
         let stalled = daemon.ring_order.lock().await;
         daemon
@@ -18169,7 +18352,7 @@ mod tests {
         crate::presence::set_idle(Some(AWAY));
         assert_eq!(
             rung_after(&capture, 1).await,
-            vec![PushKind::Completed],
+            vec![PushKind::Approval],
             "and it rings once they have left again"
         );
     }
@@ -18178,13 +18361,13 @@ mod tests {
     ///
     /// Every doorbell shares one collapse slot and a device's queue keeps the one
     /// that arrives last, so arrival order has to be the order the counts were
-    /// taken in. Here a finished turn is counted (0 decisions) and its sender then
-    /// stalls before enqueueing; meanwhile another run raises a decision, counted
-    /// as 1. Released, the stale "finished, 0" must not end up as the phone's
-    /// newest notification.
+    /// taken in. Here a finished turn is counted with one decision open elsewhere
+    /// and its sender then stalls before enqueueing; meanwhile another run raises
+    /// a decision, counted as 2. Released, the stale count of 1 must not end up
+    /// as the phone's newest notification.
     ///
     /// **Mutation:** take the ordering lock out of the dispatch and the stalled
-    /// `Completed, 0` lands last.
+    /// `Approval, 1` lands last.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_earlier_count_never_lands_after_a_later_one() {
         use crate::apns::PushKind;
@@ -18213,7 +18396,9 @@ mod tests {
         );
         crate::presence::set_idle(Some(AWAY));
 
-        // Run A's turn ends with nothing waiting; its send stalls after the count.
+        // Run A's turn ends with one decision waiting elsewhere; its send stalls
+        // after the count.
+        open_a_decision(&daemon).await;
         daemon
             .handle_hook(quiet_hook("agent_completed", "done"))
             .await;
@@ -18241,8 +18426,8 @@ mod tests {
             .collect();
         assert_eq!(
             rung.last(),
-            Some(&(PushKind::Approval, 1)),
-            "the newest doorbell must say the decision waits, with a badge of 1: {rung:?}"
+            Some(&(PushKind::Approval, 2)),
+            "the newest doorbell must count both decisions, with a badge of 2: {rung:?}"
         );
     }
 
@@ -18281,16 +18466,22 @@ mod tests {
     }
 
     /// **A direction override in a run's directory reaches the alert title as a
-    /// replacement character.** The title of a direct APNs alert is the run's
-    /// project label, drawn by the lock screen as it arrives.
+    /// replacement character.** The title of a direct APNs alert is the project
+    /// label of the run holding the decision, drawn by the lock screen as it
+    /// arrives.
     #[tokio::test]
     async fn a_direction_override_in_a_cwd_reaches_the_alert_title_replaced() {
         let (daemon, capture) = capture_daemon();
         crate::presence::set_idle(Some(AWAY));
-        let mut hook = quiet_hook("agent_completed", "done");
-        hook.payload["cwd"] = json!("/work/abc\u{202E}gpj.exe");
-        daemon.handle_hook(hook).await;
-        assert_eq!(rung_after(&capture, 1).await.len(), 1, "the turn end rang");
+        let cwd = json!("/work/abc\u{202E}gpj.exe");
+        let request = json!({
+            "hook_event_name": "PermissionRequest", "cwd": cwd, "prompt_id": "p-1",
+            "tool_name": "Bash", "tool_input": { "command": "echo hi" },
+        });
+        daemon.handle_hook(post(TEST_UID, request, false)).await;
+        // Held inside the card's own dispatch grace, so its doorbell rings.
+        hold_open_cards(&daemon, TEST_UID).await;
+        assert_eq!(rung_after(&capture, 1).await.len(), 1, "the decision rang");
         let title = crate::apns::alert(&newest_doorbell(&capture)).0;
         assert_eq!(title, "abc\u{FFFD}gpj.exe");
     }
@@ -18299,6 +18490,7 @@ mod tests {
     #[tokio::test]
     async fn a_ring_waits_for_two_full_minutes_without_input() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(AWAY - Duration::from_millis(1)));
         daemon
             .handle_hook(quiet_hook("agent_completed", "done"))
@@ -18309,7 +18501,7 @@ mod tests {
         crate::presence::set_idle(Some(AWAY));
         assert_eq!(
             rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Completed]
+            vec![crate::apns::PushKind::Approval]
         );
     }
 
@@ -18319,6 +18511,7 @@ mod tests {
     #[tokio::test]
     async fn a_phone_that_saw_the_fact_while_its_ring_was_held_is_not_rung() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(Duration::ZERO));
         daemon
             .handle_hook(quiet_hook("agent_needs_input", "waiting"))
@@ -18693,6 +18886,7 @@ mod tests {
     #[tokio::test]
     async fn a_runs_newer_quiet_state_retires_its_older_one() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(Duration::ZERO));
         daemon
             .handle_hook(quiet_hook("agent_completed", "done"))
@@ -18705,7 +18899,7 @@ mod tests {
         crate::presence::set_idle(Some(AWAY));
         assert_eq!(
             rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Idle]
+            vec![crate::apns::PushKind::Approval]
         );
     }
 
@@ -19087,6 +19281,7 @@ mod tests {
     #[tokio::test]
     async fn a_ring_a_prompt_ended_lets_the_next_wait_ring() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(Duration::ZERO));
         daemon
             .handle_hook(quiet_hook("idle_prompt", "waiting"))
@@ -19100,7 +19295,7 @@ mod tests {
         crate::presence::set_idle(Some(AWAY));
         assert_eq!(
             rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Idle]
+            vec![crate::apns::PushKind::Approval]
         );
     }
 
@@ -19114,6 +19309,7 @@ mod tests {
             ("idle_prompt", "idle_prompt"),
         ] {
             let (daemon, capture) = capture_daemon();
+            open_a_decision(&daemon).await;
             daemon.handle_hook(quiet_hook(first, "x")).await;
             assert_eq!(
                 rung_after(&capture, 1).await.len(),
@@ -19220,6 +19416,8 @@ mod tests {
             };
 
             let (daemon, capture) = capture_daemon();
+
+            open_a_decision(&daemon).await;
             crate::presence::set_idle(Some(Duration::ZERO));
             tool_call(&daemon, "cc-1", TEST_UID, "toolu_first").await;
             transcript_line(&daemon, &prompt).await;
@@ -19230,7 +19428,7 @@ mod tests {
             transcript_line(&daemon, &next).await;
             crate::presence::set_idle(Some(AWAY));
             let held = if again {
-                vec![PushKind::Completed]
+                vec![PushKind::Approval]
             } else {
                 vec![]
             };
@@ -19241,6 +19439,8 @@ mod tests {
             );
 
             let (daemon, capture) = capture_daemon();
+
+            open_a_decision(&daemon).await;
             crate::presence::set_idle(Some(AWAY));
             tool_call(&daemon, "cc-1", TEST_UID, "toolu_first").await;
             transcript_line(&daemon, &prompt).await;
@@ -19249,7 +19449,7 @@ mod tests {
                 .await;
             assert_eq!(
                 rung_after(&capture, 1).await,
-                vec![PushKind::Idle],
+                vec![PushKind::Approval],
                 "the premise"
             );
             transcript_line(&daemon, &next).await;
@@ -19296,6 +19496,7 @@ mod tests {
             ("a background agent's", sidechain),
         ] {
             let (daemon, capture) = capture_daemon();
+            open_a_decision(&daemon).await;
             crate::presence::set_idle(Some(Duration::ZERO));
             daemon
                 .handle_hook(quiet_hook("agent_completed", "done"))
@@ -19305,7 +19506,7 @@ mod tests {
             crate::presence::set_idle(Some(AWAY));
             assert_eq!(
                 rung_after(&capture, 1).await,
-                vec![crate::apns::PushKind::Completed],
+                vec![crate::apns::PushKind::Approval],
                 "{case}"
             );
         }
@@ -22883,6 +23084,7 @@ mod tests {
     #[tokio::test]
     async fn a_codex_turn_complete_rings_once_per_turn() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
             &daemon,
             None,
@@ -22896,7 +23098,7 @@ mod tests {
         {
             let rings = capture.0.lock().unwrap();
             assert_eq!(rings.len(), 1, "one finished turn, one ring: {rings:?}");
-            assert_eq!(rings[0].0.kind, crate::apns::PushKind::Completed);
+            assert_eq!(rings[0].0.kind, crate::apns::PushKind::Approval);
             assert_eq!(rings[0].0.session_uid, uid, "about the run that finished");
         }
 
@@ -22922,7 +23124,8 @@ mod tests {
     /// rings rather than the moment it was admitted, and the price of that is
     /// exactly this: a turn superseded before its push left the building does not
     /// ring, and the reader is told the later, truer thing once. The alternative —
-    /// two "Finished a turn" banners 300 ms apart — is one fact said twice.
+    /// two banners 300 ms apart about the same open decisions — is one fact said
+    /// twice.
     ///
     /// Asserted for both agents in one test because the claim is *parity*: Claude
     /// coalesces here by the same mechanism (its `Stop` hook records the progress
@@ -22932,6 +23135,7 @@ mod tests {
     #[tokio::test]
     async fn two_turns_inside_one_dispatch_grace_ring_once_on_both_paths() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
             &daemon,
             None,
@@ -22954,6 +23158,7 @@ mod tests {
         // The Claude control, through the real hook path: `Stop` then the
         // notification, twice, 100 ms apart — the shape the wire actually produces.
         let (claude, claude_capture) = capture_daemon();
+        open_a_decision(&claude).await;
         let stop = || HookPost {
             session_id: "cc-1".into(),
             session_uid: Some(TEST_UID.into()),
@@ -22994,6 +23199,7 @@ mod tests {
     #[tokio::test]
     async fn a_turn_starting_inside_the_grace_cancels_the_last_turns_doorbell() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
             &daemon,
             None,
