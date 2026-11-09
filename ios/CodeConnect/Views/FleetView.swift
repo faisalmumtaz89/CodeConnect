@@ -1047,7 +1047,7 @@ struct FleetView: View {
             // measured at the send stub.
             stopOffered: owner.stopUnavailable(for: key) == nil,
             stopBlockedReason: stopBlockedReason(for: row),
-            stop: owner.codexControls(for: key).stop)
+            stop: owner.codexStop(for: key))
     }
 
     /// One row, and the actions it is handed. Each action is built from what
@@ -1098,8 +1098,8 @@ struct FleetView: View {
     ///     which always names which condition failed — is what the operator
     ///     reads. Greying on a link state the summary reports but cannot act on
     ///     would hide the button on the one signal that is genuinely informative.
-    ///   * **Not the daemon's sentence.** It is already drawn, verbatim, in the
-    ///     banner directly beneath this row. Handed to the button as well it
+    ///   * **Not the daemon's sentence.** It is shown verbatim behind the
+    ///     outcome's word, a tap away. Handed to the button as well it
     ///     rendered as a twelve-line orange column half the row wide, pushing the
     ///     activity line down and printing the same refusal twice — "two
     ///     identical warnings side by side read as two problems", which is the
@@ -1892,17 +1892,13 @@ struct FleetRowCell: View, Equatable {
         lhs.content == rhs.content
     }
 
-    /// The row, and whatever the daemon last said about a stop on it.
-    ///
-    /// **Directly under the row that produced it**, rather than in a screen-wide
-    /// banner slot: on a fleet of two dozen runs, "Nothing was sent" floating at
-    /// the top of the list is a sentence about a row the reader has to go and
-    /// find. The outcome belongs where the tap was.
+    /// The row, and whatever was last said about a stop on it, in the Stop
+    /// control's own place (see `FleetRowView.stopControl`): on a fleet of two
+    /// dozen runs, "Nothing was sent" in a screen-wide slot is a sentence about
+    /// a row the reader has to go and find. The outcome belongs where the tap
+    /// was.
     var body: some View {
-        VStack(spacing: 0) {
-            row
-            stopOutcome
-        }
+        row
     }
 
     /// The row, wrapped in its removal gesture.
@@ -1936,6 +1932,7 @@ struct FleetRowCell: View, Equatable {
                 onStop: content.stopOffered ? onStop : nil,
                 stopBlockedReason: content.stopBlockedReason,
                 stopping: content.stop == .inFlight,
+                stopOutcome: stopOutcome,
                 selection: content.selection,
                 action: onTap)
         }
@@ -1955,40 +1952,52 @@ struct FleetRowCell: View, Equatable {
         }
     }
 
-    @ViewBuilder
-    private var stopOutcome: some View {
+    /// What was last said about a stop on this run, for the Stop control's
+    /// own place.
+    private var stopOutcome: StopOutcome? {
         switch content.stop {
+        // **The daemon's sentence, verbatim.** Its refusals were written to be
+        // shown, and each names which condition failed.
         case .settled(let result):
             let banner = CodexProse.interrupt(result)
-            CCBanner(
-                banner.title,
-                // **The daemon's sentence, verbatim.** Every one of the eleven
-                // refusals names which condition failed and what to do instead;
-                // they were written to be shown.
-                message: banner.message,
-                tone: banner.tone.ccTone, icon: banner.icon)
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.sm)
+            return StopOutcome(
+                word: Self.word(for: result), title: banner.title, message: banner.message, icon: banner.icon,
+                tone: banner.tone.ccTone)
+        // The app's own words, never dressed as the daemon's: nothing was
+        // sent, so the daemon has said nothing about it.
         case .notSent(let reason):
-            // The app's own words, never dressed as the daemon's: nothing was
-            // sent, so the daemon has said nothing about it.
-            CCBanner(
-                "Nothing was sent", message: reason, tone: .warning,
-                icon: "warning-fill")
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.sm)
+            return StopOutcome(
+                word: "Not sent", title: "Nothing was sent", message: reason, icon: "warning-fill", tone: .warning)
+        // **Not "nothing was sent".** The frame left; what became of it is the
+        // thing nobody knows.
         case .sentNoAnswer(let reason):
-            // **Not "nothing was sent".** The frame left; what became of it is
-            // the thing nobody knows.
-            CCBanner(
-                "Sent, no answer heard", message: reason, tone: .warning,
-                icon: "question")
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.sm)
+            return StopOutcome(
+                word: "No answer", title: "Sent, no answer heard", message: reason, icon: "question", tone: .warning)
         case .idle, .inFlight:
-            EmptyView()
+            return nil
         }
     }
+
+    /// The outcome in a word, for the control's own width; its title and
+    /// sentence are a tap away.
+    private static func word(for result: InterruptResult) -> String {
+        switch result {
+        case .aborted, .duplicate: return "Stopped"
+        case .rejected: return "Refused"
+        case .indeterminate: return "No answer"
+        case .unknown: return "Unclear"
+        }
+    }
+}
+
+/// A stop's outcome as the Stop control shows it: a word on the control, its
+/// title and sentence a tap away.
+struct StopOutcome {
+    let word: String
+    let title: String
+    let message: String
+    let icon: String
+    let tone: CCTone
 }
 
 struct FleetRowView: View {
@@ -2026,6 +2035,9 @@ struct FleetRowView: View {
     var stopBlockedReason: String?
     /// True from the tap until the daemon answers.
     var stopping: Bool = false
+    /// What was last said about a stop on this run, shown in the Stop
+    /// control's place.
+    var stopOutcome: StopOutcome?
     /// Whether this row is chosen, while ended rows are being chosen to remove;
     /// nil otherwise. The checkmark takes the status dot's place.
     var selection: Bool?
@@ -2053,6 +2065,7 @@ struct FleetRowView: View {
     /// an hour, because that is when its string stops being true.
     ///
     @State private var lastTick = Date()
+    @State private var showsStopOutcome = false
 
     /// The clock this row renders with.
     ///
@@ -2339,18 +2352,72 @@ struct FleetRowView: View {
     /// where the daemon's own sentence has just said to try again shortly — and
     /// there the reason is drawn, never merely hinted.
     ///
+    /// **What became of a stop takes the control's place**, as a word, with its
+    /// title and sentence a tap away. On a line of its own under the run, a late
+    /// answer and the refusal's ten seconds ending moved every card below with
+    /// no touch. While the turn still runs, Stop is offered again beside the
+    /// sentence, greyed with its reason for the refusal's window.
+    ///
     /// In a project card a Codex run keeps the control's height while it has
     /// nothing to stop, so a turn starting or ending moves nothing below it.
     @ViewBuilder
     private var stopControl: some View {
-        if let onStop {
+        if let stopOutcome {
+            // The word alone: its icon and tone are in the sheet.
+            CCButton(stopOutcome.word, variant: .secondary, size: .sm) {
+                showsStopOutcome = true
+            }
+            // Never cut: the activity beside it gives way.
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityIdentifier("stop-outcome-\(row.summary.sessionKey)")
+            .accessibilityLabel("\(stopOutcome.title). \(stopOutcome.message)")
+            .accessibilityHint("Shows what was said about the stop")
+            .layoutPriority(1)
+            .sheet(isPresented: $showsStopOutcome) {
+                CCSheetChrome("Stop", onClose: { showsStopOutcome = false }) {
+                    // Scrolled, and resizable to a sheet's full height: at the
+                    // largest sizes the sentence and Stop below it do not fit
+                    // half the screen.
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: CC.space.md) {
+                            CCBanner(
+                                stopOutcome.title, message: stopOutcome.message, tone: stopOutcome.tone,
+                                icon: stopOutcome.icon)
+                            if let onStop {
+                                CCButton(
+                                    "Stop", icon: "stop-fill", variant: .secondary,
+                                    disabledReason: CCDisabledReason(stopBlockedReason)
+                                ) {
+                                    showsStopOutcome = false
+                                    onStop()
+                                }
+                                .accessibilityIdentifier("stop-again-\(row.summary.sessionKey)")
+                                .accessibilityLabel("Stop the turn \(placeName) is running")
+                            }
+                        }
+                        .padding(CC.space.md)
+                    }
+                }
+                .ccResizableSheet()
+            }
+        } else if onStop != nil, let stopBlockedReason {
+            // Greyed for the refusal's bounded window, its reason on the
+            // control itself rather than on a line of its own.
+            CCButton(stopBlockedReason, variant: .secondary, size: .sm) {}
+                .lineLimit(1)
+                .disabled(true)
+                .accessibilityIdentifier("stop-\(row.summary.sessionKey)")
+                .accessibilityLabel("Stop the turn \(placeName) is running")
+                .accessibilityHint(stopBlockedReason)
+                .layoutPriority(1)
+        } else if let onStop {
             CCButton(
                 stopping ? "Stopping…" : "Stop",
                 icon: stopping ? nil : "stop-fill",
                 variant: .secondary,
                 size: .sm,
                 isLoading: stopping,
-                disabledReason: CCDisabledReason(stopBlockedReason),
                 action: onStop
             )
             .accessibilityIdentifier("stop-\(row.summary.sessionKey)")

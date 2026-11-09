@@ -220,7 +220,7 @@ public enum CodexProse {
         case .aborted:
             return Banner(
                 title: "Stopped",
-                message: "The turn reached its aborted boundary.",
+                message: "Codex stopped the turn.",
                 icon: "stop-circle-fill", tone: .success)
         case .duplicate:
             return Banner(

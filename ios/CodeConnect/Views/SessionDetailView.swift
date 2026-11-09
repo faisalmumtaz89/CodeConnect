@@ -1409,7 +1409,7 @@ struct SessionDetailView: View {
     }
 
     private var isStopping: Bool {
-        if case .inFlight = model.codexControls(for: key).stop { return true }
+        if case .inFlight = model.codexStop(for: key) { return true }
         return false
     }
 
@@ -2437,16 +2437,16 @@ private struct SessionComposeBar: View {
         // A Codex outcome outranks the Claude ladder below, because on a Codex
         // session the ladder's vocabulary — "typed into the session", "the
         // composer did not come back" — describes machinery that is not there.
-        if summary?.isCodex == true, case .settled(let result) = codexControls?.stop {
+        if summary?.isCodex == true, case .settled(let result) = codexStop {
             // **One outcome slot, both mutations.** The stop's result used to
             // live under the header's Stop button; at AX5 that made the header
             // tall enough to push the pending card's own controls off screen.
             // It belongs here, where the compose result already goes and where
             // the reader is looking after they act.
             codexStopNote(result)
-        } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.stop {
+        } else if summary?.isCodex == true, case .notSent(let reason) = codexStop {
             ComposeNote(text: reason, tone: .warning, glyph: "warning-circle-fill")
-        } else if summary?.isCodex == true, case .sentNoAnswer(let reason) = codexControls?.stop {
+        } else if summary?.isCodex == true, case .sentNoAnswer(let reason) = codexStop {
             ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
         } else if summary?.isCodex == true, case .settled(let result) = codexControls?.compose {
             codexComposeNote(result)
@@ -2474,6 +2474,13 @@ private struct SessionComposeBar: View {
     private var codexControls: CodexControls? {
         guard let key = summary?.sessionKey else { return nil }
         return model.codexControls(for: key)
+    }
+
+    /// The last stop's outcome while it answers the turn running now: the
+    /// fleet row's rule, so a turn started since is not handed an old answer.
+    private var codexStop: CodexControls.Activity<InterruptResult>? {
+        guard let key = summary?.sessionKey else { return nil }
+        return model.codexStop(for: key)
     }
 
     /// What became of a Codex message, in Codex's own five arms.

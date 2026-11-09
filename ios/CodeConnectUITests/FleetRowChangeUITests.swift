@@ -61,27 +61,30 @@ final class FleetRowChangeUITests: XCTestCase {
             "fx-5's turn moves it to Running, on its last command: \(row(app, "fx-5").label)")
     }
 
-    /// A refused Stop greys for its cooldown and comes back, on its row, with
-    /// the daemon's sentence beneath it.
-    func testAGreyedStopComesBackOnItsRow() {
+    /// A refused Stop says so in Stop's own place on its row, the daemon's
+    /// sentence a tap away and Stop offered beside it: greyed for the
+    /// refusal's cooldown, saying why, and then back.
+    func testARefusedStopIsOfferedAgainBesideItsSentence() {
         let app = launch(["-CC_CODEX", "stop-refused-late"])
-        let stop = app.buttons["stop-cx-1"]
+        let outcome = app.buttons["stop-outcome-cx-1"]
+        let again = app.buttons["stop-again-cx-1"]
         let reason = app.descendants(matching: .any).matching(
             NSPredicate(format: "label CONTAINS %@", "Try again in a moment")
         ).firstMatch
-        XCTAssertTrue(stop.waitForExistence(timeout: 30), "Stop is offered on the Codex row")
-        XCTAssertTrue(
-            waitUntil(timeout: 15) { !reason.exists }, "the launch's own refusal cools down")
+        XCTAssertTrue(outcome.waitForExistence(timeout: 30), "the launch's refusal is in Stop's place")
+        XCTAssertTrue(outcome.label.contains("lost its control link"), "and speaks the daemon's sentence: \(outcome.label)")
 
-        stop.tap()
-        XCTAssertTrue(
-            reason.waitForExistence(timeout: 10), "the refusal greys Stop and says why, on the row")
-        XCTAssertTrue(
-            app.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS %@", "lost its control link")
-            ).firstMatch.exists,
-            "the daemon's sentence is under the row")
-        XCTAssertTrue(waitUntil(timeout: 15) { !reason.exists }, "and Stop comes back")
+        outcome.tap()
+        XCTAssertTrue(again.waitForExistence(timeout: 10), "Stop is offered beside the sentence")
+        XCTAssertTrue(waitUntil(timeout: 15) { again.isEnabled }, "once the launch's refusal cools down")
+        again.tap()
+
+        XCTAssertTrue(outcome.waitForExistence(timeout: 10), "the new refusal is in Stop's place")
+        outcome.tap()
+        XCTAssertTrue(again.waitForExistence(timeout: 10))
+        XCTAssertFalse(again.isEnabled, "the refusal greys Stop")
+        XCTAssertTrue(reason.exists, "and says why")
+        XCTAssertTrue(waitUntil(timeout: 15) { again.isEnabled }, "and Stop comes back")
     }
 
     /// The link drops and returns: the run's capability is unknown while it is

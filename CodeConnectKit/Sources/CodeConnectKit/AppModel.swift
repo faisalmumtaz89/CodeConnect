@@ -3034,7 +3034,7 @@ public final class AppModel {
         // Agent, daemon capability, running turn and **link state**, in the one
         // place that decides whether a frame may leave.
         if let blocked = stopBlocked(for: key) {
-            controls.stopNotSent(blocked)
+            controls.stopNotSent(blocked, turn: runningTurn(for: key))
             return nil
         }
         guard let turn = runningTurn(for: key) else {
@@ -3045,7 +3045,7 @@ public final class AppModel {
         // next run, so hashing and sending it can aim an abort at a session the
         // reader never saw. There is no safe fallback, so there is none.
         guard let reference = Self.sessionReference(summary) else {
-            controls.stopNotSent(Self.noUidSentence)
+            controls.stopNotSent(Self.noUidSentence, turn: turn)
             return nil
         }
         let hash = CodexHash.interrupt(sessionRef: reference, turnID: turn)
@@ -3055,12 +3055,12 @@ public final class AppModel {
         // issued, and the daemon's own sentence says it will not be sent again.
         // Neither will this.
         guard !controls.stopIsSpent(material: hash) else {
-            controls.stopNotSent(Self.alreadyIssuedSentence(verb: "stop"))
+            controls.stopNotSent(Self.alreadyIssuedSentence(verb: "stop"), turn: turn)
             return nil
         }
         let requestID = controls.stopRequestID(material: hash)
 
-        controls.beginStop()
+        controls.beginStop(turn: turn)
         do {
             let result = try await connection.interrupt(
                 session: reference, requestID: requestID, turnID: turn, payloadHash: hash)
@@ -3069,7 +3069,7 @@ public final class AppModel {
             refreshFleet()
             return result
         } catch let refusal as DaemonConnection.CodexRefusal {
-            controls.stopNotSent(Self.sentence(for: refusal, verb: "stop this turn"))
+            controls.stopNotSent(Self.sentence(for: refusal, verb: "stop this turn"), turn: turn)
             return nil
         } catch ConnectionError.sentButUnanswered {
             // The frame left. Saying "nothing was sent" here would be the app
@@ -3077,9 +3077,16 @@ public final class AppModel {
             controls.stopSentNoAnswer(Self.sentNoAnswerSentence(verb: "stop"), material: hash)
             return nil
         } catch {
-            controls.stopNotSent(error.localizedDescription)
+            controls.stopNotSent(error.localizedDescription, turn: turn)
             return nil
         }
+    }
+
+    /// A Codex run's stop as every screen shows it: the last outcome while it
+    /// is about the turn running now (`CodexControls.stop(forRunningTurn:)`),
+    /// read against the same running turn Stop is offered for.
+    public func codexStop(for key: String) -> CodexControls.Activity<InterruptResult> {
+        codexControls(for: key).stop(forRunningTurn: shown(for: key)?.runningTurn)
     }
 
     /// **Say something to this Codex session.**
@@ -3151,7 +3158,7 @@ public final class AppModel {
             + "Check \(HostDevice.current.computer("the computer"))."
     }
 
-    private static func sentNoAnswerSentence(verb: String) -> String {
+    static func sentNoAnswerSentence(verb: String) -> String {
         "This left the \(HostDevice.current.noun) and \(HostDevice.current.computer("the computer")) never answered, so what became of it is not known; "
             + "it will not be \(verb) again. Check \(HostDevice.current.computer("the computer"))."
     }
