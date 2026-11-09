@@ -26,13 +26,13 @@ final class AgentSeamRenderingTests: XCTestCase {
     // MARK: An unknown applied-path never claims a real actuation
 
     /// The trap this guards against: an `AnswerPath.unknown` used to render as
-    /// "returned to the hook" — a positive claim about how the answer landed that
+    /// "handed straight to Claude" — a positive claim about how the answer landed that
     /// this build cannot vouch for. It must now read as unrecognised, never as a
     /// hook return or a keystroke.
     func testUnknownAppliedViaMakesNoPositiveActuationClaim() {
         let phrase = ResolutionBanner.actuationPhrase(for: .unknown("future_path"))
-        XCTAssertNotEqual(phrase, "returned to the hook", "unknown must not claim a hook return")
-        XCTAssertNotEqual(phrase, "typed at the TTY", "unknown must not claim keystrokes")
+        XCTAssertNotEqual(phrase, "handed straight to Claude", "unknown must not claim a hook return")
+        XCTAssertNotEqual(phrase, "typed into the session on your computer", "unknown must not claim keystrokes")
         XCTAssertTrue(
             phrase.contains("recognise"),
             "an unknown path is described as unrecognised, got: \(phrase)")
@@ -40,14 +40,15 @@ final class AgentSeamRenderingTests: XCTestCase {
         // And through the full provenance line an applied outcome would render.
         let provenance = ResolutionBanner.provenance(for: .applied(outcome(appliedVia: .unknown("future_path"))))
         XCTAssertNotNil(provenance)
-        XCTAssertFalse(provenance!.contains("returned to the hook"), provenance!)
-        XCTAssertFalse(provenance!.contains("typed at the TTY"), provenance!)
+        XCTAssertFalse(provenance!.contains("handed straight to Claude"), provenance!)
+        XCTAssertFalse(provenance!.contains("typed into the session on your computer"), provenance!)
     }
 
-    /// The two known paths keep their exact, unchanged copy.
+    /// The three known paths keep their exact copy.
     func testKnownAppliedViaKeepTheirExactCopy() {
-        XCTAssertEqual(ResolutionBanner.actuationPhrase(for: .sendKeys), "typed at the TTY")
-        XCTAssertEqual(ResolutionBanner.actuationPhrase(for: .hookReturn), "returned to the hook")
+        XCTAssertEqual(ResolutionBanner.actuationPhrase(for: .sendKeys), "typed into the session on your computer")
+        XCTAssertEqual(ResolutionBanner.actuationPhrase(for: .hookReturn), "handed straight to Claude")
+        XCTAssertEqual(ResolutionBanner.actuationPhrase(for: .codexResponse), "sent straight to Codex")
     }
 
     // MARK: An indeterminate outcome renders as indeterminate, never confirmed
@@ -83,12 +84,12 @@ final class AgentSeamRenderingTests: XCTestCase {
 
     /// An `.indeterminate` provenance must never reuse the actuation phrase —
     /// even when the outcome's `appliedVia` is `.sendKeys`, it cannot say "typed
-    /// at the TTY", because that is the very landing the daemon could not confirm.
+    /// into the session on your computer", because that is the very landing the daemon could not confirm.
     func testIndeterminateProvenanceMakesNoPositiveActuationClaim() throws {
         let attempt = AnswerAttempt.indeterminate(outcome(appliedVia: .sendKeys, indeterminate: true))
         let provenance = try XCTUnwrap(ResolutionBanner.provenance(for: attempt))
-        XCTAssertFalse(provenance.contains("typed at the TTY"), provenance)
-        XCTAssertFalse(provenance.contains("returned to the hook"), provenance)
+        XCTAssertFalse(provenance.contains("typed into the session on your computer"), provenance)
+        XCTAssertFalse(provenance.contains("handed straight to Claude"), provenance)
         XCTAssertTrue(provenance.contains("never confirmed"), provenance)
     }
 
