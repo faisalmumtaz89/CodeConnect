@@ -145,13 +145,28 @@ final class LaunchSettleTests: XCTestCase {
     /// until its subscription has decided what to keep.
     func testAReconnectStartsTheCatchUpOver() async {
         let model = connectedModel()
+        // A run is subscribed once its cache read has decided what history to
+        // keep, so the subscription is the sign that the read is over.
+        var subscribed: [String] = []
+        model.connection.sendStub = { message in
+            if case .subscribe(let session, _) = message { subscribed.append(session) }
+        }
+        // Each link comes up as the product's does, with a handshake: the first
+        // opens the launch's catch-up, and the reconnect has to start it over.
+        let handshake = frame(
+            #"{"type":"hello_ack","protocol_version":1,"protocol_minor":6,"capabilities":{}}"#)
+        model.connection.injectForTesting(handshake)
         model.connection.injectForTesting(sessions([(uidA, 3), (uidB, 3)]))
-        await settle(model)
+        for _ in 0..<200 where Set(subscribed) != [uidA, uidB] {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(Set(subscribed), [uidA, uidB], "both runs are prepared on the first link")
         for seq in 1...3 { model.connection.injectForTesting(event(uidA, seq: seq)) }
-        await settle(model)
         XCTAssertFalse(model.launchSettled, "B is behind")
 
-        model.connection.onConnected?()
+        // The handshake moves the link on first, so anything still under way
+        // for the old link stands down rather than counting against the new list.
+        model.connection.injectForTesting(handshake)
         // The Mac's log for A was reset, and B has gone.
         model.connection.injectForTesting(sessions([(uidA, 2)]))
         for _ in 0..<200 where model.statesForTesting[uidA]?.lastSeq != 0 {
