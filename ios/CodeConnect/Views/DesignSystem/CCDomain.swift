@@ -315,12 +315,13 @@ extension LinkHealth {
                     icon: "plugs", actionTitle: "Retry", action: onRetry)
             }
         case .stale:
+            // No Retry: a quiet link is cut and dialled again on its own after
+            // half a second at most, and a retry only cuts that wait short.
             return CCBannerItem(
                 .stale, title: "Link stale",
                 message:
                     "\(ageText) since your computer last answered. Actions are disabled until it answers.",
-                tone: .danger, icon: "warning-fill",
-                actionTitle: "Retry", action: onRetry)
+                tone: .danger, icon: "warning-fill")
         case .connecting:
             // Only after 2s of connecting — a banner that flashes on
             // every reconnect is noise. The caller owns that delay.

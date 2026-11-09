@@ -56,7 +56,7 @@ final class UnknownComputerTests: XCTestCase {
         XCTAssertFalse(reason.contains("too old"), reason)
     }
 
-    private let link = "Could not connect to the server. Retrying automatically."
+    private let link = "Can't reach your computer. Retrying automatically."
 
     private func heldQuestion() throws -> (ApprovalItem, QuestionCard) {
         let url = try XCTUnwrap(

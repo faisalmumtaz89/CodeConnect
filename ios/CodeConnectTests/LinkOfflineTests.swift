@@ -61,22 +61,61 @@ final class LinkOfflineTests: XCTestCase {
             "a per-second countdown re-renders the banner and informs nothing")
     }
 
+    /// The app's own words, never the system's: the phase's reason here is
+    /// URLSession's sentence, and it stays off the screen.
     func testAnOrdinaryFailureAlsoLosesTheCountdown() {
         let health = LinkHealth.evaluate(
-            phase: waiting, lastContactAt: nil,
-            dialFailure: .other(message: "Could not connect to the server"))
-        XCTAssertEqual(health.detail, "Could not connect to the server. Retrying automatically.")
+            phase: waiting, lastContactAt: nil, dialFailure: .unreachable)
+        XCTAssertEqual(health.level, .offline)
+        XCTAssertEqual(health.detail, "Can't reach your computer. Retrying automatically.")
         XCTAssertNil(health.cause)
     }
 
-    /// The system's own messages end in a full stop, as URLSession's
-    /// "Could not connect to the server." does; the sentence after it must not
-    /// double it.
-    func testASystemMessageEndingInAFullStopIsNotDoubled() {
-        let health = LinkHealth.evaluate(
-            phase: waiting, lastContactAt: nil,
-            dialFailure: .other(message: "Could not connect to the server."))
-        XCTAssertEqual(health.detail, "Could not connect to the server. Retrying automatically.")
+    // MARK: A computer that goes quiet
+
+    /// Quiet reads stale from the silence deadline on: while the socket is
+    /// still up, and through the cut and the redial after it. On a real
+    /// computer the cut came 30 to 40 s in, before stale's old 45 s, and the
+    /// banner read the system's text for the cut: "The operation couldn't be
+    /// completed. Socket is not connected. Retrying automatically."
+    func testAQuietComputerReadsStaleFromTheDeadlineThroughTheRedial() {
+        let now = Date()
+        let heard = now.addingTimeInterval(-DaemonConnection.silenceDeadline)
+
+        let connected = LinkHealth.evaluate(
+            phase: .connected(since: heard), lastContactAt: heard, now: now)
+        XCTAssertEqual(connected.level, .stale, "stale at the deadline, before the cut")
+
+        let failure = DaemonConnection.dropped(wasUp: true, lastContactAt: heard, now: now)
+        XCTAssertEqual(failure, .quiet)
+        for phase in [DaemonConnection.Phase.connecting, waiting] {
+            let health = LinkHealth.evaluate(
+                phase: phase, lastContactAt: heard, dialFailure: failure, isRedial: true, now: now)
+            XCTAssertEqual(health.level, .stale, "\(phase)")
+            XCTAssertEqual(health.ageText, "30s", "the age keeps counting from the last answer")
+            XCTAssertEqual(health.detail, "Your computer has gone quiet. Retrying automatically.")
+            let banner = health.ccBannerItem(onRetry: {}, onSettings: {}, onTailscale: {})
+            XCTAssertEqual(banner?.title, "Link stale")
+            XCTAssertNil(banner?.actionTitle, "the app is already dialling again")
+        }
+    }
+
+    /// Only a link that was up and heard nothing for the deadline went quiet.
+    /// A link dropped sooner, and a dial that never got its handshake, could
+    /// not reach the computer.
+    func testOnlyALinkThatWasUpAndSilentWentQuiet() {
+        let now = Date()
+        let deadline = DaemonConnection.silenceDeadline
+        XCTAssertEqual(
+            DaemonConnection.dropped(
+                wasUp: true, lastContactAt: now.addingTimeInterval(-(deadline - 1)), now: now),
+            .unreachable)
+        XCTAssertEqual(
+            DaemonConnection.dropped(
+                wasUp: false, lastContactAt: now.addingTimeInterval(-600), now: now),
+            .unreachable, "a redial that fails is a fresh failure, however long ago the last answer")
+        XCTAssertEqual(
+            DaemonConnection.dropped(wasUp: true, lastContactAt: nil, now: now), .unreachable)
     }
 
     func testARedialKeepsTheFailureOnScreenInsteadOfBlanking() {
@@ -127,7 +166,7 @@ final class LinkOfflineTests: XCTestCase {
     func testAPlainOfflineBannerIsUnchanged() {
         let health = LinkHealth.evaluate(
             phase: waiting, lastContactAt: nil,
-            dialFailure: .other(message: "Could not connect to the server"))
+            dialFailure: .unreachable)
         let item = health.ccBannerItem(onRetry: {}, onSettings: {}, onTailscale: {})
         XCTAssertEqual(item?.title, "Offline")
         XCTAssertEqual(item?.actionTitle, "Retry")
@@ -148,6 +187,10 @@ final class LinkOfflineTests: XCTestCase {
             LinkHealth.evaluate(
                 phase: waiting, lastContactAt: nil,
                 dialFailure: .hostUnresolvable(host: "mac.tail1234.ts.net")),
+            LinkHealth.evaluate(phase: waiting, lastContactAt: nil, dialFailure: .unreachable),
+            LinkHealth.evaluate(
+                phase: waiting, lastContactAt: now.addingTimeInterval(-60), dialFailure: .quiet,
+                now: now),
         ]
         for health in healths {
             let banner = health.ccBannerItem(onRetry: {}, onSettings: {}, onTailscale: {})

@@ -1067,8 +1067,8 @@ public final class AppModel {
             // a state nothing can reach is a state nobody has looked at: the
             // accessory bar shipped with its blocked reason cut mid-word at
             // `…but the daem…` and dimmed to 3.16:1, and nothing could render
-            // the frame that showed it. `LinkHealth.staleAfter` is 45s, so the
-            // state arrives on its own about three quarters of a minute in.
+            // the frame that showed it. `LinkHealth.staleAfter` is 30s, so the
+            // state arrives on its own about half a minute in.
             guard UserDefaults.standard.string(forKey: "CC_FIXTURE_LINK") != "stale" else { return }
             Task { [weak self] in
                 while !Task.isCancelled {

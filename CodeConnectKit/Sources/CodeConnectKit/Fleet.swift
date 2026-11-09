@@ -488,7 +488,9 @@ public struct LinkHealth: Sendable, Equatable {
 
     /// Beyond this, a "connected" socket is not evidence of anything.
     private static let lagAfter: TimeInterval = 15
-    private static let staleAfter: TimeInterval = 45
+    /// Quiet for as long as a link is given before it is cut: from here the
+    /// link reads stale, before the cut and through the redial after it.
+    private static let staleAfter = DaemonConnection.silenceDeadline
 
     public var actionsEnabled: Bool { level == .live || level == .lagging }
 
@@ -545,19 +547,29 @@ public struct LinkHealth: Sendable, Equatable {
             ? .tailnetHostUnresolvable(host: host) : .hostUnresolvable(host: host)
     }
 
-    /// The stable sentence for a link that is down and retrying. **No
-    /// countdown**: a per-second number re-renders the banner sixty times a
-    /// minute and informs no decision — the deadline still schedules the
-    /// retry, it just doesn't narrate it.
-    private static func offlineDetail(
-        reason: String, failure: DaemonConnection.DialFailure?
-    ) -> String {
-        if case .hostUnresolvable(let host) = failure {
-            return "`\(host)` is not resolving. Retrying automatically."
+    /// The link while it redials after `failure`, in the app's own stable
+    /// sentence. **No countdown**: a per-second number re-renders the banner
+    /// sixty times a minute and informs no decision — the deadline still
+    /// schedules the retry, it just doesn't narrate it. A computer that only
+    /// went quiet reads stale, its age still counting, until a dial fails.
+    private static func redialing(
+        after failure: DaemonConnection.DialFailure, lastContactAt: Date?, now: Date
+    ) -> LinkHealth {
+        let age = lastContactAt.map { now.timeIntervalSince($0) }
+        switch failure {
+        case .quiet:
+            return LinkHealth(
+                level: .stale, age: age,
+                detail: "\(HostDevice.current.computer("Your computer")) has gone quiet. Retrying automatically.")
+        case .hostUnresolvable(let host):
+            return LinkHealth(
+                level: .offline, age: age, detail: "`\(host)` is not resolving. Retrying automatically.",
+                cause: cause(of: failure))
+        case .unreachable:
+            return LinkHealth(
+                level: .offline, age: age,
+                detail: "Can't reach \(HostDevice.current.computer("your computer")). Retrying automatically.")
         }
-        // The system's own messages already end in a full stop.
-        let sentence = reason.hasSuffix(".") ? String(reason.dropLast()) : reason
-        return "\(sentence). Retrying automatically."
     }
 
     static func evaluate(
@@ -577,23 +589,15 @@ public struct LinkHealth: Sendable, Equatable {
             // display until the handshake disproves it; only the launch dial —
             // no failure yet — reads as "connecting".
             if isRedial, let dialFailure {
-                return LinkHealth(
-                    level: .offline,
-                    age: lastContactAt.map { now.timeIntervalSince($0) },
-                    detail: offlineDetail(
-                        reason: reasonText(of: dialFailure), failure: dialFailure),
-                    cause: cause(of: dialFailure))
+                return redialing(after: dialFailure, lastContactAt: lastContactAt, now: now)
             }
             return LinkHealth(level: .connecting, age: nil, detail: "Opening the connection.")
         case .failed(let reason):
             return LinkHealth(level: .rejected, age: nil, detail: reason)
-        case .waiting(_, let reason):
-            return LinkHealth(
-                level: .offline,
-                age: lastContactAt.map { now.timeIntervalSince($0) },
-                detail: offlineDetail(
-                    reason: dialFailure.map(reasonText(of:)) ?? reason, failure: dialFailure),
-                cause: cause(of: dialFailure))
+        case .waiting:
+            // `supervise` records a failure before every wait.
+            return redialing(
+                after: dialFailure ?? .unreachable, lastContactAt: lastContactAt, now: now)
         case .connected:
             guard let lastContactAt else {
                 return LinkHealth(
@@ -609,13 +613,6 @@ public struct LinkHealth: Sendable, Equatable {
                 return LinkHealth(level: .lagging, age: age, detail: "Link lagging.")
             }
             return LinkHealth(level: .live, age: age, detail: "Live.")
-        }
-    }
-
-    private static func reasonText(of failure: DaemonConnection.DialFailure) -> String {
-        switch failure {
-        case .hostUnresolvable(let host): return "`\(host)` is not resolving"
-        case .other(let message): return message
         }
     }
 }
