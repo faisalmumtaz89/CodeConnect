@@ -63,9 +63,9 @@ final class DiffTruncationUITests: XCTestCase {
         let app = launch()
         try openDiff(app)
 
-        // The daemon's cap, in the daemon's terms, above the fold.
+        // The cut, in plain words, above the fold.
         let banner = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS '512KB cap'")
+            NSPredicate(format: "label CONTAINS 'Cut short by your computer. This is not the whole diff.'")
         ).firstMatch
         XCTAssertTrue(
             banner.waitForExistence(timeout: 20),
@@ -132,7 +132,7 @@ final class DiffTruncationUITests: XCTestCase {
         try openDiff(app)
 
         let banner = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS '512KB cap'")
+            NSPredicate(format: "label CONTAINS 'Cut short by your computer. This is not the whole diff.'")
         ).firstMatch
         XCTAssertTrue(banner.waitForExistence(timeout: 25))
         attach(app, "truncated-diff-ax5")
