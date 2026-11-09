@@ -131,18 +131,18 @@ struct ResolutionBanner: View {
         }
     }
 
-    /// How an answer was *applied*, in the daemon's terms — never a claim this
+    /// How an answer was *applied*, in plain words — never a claim this
     /// build cannot support. An `AnswerPath.unknown` is a path this build has
     /// never heard of, so it is described as unrecognised rather than asserted
     /// to be keystrokes or a hook return we cannot vouch for.
     static func actuationPhrase(for path: AnswerPath) -> String {
         switch path {
-        case .sendKeys: return "typed at the TTY"
-        case .hookReturn: return "returned to the hook"
+        case .sendKeys: return "typed into the session on your computer"
+        case .hookReturn: return "handed straight to Claude"
         // A real actuation, and it reads like one. Codex asked, over its own
         // control link, and this is the answer written back to that request —
         // no keyboard, no pane, nothing inferred from a prompt disappearing.
-        case .codexResponse: return "answered on the Codex link"
+        case .codexResponse: return "sent straight to Codex"
         case .unknown: return "applied in a way this app doesn’t recognise"
         }
     }
@@ -152,8 +152,8 @@ struct ResolutionBanner: View {
         case .applied(let outcome):
             return [actuationPhrase(for: outcome.appliedVia), outcome.detail]
                 .compactMap { $0 }.joined(separator: " · ")
-        // Never the `actuationPhrase` — that would claim the answer was "typed at
-        // the TTY" or "returned to the hook", the exact positive actuation the
+        // Never the `actuationPhrase` — that would claim the answer was "typed into
+        // the session on your computer" or "handed straight to Claude", the exact positive actuation the
         // daemon could not confirm. The provenance states the uncertainty instead.
         case .indeterminate(let outcome) where outcome.wasSentToClaude:
             return "Claude takes the first answer, the computer’s or this one, so whether it used this one is not known."
