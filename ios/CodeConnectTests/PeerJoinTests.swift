@@ -1,4 +1,5 @@
 import Network
+import os
 import XCTest
 
 @testable import CodeConnect
@@ -25,9 +26,30 @@ final class PeerJoinTests: XCTestCase {
         connection.stop()
     }
 
-    /// Blocked, then allowed again: the computer lets the device in by its
-    /// Tailscale identity, and the token it answers with replaces the dead one.
-    func testADeviceAllowedAgainIsBackWithItsNewToken() async throws {
+    /// Blocked, then allowed again: refused by its token and then without one,
+    /// the device keeps its token, so the next try (a return to the app, or
+    /// Retry) asks with it, and the computer that restored its pairing lets it
+    /// in as it was.
+    func testABlockedDeviceAllowedAgainIsBackWithItsOwnToken() async throws {
+        let blocked = OSAllocatedUnfairLock(initialState: true)
+        let daemon = try StubDaemon { credential in
+            credential == "token kept" && !blocked.withLock { $0 }
+                ? .admit(token: "kept", machineID: "daemon-1") : .refuse
+        }
+        let connection = DaemonConnection()
+        connection.start(
+            endpoint: DaemonEndpoint(host: "127.0.0.1", port: daemon.port, credential: .token("kept"), useTLS: false))
+        try await until { if case .failed = connection.phase { true } else { false } }
+        blocked.withLock { $0 = false }
+        connection.retryNow()
+        try await until { connection.phase.isConnected }
+        XCTAssertEqual(daemon.hellos, ["token kept", "none", "token kept"])
+        connection.stop()
+    }
+
+    /// A token the computer no longer knows: the computer lets the device in by
+    /// its Tailscale identity, and the token it answers with replaces the dead one.
+    func testAnUnknownTokenIsReplacedThroughTailscale() async throws {
         let daemon = try StubDaemon { $0 == "none" ? .admit(token: "fresh", machineID: "daemon-1") : .refuse }
         let pairing = PairingStore(ephemeral: true)
         pairing.save(
