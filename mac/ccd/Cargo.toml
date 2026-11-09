@@ -36,7 +36,9 @@ libc = { workspace = true }
 unicode-general-category = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+# `test-util` for the paused clock a test runs on when its timing must not depend on how
+# busy the machine is.
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 # TEST-ONLY. The tests drive the broker's own relay and read its constants (the frame
 # tee's variable, the head notice, the refusal causes) rather than restating them.
 codex-broker = { path = "../codex-broker" }
