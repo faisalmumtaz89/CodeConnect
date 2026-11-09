@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A model set with /model reaches the phone by its name
+
+- Claude Code 2.1.319 writes the model `/model` set in backticks (`` `Opus 5.5` ``). The computer
+  now reads the name out of them, as the phone does, so the model it sends the phone for a session
+  is the plain name.
+
 ## A Codex start that fails says why
 
 - When a Codex session failed while it was starting, `codeconnect codex` could say "tmux reading the
