@@ -153,6 +153,7 @@ For ordinary relay notifications:
 - `interruption-level` remains `time-sensitive`.
 - `codeconnect.kind` remains one of `approval`, `input`, `done`, or `idle`; a question is routed as `approval`.
 - The doorbell DTO's `kind` is one of `approval`, `question`, `input`, `done`, or `idle`. A relay that does not know `question` refuses it as `malformed`, and the daemon then sends the same doorbell as `approval`.
+- From 0.17.3 the daemon rings only while a decision the phone can answer is waiting, so it sends only `approval` and `question`. The relay keeps `input`, `done` and `idle` for daemons before it.
 - Sound and fixed ordinary/test collapse IDs remain.
 - Test notifications retain the existing fixed test copy and `codeconnect_test` marker.
 

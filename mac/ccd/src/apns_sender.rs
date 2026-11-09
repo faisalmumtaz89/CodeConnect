@@ -112,9 +112,9 @@ impl ApnsPushSender {
     /// **No routing, session, request or device identifier.** Not a uid, not a
     /// request id, not a token — nothing that could be reversed into a command
     /// or left pointing at a decision somebody has since answered. The kind is a
-    /// closed set of four words and is stable for the life of the notification,
-    /// which is why a tap can act on it: only an approval has a card in the
-    /// phone's decision list, so only an approval opens it.
+    /// closed set — `approval`, the only word this daemon sends, since it rings
+    /// only for a decision — and is stable for the life of the notification,
+    /// which is why a tap can act on it: it opens the phone's decision list.
     fn payload(hint: &PushHint) -> String {
         let (title, body) = alert(hint);
         serde_json::json!({
@@ -1487,12 +1487,12 @@ mod tests {
                 .set_push_token(device, &format!("tok-{device}"), "production", None)
                 .unwrap();
         }
-        let turn_end = PushHint {
-            kind: crate::apns::PushKind::Completed,
-            ..hint(0)
+        let question = PushHint {
+            kind: crate::apns::PushKind::Question,
+            ..hint(1)
         };
 
-        for (what, doorbell) in [("an approval", hint(1)), ("a finished turn", turn_end)] {
+        for (what, doorbell) in [("an approval", hint(1)), ("a question", question)] {
             let sender =
                 ApnsPushSender::without_a_network(Arc::new(StoreRegistry::new(Arc::clone(&store))));
             sender.send(&doorbell, &[]);

@@ -16538,25 +16538,21 @@ mod tests {
 
     // ------------------------------------------------------- the doorbell
 
-    /// **Only a turn this link WATCHED finish rings a phone.**
+    /// **A finished turn rings no phone while nothing the phone can answer is
+    /// open**, however the link learned of it.
     ///
-    /// The two scripts are the same turn reaching the store two different ways, which
-    /// is what makes this a controlled pair rather than two separate assertions:
+    /// The scripts are the same turn reaching the store different ways:
     ///
     ///   * `MidTurnThenCompleted` seeds the turn **running** — a running turn
     ///     contributes no terminal — and then replays the rest of it live, so the
-    ///     `turn/completed` the link records is one it observed arrive. News, and it
-    ///     rings.
+    ///     `turn/completed` the link records is one it observed arrive. An occasion
+    ///     to ring, and with no decision open, a doorbell that would open onto
+    ///     nothing to answer.
     ///   * `PopulatedNoReplay` answers with the turn already **finished** and then
     ///     stays silent. The identical fact, under the identical key, recovered
-    ///     rather than witnessed. Whatever it was, it was over before this daemon
-    ///     was listening, and a doorbell for it would be a doorbell about the past.
-    ///
-    /// Nothing about the two *facts* differs — that identity is what makes recovery
-    /// dedup-safe, and is asserted in `codex_adapter`'s own suite — so this is
-    /// necessarily a test about which call site produced it.
+    ///     rather than witnessed, and never an occasion at all.
     #[tokio::test(flavor = "multi_thread")]
-    async fn only_a_turn_this_link_watched_finish_rings_a_phone() {
+    async fn a_finished_turn_rings_no_phone_while_no_decision_is_open() {
         let (_, _, _, _, _, watched) = drive_watching_presence(
             ResumeAnswer::MidTurnThenCompleted,
             Some(LIFECYCLE_THREAD),
@@ -16564,11 +16560,9 @@ mod tests {
             Duration::from_secs(4),
         )
         .await;
-        let watched = watched.expect("a turn observed finishing live is news worth ringing about");
         assert_eq!(
-            watched.kind,
-            crate::apns::PushKind::Completed,
-            "the doorbell says a turn finished and nothing else: {watched:?}"
+            watched, None,
+            "a turn observed finishing with no decision open must not ring: {watched:?}"
         );
 
         let (events, _, _, _, _, recovered) = drive_watching_presence(

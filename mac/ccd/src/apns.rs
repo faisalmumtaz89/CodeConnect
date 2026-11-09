@@ -1,11 +1,17 @@
 //! Push, behind a trait so the daemon runs without an Apple key.
 //!
-//! Push is a **doorbell, not a data channel**: it names the project a run is in
-//! and why it rang — coarse facts, deliberately — and nothing an agent wrote,
-//! ran, or changed. The phone reconnects and asks the event log what is true. APNs stores exactly one offline notification per bundle id, so the
-//! sender coalesces to an aggregate body and the durable event log stays
+//! Push is a **doorbell, not a data channel**: it names the project a decision
+//! is in and that one is waiting — coarse facts, deliberately — and nothing an
+//! agent wrote, ran, or changed. The phone reconnects and asks the event log
+//! what is true. APNs stores exactly one offline notification per bundle id, so
+//! the sender coalesces to an aggregate body and the durable event log stays
 //! authoritative. The phone reconciles on foreground via `subscribe(after_seq)`;
 //! a dropped push costs a delay, never a fact.
+//!
+//! **It rings only for a decision the phone can answer** — an approval or a
+//! question card, Claude's or Codex's — open at the moment it rings. A run
+//! that is idle, finished or waiting at its own keyboard is no doorbell's
+//! subject: a tap on one would open onto nothing to answer.
 
 use std::sync::Mutex;
 
@@ -22,10 +28,9 @@ pub struct PushHint {
     /// Which sentence to use. The daemon never passes a sentence; it passes
     /// the *kind*, and the words live with the composer.
     pub kind: PushKind,
-    /// How many *decisions* are waiting — every pending approval and question,
-    /// of every agent's runs: the number the app's fleet shows as "N waiting for
-    /// you", so the lock screen and the app never give one sentence two numbers.
-    /// A run merely waiting for input is not among them.
+    /// How many *decisions* the phone can answer are waiting — every open
+    /// approval and question of every agent's runs that an answer from the
+    /// phone can reach. A card only the computer can answer is not among them.
     pub decisions: usize,
     /// Which run rang, for the log only. **Never serialised into a payload**: a
     /// ULID's leading bits are the run's start time, and a notification that
@@ -34,79 +39,55 @@ pub struct PushHint {
 }
 
 impl PushHint {
-    /// The doorbell as it should read at the moment it rings.
+    /// The doorbell for the decisions open at the moment it rings, whichever
+    /// event rang it.
     ///
-    /// **One slot, so it has to describe the fleet and not just the event that
-    /// rang.** A phone holds one CodeConnect notification and a later one
-    /// replaces it, so a run finishing a turn would otherwise overwrite an
-    /// outstanding decision — and a tap on that lands on the fleet, because
-    /// only an approval opens the decision list. While any run is holding a
-    /// decision the doorbell is about decisions; only when none is does the
-    /// event that rang get to speak for itself.
+    /// **It must not name the wrong run.** A doorbell rung by `Ledger` going
+    /// idle while `Aion` holds the decision is about `Aion`. So the title
+    /// follows the subject — the one blocked run when exactly one run holds
+    /// decisions, however many it holds (`blocked_label`, which the caller
+    /// gives only then), and nobody in particular when several runs do, where
+    /// the body is a count rather than a claim about any single project.
     ///
-    /// **And it must not name the wrong run.** A doorbell that speaks for the
-    /// fleet is no longer about the run that triggered it: saying `Ledger` over
-    /// `Waiting on an approval` when the decision belongs to `Aion` sends a
-    /// reader looking in the wrong place. So the title follows the subject —
-    /// the one blocked run when exactly one run holds decisions, however many
-    /// it holds (`blocked_label`, which the caller gives only then), and nobody
-    /// in particular when several runs do, where the body is a count rather
-    /// than a claim about any single project.
-    ///
-    /// The count is read at ring time rather than at admission for the same
-    /// reason: a number taken before the dispatch grace can describe a fleet
-    /// that has since answered everything.
-    pub fn describing(&self, decisions: usize, blocked_label: Option<String>) -> PushHint {
+    /// `question` says the one decision waiting is a question, which keeps its
+    /// own words; beside other decisions it is counted with them.
+    pub fn for_decisions(
+        session_uid: String,
+        decisions: usize,
+        blocked_label: Option<String>,
+        question: bool,
+    ) -> PushHint {
         PushHint {
-            // The question's own ring keeps its words while it is the one
-            // decision waiting.
-            kind: match (decisions, self.kind) {
-                (0, kind) | (1, kind @ PushKind::Question) => kind,
-                _ => PushKind::Approval,
+            kind: if decisions == 1 && question {
+                PushKind::Question
+            } else {
+                PushKind::Approval
             },
             decisions,
-            // With several runs blocked the caller gives no label: a title
-            // naming one of them would be picking a favourite.
-            project_label: match decisions {
-                0 => self.project_label.clone(),
-                _ => blocked_label.unwrap_or_default(),
-            },
-            session_uid: self.session_uid.clone(),
+            project_label: blocked_label.unwrap_or_default(),
+            session_uid,
         }
     }
 }
 
-/// Why the doorbell rang. One of these, never the agent's own words.
+/// What the doorbell is about. One of these, never the agent's own words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushKind {
     Approval,
     /// Claude's `AskUserQuestion`: a decision too, answered on the same card list.
     Question,
-    NeedsInput,
-    Completed,
-    Idle,
 }
 
 impl PushKind {
     /// The stable, machine-readable form, for deciding where a tap lands.
     ///
-    /// **Coarse metadata, not a duplicate.** Under coalescing the body becomes
-    /// `{n} waiting for you`, so this is not always visible in the alert — it is
-    /// one of four words describing why the doorbell rang, and it is deliberate
-    /// additional information. What it is *not* is an identifier: it names no
-    /// session, no decision and no device, and two notifications carrying the
-    /// same word say nothing about whether they concern the same run.
-    ///
-    /// It is here because only an approval has a card in the phone's decision
-    /// list. `Finished a turn` has none and never will, so a tap that always
-    /// opened that list would reliably open an empty one — a wrong answer rather
-    /// than a stale one.
+    /// **Coarse metadata, not an identifier**: it names no session, no decision
+    /// and no device. Every doorbell is about decisions, so every one opens the
+    /// phone's decision list. An app that still knows the other words an older
+    /// computer sent (`input`, `done`, `idle`) opens its fleet for those.
     pub fn tag(self) -> &'static str {
         match self {
             PushKind::Approval | PushKind::Question => "approval",
-            PushKind::NeedsInput => "input",
-            PushKind::Completed => "done",
-            PushKind::Idle => "idle",
         }
     }
 
@@ -116,13 +97,7 @@ impl PushKind {
     /// what the compiler forces you to update, and this is what a reviewer has
     /// to notice. Kept next to it so noticing is easy.
     #[cfg(test)]
-    pub const ALL: &'static [PushKind] = &[
-        PushKind::Approval,
-        PushKind::Question,
-        PushKind::NeedsInput,
-        PushKind::Completed,
-        PushKind::Idle,
-    ];
+    pub const ALL: &'static [PushKind] = &[PushKind::Approval, PushKind::Question];
 
     /// The whole vocabulary of a notification body, as a closed set.
     ///
@@ -132,9 +107,6 @@ impl PushKind {
         match self {
             PushKind::Approval => "Waiting on an approval",
             PushKind::Question => "Asking you a question",
-            PushKind::NeedsInput => "Waiting for your input",
-            PushKind::Completed => "Finished a turn",
-            PushKind::Idle => "Waiting for you",
         }
     }
 }
@@ -484,10 +456,6 @@ mod tests {
             alert(&hint(1)),
             ("Aion".into(), "Waiting on an approval".into())
         );
-        assert_eq!(
-            alert(&hint(0)),
-            ("Aion".into(), "Waiting on an approval".into())
-        );
     }
 
     #[test]
@@ -495,81 +463,38 @@ mod tests {
         assert_eq!(alert(&hint(3)).1, "3 waiting for you");
     }
 
-    /// **A doorbell never announces the lesser fact while a decision waits.**
-    ///
-    /// One slot means the last push replaces the rest, so a completion landing
-    /// while an approval is outstanding would take the decision's place and
-    /// send a tap to the fleet. Whatever rang, the doorbell says decisions
-    /// while there are decisions.
-    #[test]
-    fn a_doorbell_speaks_for_the_fleet_while_any_decision_waits() {
-        for &rang in PushKind::ALL {
-            let quiet = hint(0);
-            assert_eq!(
-                quiet.describing(0, None).kind,
-                quiet.kind,
-                "with nothing waiting, the event that rang speaks for itself"
-            );
-
-            let mut ambient = hint(0);
-            ambient.kind = rang;
-            assert_eq!(alert(&ambient.describing(3, None)).1, "3 waiting for you");
-            if rang == PushKind::Question {
-                continue;
-            }
-            assert_eq!(
-                ambient.describing(1, Some("Aion".into())).kind,
-                PushKind::Approval,
-                "{rang:?} must not replace an outstanding decision with a dead end"
-            );
-            assert_eq!(
-                alert(&ambient.describing(1, Some("Aion".into()))).1,
-                "Waiting on an approval"
-            );
-        }
-    }
-
     /// A question ringing as the one decision waiting says it is a question;
     /// beside other decisions it is counted with them.
     #[test]
     fn a_question_rings_as_a_question() {
-        let mut asked = hint(0);
-        asked.kind = PushKind::Question;
-        let one = asked.describing(1, Some("Aion".into()));
+        let one = PushHint::for_decisions("run".into(), 1, Some("Aion".into()), true);
         assert_eq!(alert(&one).1, "Asking you a question");
         assert_eq!(one.kind.tag(), "approval", "it opens the decision list");
-        assert_eq!(asked.describing(2, None).kind, PushKind::Approval);
+        assert_eq!(
+            PushHint::for_decisions("run".into(), 2, None, true).kind,
+            PushKind::Approval
+        );
     }
 
-    /// **A doorbell that speaks for the fleet must not name the wrong run.**
-    ///
-    /// `Ledger` finishing a turn while `Aion` holds a decision produces an
-    /// approval doorbell — and titling it `Ledger` sends the reader to the
-    /// wrong project to look for a card that is not there.
+    /// **A doorbell names the run its decision is in**, whichever run rang it:
+    /// `Ledger` going idle while `Aion` holds the decision is about `Aion`.
     #[test]
     fn a_doorbell_names_the_run_it_is_actually_about() {
-        let mut ledger = hint(0);
-        ledger.project_label = "Ledger".into();
-        ledger.kind = PushKind::Completed;
-
-        let speaking = ledger.describing(1, Some("Aion".into()));
         assert_eq!(
-            alert(&speaking),
+            alert(&PushHint::for_decisions(
+                "ledger".into(),
+                1,
+                Some("Aion".into()),
+                false
+            )),
             ("Aion".into(), "Waiting on an approval".into()),
             "the decision's project, not the one that happened to ring"
         );
-
         // Several blocked runs: the body is a count, so the title claims
         // nothing about any one of them.
         assert_eq!(
-            alert(&ledger.describing(3, None)),
+            alert(&PushHint::for_decisions("ledger".into(), 3, None, false)),
             ("CodeConnect".into(), "3 waiting for you".into())
-        );
-
-        // Nothing blocked: the run that rang is the subject, and keeps its name.
-        assert_eq!(
-            alert(&ledger.describing(0, None)),
-            ("Ledger".into(), "Finished a turn".into())
         );
     }
 
@@ -581,18 +506,14 @@ mod tests {
         assert_eq!(alert(&unnamed).0, "CodeConnect");
     }
 
-    /// **The literals, independently.** The payload matrix builds both sides
+    /// **The literal, independently.** The payload matrix builds both sides
     /// from `tag()`, so renaming `"approval"` to `"approve"` would leave every
-    /// Rust and Swift test green while every approval tap landed on the fleet.
-    /// These are the four words the phone matches on; they are a wire contract,
-    /// not an implementation detail.
+    /// Rust and Swift test green while every tap landed on the fleet. It is the
+    /// word the phone matches on: a wire contract, not an implementation detail.
     #[test]
     fn the_routing_tags_are_pinned_literals() {
         assert_eq!(PushKind::Approval.tag(), "approval");
         assert_eq!(PushKind::Question.tag(), "approval");
-        assert_eq!(PushKind::NeedsInput.tag(), "input");
-        assert_eq!(PushKind::Completed.tag(), "done");
-        assert_eq!(PushKind::Idle.tag(), "idle");
     }
 
     /// Every sentence a notification can contain, pinned. Widening this set is
@@ -602,13 +523,7 @@ mod tests {
         let sentences: Vec<&str> = PushKind::ALL.iter().map(|k| k.sentence()).collect();
         assert_eq!(
             sentences,
-            vec![
-                "Waiting on an approval",
-                "Asking you a question",
-                "Waiting for your input",
-                "Finished a turn",
-                "Waiting for you",
-            ]
+            vec!["Waiting on an approval", "Asking you a question"]
         );
     }
 
