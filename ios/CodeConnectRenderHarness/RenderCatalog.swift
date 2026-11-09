@@ -1516,6 +1516,22 @@ enum RenderCatalog {
                     driver.element(containing: "try again shortly", in: app),
                     "the daemon's own sentence, unedited")
             }),
+        // **What a refusal said, opened from Stop's place on the row**, with
+        // Stop offered beside it.
+        RenderScenario(
+            name: "codex-stop-refused-late-sheet",
+            purpose: "the stop's outcome opened from its word on the row: the daemon's sentence, whole",
+            arguments: ["-CC_CODEX", "stop-refused-late"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(app.buttons["stop-outcome-\(codexSessionKey)"], "the outcome's word").tap()
+                try driver.require(
+                    driver.text(containing: "try again shortly", in: app), "the daemon's own sentence, unedited")
+                // Stop itself, on screen with nothing over it: while a word
+                // stands in its place on the row, this is the way to stop the
+                // turn.
+                try driver.require(app.buttons["stop-again-\(codexSessionKey)"], "Stop beside the sentence")
+            }),
         // **The session route**, so the session screen's own Stop control is
         // photographed too. The other three S-series scenarios drive the fleet
         // row; this one drives the same mutation from the screen a reader is on

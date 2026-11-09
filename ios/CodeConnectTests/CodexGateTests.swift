@@ -417,6 +417,62 @@ final class CodexGateTests: XCTestCase {
         XCTAssertFalse(controls.isStopGreyed(now: now.addingTimeInterval(1)))
     }
 
+    /// **An outcome belongs to the turn it answered.** Whatever became of the
+    /// last stop, a turn that started since is offered Stop; the turn it was
+    /// aimed at keeps the answer, and so does a session with no turn running.
+    func testAStopsOutcomeBelongsToTheTurnItAnswered() {
+        let outcomes: [(String, (CodexControls) -> Void)] = [
+            ("stopped", { $0.beginStop(turn: "t-1"); $0.settleStop(.aborted(turnID: "t-1"), material: "m1", turnID: "t-1") }),
+            ("already stopped", { $0.beginStop(turn: "t-1"); $0.settleStop(.duplicate(turnID: "t-1"), material: "m2", turnID: "t-1") }),
+            ("refused", { $0.beginStop(turn: "t-1"); $0.settleStop(.rejected(reason: "the computer has lost its control link"), material: "m3", turnID: "t-1") }),
+            ("outcome unknown", { $0.beginStop(turn: "t-1"); $0.settleStop(.indeterminate(reason: "the link's connection to Codex ended"), material: "m4", turnID: "t-1") }),
+            ("unclear", { $0.beginStop(turn: "t-1"); $0.settleStop(.unknown(status: "paused"), material: "m5", turnID: "t-1") }),
+            ("not sent", { $0.stopNotSent("This was already sent and what became of it is not known.", turn: "t-1") }),
+            ("no answer", { $0.beginStop(turn: "t-1"); $0.stopSentNoAnswer("The computer never answered.", material: "m6") }),
+        ]
+        for (name, answer) in outcomes {
+            let controls = CodexControls()
+            answer(controls)
+            XCTAssertNotEqual(controls.stop(forRunningTurn: "t-1"), .idle, "\(name): the turn it answered keeps it")
+            XCTAssertNotEqual(controls.stop(forRunningTurn: nil), .idle, "\(name): with no turn running it stays")
+            XCTAssertEqual(controls.stop(forRunningTurn: "t-2"), .idle, "\(name): a newer turn is offered Stop")
+        }
+        // Refused before any turn could be named: a turn that runs is offered Stop.
+        let early = CodexControls()
+        early.stopNotSent("Nothing is running to stop.")
+        XCTAssertEqual(early.stop(forRunningTurn: "t-1"), .idle)
+        XCTAssertNotEqual(early.stop(forRunningTurn: nil), .idle)
+    }
+
+    /// **A stop the phone refuses answers the turn it was pressed on.** The
+    /// link went down between what the row drew and the tap, so nothing left;
+    /// that "nothing was sent" stands in Stop's place while the turn runs on,
+    /// through the same send path and the same accessor the row reads.
+    func testAStopRefusedOnThePhoneAnswersTheRunningTurn() async throws {
+        let refusal = try XCTUnwrap(CodexLinkState.offline.blockedReason(for: .stop))
+        let model = AppModel(
+            cache: EventCache(),
+            codexSpentLedger: CodexSpentLedger(
+                defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(extra: ["codex_interrupt": .bool(true), "codex_compose": .bool(true)]),
+            minor: 19)
+        // The fixture's frames without its hello: an ack opens a catch-up, and
+        // a catch-up holds the screen this test reads.
+        for frame in CodexFixtures.frames(state: .stopLinkDown) {
+            if case .helloAck = frame { continue }
+            model.connection.injectForTesting(frame)
+        }
+        // What arrived reaches the screen in each run's coalesced rebuild.
+        for state in model.statesForTesting.values { await state.settleForTesting() }
+        let key = CodexFixtures.sessionKey
+        XCTAssertEqual(model.shown(for: key)?.runningTurn, CodexFixtures.turnID, "a turn is running")
+
+        _ = await model.stopCodexTurn(sessionKey: key)
+        XCTAssertEqual(model.codexStop(for: key), .notSent(refusal))
+    }
+
     /// **One slot, one question, no exceptions.**
     ///
     /// `beginStop`/`beginCompose` cleared the other outcome, so a mutation that

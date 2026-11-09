@@ -13,7 +13,8 @@ import XCTest
 /// Every state, crossed: each status (waiting at each risk, on one card and on
 /// two), each capability, what the run last did (a tool and its argument, a
 /// sentence, nothing), off the disk or live, and for Codex the Stop control
-/// absent, offered and in flight; on an iPhone SE's card at the default size
+/// absent, offered, in flight, cooling down and settled with each outcome; on
+/// an iPhone SE's card at the default size
 /// and at the largest reading size. A run's agent is not a state — a run is
 /// Claude Code or Codex for life — so each agent has a height of its own.
 @MainActor
@@ -63,18 +64,69 @@ final class FleetRowHeightTests: XCTestCase {
         (nil, ""),
     ]
 
-    /// How tall the run's line is, drawn as a project card draws it. Stop's
-    /// own outcome, which only the owner's tap brings, is not a state here.
-    private func height(_ row: FleetRow, blocked: BlockedCard?, stop: (offered: Bool, stopping: Bool), type: DynamicTypeSize)
-        -> CGFloat
-    {
+    /// A Codex run's Stop, as a row can draw it: absent, offered, in flight,
+    /// cooling down after a refusal, or settled with each kind of outcome.
+    /// The outcome comes after the owner's tap, but a late answer and the
+    /// cooldown's end come with no touch at all.
+    private struct CodexStop: CustomStringConvertible {
+        let name: String
+        let offered: Bool
+        let blockedReason: String?
+        let activity: CodexControls.Activity<InterruptResult>
+        var description: String { name }
+    }
+
+    /// The daemon's own sentences, from its catalogue
+    /// (`fixtures/codex/refusal-sentences.json`): its link-state refusal, which
+    /// greys Stop for ten seconds, and its longest stop sentence.
+    private let linkRefusal =
+        "the computer has lost its control link to the Codex session and is reconnecting, so nothing was sent; "
+        + "try again shortly, or stop the turn at the computer"
+    private let longestStopSentence =
+        "the link's connection to Codex ended while this request to stop the turn was in flight, and the computer "
+        + "could not record that either, so it cannot say what became of it. Check the computer."
+    /// What the fleet draws for a greyed Stop (`FleetView.stopBlockedReason`).
+    private let coolingDown = "Try again in a moment."
+
+    private var codexStops: [CodexStop] {
+        [
+            CodexStop(name: "absent", offered: false, blockedReason: nil, activity: .idle),
+            CodexStop(name: "offered", offered: true, blockedReason: nil, activity: .idle),
+            CodexStop(name: "stopping", offered: true, blockedReason: nil, activity: .inFlight),
+            CodexStop(name: "cooling down", offered: true, blockedReason: coolingDown, activity: .idle),
+            CodexStop(name: "stopped", offered: false, blockedReason: nil, activity: .settled(.aborted(turnID: "t-1"))),
+            CodexStop(
+                name: "refused", offered: true, blockedReason: nil,
+                activity: .settled(.rejected(reason: longestStopSentence))),
+            CodexStop(
+                name: "refused, cooling down", offered: true, blockedReason: coolingDown,
+                activity: .settled(.rejected(reason: linkRefusal))),
+            CodexStop(
+                name: "already stopped", offered: false, blockedReason: nil,
+                activity: .settled(.duplicate(turnID: "t-1"))),
+            CodexStop(
+                name: "outcome unknown", offered: false, blockedReason: nil,
+                activity: .settled(.indeterminate(reason: longestStopSentence))),
+            CodexStop(
+                name: "unclear", offered: true, blockedReason: nil, activity: .settled(.unknown(status: "paused"))),
+            CodexStop(
+                name: "not sent", offered: true, blockedReason: nil,
+                activity: .notSent(CodexLinkState.offline.blockedReason(for: .stop) ?? "")),
+            CodexStop(
+                name: "no answer", offered: false, blockedReason: nil,
+                activity: .sentNoAnswer(AppModel.sentNoAnswerSentence(verb: "stop"))),
+        ]
+    }
+
+    /// How tall the run's line is, drawn as a project card draws it.
+    private func height(_ row: FleetRow, blocked: BlockedCard?, stop: CodexStop, type: DynamicTypeSize) -> CGFloat {
         // A card's runs answer to `control`, so a run shows its capability when
         // it is settled and cannot act: the card's own rule (`showsCapability`).
         let content = FleetRowCell.Content(
             row: row, waitingSince: Date(timeIntervalSinceNow: -64), blocked: blocked,
             showsCapability: row.capability.isSettled && !row.capability.canAct,
             separator: true, titledByAgent: true, removalOffered: false, selection: nil,
-            stopOffered: stop.offered, stopBlockedReason: nil, stop: stop.stopping ? .inFlight : .idle)
+            stopOffered: stop.offered, stopBlockedReason: stop.blockedReason, stop: stop.activity)
         let view = FleetRowCell(
             content: content, remove: { nil }, confirm: { _ in }, coordinator: CCSwipeCloseCoordinator(),
             onOpenDiff: {}, onMarkReviewed: {}, onStop: {}, onTap: {}
@@ -87,8 +139,7 @@ final class FleetRowHeightTests: XCTestCase {
     func testARunIsAsTallInEveryStateItCanBeIn() throws {
         for type in [DynamicTypeSize.large, .xxxLarge] {
             for agent in ["claude", "codex"] {
-                let stops: [(offered: Bool, stopping: Bool)] =
-                    agent == "codex" ? [(false, false), (true, false), (true, true)] : [(false, false)]
+                let stops = agent == "codex" ? codexStops : [codexStops[0]]
                 var heights: [String: CGFloat] = [:]
                 for state in states {
                     let summary = try summary(agent, ended: state.status == .ended, waiting: state.cards)

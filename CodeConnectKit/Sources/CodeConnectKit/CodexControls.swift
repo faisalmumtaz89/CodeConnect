@@ -58,7 +58,12 @@ public final class CodexControls {
         self.ledger = ledger
     }
 
-    public private(set) var stop: Activity<InterruptResult> = .idle
+    /// Not public: a screen reads `AppModel.codexStop(for:)`, which holds an
+    /// outcome to the turn it answered.
+    private(set) var stop: Activity<InterruptResult> = .idle
+    /// The turn the last stop's outcome answers: the one it was aimed at, or
+    /// nil when no turn was running to aim at.
+    public private(set) var stopTurn: String?
     public private(set) var compose: Activity<ComposeResult> = .idle
 
     /// Until when Stop is greyed after a link-state refusal.
@@ -175,9 +180,21 @@ public final class CodexControls {
     /// followed by a successful message went on showing the stop refusal. There
     /// is one slot because there is one question — *what happened when I just
     /// did that* — and the answer is about the thing that was just done.
-    func beginStop() {
+    func beginStop(turn: String? = nil) {
         stop = .inFlight
+        stopTurn = turn
         compose = .idle
+    }
+
+    /// What became of the last stop, **while it is about the turn running
+    /// now**: an outcome belongs to the turn it answered. A turn that started
+    /// since is offered Stop, whatever the last answer was; with no turn
+    /// running, the last word stays.
+    public func stop(forRunningTurn running: String?) -> Activity<InterruptResult> {
+        switch stop {
+        case .idle, .inFlight: return stop
+        case .settled, .notSent, .sentNoAnswer: return running == nil || running == stopTurn ? stop : .idle
+        }
     }
 
     func beginCompose() {
@@ -199,6 +216,7 @@ public final class CodexControls {
     func settleStop(_ result: InterruptResult, material: String, turnID: String, now: Date = Date())
     {
         stop = .settled(result)
+        stopTurn = turnID
         if case .rejected(let reason) = result, Self.isLinkStateRefusal(reason) {
             stopGreyedUntil = now.addingTimeInterval(Self.refusalCooldown)
         }
@@ -301,8 +319,9 @@ public final class CodexControls {
     /// to write their sentence while the *other* mutation's older banner stayed
     /// on screen above it. One slot, one question, and the answer is always
     /// about the thing that was just attempted.
-    func stopNotSent(_ reason: String) {
+    func stopNotSent(_ reason: String, turn: String? = nil) {
         stop = .notSent(reason)
+        stopTurn = turn
         compose = .idle
     }
 
