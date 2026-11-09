@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Reinstalling the daemon over a running one leaves it running
+
+- `codeconnect daemon install` over a daemon that was already running could leave none: the old
+  one stopped, and launchd turned the new one away because it was still removing the old, so
+  nothing ran again until the next login. The Mac app's first run and its updates install this
+  way. Installing now waits until launchd has let go of the old daemon before it starts the new
+  one.
+
 ## A notification always has something to answer
 
 - Your phone now rings only while an approval or a question is waiting that you can answer from
