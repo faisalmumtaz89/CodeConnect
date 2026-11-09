@@ -228,18 +228,10 @@ fn install(args: &[String]) -> Result<()> {
         }
     }
 
-    // An old job must be booted out before the file under it changes, or
-    // launchd keeps running the previous program.
-    //
-    // And it should be gone before the new one starts: while it still holds
-    // `ccd.lock` the new daemon refuses to start and waits out launchd's
-    // throttle. `bootout` returns before launchd has finished reaping, so the
-    // socket is what gets waited on.
-    if unload_job()? {
-        wait_for_daemon_to_stop(Duration::from_secs(10)).context(format!(
-            "the previous daemon did not release its socket after {UNLOAD}"
-        ))?;
-    }
+    // An old job must be unloaded before the file under it changes, or launchd
+    // keeps running the previous program — and gone before the new one is
+    // loaded; `unload_job` returns only once it is.
+    unload_job()?;
 
     let document = definition_document(&ccd, &path_value());
     write_atomically(&definition, &document)
@@ -684,11 +676,30 @@ fn definition_document(ccd: &Path, path_value: &str) -> String {
     plist_document(ccd, path_value)
 }
 
-/// Unload the job ahead of replacing its definition; whether one was loaded.
+/// Unload the job ahead of replacing its definition, and return once launchd no
+/// longer has it.
+///
+/// `bootout` returns before launchd has removed the job: that waits for the old
+/// daemon to exit, and the daemon drops its socket before it does. A bootstrap
+/// in between is refused ("Operation already in progress"), and when the removal
+/// then completes nothing is loaded at all. So this waits on launchd itself,
+/// which is also after the old daemon has let go of `ccd.lock` and its socket —
+/// and waits even when the bootout failed, since that is also what a job still
+/// being removed answers.
 #[cfg(target_os = "macos")]
-fn unload_job() -> Result<bool> {
-    let booted = launchctl(&["bootout".into(), service_target(user_id()?)])?;
-    Ok(booted.ok)
+fn unload_job() -> Result<()> {
+    let target = service_target(user_id()?);
+    launchctl(&["bootout".into(), target.clone()])?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while job_is_loaded() {
+        if Instant::now() >= deadline {
+            bail!(
+                "launchd still has {target} 10s after {UNLOAD}; check `launchctl print {target}`"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -831,12 +842,19 @@ fn ensure_linger() -> Result<()> {
     Ok(())
 }
 
-/// Stop and disable the unit ahead of replacing it; whether it was running.
+/// Stop and disable the unit ahead of replacing it. `--now` waits for the stop,
+/// and the socket is waited on after it: the new daemon refuses to start while
+/// the old one still holds `ccd.lock`.
 #[cfg(target_os = "linux")]
-fn unload_job() -> Result<bool> {
+fn unload_job() -> Result<()> {
     let was_active = job_is_loaded();
     systemctl(&["disable", "--now", &unit_name()])?;
-    Ok(was_active)
+    if was_active {
+        wait_for_daemon_to_stop(Duration::from_secs(10)).context(format!(
+            "the previous daemon did not release its socket after {UNLOAD}"
+        ))?;
+    }
+    Ok(())
 }
 
 /// Enable and start the unit just written. The logs directory is made first:
@@ -1111,7 +1129,9 @@ fn wait_for_daemon(timeout: Duration) -> Option<DaemonInfo> {
 ///
 /// The inverse of [`wait_for_daemon`], and the more important half: starting a
 /// second daemon while the first is still alive would put two processes on one
-/// SQLite file, and the migration is not a thing to run twice concurrently.
+/// SQLite file, and the migration is not a thing to run twice concurrently. On
+/// macOS launchd is asked instead (`unload_job`).
+#[cfg(target_os = "linux")]
 fn wait_for_daemon_to_stop(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
