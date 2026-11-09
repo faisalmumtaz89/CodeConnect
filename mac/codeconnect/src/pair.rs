@@ -266,7 +266,8 @@ pub fn devices(args: &[String]) -> Result<()> {
         println!();
         println!("  A device revoked above was paired before Tailscale sign-in, so this");
         println!("  computer cannot tell which device to keep out. Until it is unblocked");
-        println!("  (codeconnect unblock <device>), new devices need a code.");
+        println!("  (codeconnect unblock <device>, which lets it back in), new devices need");
+        println!("  a code.");
     }
     Ok(())
 }
