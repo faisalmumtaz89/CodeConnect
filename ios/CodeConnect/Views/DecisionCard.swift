@@ -1131,8 +1131,8 @@ struct DecisionCardView: View {
         // **Above the Claude ladder, below the hash gate.** A Codex resolution
         // is authoritative — the daemon watched the question end — and it is the
         // only thing that can describe a Codex ending at all: the Claude ladder
-        // below would render `.unavailable` ("the run left the daemon's list or
-        // its log was reset"), which is the wrong sentence for a question that
+        // below would render `.unavailable` ("the run is no longer on your
+        // computer, or its log was reset"), which is the wrong sentence for a question that
         // was answered at the keyboard thirty seconds ago.
         if let resolution = effectiveCodexResolution { return .codex(resolution) }
         switch Self.resolvedBanner(attempt: attempt, persisted: effectiveOutcome, isBacked: live != nil) {
@@ -1232,7 +1232,7 @@ struct DecisionCardView: View {
             CCBanner(
                 "No longer available",
                 message:
-                    "This decision can't be acted on here — the run left the daemon's list or its log was reset.",
+                    "This decision can't be acted on here — the run is no longer on your computer, or its log was reset.",
                 tone: .warning, icon: "question")
         case .authRefused(let notice):
             // The gate's own words in the message, never a paraphrase, and never
@@ -1257,13 +1257,13 @@ struct DecisionCardView: View {
     }
 
     static func alreadyResolvedMessage(for outcome: AnswerOutcome, now: Date) -> String {
-        let age = "\(Format.age(since: outcome.resolvedDate, now: now)) ago"
+        let age = Format.ago(since: outcome.resolvedDate, now: now)
         if outcome.wasSentToClaude {
             return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude) · \(age)"
         }
         let ending = "\(outcome.decisionLabel) \(outcome.provenance)"
         if outcome.indeterminate {
-            return "\(ending) · \(age), but the daemon couldn’t confirm it reached the agent"
+            return "\(ending) · \(age), but your computer couldn’t confirm it reached the agent"
         }
         return "\(ending) · \(age)"
     }
@@ -1786,7 +1786,7 @@ struct DecisionCardView: View {
     static func blockedReason(model: AppModel, approval: ApprovalItem, inFlight: Bool) -> String? {
         // A second tap while the first is in flight would be a silent no-op;
         // saying "waiting" is the honest version of the same refusal.
-        if inFlight { return "Waiting for the daemon to confirm…" }
+        if inFlight { return "Waiting for your computer to confirm…" }
         if let reason = model.actionsBlockedReason { return reason }
         if let summary = model.shownSummary(for: approval.sessionKey) {
             let badge = FleetStatusRule.capability(

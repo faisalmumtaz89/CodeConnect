@@ -385,7 +385,7 @@ struct RenderDriver {
         link.tap()
         // The sheet is `CCSheetChrome`, so there is no navigation bar to wait
         // on — the measured sentence is the signal.
-        try require(element(containing: "daemon last spoke", in: app), "the link-health sheet")
+        try require(element(containing: "your computer last answered", in: app), "the link-health sheet")
     }
 
     /// The session's terminal, from the bar's menu.
@@ -616,7 +616,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.fleet(app)
                 try driver.require(
-                    driver.element(containing: "since the daemon last spoke", in: app),
+                    driver.element(containing: "since your computer last answered", in: app),
                     "the stale-link banner")
             }),
 
@@ -1112,7 +1112,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.openLinkHealth(app)
                 try driver.scrollUntil(app, "the pairing-required message on screen") {
-                    driver.element(containing: "bootstrap connection", in: app).isHittable
+                    driver.element(containing: "connected without pairing", in: app).isHittable
                 }
             }),
     ]

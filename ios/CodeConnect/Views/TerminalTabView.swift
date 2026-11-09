@@ -390,7 +390,7 @@ struct TerminalTabView: View {
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel("Attached to tmux session \(sessionID)")
+                    .accessibilityLabel("Attached to terminal session \(sessionID)")
             }
         } else if canOfferReconnect {
             // `ghost` again: the variant draws its own 1pt edge at rest now, so
@@ -910,8 +910,8 @@ struct TerminalTabView: View {
             return .blocked(
                 Blocked(
                     reason: unhosted
-                        ? "CodeConnect did not launch this session, so there is no tmux session of its own to attach to."
-                        : "The daemon no longer lists this run, so there is no tmux session to attach to."
+                        ? "CodeConnect did not launch this session, so there is no terminal of its own to attach to."
+                        : "Your computer no longer lists this run, so there is no terminal to attach to."
                 ))
         }
         // The daemon allows one terminal per connection and the carrier is

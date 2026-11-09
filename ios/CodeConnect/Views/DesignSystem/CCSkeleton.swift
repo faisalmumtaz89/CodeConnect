@@ -114,12 +114,12 @@ struct CCSkeletonRow: View {
 /// *every wait has a shape, a sentence, and a ticking elapsed counter* — plus
 /// the escape hatch every wait over 20s owes the reader.
 ///
-/// The escalation is the honesty: `waiting for the daemon · 3s` becomes
+/// The escalation is the honesty: `waiting for your computer · 3s` becomes
 /// `still waiting · 8s` and grows a way out, because a wait that has stopped
 /// being normal should stop *looking* normal.
 struct CCWaitingNotice: View {
     let elapsed: TimeInterval
-    var label: String = "waiting for the daemon"
+    var label: String = "waiting for your computer"
     var lateLabel: String = "still waiting"
     /// When the notice starts calling itself late, and offers `actionTitle`.
     var lateAfter: TimeInterval = 8

@@ -974,18 +974,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// per-session `agent` is what actually scopes an affordance, and this is
     /// the connection-wide fact the trust screen reports.
     var hostsCodex: Bool { supportedAgents.contains("codex") }
-
-    /// Everything advertised, sorted, for the trust screen. Boolean-valued keys
-    /// come back as `(name, isOn)`; anything else is rendered as its value.
-    public var advertisedRows: [(name: String, value: String, isFlag: Bool, isOn: Bool)] {
-        advertised.keys.sorted().map { key in
-            let value = advertised[key] ?? .null
-            if let flag = value.boolValue {
-                return (key, flag ? "yes" : "no", true, flag)
-            }
-            return (key, value.stringValue ?? value.canonicalJSONString, false, false)
-        }
-    }
 }
 
 // MARK: - Answers
@@ -1793,7 +1781,8 @@ public struct SessionDiff: Sendable, Hashable {
     /// `git -C <cwd> diff HEAD` plus untracked names, exactly as the daemon
     /// captured it.
     public let unified: String
-    /// The daemon hit its 512KB cap. Rendering a truncated diff as if it were
+    /// The daemon cut the capture: the diff passed its 512KB cap, or the list of
+    /// untracked names passed its own. Rendering a truncated diff as if it were
     /// whole is precisely the class of lie this flag exists to prevent.
     public let truncated: Bool
     let capturedAt: String

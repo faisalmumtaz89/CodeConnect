@@ -791,7 +791,7 @@ struct MachineScreen: View {
                 CCRow(
                     model.machineName ?? "Not paired",
                     subtitle: model.machineSystem,
-                    meta: model.endpoint?.host,
+                    meta: model.endpoint?.displayAddress,
                     separator: false,
                     action: { showLinkHealth = true }
                 ) {

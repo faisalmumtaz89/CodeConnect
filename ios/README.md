@@ -190,7 +190,7 @@ release build:
 | `-CC_OPEN_LINK https://codeconnect.sh/p#…` | opens a link at launch through the handler `onOpenURL` calls. A pairing link, the one a `codeconnect pair` QR code holds, arrives on iOS as a universal link only once codeconnect.sh vouches for the build, which a simulator run cannot arrange; this is how `PairingLinkUITests` and the render harness reach its sheet |
 | `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
-| `-cc.debug.diff truncated` | a capture the daemon cut at its 512KB cap, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Truncated at 512KB`. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
+| `-cc.debug.diff truncated` | a capture the daemon cut short, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Cut short by your computer` marker. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
 | `-cc.debug.terminalState attaching\|ended\|endedLive` | the terminal states a healthy Mac never shows, which otherwise need a session killed mid-flight or the link dropped |
 | `-cc.debug.sendText sent\|recovered\|recovered-empty\|lost` | resolves typed sends locally, the way `-CC_FIXTURE` resolves decisions, so the snapshot sheet's four outcomes can be photographed. `recovered` carries a real 80-column `/status` capture measured off a live Mac. Against a daemon these states need a Mac view opened and its Escape failing on cue, which is not something a render pass can arrange |
@@ -345,8 +345,9 @@ is enforced.
 * **A diff carries its capture time and its truncation.** An empty diff renders
   the daemon's `note`, which is the only thing that tells a clean tree from a
   directory that was never a git repository.
-* **Capability badges are reported, not guessed.** The trust screen lists every
-  advertised capability, including ones this build has no name for.
+* **Capability badges are reported, not guessed.** Each row on the trust screen
+  is what the computer said about itself; before it has said anything, the screen
+  says it doesn't know.
 
 ## Correctness invariants worth not breaking
 

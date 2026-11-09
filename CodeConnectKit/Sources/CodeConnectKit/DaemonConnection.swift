@@ -857,7 +857,8 @@ public final class DaemonConnection {
         guard let socket else { throw ConnectionError.notConnected }
         let data = try encoder.encode(message)
         guard data.count <= Wire.maxClientMessageBytes else {
-            throw ConnectionError.transport("Message too large for the daemon to accept")
+            throw ConnectionError.transport(
+                "Message too large for \(HostDevice.current.computer("your computer")) to accept")
         }
         do {
             try await socket.send(.string(String(decoding: data, as: UTF8.self)))
@@ -1287,7 +1288,8 @@ public final class DaemonConnection {
             // encrypted transport now rather than at the next cold start. The
             // ladder above puts things right if `wss://` turns out not to work.
             if caps.tls, !usingTLS, endpoint?.hostIsIPLiteral == false {
-                lastErrorMessage = "The daemon offers TLS; reconnecting over wss://"
+                lastErrorMessage =
+                    "\(HostDevice.current.computer("Your computer")) can encrypt this connection; reconnecting with encryption."
                 lastErrorAt = Date()
                 endpoint?.useTLS = true
                 onTransportSettled?(true)

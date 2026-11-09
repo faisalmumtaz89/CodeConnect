@@ -100,7 +100,7 @@ final class ConversationLayoutUITests: XCTestCase {
             "and the changes")
         link.tap()
         XCTAssertTrue(
-            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'daemon last spoke'")).firstMatch
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'your computer last answered'")).firstMatch
                 .waitForExistence(timeout: 10),
             "the computer's item opens the link's details")
     }

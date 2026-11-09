@@ -65,8 +65,8 @@ public enum CodexProse {
 
     /// The one banner a resolved Codex card shows.
     ///
-    /// **Never the app's `.unavailable` copy** ("the run left the daemon's list
-    /// or its log was reset"). That sentence is about the phone losing sight of
+    /// **Never the app's `.unavailable` copy** ("the run is no longer on your
+    /// computer, or its log was reset"). That sentence is about the phone losing sight of
     /// a run; every sentence here is about the *question* ending, which is a
     /// different fact and usually a completely ordinary one.
     public static func resolution(_ resolution: CodexResolution) -> Banner {

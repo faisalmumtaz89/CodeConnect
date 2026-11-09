@@ -28,13 +28,13 @@ public struct GapNotice: Sendable, Hashable {
         switch cause {
         case .daemonResync(let skipped):
             if let skipped {
-                return "Resynced. The daemon fell \(skipped) events behind and replayed the log."
+                return "Resynced. \(HostDevice.current.computer("The computer")) fell \(skipped) events behind and replayed the log."
             }
-            return "Resynced. The daemon replayed the log."
+            return "Resynced. \(HostDevice.current.computer("The computer")) replayed the log."
         case .sequenceJump(let missing):
             return "Resynced, \(missing) event\(missing == 1 ? "" : "s") not shown."
         case .logRewound:
-            return "Resynced. The daemon's log was reset; cached history was discarded."
+            return "Resynced. \(HostDevice.current.computer("The computer"))'s log was reset; cached history was discarded."
         case .cacheDiscarded:
             return
                 "Resynced. \(HostDevice.current.computer("The computer")) now tells its runs apart, so history cached under the old name was discarded."

@@ -257,7 +257,7 @@ final class FleetStatusTests: XCTestCase {
         }
         XCTAssertFalse(badge.canAct, "nothing may act before the ack")
         XCTAssertFalse(badge.isSettled, "and the fleet must say nothing")
-        XCTAssertEqual(reason, "Not connected. The daemon has not told us what it can do.")
+        XCTAssertEqual(reason, "Not connected. Your computer hasn't said what it can do yet.")
     }
 
     /// The band-header rule, whole: only settled observe earns the words.

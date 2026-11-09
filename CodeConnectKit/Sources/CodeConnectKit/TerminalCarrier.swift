@@ -560,7 +560,7 @@ public final class TerminalCarrier {
             // arithmetic below, so it cannot be the second test.
             guard bytes.count <= maxChunkBytes else {
                 detachAfterProtocolFault(
-                    "\(HostDevice.current.computer("The computer")) sent a larger burst of terminal output than the protocol allows.")
+                    "\(HostDevice.current.computer("The computer")) sent more terminal output at once than allowed.")
                 return
             }
             // Absorbing this was the silent failure: clamping the ledger to
@@ -592,7 +592,7 @@ public final class TerminalCarrier {
             let granted = UInt64(inputCredit) + UInt64(bytes)
             guard granted <= UInt64(maxOutstandingCredit) else {
                 detachAfterProtocolFault(
-                    "\(HostDevice.current.computer("The computer")) granted more terminal input than the protocol allows.")
+                    "\(HostDevice.current.computer("The computer")) granted more terminal input than allowed.")
                 return
             }
             inputCredit = UInt32(granted)
@@ -1032,7 +1032,7 @@ public final class TerminalCarrier {
         case .superseded: return "Another terminal took over this session."
         case .sessionBusy: return "The session's previous terminal is still closing; try again."
         case .notAuthorised: return "This connection may not open a terminal."
-        case .protocolError: return "The terminal was closed after a protocol error."
+        case .protocolError: return "The terminal was closed after a connection error."
         case .slowConsumer: return "The terminal stalled and was closed."
         case .windowChanged: return "The session's window changed."
         case .detached: return "Disconnected."

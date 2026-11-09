@@ -28,8 +28,9 @@ final class PairingKeychainTests: XCTestCase {
         let store = PairingStore(keychainPrefix: prefix)
         XCTAssertEqual(store.machines.map(\.id), ["upgrade-studio", "upgrade-laptop"], "every computer is still paired")
         XCTAssertEqual(
-            store.machines.map(\.endpoint.displayAddress),
-            ["ws://studio.upgrade.ts.net:8787", "wss://laptop.upgrade.ts.net:8788"])
+            store.machines.map(\.endpoint.host), ["studio.upgrade.ts.net", "laptop.upgrade.ts.net"])
+        XCTAssertEqual(store.machines.map(\.endpoint.port), [8787, 8788])
+        XCTAssertEqual(store.machines.map(\.endpoint.useTLS), [false, true])
         XCTAssertEqual(store.machines.map(\.endpoint.token), ["studio-upgrade-token", "laptop-upgrade-token"])
     }
 }

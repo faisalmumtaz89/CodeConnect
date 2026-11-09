@@ -493,7 +493,7 @@ public enum TimelineBuilder {
                                     kind: .failure,
                                     symbol: "warning",
                                     title: "Approval request could not be read",
-                                    detail: "The daemon sent a card this app could not decode.",
+                                    detail: "\(HostDevice.current.computer("The computer")) sent a card this app couldn't read.",
                                     severity: .warning))))
                     break
                 }
@@ -649,7 +649,7 @@ public enum TimelineBuilder {
             if transcript.isError { outcome.status = .failed }
             if outcome.text == nil { outcome.text = transcript.text }
         }
-        if event.isTruncated { outcome.text = "(output too large; the daemon truncated it)" }
+        if event.isTruncated { outcome.text = "(output too large; \(HostDevice.current.computer("the computer")) cut it short)" }
 
         table[id] = outcome
     }

@@ -8,7 +8,7 @@ public enum AnswerAttempt: Sendable {
     case applied(AnswerOutcome)
     /// The daemon accepted the answer but **cannot confirm it landed** —
     /// `AnswerOutcome.indeterminate`. Kept apart from `.applied` so nothing ever
-    /// renders an unconfirmed answer as "confirmed by the daemon": a positive
+    /// renders an unconfirmed answer as "confirmed by your computer": a positive
     /// actuation claim the daemon never made.
     case indeterminate(AnswerOutcome)
     /// The ledger already had this request; carries the *original* outcome.
@@ -1299,7 +1299,7 @@ public final class AppModel {
         settleLaunch()
         // Every sample session, not just the diff's own: the replayed ack
         // advertises diff support, so the ± control appears on all of them, and
-        // a tap that answers "Not paired with a daemon." inside the sample
+        // a tap that answers "Not paired with a computer." inside the sample
         // fleet would be a dead end in the link's vocabulary. One shared diff
         // is what the fixture has; the banner has already said none of it is
         // real.
@@ -2965,7 +2965,7 @@ public final class AppModel {
     /// link, rather than that the daemon predates it.
     private func unknownDaemonReason(_ summary: SessionSummary) -> String? {
         guard summary.agent == .codex, !daemonProfile.isConnected else { return nil }
-        return actionsBlockedReason ?? "Not connected to the daemon."
+        return actionsBlockedReason ?? "Not connected to \(HostDevice.current.computer("your computer"))."
     }
 
     /// Why Stop is not offered on this session as drawn, or nil when it is.
@@ -3397,7 +3397,7 @@ public final class AppModel {
         // Model/Effort/Compact sheets, `/clear` — so this is where the sample
         // fleet is answered once, in its own vocabulary, rather than per
         // surface. A surface the sample forgot to gate otherwise falls
-        // through to the link's sentence ("Not connected to the daemon"),
+        // through to the link's sentence ("Not connected to your computer"),
         // which is a dead end in a fleet whose banner says nothing is
         // connected.
         if sampleFleetActive {
@@ -3406,7 +3406,7 @@ public final class AppModel {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
-            return .failed("This daemon does not accept typed text.")
+            return .failed("\(HostDevice.current.computer("The computer"))'s CodeConnect can't take typed text.")
         }
         // Every send carries an identity, so a retry is recognisable instead
         // of being typed twice. The id is fresh per mutation — except after
@@ -3520,7 +3520,7 @@ public final class AppModel {
         guard connection.phase.isConnected else {
             // The app's own sentence about its own link. Tagged `.app` so the
             // screen renders its link state instead of quoting this to the Mac.
-            diffs[key] = .failed(.app(linkHealth.disabledReason ?? "Not connected to the daemon."))
+            diffs[key] = .failed(.app(linkHealth.disabledReason ?? "Not connected to \(HostDevice.current.computer("your computer"))."))
             return
         }
         diffs[key] = .loading
@@ -3542,7 +3542,7 @@ public final class AppModel {
                 let hint =
                     self.daemonProfile.servesDiff
                     ? ""
-                    : " This daemon never advertised diff support, which would explain it."
+                    : " \(HostDevice.current.computer("The computer"))'s CodeConnect never said it can show diffs, which would explain it."
                 if let quoted = self.connection.daemonErrorReported(since: askedAt) {
                     self.diffs[key] = .failed(.daemon(quoted + hint))
                 } else {

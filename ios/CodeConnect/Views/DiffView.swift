@@ -183,7 +183,7 @@ struct DiffSheet: View {
         CCEmptyState(
             glyph: "plugs",
             title: "Not connected",
-            message: "Not connected. The daemon cannot be asked for a diff.",
+            message: "Not connected. The computer can't be asked for a diff.",
             tone: .warning,
             actionTitle: "Try again",
             action: { start(force: true) }
@@ -192,7 +192,7 @@ struct DiffSheet: View {
             // leave the screen to learn why.
             //
             // `footnote`, not `monoSmall`: `LinkHealth.detail` is English —
-            // "The socket is open but the daemon has gone quiet." — and prose is
+            // "Connected, but your computer has gone quiet." — and prose is
             // never monospace.
             Text(model.linkHealth.detail)
                 .ccType(CC.type.footnote)
@@ -210,7 +210,7 @@ struct DiffSheet: View {
             CCEmptyState(
                 glyph: "warning-octagon",
                 title: "The computer could not read the diff",
-                message: "No diff was produced. The daemon's own reason follows, verbatim.",
+                message: "No diff was produced. Your computer's own reason follows, word for word.",
                 tone: .danger,
                 actionTitle: "Try again",
                 action: { start(force: true) }
@@ -238,7 +238,7 @@ struct DiffSheet: View {
                 glyph: "question",
                 title: "No answer from the computer",
                 message:
-                    "The link is up and the request went out. Nothing came back, and the daemon "
+                    "The link is up and the request went out. Nothing came back, and your computer "
                     + "gave no reason. This is the app's own account of what it saw.",
                 tone: .warning,
                 actionTitle: "Ask again",
@@ -932,7 +932,7 @@ struct DiffDocumentView: View {
     /// chrome before the first line of code. The marker states the
     /// mechanism where the mechanism is; up here, two facts and no lesson.
     private func partialityBanner(_ coverage: Coverage) -> CCBannerItem? {
-        let cut = "Truncated by the daemon at its 512KB cap. This is not the whole diff."
+        let cut = "Cut short by your computer. This is not the whole diff."
         let drawn = "\(coverage.drawn.formatted()) of \(coverage.total.formatted()) lines drawn."
 
         switch (raw.truncated, coverage.isPartial) {
@@ -961,7 +961,7 @@ struct DiffDocumentView: View {
     /// never `danger`. It reads the clock directly and keeps ticking, which is
     /// correct here: there is no document behind it to pay for the second.
     private var ageLine: String {
-        "Checked \(Format.age(since: raw.capturedDate ?? fetchedAt, now: model.now)) ago"
+        "Checked \(Format.ago(since: raw.capturedDate ?? fetchedAt, now: model.now))"
     }
 
     // MARK: File chips
@@ -1054,7 +1054,7 @@ struct DiffDocumentView: View {
                         if raw.truncated {
                             // A reader who scrolls to the end learns it there
                             // too, not only from the banner they scrolled past.
-                            CCGapMarker(label: "Truncated at 512KB")
+                            CCGapMarker(label: "Cut short by your computer")
                                 .padding(.horizontal, CC.space.md)
                         }
                         Color.clear.frame(height: CC.space.xl)
@@ -1101,7 +1101,7 @@ struct DiffDocumentView: View {
                 title: raw.note == nil ? "No uncommitted changes" : "No diff to show",
                 message: raw.note == nil
                     ? "This session's worktree was clean when it was read."
-                    : "No diff was produced. The daemon's own reason follows, verbatim.",
+                    : "No diff was produced. Your computer's own reason follows, word for word.",
                 actionTitle: "Check again",
                 action: refresh
             ) {
@@ -1458,7 +1458,7 @@ private struct DiffCommentSheet: View {
 
     private func resultMessage(_ attempt: ComposeAttempt) -> String {
         switch attempt {
-        case .sent(let matched): return "The daemon typed it into \(matched)."
+        case .sent(let matched): return "Your computer typed it into \(matched)."
         case .refused(let reason), .failed(let reason):
             return reason
         case .indeterminate(let reason):
