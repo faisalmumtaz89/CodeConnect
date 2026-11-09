@@ -6184,7 +6184,12 @@ pub(crate) mod tests {
     /// peer sitting just inside the 20s write deadline against the 30s stall
     /// deadline, and the credit is ample so the reader parks in the hand-over
     /// rather than on credit — the queue is what the peer is holding shut.
-    #[tokio::test]
+    ///
+    /// On tokio's paused clock, which every clock here reads (the deadline, the
+    /// peer's hold and the ledger's `elapsed`), so nine tenths is nine tenths. On
+    /// the wall clock a busy machine can wake the peer past the deadline, expire
+    /// it, and break the premise rather than the bound.
+    #[tokio::test(start_paused = true)]
     async fn a_peer_that_never_lets_a_deadline_expire_still_loses_the_terminal() {
         let _serial = fixture_test_guard().await;
         let stall = std::time::Duration::from_millis(200);

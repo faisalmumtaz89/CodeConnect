@@ -237,10 +237,12 @@ fn a_viewer_holds_the_stop_and_its_resume_continues_the_agent() {
     let agent = pane.agent();
     pane.touch("go");
     wait_for("the stop to be held", || pane.stopped_flag() == "1");
-    assert!(
-        state(agent).starts_with('T'),
-        "really stopped: {}",
-        state(agent)
+    // The stop reaches the job a moment before `ps` shows it: just after the flag, the
+    // agent can still read as running.
+    wait_or_report(
+        "the agent to be really stopped",
+        || state(agent).starts_with('T'),
+        || pane.report(agent),
     );
     assert_eq!(pane.file("after"), "", "nothing ran past the stop");
 
@@ -377,9 +379,18 @@ fn a_reader_stopped_by_the_terminal_reads_on_after_it_is_continued() {
     };
     keys("1a");
     wait_for("the stop to be held", || pane.stopped_flag() == "1");
-    assert!(state(agent).starts_with('T'), "{}", state(agent));
+    // As in the viewer's test: `ps` can trail the stop by a moment.
+    wait_or_report(
+        "the reader to be really stopped",
+        || state(agent).starts_with('T'),
+        || pane.report(agent),
+    );
     unsafe { libc::kill(pane.pane_pid(), libc::SIGUSR1) };
-    wait_for("the reader to continue", || pane.stopped_flag().is_empty());
+    wait_or_report(
+        "the reader to continue",
+        || pane.stopped_flag().is_empty(),
+        || pane.report(agent),
+    );
     keys("61");
     keys("0d");
     wait_or_report(
