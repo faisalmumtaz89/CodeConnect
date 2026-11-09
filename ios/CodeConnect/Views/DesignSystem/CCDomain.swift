@@ -231,7 +231,7 @@ extension LinkHealth {
         switch level {
         case .live, .lagging, .stale:
             let age = age.map(Format.spokenAge) ?? "unknown"
-            return "\(word). Daemon last spoke \(age)."
+            return "\(word). Your computer last answered \(age)."
         default:
             return "\(word). \(detail)"
         }
@@ -295,7 +295,7 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Connect Tailscale",
                     message:
-                        "`\(host)` isn't resolving. Use Tailscale to put this iPhone on the same tailnet as your computer — CodeConnect reconnects on its own.",
+                        "Can't find your computer at `\(host)`. Turn on Tailscale on this iPhone, signed in to the same account as your computer. CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: TailscaleAssist.isInstallHintNeeded
@@ -318,14 +318,14 @@ extension LinkHealth {
             return CCBannerItem(
                 .stale, title: "Link stale",
                 message:
-                    "\(ageText) since the daemon last spoke. Actions are disabled until it answers.",
+                    "\(ageText) since your computer last answered. Actions are disabled until it answers.",
                 tone: .danger, icon: "warning-fill",
                 actionTitle: "Retry", action: onRetry)
         case .connecting:
             // Only after 2s of connecting — a banner that flashes on
             // every reconnect is noise. The caller owns that delay.
             return CCBannerItem(
-                .offline, title: "Connecting", message: "Connecting to the daemon…",
+                .offline, title: "Connecting", message: "Connecting to your computer…",
                 tone: .info, icon: "arrows-clockwise")
         }
     }

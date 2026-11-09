@@ -120,7 +120,7 @@ final class ApprovalFlowUITests: XCTestCase {
         // else is in the queue — the Deck advances a settled card off the stack,
         // so the banner on it is not something the test can insist on seeing.
         let confirmed = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'confirmed by the daemon'")
+            NSPredicate(format: "label CONTAINS 'confirmed by your computer'")
         ).firstMatch
         let cleared = app.staticTexts["Fleet clear"]
         let settled = XCTNSPredicateExpectation(
@@ -183,7 +183,7 @@ final class ApprovalFlowUITests: XCTestCase {
         // The same settled states as a Claude answer, each reached only after
         // `answer_result`: the Deck advances a settled card off the stack.
         let confirmed = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'confirmed by the daemon'")
+            NSPredicate(format: "label CONTAINS 'confirmed by your computer'")
         ).firstMatch
         let cleared = app.staticTexts["Fleet clear"]
         let answeredOff = { () -> Bool in
@@ -269,7 +269,7 @@ final class ApprovalFlowUITests: XCTestCase {
         denyAndSend.tap()
 
         let denied = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Denied, confirmed by the daemon'")
+            NSPredicate(format: "label CONTAINS 'Denied, confirmed by your computer'")
         ).firstMatch
         XCTAssertTrue(
             denied.waitForExistence(timeout: 30), "the denial must be daemon-confirmed")

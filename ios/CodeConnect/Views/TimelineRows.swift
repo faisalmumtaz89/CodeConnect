@@ -513,7 +513,7 @@ struct ToolRow: View {
         if tool.isTruncated {
             // Verbatim. This sentence is the honest description of a payload cap
             // and it must survive every redesign.
-            Text("The daemon truncated this payload; the fact is complete, the bulk is not.")
+            Text("Your computer cut this short; the fact is complete, the bulk is not.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.color.warning)
                 .fixedSize(horizontal: false, vertical: true)

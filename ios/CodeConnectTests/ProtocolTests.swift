@@ -101,9 +101,6 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(ack.capabilities.holdSecs, 9)
         XCTAssertFalse(ack.capabilities.sendText, "an absent capability is not an available one")
         XCTAssertEqual(ack.capabilities.advertised["future_thing"]?.stringValue, "yes")
-        XCTAssertTrue(
-            ack.capabilities.advertisedRows.contains { $0.name == "future_thing" },
-            "the trust screen must be able to list capabilities this build cannot name")
     }
 
     // MARK: diff

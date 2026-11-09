@@ -162,7 +162,7 @@ struct StartStepsSheet: View {
 
     private func computerSummary(_ candidate: StartContext) -> String {
         let count = candidate.projects.count
-        let used = candidate.lastUsed.map { " · last used \(Format.age(since: $0)) ago" } ?? ""
+        let used = candidate.lastUsed.map { " · last used \(Format.ago(since: $0))" } ?? ""
         return "\(count) recent folder\(count == 1 ? "" : "s")\(used)"
     }
 

@@ -208,9 +208,9 @@ public struct DaemonProfile: Sendable, Hashable {
     /// diff request costs one frame — so the app asks, and says plainly that it
     /// is asking a daemon which never advertised the ability.
     public var diffCaveat: String? {
-        guard isConnected else { return "Not connected. The daemon cannot be asked for a diff." }
+        guard isConnected else { return "Not connected. \(HostDevice.current.computer("The computer")) can't be asked for a diff." }
         return servesDiff
             ? nil
-            : "This daemon has not advertised diff support. Asking anyway; if it cannot answer, this will say so."
+            : "\(HostDevice.current.computer("The computer"))'s CodeConnect hasn't said it can show diffs. Asking anyway; if it cannot answer, this will say so."
     }
 }

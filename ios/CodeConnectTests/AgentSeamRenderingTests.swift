@@ -64,20 +64,20 @@ final class AgentSeamRenderingTests: XCTestCase {
     }
 
     /// The rendering step: `.indeterminate` reads as "Unconfirmed" and its
-    /// sentence never says "confirmed by the daemon" — while `.applied` still
+    /// sentence never says "confirmed by your computer" — while `.applied` still
     /// does, so the contrast is real and not a copy accident.
     func testIndeterminateRendersAsUnconfirmedNotConfirmed() {
         let indeterminate = AnswerAttempt.indeterminate(outcome(appliedVia: .sendKeys, indeterminate: true))
         XCTAssertEqual(ResolutionBanner.classificationLabel(for: indeterminate), "Unconfirmed")
         let indeterminateHeadline = ResolutionBanner.headline(for: indeterminate)
         XCTAssertFalse(
-            indeterminateHeadline.contains("confirmed by the daemon"),
+            indeterminateHeadline.contains("confirmed by your computer"),
             "the daemon did not confirm this landed: \(indeterminateHeadline)")
 
         let applied = AnswerAttempt.applied(outcome(appliedVia: .sendKeys))
         XCTAssertEqual(ResolutionBanner.classificationLabel(for: applied), "Confirmed")
         XCTAssertTrue(
-            ResolutionBanner.headline(for: applied).contains("confirmed by the daemon"),
+            ResolutionBanner.headline(for: applied).contains("confirmed by your computer"),
             "a genuinely confirmed answer still says so")
     }
 
@@ -122,7 +122,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         // And the copy that reaches the reader is unconfirmed, not "Already answered".
         XCTAssertEqual(ResolutionBanner.classificationLabel(for: attempt), "Unconfirmed")
         let headline = ResolutionBanner.headline(for: attempt)
-        XCTAssertFalse(headline.contains("confirmed by the daemon"), headline)
+        XCTAssertFalse(headline.contains("confirmed by your computer"), headline)
         XCTAssertNotEqual(headline, "Already answered")
     }
 

@@ -2553,7 +2553,7 @@ struct CapabilitySheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                     Text(
-                        "Answers given on this phone reach an agent only when a supervisor is attached to its tmux session and the daemon says it can deliver them."
+                        "Answers given on this phone reach an agent only when CodeConnect is attached to its terminal and your computer says it can deliver them."
                     )
                     .ccType(CC.type.body)
                     .foregroundStyle(CC.text.primary)
@@ -2593,8 +2593,8 @@ struct CapabilitySheet: View {
 ///    `0`.** `0` is a measurement. Round-trip time and the never-miss ledger
 ///    are not measured yet; printing zeroes for them now would
 ///    be the exact lie this screen exists to disprove.
-///  * **Capabilities are reported, not guessed** — including the advertised keys
-///    this build has no word for, which are listed verbatim rather than dropped.
+///  * **Capabilities are reported, not guessed**: each row is what the computer
+///    said about itself, and an unknown is not a no.
 ///  * **A control that cannot work says why.** The test notification is disabled
 ///    with the daemon's own reason on a build that advertises `push: false`.
 struct LinkHealthSheet: View {
@@ -2646,12 +2646,12 @@ struct LinkHealthSheet: View {
                         model.linkHealth.actionsEnabled
                             ? CC.text.primary : model.linkHealth.level.ccTone.color)
                 Text(
-                    "daemon last spoke \(Format.age(since: model.connection.lastContactAt, now: model.now)) ago"
+                    "your computer last answered \(Format.ago(since: model.connection.lastContactAt, now: model.now))"
                 )
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(CC.text.tertiary)
                 if !model.linkHealth.actionsEnabled {
-                    Text("Actions are disabled until the daemon answers.")
+                    Text("Actions are disabled until your computer answers.")
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.color.warning)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2687,7 +2687,7 @@ struct LinkHealthSheet: View {
                 "Missed decisions", value: Self.unmeasured,
                 spokenValue: "not measured on this build"),
             CCStat(
-                "Seq gaps", value: "\(gapCount)",
+                "Event gaps", value: "\(gapCount)",
                 tone: gapCount > 0 ? .danger : .neutral),
             CCStat("Reconnects", value: "\(model.connection.reconnectCount)"),
         ])
@@ -2702,25 +2702,25 @@ struct LinkHealthSheet: View {
                 "State", value: model.linkHealth.detail,
                 tone: model.linkHealth.level.ccTone, separator: true)
             CCFactRow(
-                "Daemon last spoke",
-                value: Format.age(since: model.connection.lastContactAt, now: model.now) + " ago",
+                "Computer last answered",
+                value: Format.ago(since: model.connection.lastContactAt, now: model.now),
                 separator: true)
             // Not measured on this build. `—`, never `0ms`.
             CCFactRow("Round trip", value: Self.unmeasured, isUnmeasured: true, separator: true)
             CCFactRow(
-                "Transport", value: transport, tone: transportTone, separator: true)
+                "Encryption", value: transport, tone: transportTone, separator: true)
             CCFactRow(
                 "Address", value: model.endpoint?.displayAddress ?? Self.unmeasured,
                 isUnmeasured: model.endpoint == nil, separator: true)
             CCFactRow(
-                "Protocol",
+                "Link version",
                 value: model.daemonProfile.isConnected
                     ? "v\(model.daemonProfile.protocolVersion).\(model.daemonProfile.protocolMinor)"
                     : Self.unmeasured,
                 isUnmeasured: !model.daemonProfile.isConnected,
                 separator: true)
             CCFactRow(
-                "Daemon clock",
+                "Computer's clock",
                 value: model.connection.serverTime ?? Self.unmeasured,
                 isUnmeasured: model.connection.serverTime == nil,
                 separator: model.connection.lastErrorMessage != nil)
@@ -2730,7 +2730,7 @@ struct LinkHealthSheet: View {
                     "Last error",
                     text: error,
                     age: model.connection.lastErrorAt.map {
-                        Format.age(since: $0, now: model.now) + " ago"
+                        Format.ago(since: $0, now: model.now)
                     })
             }
         }
@@ -2738,10 +2738,16 @@ struct LinkHealthSheet: View {
 
     /// `tls` says the listener *holds* a certificate; `tls_active` says *this*
     /// connection is encrypted. They are different facts and are shown
-    /// separately — the degraded pairing gets the verbatim explanation.
+    /// separately — the degraded pairing gets the verbatim explanation. The
+    /// words are the computer screen's (`PairingView.transport`), so the two
+    /// screens never describe one connection differently.
     private var transport: String {
         guard model.daemonProfile.isConnected else { return Self.unmeasured }
-        return model.daemonProfile.connectionEncrypted ? "wss (encrypted)" : "ws (plain)"
+        return PairingView.transport(
+            encrypted: model.daemonProfile.connectionEncrypted,
+            paired: model.connection.helloAck?.deviceID != nil,
+            capabilities: model.connection.capabilities
+        ).value
     }
 
     private var transportTone: CCTone {
@@ -2757,7 +2763,7 @@ struct LinkHealthSheet: View {
             // stack, and `CCSectionHeader` owns the step from there to the
             // content column. A second `CC.space.md` here is how ten headers in
             // this build ended up on x=32 instead of x=52.
-            CCSectionHeader("What this daemon can do")
+            CCSectionHeader("What your computer can do")
             CCCard(padding: 0) {
                 if let capabilities = model.connection.capabilities {
                     VStack(spacing: 0) {
@@ -2769,24 +2775,14 @@ struct LinkHealthSheet: View {
                         // as "no", though it is exactly the daemon that does send.
                         capabilityRow("Push notifications", capabilities.pushMode != .none)
                         capabilityRow("Holds a certificate", capabilities.tls)
-                        // Named rows, not left to `extraAdvertised`'s raw
-                        // `codex_interrupt` / `codex_compose`: these two are the
-                        // difference between a Stop button that works and one
-                        // that is offered and guaranteed broken, and a reader
-                        // asking "why can't I stop this?" should find the answer
-                        // in the same words the control used.
+                        // These two are the difference between a Stop button
+                        // that works and one that is offered and guaranteed
+                        // broken, and a reader asking "why can't I stop this?"
+                        // should find the answer in the same words the control used.
                         capabilityRow("Stop a Codex turn", capabilities.codexInterrupt)
                         capabilityRow("Say something to Codex", capabilities.codexCompose)
                         capabilityRow(
-                            "This connection encrypted", capabilities.tlsActive,
-                            separator: !extraAdvertised.isEmpty)
-                        // Everything else it advertised, including keys this
-                        // build has no name for. Dropping them would make a
-                        // working feature invisible.
-                        ForEach(Array(extraAdvertised.enumerated()), id: \.element.name) {
-                            index, row in
-                            advertisedRow(row, separator: index < extraAdvertised.count - 1)
-                        }
+                            "This connection encrypted", capabilities.tlsActive, separator: false)
                     }
                 } else {
                     // Verbatim, and deliberately not "no": an unknown is not a
@@ -2800,7 +2796,7 @@ struct LinkHealthSheet: View {
             if model.daemonProfile.connectionEncrypted == false,
                 model.connection.capabilities?.tls == true
             {
-                Text("The daemon holds a certificate but this connection is not using it.")
+                Text("Your computer can encrypt this connection itself, but this iPhone isn't using that.")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2809,27 +2805,13 @@ struct LinkHealthSheet: View {
         }
     }
 
-    /// The advertised keys this build does not have a named row for, sorted.
-    private var extraAdvertised: [(name: String, value: String, isFlag: Bool, isOn: Bool)] {
-        let named: Set<String> = [
-            "approve", "can_approve_reliably", "send_text", "capture", "push", "push_relay",
-            "tls", "tls_active", "fail_mode", "answer_path", "hold_secs",
-            // Drawn above, in the words the controls themselves use. Left in
-            // this set they would appear twice: once as "Stop a Codex turn" and
-            // once as the raw `codex_interrupt`.
-            "codex_interrupt", "codex_compose",
-        ]
-        return (model.connection.capabilities?.advertisedRows ?? [])
-            .filter { !named.contains($0.name) }
-    }
-
     private var eventStreamSection: some View {
         section("Event stream") {
             CCFactRow(
                 "Sessions with a gap", value: "\(gapCount)",
                 tone: gapCount > 0 ? .danger : .neutral, separator: true)
             CCFactRow(
-                "Highest seq seen",
+                "Latest event number",
                 value: highestSeq.map(String.init) ?? Self.unmeasured,
                 isUnmeasured: highestSeq == nil,
                 separator: true)
@@ -2934,11 +2916,11 @@ struct LinkHealthSheet: View {
             let receipt = apnsID.map { " Apple's receipt: \($0)." } ?? ""
             return "Accepted by Apple — the banner on this phone is the proof.\(receipt)"
         case .pushUnconfigured:
-            return "The computer has no APNs key configured, so nothing was sent."
+            return "Your computer isn't set up to send notifications, so nothing was sent."
         case .notPairedDevice:
-            return "This connection uses the bootstrap token; pair the phone to test push."
+            return "This iPhone is connected without pairing. Pair it to test notifications."
         case .noRegisteredToken:
-            return "The computer holds no notification token for this phone yet. Enable notifications, then try again."
+            return "Your computer can't notify this iPhone yet. Turn on notifications, then try again."
         case .credentialInvalid:
             return "The relay no longer trusts this phone’s credential. Reset notification registration to enroll again."
         case .rateLimited(let secs):
@@ -2959,13 +2941,13 @@ struct LinkHealthSheet: View {
     /// the user visits Settings.
     private var pushReason: String? {
         guard let capabilities = model.connection.capabilities else {
-            return "Not connected. The daemon has not told us what it can do."
+            return "Not connected. Your computer hasn't said what it can do yet."
         }
         guard capabilities.pushMode != .none else {
-            return "This daemon does not send push notifications, so there is nothing to test."
+            return "Your computer doesn't send notifications, so there is nothing to test."
         }
         guard capabilities.testsPush else {
-            return "This daemon predates push testing. Update the computer to prove the doorbell."
+            return "Your computer's CodeConnect is too old to send a test. Update it."
         }
         // Relay mode has an enrollment step direct mode does not; its states fold
         // in here so the one button explains why it is waiting or stuck.
@@ -2973,7 +2955,7 @@ struct LinkHealthSheet: View {
             // A bootstrap/static connection has no device row, so enrollment can
             // never begin — say that plainly instead of "Setting up…" forever.
             guard model.connection.helloAck?.deviceID != nil else {
-                return "This is a bootstrap connection. Pair this iPhone with the computer to receive notifications."
+                return "This iPhone is connected without pairing. Pair it with your computer to receive notifications."
             }
             switch model.relayPushState {
             case .unsupported:
@@ -3046,27 +3028,6 @@ struct LinkHealthSheet: View {
                     enabled ? "Yes" : "No", tone: enabled ? .success : .neutral,
                     accessibilityText: enabled ? "available" : "not available")
             })
-    }
-
-    /// An advertised key this build has never heard of. Printed as it arrived,
-    /// in monospace, because the name is the daemon's and not ours to prettify —
-    /// which is what `CCFactLabelStyle.key` means.
-    @ViewBuilder
-    private func advertisedRow(
-        _ row: (name: String, value: String, isFlag: Bool, isOn: Bool), separator: Bool
-    ) -> some View {
-        if row.isFlag {
-            CCFactRow(
-                row.name, labelStyle: .key, separator: separator,
-                accessibilityValueText: row.isOn ? "yes" : "no",
-                value: {
-                    CCBadge(
-                        row.isOn ? "Yes" : "No", tone: row.isOn ? .success : .neutral,
-                        accessibilityText: row.isOn ? "available" : "not available")
-                })
-        } else {
-            CCFactRow(row.name, value: row.value, labelStyle: .key, separator: separator)
-        }
     }
 }
 

@@ -133,6 +133,48 @@ final class LinkOfflineTests: XCTestCase {
         XCTAssertEqual(item?.actionTitle, "Retry")
     }
 
+    // MARK: Plain words
+
+    /// Everything the link says about itself, in the fleet's banner, a disabled
+    /// control's reason and VoiceOver, names the computer, never the helper on
+    /// it or the network under it.
+    func testTheLinkSpeaksOfTheComputer() {
+        let now = Date()
+        let healths = [
+            LinkHealth.evaluate(phase: .idle, lastContactAt: nil),
+            LinkHealth.evaluate(phase: .connecting, lastContactAt: nil),
+            LinkHealth.evaluate(
+                phase: .connected(since: now), lastContactAt: now.addingTimeInterval(-60), now: now),
+            LinkHealth.evaluate(
+                phase: waiting, lastContactAt: nil,
+                dialFailure: .hostUnresolvable(host: "mac.tail1234.ts.net")),
+        ]
+        for health in healths {
+            let banner = health.ccBannerItem(onRetry: {}, onSettings: {}, onTailscale: {})
+            for sentence in [health.detail, health.disabledReason, health.spokenValue, banner?.message] {
+                guard let sentence else { continue }
+                XCTAssertFalse(sentence.localizedCaseInsensitiveContains("daemon"), sentence)
+                XCTAssertFalse(sentence.localizedCaseInsensitiveContains("tailnet"), sentence)
+            }
+        }
+    }
+
+    /// A computer this phone has not heard from since launch last answered
+    /// "never", which takes no "ago".
+    func testAnAgeThatHasNotHappenedSaysNever() {
+        let now = Date()
+        XCTAssertEqual(Format.ago(since: nil, now: now), "never")
+        XCTAssertEqual(Format.ago(since: now.addingTimeInterval(-120), now: now), "2m ago")
+    }
+
+    /// The system alert asking for the local network is the first thing many
+    /// people read, and it says the same.
+    func testTheLocalNetworkPromptSpeaksOfTheComputer() throws {
+        let prompt = try XCTUnwrap(
+            Bundle.main.object(forInfoDictionaryKey: "NSLocalNetworkUsageDescription") as? String)
+        XCTAssertFalse(prompt.localizedCaseInsensitiveContains("daemon"), prompt)
+    }
+
     // MARK: Cadence
 
     func testTheDNSCadenceIsFastTwiceThenCalm() {

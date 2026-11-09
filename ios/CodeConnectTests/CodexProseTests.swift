@@ -19,7 +19,7 @@ final class CodexProseTests: XCTestCase {
     /// It is about the phone losing sight of a run; every Codex ending is about
     /// the *question* finishing, which is usually completely ordinary.
     private let unavailableCopy =
-        "This decision can't be acted on here — the run left the daemon's list or its log was reset."
+        "This decision can't be acted on here — the run is no longer on your computer, or its log was reset."
 
     private var allEndings: [CodexResolution] {
         [

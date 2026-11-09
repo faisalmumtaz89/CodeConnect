@@ -138,7 +138,7 @@ final class LiveDaemonUITests: XCTestCase {
         link.tap()
 
         let advertised = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'What this daemon can do'")
+            NSPredicate(format: "label CONTAINS 'What your computer can do'")
         ).firstMatch
         app.swipeUp()
         app.swipeUp()
@@ -220,10 +220,10 @@ final class LiveDaemonUITests: XCTestCase {
         app.launch()
 
         let verbatim = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS \"daemon's own reason follows\"")
+            NSPredicate(format: "label CONTAINS \"own reason follows\"")
         ).firstMatch
         let quoted = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Connecting to the daemon'")
+            NSPredicate(format: "label CONTAINS 'Connecting to your computer'")
         ).firstMatch
 
         // Watch the whole race, not one moment of it.

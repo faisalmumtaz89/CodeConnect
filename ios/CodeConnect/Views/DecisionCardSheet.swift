@@ -114,7 +114,7 @@ struct ResolutionBanner: View {
     /// is an outcome they skim. Static and pure for the same reason as above.
     static func headline(for attempt: AnswerAttempt) -> String {
         switch attempt {
-        case .applied(let outcome): return "\(outcome.decisionLabel), confirmed by the daemon"
+        case .applied(let outcome): return "\(outcome.decisionLabel), confirmed by your computer"
         // The one honesty this case exists to protect: the daemon accepted the
         // answer but could not confirm it reached the agent, so this must never
         // read as confirmed/applied.
@@ -122,12 +122,12 @@ struct ResolutionBanner: View {
             if outcome.wasSentToClaude {
                 return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude)"
             }
-            return "\(outcome.decisionLabel), but the daemon couldn’t confirm it landed"
+            return "\(outcome.decisionLabel), but your computer couldn’t confirm it landed"
         case .duplicate: return "Already answered"
         case .answeredAtKeyboard: return "Answered at the computer"
         case .staleCard: return "This card is out of date"
-        case .rejected: return "The daemon refused this answer"
-        case .failed: return "The answer did not reach the daemon"
+        case .rejected: return "Your computer refused this answer"
+        case .failed: return "The answer did not reach your computer"
         }
     }
 
@@ -159,14 +159,14 @@ struct ResolutionBanner: View {
             return "Claude takes the first answer, the computer’s or this one, so whether it used this one is not known."
         case .indeterminate(let outcome):
             return [
-                "The daemon accepted this but never confirmed it reached the agent.",
+                "Your computer accepted this but never confirmed it reached the agent.",
                 outcome.detail,
             ].compactMap { $0 }.joined(separator: " · ")
         case .duplicate(let outcome, let stale):
             let original =
                 "Original outcome: \(outcome.decisionLabel) \(outcome.provenance), \(outcome.resolvedAt)."
                 + (outcome.inferred
-                    ? " The daemon inferred that from the prompt disappearing rather than observing the answer."
+                    ? " Your computer inferred that from the prompt disappearing rather than observing the answer."
                     : "")
             return stale
                 ? original + " The card you answered was also out of date." : original

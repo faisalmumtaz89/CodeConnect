@@ -27,8 +27,6 @@ public struct DaemonEndpoint: Codable, Sendable, Hashable {
         self.useTLS = useTLS
     }
 
-    var scheme: String { useTLS ? "wss" : "ws" }
-
     /// The durable credential, or nil while pairing.
     var token: String? {
         if case .token(let token) = credential { return token }
@@ -52,7 +50,9 @@ public struct DaemonEndpoint: Codable, Sendable, Hashable {
         URL(string: "\(useTLS ? "wss" : "ws")://\(hostForURL):\(port)")
     }
 
-    public var displayAddress: String { "\(scheme)://\(host):\(port)" }
+    /// The computer's address as a screen shows it: the host alone, never the
+    /// scheme or the port the connection dials.
+    public var displayAddress: String { host }
 
     /// Whether `other` names the same daemon: the same host, compared without
     /// case, and the same port. Credential and scheme do not enter into it.

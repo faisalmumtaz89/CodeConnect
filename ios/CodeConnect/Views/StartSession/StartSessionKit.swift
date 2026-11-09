@@ -73,7 +73,7 @@ struct StartContext {
 func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
     var parts: [String] = []
     if let branch = project.gitBranch { parts.append(branch) }
-    parts.append("\(Format.age(since: project.lastUsed, now: now)) ago")
+    parts.append(Format.ago(since: project.lastUsed, now: now))
     if let agent = project.lastAgent { parts.append(agent.displayName) }
     return parts.joined(separator: " · ")
 }

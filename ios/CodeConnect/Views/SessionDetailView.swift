@@ -1471,9 +1471,9 @@ struct SessionDetailView: View {
         VStack {
             CCEmptyState(
                 glyph: "folder-dashed",
-                title: "Not in the daemon's list",
+                title: "Not on your computer's list",
                 message:
-                    "This run may have exited, or the daemon has restarted since the link was made.",
+                    "This run may have exited, or CodeConnect on your computer restarted since the link was made.",
                 tone: .warning)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -2595,7 +2595,7 @@ private struct SessionComposeBar: View {
     /// they are asked first so a Codex session is never refused with a sentence
     /// about a TTY it does not have.
     private var sendBlockedReason: String? {
-        // The sample fleet's reason, not the link's: "Not paired with a daemon."
+        // The sample fleet's reason, not the link's: "Not paired with a computer."
         // beside a card that answers in sample vocabulary would be two different
         // accounts of the same absence on one screen.
         if model.sampleFleetActive {
@@ -2613,7 +2613,7 @@ private struct SessionComposeBar: View {
             return model.composeUnavailable(for: summary.sessionKey)
         }
         if model.connection.capabilities?.sendText == false {
-            return "This daemon does not accept typed text."
+            return "The computer's CodeConnect can't take typed text."
         }
         if let summary, let reason = FleetStatusRule.capability(
             summary: summary, capabilities: model.connection.capabilities).reason

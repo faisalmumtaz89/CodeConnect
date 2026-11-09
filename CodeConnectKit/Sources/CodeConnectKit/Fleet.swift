@@ -429,7 +429,8 @@ public enum FleetStatusRule {
 
     public static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
-            return .unknown(reason: "Not connected. The daemon has not told us what it can do.")
+            return .unknown(
+                reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn't said what it can do yet.")
         }
         // Before any link reason: an ended run has no supervisor because it has
         // ended, and nothing can answer it anywhere, the Mac included.
@@ -437,7 +438,8 @@ public enum FleetStatusRule {
             return .observe(reason: "This session has ended.")
         }
         guard capabilities.canApproveReliably else {
-            return .observe(reason: "The daemon does not guarantee an answer will reach the agent.")
+            return .observe(
+                reason: "\(HostDevice.current.computer("The computer")) can't promise an answer will reach the agent.")
         }
         switch summary.link {
         case .attached:
@@ -449,7 +451,8 @@ public enum FleetStatusRule {
                 reason: "No supervisor is attached to this session. It can only be answered at \(HostDevice.current.computer("the computer"))."
             )
         case .stale:
-            return .observe(reason: "The daemon has not heard from this session recently.")
+            return .observe(
+                reason: "\(HostDevice.current.computer("The computer")) hasn't heard from this session recently.")
         }
     }
 }
@@ -492,8 +495,9 @@ public struct LinkHealth: Sendable, Equatable {
     public var disabledReason: String? {
         guard !actionsEnabled else { return nil }
         switch level {
-        case .stale: return "Link stale - \(ageText) since the daemon last spoke. \(detail)"
-        case .connecting: return "Connecting to the daemon…"
+        case .stale:
+            return "Link stale - \(ageText) since \(HostDevice.current.computer("your computer")) last answered. \(detail)"
+        case .connecting: return "Connecting to \(HostDevice.current.computer("your computer"))…"
         case .offline: return detail
         case .rejected: return detail
         case .live, .lagging: return nil
@@ -565,7 +569,7 @@ public struct LinkHealth: Sendable, Equatable {
     ) -> LinkHealth {
         switch phase {
         case .idle:
-            return LinkHealth(level: .offline, age: nil, detail: "Not paired with a daemon.")
+            return LinkHealth(level: .offline, age: nil, detail: "Not paired with a computer.")
         case .connecting:
             // A redial is a retry of a failure the screen is already showing,
             // and blanking the banner for the second the dial takes was the
@@ -599,7 +603,7 @@ public struct LinkHealth: Sendable, Equatable {
             if age >= staleAfter {
                 return LinkHealth(
                     level: .stale, age: age,
-                    detail: "The socket is open but the daemon has gone quiet.")
+                    detail: "Connected, but \(HostDevice.current.computer("your computer")) has gone quiet.")
             }
             if age >= lagAfter {
                 return LinkHealth(level: .lagging, age: age, detail: "Link lagging.")
@@ -638,6 +642,13 @@ public enum Format {
     public static func age(since date: Date?, now: Date = Date()) -> String {
         guard let date else { return "never" }
         return age(now.timeIntervalSince(date))
+    }
+
+    /// When something happened, as a sentence ends it: "4m ago", or "never" for
+    /// what has not happened, which takes no "ago".
+    public static func ago(since date: Date?, now: Date = Date()) -> String {
+        guard let date else { return "never" }
+        return "\(age(now.timeIntervalSince(date))) ago"
     }
 
     public static func duration(ms: Int) -> String {
