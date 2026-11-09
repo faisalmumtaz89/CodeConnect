@@ -60,10 +60,7 @@ struct StartStepsSheet: View {
 
     /// Whether the branch step comes next: the computer can say, and has not
     /// yet said the folder is outside a repository.
-    private var branchAhead: Bool {
-        guard let project, context.asksGit else { return false }
-        return context.git(project.path).map { $0 != nil } ?? true
-    }
+    private var branchAhead: Bool { project.map(context.branchAhead) ?? false }
 
     var body: some View {
         Group {
@@ -343,14 +340,7 @@ struct StartStepsSheet: View {
     }
 
     /// The browsed folder as a project: a recent one when it is one.
-    private func useFolder(_ path: String) {
-        let recent = context.projects.first { $0.path == path }
-        choose(
-            recent
-                ?? StartProject(
-                    path: path, name: path == "/" ? "/" : String(path.split(separator: "/").last ?? ""),
-                    lastUsed: Date(), lastAgent: nil, gitBranch: nil, exists: true))
-    }
+    private func useFolder(_ path: String) { choose(context.project(at: path)) }
 
     // MARK: Agent
 
@@ -413,14 +403,14 @@ struct StartStepsSheet: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if let here = git.checkout(at: project.path) {
                         section("This folder")
-                        placeRow(.folder, title: name(here), detail: notes(here, running))
+                        placeRow(.folder, title: here.title, detail: here.notes(running: running))
                     }
                     let others = git.others(than: project.path)
                     if !others.isEmpty {
                         section("Worktrees")
                         ForEach(others, id: \.path) { checkout in
                             placeRow(
-                                .existing(checkout), title: name(checkout), detail: notes(checkout, running),
+                                .existing(checkout), title: checkout.title, detail: checkout.notes(running: running),
                                 disabled: checkout.missing)
                         }
                     }
@@ -472,17 +462,6 @@ struct StartStepsSheet: View {
             .padding(.top, CC.space.md)
     }
 
-    private func name(_ checkout: StartWorktree) -> String { checkout.branch ?? "Detached HEAD" }
-
-    /// What a start in this checkout would share or meet.
-    private func notes(_ checkout: StartWorktree, _ running: Set<String>) -> String? {
-        let notes =
-            (checkout.missing ? ["Its folder is gone"] : [])
-            + (running.contains(checkout.path) ? ["A session is running here"] : [])
-            + (checkout.dirty ? ["Uncommitted changes"] : [])
-        return notes.isEmpty ? nil : notes.joined(separator: " · ")
-    }
-
     // MARK: New worktree
 
     @ViewBuilder
@@ -502,11 +481,7 @@ struct StartStepsSheet: View {
                         onSubmit: { if valid { useNewWorktree(name) } })
                     VStack(alignment: .leading, spacing: CC.space.xs) {
                         fact("Branch", valid ? StartPlace.newBranch(name, for: agent) : "—", mono: true)
-                        fact(
-                            "From",
-                            agent == .claude
-                                ? "Claude Code’s own default base"
-                                : "the current commit of \(here?.branch ?? "this folder")")
+                        fact("From", StartPlace.newWorktreeBase(for: agent, from: here))
                         if here?.dirty == true {
                             fact("Changes", "Uncommitted changes stay where they are")
                         }
@@ -565,7 +540,11 @@ struct StartStepsSheet: View {
                     summary("Computer", context.machineName, .computer)
                     summary("Folder", project.shownPath, .folder, mono: true, oneLine: true)
                     summary("Agent", agent.displayName, .agent)
-                    if git != nil { summary("Branch", placeSummary(agent), .branch, mono: true) }
+                    if git != nil {
+                        summary(
+                            "Branch", startPlaceSummary(place, agent: agent, project: project, git: git), .branch,
+                            mono: true)
+                    }
                     if typeSize.isAccessibilitySize { messagePill(project, agent).padding(CC.space.md) }
                 }
             }
@@ -595,16 +574,6 @@ struct StartStepsSheet: View {
 
     private func start(_ project: StartProject, _ agent: StartAgent) {
         onStarted(context.start(project, place: place, agent: agent, prompt: message))
-    }
-
-    /// The chosen place in a word or two: the branch, and where it runs.
-    private func placeSummary(_ agent: StartAgent) -> String {
-        switch place {
-        case .folder: return git?.checkout(at: project?.path ?? "").map(name) ?? "This folder"
-        case .existing(let checkout): return "\(name(checkout)) · worktree"
-        case .branch(let branch): return "\(branch) · new worktree"
-        case .new(let name): return "\(StartPlace.newBranch(name, for: agent)) · new worktree"
-        }
     }
 
     /// One choice made, named, and a tap back to the screen that made it.

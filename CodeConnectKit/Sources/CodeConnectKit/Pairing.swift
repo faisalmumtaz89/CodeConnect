@@ -229,7 +229,7 @@ public struct PairingQRPayload: Sendable, Hashable {
     /// **not** demand a `100.64/10` address or a `.ts.net` name: a custom DNS
     /// name, a tailnet with its own domain, or a deliberately pinned `ws_bind` are
     /// all legitimate, and refusing the unfamiliar would be a guess.
-    static func unreachableHost(_ host: String) -> String? {
+    public static func unreachableHost(_ host: String) -> String? {
         let trimmed = host.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return "is empty" }
         if trimmed.caseInsensitiveCompare("localhost") == .orderedSame {
@@ -327,6 +327,11 @@ public struct PairingQRPayload: Sendable, Hashable {
     public var endpoint: DaemonEndpoint {
         DaemonEndpoint(host: host, port: port, credential: .pairingCode(code), useTLS: false)
     }
+
+    /// The link a pairing QR carries, written as the daemon writes it (`protocol::pairing` `to_link`): the four
+    /// fields after `#`, so the page it opens without the app never sees the code. Nothing is escaped: a host is
+    /// a DNS name or an address, and a code is from the pairing alphabet.
+    public var link: String { "https://codeconnect.sh/p#v=\(Self.supportedVersion)&h=\(host)&p=\(port)&c=\(code)" }
 }
 
 // MARK: - Typed-in credentials
@@ -551,6 +556,19 @@ public final class PairingStore {
             return
         }
         let next = upserting(endpoint, id: id)
+        if persist(next) { machines = next }
+    }
+
+    /// A paired machine whose daemon now answers at another address keeps its id, its token, its
+    /// cache and its name: the Mac app's own computer, paired at loopback before its daemon moved to
+    /// the tailnet. Nothing changes when the address is already this one.
+    public func readdress(_ id: String, host: String, port: Int, useTLS: Bool) {
+        guard let index = machines.firstIndex(where: { $0.id == id }) else { return }
+        var next = machines
+        let old = next[index].endpoint
+        let moved = DaemonEndpoint(host: host, port: port, credential: old.credential, useTLS: useTLS)
+        guard !moved.isSameAddress(as: old) || moved.useTLS != old.useTLS else { return }
+        next[index].endpoint = moved
         if persist(next) { machines = next }
     }
 

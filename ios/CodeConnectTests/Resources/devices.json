@@ -1,0 +1,86 @@
+{
+  "devices": {
+    "devices": [
+      {
+        "created_at": "2026-11-01T09:00:00.000Z",
+        "device_id": "a1b2c3d4e5f6",
+        "last_seen_at": "2026-11-09T08:40:00.000Z",
+        "name": "Jordan’s iPhone",
+        "tailnet_node": "nP7Kq2CNTRL"
+      },
+      {
+        "created_at": "2026-11-04T11:15:00.000Z",
+        "device_id": "c3d4e5f6a7b8",
+        "last_seen_at": "2026-11-09T08:55:00.000Z",
+        "name": "build-server-eu-west-1",
+        "tailnet_node": "nB2Lx5CNTRL"
+      },
+      {
+        "created_at": "2026-10-20T08:00:00.000Z",
+        "device_id": "d5e6f7a8b9c0",
+        "last_seen_at": "2026-11-02T19:10:00.000Z",
+        "name": "Jordan’s MacBook Pro",
+        "tailnet_node": "nM9Tz3CNTRL"
+      },
+      {
+        "created_at": "2026-11-03T07:45:00.000Z",
+        "device_id": "e7f8a9b0c1d2",
+        "last_seen_at": "2026-11-09T07:20:00.000Z",
+        "name": "Jordan’s MacBook Pro",
+        "tailnet_node": "nM9Tz3CNTRL"
+      },
+      {
+        "created_at": "2026-10-12T17:30:00.000Z",
+        "device_id": "b7c8d9e0f1a2",
+        "last_seen_at": "2026-10-30T21:05:00.000Z",
+        "name": "Jordan’s iPad",
+        "revoked_at": "2026-11-05T12:00:00.000Z",
+        "tailnet_node": "nD4Rw8CNTRL"
+      },
+      {
+        "created_at": "2026-09-02T10:00:00.000Z",
+        "device_id": "f9a0b1c2d3e4",
+        "last_seen_at": "2026-09-28T16:00:00.000Z",
+        "name": "Jordan’s old iPhone",
+        "paired_before_nodes": true,
+        "revoked_at": "2026-10-01T09:30:00.000Z"
+      }
+    ],
+    "type": "devices"
+  },
+  "list_devices_request": {
+    "type": "list_devices"
+  },
+  "revoke_device_request": {
+    "device": "a1b2c3d4e5f6",
+    "ssh_only": false,
+    "type": "revoke_device"
+  },
+  "revoked": {
+    "device": {
+      "created_at": "2026-11-01T09:00:00.000Z",
+      "device_id": "a1b2c3d4e5f6",
+      "last_seen_at": "2026-11-09T08:40:00.000Z",
+      "name": "Jordan’s iPhone",
+      "revoked_at": "2026-11-09T09:00:00.000Z",
+      "tailnet_node": "nP7Kq2CNTRL"
+    },
+    "ssh_key_removed": false,
+    "token_revoked": true,
+    "type": "revoked"
+  },
+  "unblock_device_request": {
+    "device": "b7c8d9e0f1a2",
+    "type": "unblock_device"
+  },
+  "unblocked": {
+    "device": {
+      "created_at": "2026-10-12T17:30:00.000Z",
+      "device_id": "b7c8d9e0f1a2",
+      "last_seen_at": "2026-10-30T21:05:00.000Z",
+      "name": "Jordan’s iPad",
+      "tailnet_node": "nD4Rw8CNTRL"
+    },
+    "type": "unblocked"
+  }
+}

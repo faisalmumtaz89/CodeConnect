@@ -796,6 +796,99 @@ pub const ENV_SESSION_UID: &str = "CODECONNECT_SESSION_UID";
 /// about which job they are talking about.
 pub const LAUNCHD_LABEL: &str = "com.codeconnect.ccd";
 
+/// The label this build installs, manages and recognises itself by: [`LAUNCHD_LABEL`], always,
+/// in a shipped build.
+///
+/// A rig build — `--features test-launchd-label`, never the default — takes it from
+/// [`TEST_LABEL_VAR`] instead, which must read `com.codeconnect.ccd.test-<id>`. A test install
+/// then addresses its own job in the user's launchd domain and never the real one; with the
+/// variable unset or malformed it is a label no job has, and [`test_label_refusal`] stops the
+/// install, restart and removal outright.
+#[cfg(not(feature = "test-launchd-label"))]
+pub fn launchd_label() -> &'static str {
+    LAUNCHD_LABEL
+}
+
+/// Why this build may not install, restart or remove a job: never, in a shipped build.
+#[cfg(not(feature = "test-launchd-label"))]
+pub fn test_label_refusal() -> Option<String> {
+    None
+}
+
+/// The variable a rig build reads its job's label from (see [`launchd_label`]).
+#[cfg(feature = "test-launchd-label")]
+pub const TEST_LABEL_VAR: &str = "CODECONNECT_LAUNCHD_LABEL";
+
+/// The label of an unconfigured rig build: no job has it, and [`test_label_refusal`] names it.
+#[cfg(feature = "test-launchd-label")]
+const UNSET_TEST_LABEL: &str = "com.codeconnect.ccd.test-unset";
+
+#[cfg(feature = "test-launchd-label")]
+pub fn launchd_label() -> &'static str {
+    static LABEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LABEL
+        .get_or_init(|| {
+            std::env::var(TEST_LABEL_VAR)
+                .ok()
+                .filter(|label| is_test_label(label))
+        })
+        .as_deref()
+        .unwrap_or(UNSET_TEST_LABEL)
+}
+
+/// A rig build refuses unless its job is a test job that cannot reach the owner's: a test label,
+/// and a `TMUX_TMPDIR` that exists as a directory of this user's with mode 0700. A tmux whose
+/// `TMUX_TMPDIR` is missing falls back to the default socket — the owner's server.
+#[cfg(feature = "test-launchd-label")]
+pub fn test_label_refusal() -> Option<String> {
+    if launchd_label() == UNSET_TEST_LABEL {
+        return Some(format!(
+            "this is a test build: set {TEST_LABEL_VAR}=com.codeconnect.ccd.test-<id> (letters, digits and -)"
+        ));
+    }
+    tmux_tmpdir_refusal(
+        std::env::var_os("TMUX_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .as_deref(),
+    )
+}
+
+/// A rig's `TMUX_TMPDIR` must exist as this user's own directory, mode 0700, not a link to one:
+/// checked as the folder is, so a missing or loose one stops the job before any tmux runs.
+#[cfg(feature = "test-launchd-label")]
+fn tmux_tmpdir_refusal(dir: Option<&std::path::Path>) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(dir) = dir else {
+        return Some("this is a test build: set TMUX_TMPDIR to a scratch folder".to_string());
+    };
+    match std::fs::symlink_metadata(dir) {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        Ok(meta)
+            if meta.is_dir()
+                && meta.uid() == unsafe { libc::getuid() }
+                && meta.mode() & 0o777 == fsperm::DIR_MODE =>
+        {
+            None
+        }
+        _ => Some(format!(
+            "this is a test build: TMUX_TMPDIR {} must exist as this user's directory, mode 0700",
+            dir.display()
+        )),
+    }
+}
+
+#[cfg(feature = "test-launchd-label")]
+fn is_test_label(label: &str) -> bool {
+    label
+        .strip_prefix("com.codeconnect.ccd.test-")
+        .is_some_and(|id| {
+            !id.is_empty()
+                && id != "unset"
+                && id.len() <= 64
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 /// The launcher subcommand that runs one bounded codex recovery pass.
 ///
 /// **Here rather than in either crate that says it, because it is a seam between
@@ -1178,5 +1271,70 @@ mod tests {
         // And the private-dir boundary — the one the launch path actually calls —
         // refuses too, which is the sentence "the launch fails closed" in code.
         assert!(fsperm::private_dir(&root).is_err());
+    }
+
+    /// A shipped build's label is the constant, whatever the environment says: the rig
+    /// variable is not read, and the refusal never fires.
+    #[cfg(not(feature = "test-launchd-label"))]
+    #[test]
+    fn a_shipped_build_manages_the_real_job_only() {
+        std::env::set_var(
+            "CODECONNECT_LAUNCHD_LABEL",
+            "com.codeconnect.ccd.test-ignored",
+        );
+        assert_eq!(launchd_label(), LAUNCHD_LABEL);
+        assert_eq!(test_label_refusal(), None);
+    }
+
+    /// A rig build accepts only `com.codeconnect.ccd.test-<id>`: never the real label, never one
+    /// that merely starts like it.
+    #[cfg(feature = "test-launchd-label")]
+    #[test]
+    fn a_rig_label_is_a_test_label_or_nothing() {
+        for good in [
+            "com.codeconnect.ccd.test-a",
+            "com.codeconnect.ccd.test-run-42-B",
+        ] {
+            assert!(is_test_label(good), "{good}");
+        }
+        for bad in [
+            LAUNCHD_LABEL,
+            "com.codeconnect.ccd.test-",
+            "com.codeconnect.ccd.test-unset",
+            "com.codeconnect.ccd.test-a/b",
+            "com.codeconnect.ccd.test-a b",
+            "com.codeconnect.ccdx.test-a",
+            "",
+        ] {
+            assert!(!is_test_label(bad), "{bad:?}");
+        }
+        assert!(!is_test_label(&format!(
+            "com.codeconnect.ccd.test-{}",
+            "a".repeat(65)
+        )));
+    }
+
+    /// A rig's TMUX_TMPDIR must already be this user's own 0700 directory: unset, missing, loose
+    /// or a link to a good one are each refused.
+    #[cfg(feature = "test-launchd-label")]
+    #[test]
+    fn a_rig_tmux_folder_must_exist_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("cc-tmux-check-{}", std::process::id()));
+        let good = base.join("good");
+        let loose = base.join("loose");
+        let link = base.join("link");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+
+        assert_eq!(tmux_tmpdir_refusal(Some(&good)), None);
+        assert!(tmux_tmpdir_refusal(None).is_some());
+        assert!(tmux_tmpdir_refusal(Some(&base.join("never-created"))).is_some());
+        assert!(tmux_tmpdir_refusal(Some(&loose)).is_some());
+        assert!(tmux_tmpdir_refusal(Some(&link)).is_some());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

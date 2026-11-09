@@ -37,7 +37,7 @@ final class HookOnlyApprovalTests: XCTestCase {
         XCTAssertEqual(held.questionHold, .held)
         XCTAssertTrue(held.verification.hashMatchesDisplayText)
         XCTAssertEqual(
-            DecisionCardView.answerSurface(
+            DecisionCard.answerSurface(
                 card: held, agent: .claude, hold: held.questionHold, hookOnlyApprovals: true),
             .allowDeny)
     }
@@ -57,7 +57,7 @@ final class HookOnlyApprovalTests: XCTestCase {
     func testAnOlderDaemonsClaudeApprovalsAreReadOnly() throws {
         let held = try card("held_request")
         XCTAssertEqual(
-            DecisionCardView.answerSurface(
+            DecisionCard.answerSurface(
                 card: held, agent: .claude, hold: .held, hookOnlyApprovals: false),
             .noneAnswerable)
         XCTAssertTrue(
@@ -101,7 +101,7 @@ final class HookOnlyApprovalTests: XCTestCase {
         let atMac = try card("at_mac_request")
         XCTAssertEqual(atMac.questionHold, .atMac)
         XCTAssertEqual(
-            DecisionCardView.answerSurface(
+            DecisionCard.answerSurface(
                 card: atMac, agent: .claude, hold: .atMac, hookOnlyApprovals: true),
             .noneAnswerable)
         XCTAssertEqual(
@@ -112,7 +112,7 @@ final class HookOnlyApprovalTests: XCTestCase {
         let ended = try XCTUnwrap(try event("hold_ended").questionHoldChange)
         XCTAssertEqual(ended.hold, .ended)
         XCTAssertEqual(
-            DecisionCardView.answerSurface(
+            DecisionCard.answerSurface(
                 card: atMac, agent: .claude, hold: ended.hold, hookOnlyApprovals: true),
             .noneAnswerable)
     }

@@ -10,6 +10,10 @@ description = "CodeConnect daemon: event log, hook gate, tailnet WebSocket serve
 name = "ccd"
 path = "src/main.rs"
 
+[features]
+# A rig build that recognises itself by its job's test label (`protocol::launchd_label`).
+test-launchd-label = ["protocol/test-launchd-label"]
+
 [dependencies]
 protocol = { workspace = true }
 push-core = { workspace = true }

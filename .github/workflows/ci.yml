@@ -331,6 +331,16 @@ jobs:
             exit 1
           fi
 
+      # **Every control in the Mac app can be found and read by accessibility
+      # alone,** so a test drives it by identifier with no guesswork. Each one
+      # carries an accessibilityIdentifier and a name. SwiftUI names a button
+      # after the text in its label; a label that is only an image is named
+      # after its symbol (both sidebar "+" buttons read "Add"), and a text
+      # field's title names nothing. The script lives beside the app, so a
+      # contributor runs the same check CI does.
+      - name: Mac controls have identifiers and names
+        run: ./macos/scripts/check-control-names.py
+
       # **A fixture the phone carries a copy of must equal the copy the Rust
       # side reads.** Xcode cannot reference a file outside its source root, so
       # `ios/**/Resources` holds literal duplicates of `fixtures/codex/` rather

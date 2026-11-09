@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 description = "Shared CodeConnect types: event log envelope, unix-socket IPC frames, WSS messages."
 
+[features]
+# A rig build's launchd label: the daemon's job takes `com.codeconnect.ccd.test-<id>` from the
+# environment, so a test install never reaches the real job. Never the default, so the binaries
+# a user runs carry neither the variable nor the code that reads it. See `launchd_label`.
+test-launchd-label = []
+
 [dependencies]
 libc = { workspace = true }
 serde = { workspace = true }

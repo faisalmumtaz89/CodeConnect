@@ -138,10 +138,7 @@ struct FleetView: View {
     @State private var startOpen = false
     @State private var startedRequest: String?
     /// Every paired computer that can start a session.
-    private var startContexts: [StartContext] {
-        machines.models.filter { $0.connection.capabilities?.startsSessions == true }
-            .map { StartContext(model: $0) }
-    }
+    private var startContexts: [StartContext] { machines.startContexts }
     private var canStart: Bool { !startContexts.isEmpty }
 
     /// Where every line of text on this screen starts: 52 at reading sizes.
@@ -771,15 +768,6 @@ struct FleetView: View {
         let needsYou: Bool
     }
 
-    /// The home folder as `~`, the way a shell prints it: `/Users/<name>/…` on a
-    /// Mac and `/home/<name>/…` on Linux.
-    private static func shellPath(_ cwd: String) -> String {
-        let parts = cwd.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home"
-        else { return cwd }
-        return (["~"] + parts.dropFirst(3)).joined(separator: "/")
-    }
-
     /// The projects and runs the list holds (`shown`), in the owner's order
     /// (`ProjectOrder`), the new ones on top in fleet order, and each project's
     /// runs in the order they started: no status and no event moves a card or
@@ -802,7 +790,7 @@ struct FleetView: View {
             return Project(
                 id: id,
                 name: lead.label.project,
-                path: Self.shellPath(id.folder),
+                path: FleetGroup.shellPath(id.folder),
                 machineName: lead.machineName,
                 // Control is the promise and its presence is not news, so a
                 // card has no header note and an observe-only row says so

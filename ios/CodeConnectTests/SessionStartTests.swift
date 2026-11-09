@@ -31,7 +31,7 @@ final class SessionStartTests: XCTestCase {
 
         var starts: [(requestID: String, path: String, agent: String, prompt: String?)] {
             sent.compactMap {
-                guard case .startSession(let id, let path, let agent, let prompt, _) = $0 else { return nil }
+                guard case .startSession(let id, let path, let agent, let prompt, _, _) = $0 else { return nil }
                 return (id, path, agent, prompt)
             }
         }
@@ -152,6 +152,19 @@ final class SessionStartTests: XCTestCase {
             case .startSessionResult("r9", .failed(.launchFailed, "no more sessions today")) =
                 try JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8))
         else { return XCTFail("decoded otherwise") }
+    }
+
+    /// A launch that failed says so in one plain line naming its computer, the title both apps
+    /// show; the computer's own words are the detail, kept apart.
+    func testALaunchThatFailedSaysSoOnItsComputer() {
+        let start = SessionStart(
+            requestID: "r1",
+            project: StartProject(path: "/x", name: "x", lastUsed: Date(), lastAgent: nil, gitBranch: nil, exists: true),
+            place: .folder, agent: .claude, model: nil, prompt: nil, machineName: "Jordan’s Mac Studio", sentAt: Date(),
+            outcome: .failed(.launchFailed, detail: "no more sessions today"))
+        let words = StartFailure.launchFailed.words(for: start)
+        XCTAssertEqual(words.title, "Claude Code didn’t start on Jordan’s Mac Studio.")
+        XCTAssertNil(words.message, "no sentence under it: the computer's words are the detail")
     }
 
     // MARK: The model

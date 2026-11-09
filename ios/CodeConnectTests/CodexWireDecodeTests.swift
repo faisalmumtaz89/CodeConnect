@@ -257,7 +257,7 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertFalse(summary.isCodex, "an agent this build cannot drive is not Codex")
         XCTAssertEqual(summary.agent.displayName, "gemini", "named in the daemon's own word")
         // And it gets no answer surface at all — never Claude's by default.
-        guard case .noneAnswerable = DecisionCardView.answerSurface(
+        guard case .noneAnswerable = DecisionCard.answerSurface(
             card: try XCTUnwrap(capturedCards().first?.card), agent: summary.agent,
             hold: nil, hookOnlyApprovals: true)
         else { return XCTFail("an unknown agent must not inherit a vocabulary") }

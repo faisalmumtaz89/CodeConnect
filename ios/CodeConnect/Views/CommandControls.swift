@@ -178,9 +178,6 @@ struct ModelSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    /// The selectable ships, by alias — the argument `/model` accepts.
-    private static let aliases = ["fable", "opus", "sonnet", "haiku"]
-
     private enum Phase: Equatable {
         case idle
         /// The alias being typed on the Mac right now.
@@ -366,7 +363,7 @@ struct ModelSheet: View {
     private var chooserCard: some View {
         CCCard(padding: 0) {
             VStack(spacing: 0) {
-                ForEach(Self.aliases, id: \.self) { alias in
+                ForEach(ModelDisplay.families, id: \.self) { alias in
                     aliasRow(alias)
                 }
             }
@@ -390,7 +387,7 @@ struct ModelSheet: View {
         return CCRow(
             display.name,
             showsChevron: false,
-            separator: alias != Self.aliases.last,
+            separator: alias != ModelDisplay.families.last,
             action: (busy || isCurrent) ? nil : { apply(alias) }
         ) {
             if isApplying {

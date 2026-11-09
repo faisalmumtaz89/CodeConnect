@@ -354,6 +354,15 @@ extension RenderCatalog {
             try tap(app, "start-go", driver)
             try failed(app, driver, "isn’t installed")
         },
+        RenderScenario(
+            name: "start2-i3-launch-failed", purpose: "steps: the computer could not start the agent",
+            arguments: args(outcome: "launch_failed")
+        ) { app, driver in
+            try toAgents(app, driver, "dotfiles")
+            try tap(app, "start-agent-claude", driver)
+            try tap(app, "start-go", driver)
+            try failed(app, driver, "didn’t start on")
+        },
         RenderScenario(name: "start2-g-live", purpose: "steps: live, first message sent", arguments: args()) {
             app, driver in
             try toReady(app, driver)

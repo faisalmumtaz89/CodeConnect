@@ -73,7 +73,7 @@ extension ApprovalCard {
     /// raw-JSON hole: `display_text` there is literally `"{tool}\n{input}"`, so
     /// an unverifiable card printed the wire onto the one product screen that
     /// must never show it. Those get one sentence instead, and the card is
-    /// not answerable (see `DecisionCardView.answerSurface`) — a rendering
+    /// not answerable (see `DecisionCard.answerSurface`) — a rendering
     /// nobody can vouch for is not a question anybody should answer from here.
     public func primaryText(verification: Verification, agent: AgentKind?) -> String {
         guard verification.renderMatchesDisplayText,

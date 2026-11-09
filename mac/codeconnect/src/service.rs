@@ -90,6 +90,9 @@ const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const THROTTLE_INTERVAL_SECS: u32 = 5;
 
 pub fn command(args: &[String]) -> Result<()> {
+    if let Some(refusal) = protocol::test_label_refusal() {
+        bail!("{refusal}");
+    }
     match args.first().map(String::as_str) {
         Some("install") => install(&args[1..]),
         Some("uninstall") => crate::no_arguments(&args[1..], "codeconnect daemon uninstall")
@@ -318,12 +321,12 @@ fn stop_for_removal(plist: &Path) -> Result<()> {
     let uid = user_id()?;
     let booted = launchctl(&["bootout".into(), service_target(uid)])?;
     if booted.ok {
-        println!("stopped {}", protocol::LAUNCHD_LABEL);
+        println!("stopped {}", protocol::launchd_label());
     } else if booted.stderr.contains("No such process")
         || booted.stderr.contains("not find")
         || booted.stderr.contains("no such")
     {
-        println!("{} was not loaded", protocol::LAUNCHD_LABEL);
+        println!("{} was not loaded", protocol::launchd_label());
     } else {
         // Stop here rather than delete the plist anyway. An unrecognised
         // failure means the job may well still be loaded, and removing its
@@ -553,9 +556,9 @@ fn describe_plist(path: &Path) -> String {
 /// plist-ish dict for a decade, whereas `print` is a human-readable dump that
 /// has changed shape between macOS releases.
 fn job_state() -> Result<String> {
-    let result = launchctl(&["list".into(), protocol::LAUNCHD_LABEL.into()])?;
+    let result = launchctl(&["list".into(), protocol::launchd_label().into()])?;
     if !result.ok {
-        return Ok(format!("{} is not loaded", protocol::LAUNCHD_LABEL));
+        return Ok(format!("{} is not loaded", protocol::launchd_label()));
     }
     let pid = plist_field(&result.stdout, "PID");
     let last_exit = plist_field(&result.stdout, "LastExitStatus");
@@ -594,7 +597,7 @@ fn plist_field(text: &str, key: &str) -> Option<String> {
 /// is the one thing this product promises never to do.
 #[cfg(target_os = "macos")]
 pub fn job_is_loaded() -> bool {
-    launchctl(&["list".into(), protocol::LAUNCHD_LABEL.into()])
+    launchctl(&["list".into(), protocol::launchd_label().into()])
         .map(|result| result.ok)
         .unwrap_or(false)
 }
@@ -618,12 +621,12 @@ pub fn restart_managed_daemon() -> Result<bool> {
 pub fn plist_path() -> PathBuf {
     protocol::home_dir()
         .join("Library/LaunchAgents")
-        .join(format!("{}.plist", protocol::LAUNCHD_LABEL))
+        .join(format!("{}.plist", protocol::launchd_label()))
 }
 
 #[cfg(target_os = "macos")]
 fn service_target(uid: u32) -> String {
-    format!("gui/{uid}/{}", protocol::LAUNCHD_LABEL)
+    format!("gui/{uid}/{}", protocol::launchd_label())
 }
 
 /// The real user id, asked of the system rather than guessed from `$HOME`.
@@ -651,8 +654,13 @@ struct Run {
     stderr: String,
 }
 
+/// Every launchd call goes through here, so a rig build that is not set up for a job of its own
+/// (`protocol::test_label_refusal`) makes none.
 #[cfg(target_os = "macos")]
 fn launchctl(args: &[String]) -> Result<Run> {
+    if let Some(refusal) = protocol::test_label_refusal() {
+        bail!("{refusal}");
+    }
     let output = Command::new("/bin/launchctl")
         .args(args)
         .stdin(Stdio::null())
@@ -738,7 +746,7 @@ fn kick_job() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn unit_name() -> String {
-    format!("{}.service", protocol::LAUNCHD_LABEL)
+    format!("{}.service", protocol::launchd_label())
 }
 
 #[cfg(target_os = "linux")]
@@ -1257,7 +1265,7 @@ pub(crate) fn plist_document(ccd: &Path, path_value: &str) -> String {
         <key>HOME</key>
         <string>{home}</string>
         <key>CODECONNECT_LOG</key>
-        <string>info</string>
+        <string>info</string>{rig}
     </dict>
 
     <key>StandardOutPath</key>
@@ -1270,14 +1278,43 @@ pub(crate) fn plist_document(ccd: &Path, path_value: &str) -> String {
 </dict>
 </plist>
 "#,
-        label = xml_escape(protocol::LAUNCHD_LABEL),
+        label = xml_escape(protocol::launchd_label()),
         ccd = xml_escape(&ccd.to_string_lossy()),
         throttle = THROTTLE_INTERVAL_SECS,
         path = xml_escape(path_value),
         home = xml_escape(&home.to_string_lossy()),
         stdout = xml_escape(&protocol::daemon_stdout_log().to_string_lossy()),
         stderr = xml_escape(&protocol::daemon_stderr_log().to_string_lossy()),
+        rig = rig_environment(),
     )
+}
+
+/// What a rig build's job adds to its environment: its label, so the daemon recognises its own
+/// job, and the folders the rig gave it, so it never falls back to the owner's — a tmux with no
+/// `TMUX_TMPDIR` is the owner's server. Nothing, in a shipped build.
+#[cfg(target_os = "macos")]
+fn rig_environment() -> String {
+    #[cfg(feature = "test-launchd-label")]
+    {
+        [
+            protocol::TEST_LABEL_VAR,
+            "CODECONNECT_HOME",
+            "CODECONNECT_TMUX",
+            "TMUX_TMPDIR",
+        ]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
+        .map(|(name, value)| {
+            format!(
+                "\n        <key>{}</key>\n        <string>{}</string>",
+                xml_escape(name),
+                xml_escape(&value)
+            )
+        })
+        .collect()
+    }
+    #[cfg(not(feature = "test-launchd-label"))]
+    String::new()
 }
 
 /// Escape the five XML entities.
@@ -1334,7 +1371,7 @@ WantedBy=default.target
         throttle = THROTTLE_INTERVAL_SECS,
         path = unit_quote(&format!("PATH={path_value}")),
         home = unit_quote(&format!("HOME={}", home.to_string_lossy())),
-        label = protocol::LAUNCHD_LABEL,
+        label = protocol::launchd_label(),
         stdout = unit_specifiers(&protocol::daemon_stdout_log().to_string_lossy()),
         stderr = unit_specifiers(&protocol::daemon_stderr_log().to_string_lossy()),
     )

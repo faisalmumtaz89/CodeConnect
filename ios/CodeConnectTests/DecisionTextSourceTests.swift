@@ -46,7 +46,6 @@ final class DecisionTextSourceTests: XCTestCase {
                 "let intent = ToolSummary.intent(",
                 "tool: approval.card.toolName, input: approval.card.toolInput)",
             ]),
-            ("DecisionCard.swift", ["let options = CodexCard.options(in: card.toolInput)"]),
             ("DecisionCard.swift", ["if let reason = CodexCard.reason(in: approval.card.toolInput) {"]),
             ("DecisionCard.swift", [
                 "private var changes: [CodexCard.Change] { CodexCard.changes(in: approval.card.toolInput) }",

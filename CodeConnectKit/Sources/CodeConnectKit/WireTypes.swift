@@ -1919,9 +1919,12 @@ public enum ClientMessage: Sendable {
     /// resent unchanged after a reconnect: the daemon answers a repeat with the
     /// first outcome and starts nothing new. `path` is a listed path, byte for byte.
     /// `worktree` (minor 29) starts in one of its repository's worktrees, existing
-    /// or new; `.folder` sends none, and the folder is never switched.
+    /// or new; `.folder` sends none, and the folder is never switched. `model`
+    /// (minor 33) is the `value` of a model the computer listed for the agent;
+    /// nil names none, and the agent starts on its own default.
     case startSession(
-        requestID: String, path: String, agent: String, prompt: String?, worktree: StartPlace = .folder)
+        requestID: String, path: String, agent: String, prompt: String?, worktree: StartPlace = .folder,
+        model: String? = nil)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -1958,6 +1961,7 @@ extension ClientMessage: Encodable {
         case agent
         case prompt
         case worktree
+        case model
         case showHidden = "show_hidden"
         case parent
         case name
@@ -2105,7 +2109,7 @@ extension ClientMessage: Encodable {
             try c.encode(payloadHash, forKey: .payloadHash)
         case .listProjects:
             try c.encode("list_projects", forKey: .type)
-        case .startSession(let requestID, let path, let agent, let prompt, let worktree):
+        case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model):
             try c.encode("start_session", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(path, forKey: .path)
@@ -2119,6 +2123,7 @@ extension ClientMessage: Encodable {
                 case .new(let name): ["kind": "new", "name": name]
                 }
             try c.encodeIfPresent(request, forKey: .worktree)
+            try c.encodeIfPresent(model, forKey: .model)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
             try c.encode(path, forKey: .path)

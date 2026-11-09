@@ -6,7 +6,8 @@ import Foundation
 /// `codeconnect devices` use it to tell two phones apart, so it has to outlive
 /// pairing, re-pairing, and whatever transport the terminal happens to use.
 public enum DeviceIdentity {
-    private static let key = "codeconnect.installationID"
+    /// Where the id is kept in the app's defaults.
+    public static let key = "codeconnect.installationID"
 
     public static let installationID: String = {
         if let existing = UserDefaults.standard.string(forKey: key) { return existing }

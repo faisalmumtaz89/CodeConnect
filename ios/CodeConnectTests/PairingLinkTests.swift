@@ -22,6 +22,11 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertTrue(payload.endpoint.isPairingCode)
     }
 
+    /// The link the app writes is the daemon's, byte for byte: a Mac shows the QR the computer would print.
+    func testTheAppWritesTheLinkTheDaemonEmits() throws {
+        XCTAssertEqual(try PairingQRPayload.decode(emitted()).get().link, try emitted())
+    }
+
     /// An opened link reaches the app as a URL; its text is the same link.
     func testAnOpenedLinkDecodesAsTheScannedOneDoes() throws {
         let url = try XCTUnwrap(URL(string: try emitted()))

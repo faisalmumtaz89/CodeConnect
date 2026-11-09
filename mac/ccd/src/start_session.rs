@@ -1025,7 +1025,7 @@ const UTF8_CTYPE: &str = "C.UTF-8";
 /// way, the daemon's environment is the session's already.
 fn phone_environment() -> HashMap<OsString, OsString> {
     let own: HashMap<OsString, OsString> = std::env::vars_os().collect();
-    let session = (crate::state::launchd_label().as_deref() == Some(protocol::LAUNCHD_LABEL))
+    let session = (crate::state::launchd_label().as_deref() == Some(protocol::launchd_label()))
         .then(|| session_environment(&own))
         .flatten();
     phone_environment_from(own, session)

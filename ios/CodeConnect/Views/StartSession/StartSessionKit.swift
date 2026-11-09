@@ -1,82 +1,12 @@
 import CodeConnectKit
 import SwiftUI
 
-// What the New session steps are built from: what a start knows about its
-// computer, a recent folder's row, the search field, the first-message pill
-// and the title of the screen a start lands on.
-
-/// What a start needs to know about the computer it runs on.
-@MainActor
-struct StartContext {
-    init(model: AppModel) { self.model = model }
-
-    let model: AppModel
-
-    var starter: SessionStarter { model.starter }
-    var machineName: String { model.machineName ?? "this computer" }
-    var projects: [StartProject] { (starter.projects ?? []).filter(\.exists) }
-
-    var id: String { model.machineID ?? "" }
-
-    /// Ask again each time: the list is the computer's, and it changes.
-    func load() { model.listProjects() }
-
-    func start(
-        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String
-    ) -> String {
-        model.startSession(project, place: place, agent: agent, prompt: prompt)
-    }
-
-    /// The folder's repository, once the computer has said: `.some(nil)` for
-    /// a folder that is not one.
-    func git(_ path: String) -> StartGit?? { starter.git[path] }
-    func askGit(_ path: String) { model.projectGit(path) }
-    /// Whether this computer can say what a folder's repository holds (minor
-    /// 29). A redial, which has no capabilities yet, is not a no: the read is
-    /// asked again after the handshake, as `AppModel.projectGit` does.
-    var asksGit: Bool { model.connection.capabilities?.startsInWorktrees != false }
-
-    /// A folder's listing, once the computer has answered.
-    func listing(_ request: StartFolderRequest) -> StartFolderListing? { starter.listings[request] }
-    func listFolder(_ request: StartFolderRequest) { model.listFolder(request) }
-    func createFolder(named name: String, in parent: String) -> String {
-        model.createFolder(named: name, in: parent)
-    }
-
-    /// What came of a `create_folder`: nil until answered, `.some(nil)` once
-    /// made, else the computer's words.
-    func created(_ requestID: String?) -> String?? { requestID.flatMap { starter.creates[$0] } }
-
-    /// Whether this computer can browse and make folders (minor 30).
-    var browses: Bool { model.connection.capabilities?.browsesFolders == true }
-
-    /// The folders a live session of this computer's is running in.
-    var runningFolders: Set<String> { model.liveFolders }
-
-    /// When this computer last ran anything the phone can start again.
-    var lastUsed: Date? { projects.first?.lastUsed }
-
-    /// Why an agent cannot be started on this computer, or nil when it can: in
-    /// plain words, never the computer's own check output, which names its
-    /// command line and its settings file. "Can't start" is true whether the
-    /// agent is missing, its shell is slow or its version check failed.
-    func missingReason(_ agent: StartAgent) -> String? {
-        guard !starter.availableAgents.contains(agent) else { return nil }
-        return "\(agent.displayName) can’t start on \(machineName)."
-    }
-}
+// What the New session steps are built from: a recent folder's row, the
+// search field, the first-message pill and the title of the screen a start
+// lands on. What a start knows about its computer, and the rules the steps
+// follow, are Kit's (`StartContext`).
 
 // MARK: - Project row
-
-/// `main · 4m ago · Claude Code`: the branch, when it was last used and by
-/// which agent. A folder that is not a repository has no branch to show.
-func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
-    var parts: [String] = []
-    if let branch = project.gitBranch { parts.append(branch) }
-    parts.append(Format.ago(since: project.lastUsed, now: now))
-    if let agent = project.lastAgent { parts.append(agent.displayName) }
-    return parts.joined(separator: " · ")
-}
 
 /// A project: its name, its folder cut from the front, and its branch, age
 /// and last agent, with a caret, since a tap moves on.
@@ -150,14 +80,6 @@ struct StartSearchField: View {
     private var field: some View {
         TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(CC.text.placeholder))
             .accessibilityIdentifier("start-search")
-    }
-}
-
-func startFilter(_ projects: [StartProject], _ query: String) -> [StartProject] {
-    let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-    guard !needle.isEmpty else { return projects }
-    return projects.filter {
-        $0.name.lowercased().contains(needle) || $0.path.lowercased().contains(needle)
     }
 }
 

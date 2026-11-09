@@ -24,7 +24,7 @@ struct DecisionCardSheet: View {
     /// card carries no title of its own, so this is its one heading.
     private var title: String {
         guard
-            let questions = DecisionCardView.questionCard(
+            let questions = DecisionCard.questionCard(
                 card: approval.card, agent: model.shownSummary(for: approval.sessionKey)?.agent)
         else { return "Decision" }
         return questions.questions.count == 1 ? "Question" : "\(questions.questions.count) questions"

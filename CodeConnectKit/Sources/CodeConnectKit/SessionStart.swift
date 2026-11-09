@@ -143,24 +143,46 @@ public struct StartProject: Identifiable, Hashable, Sendable {
 }
 
 /// One entry of `ServerMessage::Projects.agents`: whether an agent is
-/// installed on the computer, and the computer's own words when it is not.
+/// installed on the computer, and the computer's own words when it is not;
+/// from minor 33, the models it offers a start and whether it is signed in.
 public struct StartAgentStatus: Hashable, Sendable {
     public let agent: StartAgent
     let available: Bool
     public let detail: String?
+    /// In the agent's own order and words; empty from a daemon below minor 33,
+    /// and when the agent could not be asked.
+    public let models: [StartModel]
+    /// Nil when not known, and from a daemon below minor 33.
+    public let signedIn: Bool?
 
     /// As it arrives: the agent's name may be one this build does not know.
     struct Wire: Decodable {
         let agent: String
         let available: Bool
         let detail: String?
+        let models: [StartModel]?
+        let signedIn: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case agent, available, detail, models
+            case signedIn = "signed_in"
+        }
 
         var status: StartAgentStatus? {
             StartAgent(rawValue: agent).map {
-                StartAgentStatus(agent: $0, available: available, detail: detail)
+                StartAgentStatus(
+                    agent: $0, available: available, detail: detail, models: models ?? [], signedIn: signedIn)
             }
         }
     }
+}
+
+/// One model an agent offers a start (minor 33): `value` is what a start
+/// names, `label` and `detail` the agent's own words, shown as sent.
+public struct StartModel: Hashable, Sendable, Decodable {
+    public let value: String
+    public let label: String
+    public let detail: String?
 }
 
 extension StartProject: Decodable {
@@ -231,6 +253,8 @@ public struct SessionStart: Identifiable, Hashable {
     public let project: StartProject
     public let place: StartPlace
     public let agent: StartAgent
+    /// The model the start names (a listed `value`); nil names none.
+    public let model: String?
     public let prompt: String?
     public let machineName: String
     public let sentAt: Date
@@ -316,17 +340,27 @@ public final class SessionStarter {
     }
 
     /// The fixture answer to `list_projects`: a Mac's forty folders, or a
-    /// Linux server's few. `-CC_START_AGENTS claude` leaves Codex uninstalled.
+    /// Linux server's few. `-CC_START_AGENTS claude` leaves Codex uninstalled;
+    /// `-CC_START_AGENTS_WIRE <agents>` answers with a recorded frame's `agents`
+    /// as given (fixtures/claude/minor-33-wire.json), models and sign-in included.
     public func listFixtureProjects(linux: Bool) {
         projects = linux ? Self.fixtureLinuxProjects(now: Date()) : Self.fixtureProjects(now: Date())
         var codex = true
         #if DEBUG
             codex = UserDefaults.standard.string(forKey: "CC_START_AGENTS") != "claude"
+            let arguments = ProcessInfo.processInfo.arguments
+            if let flag = arguments.firstIndex(of: "-CC_START_AGENTS_WIRE"), flag + 1 < arguments.count,
+                let wire = try? JSONDecoder().decode([StartAgentStatus.Wire].self, from: Data(arguments[flag + 1].utf8))
+            {
+                agents = wire.compactMap(\.status)
+                return
+            }
         #endif
         agents = [
-            StartAgentStatus(agent: .claude, available: true, detail: nil),
+            StartAgentStatus(agent: .claude, available: true, detail: nil, models: [], signedIn: nil),
             StartAgentStatus(
-                agent: .codex, available: codex, detail: codex ? nil : "codex is not installed"),
+                agent: .codex, available: codex, detail: codex ? nil : "codex is not installed", models: [],
+                signedIn: nil),
         ]
     }
 
@@ -353,13 +387,13 @@ public final class SessionStarter {
     /// after a reconnect one session rather than two.
     @discardableResult
     public func start(
-        project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String,
+        project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String,
         machineName: String
     ) -> String {
         let requestID = UUID().uuidString.lowercased()
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         starts[requestID] = SessionStart(
-            requestID: requestID, project: project, place: place, agent: agent,
+            requestID: requestID, project: project, place: place, agent: agent, model: model,
             prompt: trimmed.isEmpty ? nil : trimmed, machineName: machineName, sentAt: Date())
         return requestID
     }
