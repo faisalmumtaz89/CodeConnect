@@ -143,9 +143,8 @@ public final class DaemonConnection {
     /// The two are not the same thing and treating them as one is how the diff
     /// sheet came to print `Connecting to the daemon…` under the words *the
     /// daemon's own reason follows, verbatim*. `lastErrorMessage` also carries
-    /// the app's own account of the link — `The daemon closed the connection`,
-    /// a protocol-version mismatch, an unreadable frame — which are true, and
-    /// are not quotations. Only an `error` frame lands here, so only this may
+    /// the app's own account of a frame it could not read, which is true, and
+    /// is not a quotation. Only an `error` frame lands here, so only this may
     /// be shown as something the Mac said.
     private(set) var lastDaemonErrorMessage: String?
     private(set) var lastDaemonErrorAt: Date?
@@ -194,13 +193,22 @@ public final class DaemonConnection {
     /// cleared on `start`, `stop` and a successful `hello_ack`, and it names
     /// its host so a stale classification can never dress a replacement
     /// endpoint.
+    ///
+    /// **It carries no message.** The banner says each case in the app's own
+    /// words; the system's text for a failure ("Socket is not connected", "The
+    /// request timed out.") stays in `lastErrorMessage`, for Link health's Last
+    /// error row.
     public enum DialFailure: Equatable, Sendable {
         /// DNS cannot resolve the daemon's name. On a `*.ts.net` pairing this
         /// almost always means Tailscale is off on this phone — but it is
         /// recovery guidance, not an observed fact, and the copy built from it
         /// must not claim more than DNS reported.
         case hostUnresolvable(host: String)
-        case other(message: String)
+        /// A link that was up dropped after hearing nothing for
+        /// `silenceDeadline`: the computer went quiet, whichever side ended it.
+        case quiet
+        /// Any other failure: the computer could not be reached.
+        case unreachable
     }
     public private(set) var dialFailure: DialFailure?
     /// Whether this `start` has already completed at least one failed dial —
@@ -400,11 +408,8 @@ public final class DaemonConnection {
 
             phase = .connecting
             do {
+                // Never returns: every end of a dial, a close included, throws.
                 try await runConnection(url: url, credential: endpoint.credential)
-                // A clean close is still a disconnect; reconnect promptly.
-                ledger.reset()
-                dialFailure = .other(message: "\(HostDevice.current.pairingComputer("Your computer")) closed the connection")
-                lastErrorMessage = "\(HostDevice.current.pairingComputer("Your computer")) closed the connection"
             } catch let error as ConnectionError {
                 // A dial that had completed its handshake before dying ends
                 // the failure run: what follows is a fresh outage, not
@@ -428,7 +433,8 @@ public final class DaemonConnection {
                     dialFailure = .hostUnresolvable(host: endpoint.host)
                     ledger.dnsFailure()
                 default:
-                    dialFailure = .other(message: error.localizedDescription)
+                    dialFailure = Self.dropped(
+                        wasUp: helloAck != nil, lastContactAt: lastContactAt, now: Date())
                     ledger.failure()
                 }
                 lastErrorMessage = error.localizedDescription
@@ -436,7 +442,8 @@ public final class DaemonConnection {
                 return
             } catch {
                 if helloAck != nil { ledger.reset() }
-                dialFailure = .other(message: error.localizedDescription)
+                dialFailure = Self.dropped(
+                    wasUp: helloAck != nil, lastContactAt: lastContactAt, now: Date())
                 ledger.failure()
                 lastErrorMessage = error.localizedDescription
             }
@@ -666,7 +673,8 @@ public final class DaemonConnection {
         wakeTask = nil
     }
 
-    /// Returns when the socket closes cleanly; throws on any failure.
+    /// Never returns: every end of the link throws, a clean close and this
+    /// task's own cancellation included.
     private func runConnection(url: URL, credential: HelloCredential) async throws {
         let configuration = URLSessionConfiguration.ephemeral
         // Bounds how long a dead tailnet host takes to report itself dead; the
@@ -846,6 +854,15 @@ public final class DaemonConnection {
     static func silenceExpired(since lastContact: Date?, now: Date) -> Bool {
         guard let lastContact else { return false }
         return now.timeIntervalSince(lastContact) >= silenceDeadline
+    }
+
+    /// Why a dial ended, read from what was heard rather than from who ended
+    /// it. A link that was up and had heard nothing for `silenceDeadline` went
+    /// quiet — the silence cut above is the usual end, and it reaches here as
+    /// whatever error the system gave the cut, such as "Socket is not
+    /// connected". Anything else is a computer this app could not reach.
+    static func dropped(wasUp: Bool, lastContactAt: Date?, now: Date) -> DialFailure {
+        wasUp && silenceExpired(since: lastContactAt, now: now) ? .quiet : .unreachable
     }
 
     // MARK: - Sending

@@ -28,7 +28,7 @@ struct RenderScenario {
     var arguments: [String] = []
     var environment: [String: String] = [:]
     /// How long to allow for the state to arrive. Generous only where the state
-    /// itself takes time (`stale` crosses `LinkHealth.staleAfter` at 45s).
+    /// itself takes time (`stale` crosses `LinkHealth.staleAfter` at 30s).
     var timeout: TimeInterval = 30
     /// Drives the app from launch to the state. Throws or fails if it cannot
     /// get there — which is the whole contract.
@@ -607,7 +607,7 @@ enum RenderCatalog {
             purpose:
                 "the link has gone quiet: every action disables itself **with its reason**",
             arguments: ["-CC_FIXTURE", "stacked", "-CC_FIXTURE_LINK", "stale"],
-            // `LinkHealth.staleAfter` is 45s and the fixture withholds its
+            // `LinkHealth.staleAfter` is 30s and the fixture withholds its
             // keep-alive `pong`, so the state arrives on its own. There is no
             // shorter way in, and without it the state is unaudited — which is
             // how the accessory bar shipped with its blocked reason cut
