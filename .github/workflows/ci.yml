@@ -343,8 +343,9 @@ jobs:
 
       # **A fixture the phone carries a copy of must equal the copy the Rust
       # side reads.** Xcode cannot reference a file outside its source root, so
-      # `ios/**/Resources` holds literal duplicates of `fixtures/codex/` rather
-      # than links — and until this step nothing compared them. A regenerated
+      # `ios/**/Resources` and `macos/CodeConnect/Resources` hold literal
+      # duplicates of `fixtures/` files rather than links — and until this step
+      # nothing compared them. A regenerated
       # `refusal-sentences.json` once left the iOS copy a release behind, and the
       # composer failed *open* against a daemon that was refusing the link.
       #
