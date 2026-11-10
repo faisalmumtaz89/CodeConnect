@@ -1,0 +1,125 @@
+import CodeConnectKit
+import SwiftUI
+
+/// A run's terminal: why it cannot open, the control that opens it, or the live terminal. Showing the tab attaches
+/// nothing. A terminal is shell-equivalent authority, so it opens on a click, comes back by itself only into this
+/// run's own terminal that was already open, and is taken from another run only through the block's own button,
+/// which names that run.
+struct TerminalTab: View {
+    let row: FleetRow
+    let model: AppModel
+    /// The computer's own re-pair, for a terminal this connection may not open.
+    let pairAgain: () -> Void
+
+    private var carrier: TerminalCarrier { model.terminal }
+    private var sessionUID: String { row.id }
+
+    var body: some View {
+        Group {
+            switch model.terminalConnect(sessionUID: sessionUID) {
+            case .blocked(let reason, let fix):
+                Blocked(reason: reason, fix: fix) { run(fix) }
+            case .ready(let uid):
+                Live(carrier: carrier, sessionUID: uid) { open(uid) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.window)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("terminal.tab")
+        .onAppear {
+            if model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
+        }
+    }
+
+    private func open(_ uid: String) {
+        carrier.attach(sessionUID: uid, cols: carrier.lastSize.cols, rows: carrier.lastSize.rows)
+    }
+
+    private func run(_ fix: TerminalConnect.Fix?) {
+        switch fix {
+        case .pair: pairAgain()
+        case .takeOver: carrier.takeOver(sessionUID: sessionUID, cols: carrier.lastSize.cols, rows: carrier.lastSize.rows)
+        case nil: break
+        }
+    }
+}
+
+/// Why the terminal cannot open, in Kit's words, with the one route that changes it when there is one.
+private struct Blocked: View {
+    let reason: String
+    let fix: TerminalConnect.Fix?
+    let action: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(reason)
+                .font(Theme.ui(13))
+                .foregroundStyle(Theme.text2)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+                .accessibilityIdentifier("terminal.blocked")
+            if let fix {
+                ActionButton(title: fix.title(), key: nil, prominent: false, id: "terminal.blocked.fix", action: action)
+            }
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// This run's terminal: the control that opens it, and once opened, the terminal itself with how it stands. As on the
+/// iPhone, an open terminal stays open until its connection ends or another run takes it.
+private struct Live: View {
+    let carrier: TerminalCarrier
+    let sessionUID: String
+    let open: () -> Void
+
+    var body: some View {
+        let phase = carrier.phase(forRun: sessionUID)
+        let shown = !carrier.transcript(forRun: sessionUID).isEmpty
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if let status = status(phase) {
+                    Text(status)
+                        .font(Theme.ui(12))
+                        .foregroundStyle(Theme.text2)
+                        .lineLimit(2)
+                        .accessibilityIdentifier("terminal.status")
+                }
+                Spacer(minLength: 0)
+                if !isOpen(phase) {
+                    ActionButton(title: "Open terminal", key: nil, prominent: true, id: "terminal.open", action: open)
+                }
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 44)
+            .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+            if isOpen(phase) || shown {
+                TerminalSurface(carrier: carrier, sessionUID: sessionUID)
+            } else {
+                Text("Open the terminal to see this run on its computer and type into it.")
+                    .font(Theme.ui(12.5))
+                    .foregroundStyle(Theme.text3)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private func isOpen(_ phase: TerminalCarrier.Phase) -> Bool {
+        switch phase {
+        case .attaching, .attached: return true
+        case .idle, .ended: return false
+        }
+    }
+
+    private func status(_ phase: TerminalCarrier.Phase) -> String? {
+        switch phase {
+        case .attaching: return "Connecting…"
+        case .ended(let reason, _): return reason
+        case .idle, .attached: return nil
+        }
+    }
+}

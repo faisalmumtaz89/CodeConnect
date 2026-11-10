@@ -16,6 +16,8 @@ struct MainWindow: View {
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
     @State private var opened: String?
+    /// The open run's tab; each run opens on its conversation.
+    @State private var tab = SessionTab.conversation
 
     init() {
         #if DEBUG
@@ -30,10 +32,7 @@ struct MainWindow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(adding: $adding, scope: $scope, filter: $filter) { address in
-                repairing = address
-                adding = .computer
-            }
+            Sidebar(adding: $adding, scope: $scope, filter: $filter, pairAgain: pairAgain)
                 .frame(width: 216)
             Rectangle().fill(Theme.hairline).frame(width: 1)
             if machines.showsFleet {
@@ -43,7 +42,10 @@ struct MainWindow: View {
                     .frame(width: model == nil ? nil : 580)
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
-                    SessionPane(row: open, model: model).id(open.id)
+                    SessionPane(row: open, model: model, tab: $tab) {
+                        if let address = model.endpoint?.typedAddress { pairAgain(address) }
+                    }
+                    .id(open.id)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -55,9 +57,11 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
-        // Esc closes the open run; a sheet's own Esc is its Cancel.
+        .onChange(of: opened) { tab = .conversation }
+        // Esc closes the open run; a sheet's own Esc is its Cancel. Not while its terminal is shown: there Esc is the
+        // agent's (it interrupts a turn), and a window shortcut would take it before the terminal saw it.
         .background {
-            if opened != nil, adding == nil {
+            if opened != nil, adding == nil, tab != .terminal {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -87,6 +91,12 @@ struct MainWindow: View {
                     .renderLook()
                 #endif
         }
+    }
+
+    /// A refused computer paired again: the Add Computer sheet, its address already in the code form.
+    private func pairAgain(_ address: String) {
+        repairing = address
+        adding = .computer
     }
 }
 

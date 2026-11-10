@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		CD0000000000000000000101 /* CodeConnectKit in Frameworks */ = {isa = PBXBuildFile; productRef = CD00000000000000000000F1 /* CodeConnectKit */; };
 		CD0000000000000000000102 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = CD00000000000000000000F2 /* Sparkle */; };
+		CD0000000000000000000103 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = CD00000000000000000000F3 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 			files = (
 				CD0000000000000000000101 /* CodeConnectKit in Frameworks */,
 				CD0000000000000000000102 /* Sparkle in Frameworks */,
+				CD0000000000000000000103 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +77,7 @@
 			packageProductDependencies = (
 				CD00000000000000000000F1 /* CodeConnectKit */,
 				CD00000000000000000000F2 /* Sparkle */,
+				CD00000000000000000000F3 /* SwiftTerm */,
 			);
 			productName = CodeConnect;
 			productReference = CD00000000000000000000A5 /* CodeConnect.app */;
@@ -107,6 +110,7 @@
 			packageReferences = (
 				CD00000000000000000000E1 /* XCLocalSwiftPackageReference "../CodeConnectKit" */,
 				CD00000000000000000000E2 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				CD00000000000000000000E3 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CD00000000000000000000A3 /* Products */;
@@ -296,6 +300,14 @@
 				version = 2.10.1;
 			};
 		};
+		CD00000000000000000000E3 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/faisalmumtaz89/SwiftTerm.git";
+			requirement = {
+				kind = revision;
+				revision = caa4f03b8ca3ff34c53d6372b5a76eff1592f3c3;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -308,6 +320,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CD00000000000000000000E2 /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		CD00000000000000000000F3 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CD00000000000000000000E3 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

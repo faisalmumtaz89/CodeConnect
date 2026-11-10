@@ -1,11 +1,15 @@
 import CodeConnectKit
 import SwiftUI
 
-/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation. It reads
-/// what Kit holds for the run and changes nothing; opening and closing it mark the run reviewed, as the iPhone does.
+/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation or its
+/// terminal. Opening and closing it mark the run reviewed, as the iPhone does; opening it opens no terminal.
 struct SessionPane: View {
     let row: FleetRow
     let model: AppModel
+    /// Which tab is shown: the window's, because Esc closes the run everywhere but in the terminal.
+    @Binding var tab: SessionTab
+    /// The run's computer paired again, for a terminal its connection may not open.
+    let pairAgain: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -13,8 +17,11 @@ struct SessionPane: View {
                 if row.summary.isCodex, model.stopUnavailable(for: row.id) == nil { StopTurn(model: model, key: row.id) }
             }
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            Heading(row: row, model: model)
-            Conversation(model: model, key: row.id)
+            Heading(row: row, model: model, tab: $tab)
+            switch tab {
+            case .conversation: Conversation(model: model, key: row.id)
+            case .terminal: TerminalTab(row: row, model: model, pairAgain: pairAgain)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.window)
@@ -57,10 +64,11 @@ private struct Place<Actions: View>: View {
 }
 
 /// What the run is called, how it stands, which agent and model it is, the lines it has changed, how long ago it
-/// last said anything, and its one tab.
+/// last said anything, and its two tabs.
 private struct Heading: View {
     let row: FleetRow
     let model: AppModel
+    @Binding var tab: SessionTab
 
     var body: some View {
         let since = row.lastEventAt ?? row.summary.updatedDate
@@ -93,16 +101,12 @@ private struct Heading: View {
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text2)
             if row.summary.isCodex { StopOutcome(activity: model.codexStop(for: row.id)) }
-            VStack(spacing: 7) {
-                Text("Conversation").font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
-                Rectangle().fill(Theme.text).frame(height: 1.5)
+            HStack(spacing: 20) {
+                ForEach(SessionTab.allCases, id: \.self) { each in
+                    TabButton(tab: each, selected: tab == each) { tab = each }
+                }
             }
-            .fixedSize()
             .padding(.top, 6)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Conversation")
-            .accessibilityAddTraits([.isHeader, .isSelected])
-            .accessibilityIdentifier("session.tab.conversation")
         }
         .padding(.horizontal, 28)
         .padding(.top, 18)
@@ -115,6 +119,48 @@ private struct Heading: View {
         [row.summary.agent.displayName, model.confirmedModel(for: row.id).map { ModelDisplay.from($0.name).name }]
             .compactMap { $0 }
             .joined(separator: " · ")
+    }
+}
+
+/// What the pane shows below its heading.
+enum SessionTab: CaseIterable {
+    case conversation
+    case terminal
+
+    var title: String {
+        switch self {
+        case .conversation: return "Conversation"
+        case .terminal: return "Terminal"
+        }
+    }
+
+    /// What a driver finds the tab by.
+    var id: String {
+        switch self {
+        case .conversation: return "session.tab.conversation"
+        case .terminal: return "session.tab.terminal"
+        }
+    }
+}
+
+/// One tab: its word, underlined while it is the one shown. Both are buttons; only the shown one reads selected, and
+/// each keeps the header trait the single Conversation tab had.
+private struct TabButton: View {
+    let tab: SessionTab
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Text(tab.title).font(Theme.ui(12.5, .medium)).foregroundStyle(selected ? Theme.text : Theme.text3)
+                Rectangle().fill(selected ? Theme.text : Color.clear).frame(height: 1.5)
+            }
+            .fixedSize()
+        }
+        .buttonStyle(.hover(outset: 4, id: tab.id))
+        .accessibilityAddTraits(selected ? [.isHeader, .isSelected] : [.isHeader])
+        .accessibilityIdentifier(tab.id)
     }
 }
 
