@@ -96,3 +96,8 @@ extension ButtonStyle where Self == HoverButtonStyle {
         HoverButtonStyle(radius: radius, over: over, outset: outset, id: id)
     }
 }
+
+extension FocusedValues {
+    /// The composer is using Esc itself: its commands list is open or its field has focus.
+    @Entry var composerHoldsEscape: Bool?
+}

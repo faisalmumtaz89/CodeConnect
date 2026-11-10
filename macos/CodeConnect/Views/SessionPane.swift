@@ -14,6 +14,9 @@ struct SessionPane: View {
     /// behind the conversation: the emulator holds the run's screen and scrollback, and Kit keeps only the stream's
     /// tail, so a terminal rebuilt from it draws a wrong screen once the run has printed more than that.
     @State private var terminalShown = false
+    /// The run's draft, kept here above the tabs: the conversation and its composer are built again on each return
+    /// from the terminal, and the words being written must not go with them.
+    @State private var composerDraft = ComposerDraft()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -23,7 +26,12 @@ struct SessionPane: View {
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model, tab: $tab)
             ZStack(alignment: .topLeading) {
-                if tab == .conversation { Conversation(model: model, key: row.id) }
+                if tab == .conversation {
+                    VStack(spacing: 0) {
+                        Conversation(model: model, key: row.id)
+                        ComposerBar(key: row.id, kept: composerDraft)
+                    }
+                }
                 if tab == .terminal || terminalShown {
                     TerminalTab(row: row, model: model, onScreen: tab == .terminal, pairAgain: pairAgain)
                         .opacity(tab == .terminal ? 1 : 0)
