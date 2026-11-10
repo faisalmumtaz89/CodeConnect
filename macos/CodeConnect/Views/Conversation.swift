@@ -26,6 +26,9 @@ struct Conversation: View {
                         }
                     }
                     .scrollTargetLayout()
+                    // The end, as a place of its own that no row's change rebuilds: following scrolls here, as the
+                    // iPhone does, never to the newest row.
+                    Color.clear.frame(height: 1).id(Self.end)
                 }
                 .padding(.horizontal, 28)
             }
@@ -35,15 +38,13 @@ struct Conversation: View {
             // At the bottom from the first frame, so nothing above the newest row is passed over on the way.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.bottom, for: .alignment)
-            // A reader at the end is kept there as the column grows or the pane's foot takes more of it. Each time is
+            // A reader at the end is scrolled back to it when the column grows or the scroll view shrinks. Each time is
             // one scroll, which, unlike a bottom anchor, does not come back as rows change, so a reader who went up
             // stays where they are.
             .onScrollGeometryChange(for: ScrollGeometry.self) { $0 } action: { old, new in
                 let endMoved = new.contentSize.height > old.contentSize.height
                     || new.containerSize.height < old.containerSize.height
-                if Self.atEnd(old), endMoved, let last = items.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+                if Self.atEnd(old), endMoved { proxy.scrollTo(Self.end, anchor: .bottom) }
             }
             .accessibilityIdentifier("session.conversation")
         }
@@ -51,6 +52,8 @@ struct Conversation: View {
             .modifier(ShownOut(model: model, key: key))
         #endif
     }
+
+    private static let end = "session.conversation.end"
 
     /// The end of the column is on screen. From the scroll view's own geometry, whose top inset is the column's margin or
     /// the space above a column shorter than the pane: a lazy row that scrolled far away is gone, and never says so.
