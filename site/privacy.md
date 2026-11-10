@@ -21,7 +21,7 @@ There is no account, no login and no analytics. Your data moves between your own
 - **Session data** (agent transcripts, permission prompts, diffs, terminal output) travels directly from the daemon on your computer to your iPhone over a connection you configure — typically your own private network. It never passes through servers we operate.
 - **Pairing** uses your iPhone camera to read a QR code shown in your terminal. The code is processed on-device; nothing is recorded or uploaded.
 - **Dictation** in the compose bar uses Apple's speech recognition, on-device wherever your language supports it. Audio is transcribed while you dictate and is not recorded or kept.
-- **Face ID / passcode** is used to confirm high-risk approvals. Biometric data never leaves your device and is never visible to the app; the app only receives Apple's yes/no result.
+- **Face ID / passcode** is used on the iPhone to confirm high-risk approvals. Biometric data never leaves your device and is never visible to the app; the app only receives Apple's yes/no result.
 - **Revoking a device** — you can revoke a device's pairing token at any time from your computer, and revocation takes effect immediately, including on open connections.
 
 ## Push notifications

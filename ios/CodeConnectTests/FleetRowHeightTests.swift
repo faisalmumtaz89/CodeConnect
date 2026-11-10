@@ -114,7 +114,7 @@ final class FleetRowHeightTests: XCTestCase {
                 activity: .notSent(CodexLinkState.offline.blockedReason(for: .stop) ?? "")),
             CodexStop(
                 name: "no answer", offered: false, blockedReason: nil,
-                activity: .sentNoAnswer(AppModel.sentNoAnswerSentence(verb: "stop"))),
+                activity: .sentNoAnswer(AppModel.sentNoAnswerSentence)),
         ]
     }
 

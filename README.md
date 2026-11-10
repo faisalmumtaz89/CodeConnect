@@ -15,7 +15,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 ## Features
 
 - **Every session in one place.** One iPhone pairs with several computers and lists every session started through CodeConnect, and what it is waiting for.
-- **Approvals with the whole command.** Each request is marked by risk, and a high-risk one needs Face ID or your passcode.
+- **Approvals with the whole command.** Each request is marked by risk, and on the iPhone a high-risk one needs Face ID or your passcode.
 - **Claude's questions.** When Claude asks you to choose, the question appears on your phone, and your answer reaches Claude as if you had chosen at the computer.
 - **Diffs you can read on a phone.** Word-level highlighting, and a comment on any hunk goes to the agent.
 - **Talk to the agent.** Type or dictate a message; dictation uses Apple's speech recognition, and nothing is sent until you send it.

@@ -3,14 +3,13 @@ import SwiftUI
 
 /// Claude's question where it was asked: each question with its choices, picked here and sent as Claude reads them,
 /// or declined. Kit decides whether this Mac may answer (`QuestionCardStatus`), what the picks mean
-/// (`QuestionDraft`), and that at HIGH submitting asks Touch ID or the password first while declining never does.
+/// (`QuestionDraft`).
 struct QuestionBlock: View {
     let approval: ApprovalItem
     let questions: QuestionCard
     let model: AppModel
     @State private var draft: QuestionDraft
     @State private var sending: String?
-    @State private var authNotice: String?
 
     init(approval: ApprovalItem, questions: QuestionCard, model: AppModel) {
         self.approval = approval
@@ -22,7 +21,6 @@ struct QuestionBlock: View {
     private var live: ApprovalItem? { model.shownApproval(sessionKey: approval.sessionKey, id: approval.id) }
     private var attempt: AnswerAttempt? { model.lastAttempt(for: approval) }
     private var inFlight: Bool { sending != nil || model.isAnswering(approval) }
-    private var risk: RiskClass { approval.assessment(profile: model.daemonProfile).effective }
     private var blocked: String? { model.answerBlockedReason(for: approval, inFlight: inFlight) }
     private var id: String { "question.\(approval.card.requestID)" }
 
@@ -64,9 +62,6 @@ struct QuestionBlock: View {
                         .accessibilityIdentifier("\(id).banner")
                 } else if let attempt, !attempt.isTerminal {
                     BannerLine(DecisionCard.resultBanner(for: attempt)).accessibilityIdentifier("\(id).banner")
-                }
-                if let authNotice {
-                    BannerLine(title: HostDevice.current.biometric, message: authNotice, tone: .warning)
                 }
                 if status.isAnswerable { controls }
             }
@@ -135,9 +130,6 @@ struct QuestionBlock: View {
 
     private var controls: some View {
         let answers = draft.answers(in: questions)
-        let submitTitle =
-            DecisionCard.needsSecondFactor(risk: risk, decision: .answers([]))
-            ? "Submit with \(HostDevice.current.biometric)" : "Submit"
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Spacer()
@@ -145,7 +137,7 @@ struct QuestionBlock: View {
                     send(.decline, from: "decline")
                 }
                 .disabled(blocked != nil)
-                ActionButton(title: submitTitle, key: nil, prominent: true, id: "\(id).submit") {
+                ActionButton(title: "Submit", key: nil, prominent: true, id: "\(id).submit") {
                     if let answers { send(.answers(answers), from: "submit") }
                 }
                 .disabled(blocked != nil || answers == nil)
@@ -162,21 +154,11 @@ struct QuestionBlock: View {
         questions.questions.count == 1 ? "Choose an answer to submit." : "Answer every question to submit."
     }
 
-    /// One answer, as the decision card sends one: never while the card cannot be answered or one is on its way,
-    /// and at HIGH only after the second factor says yes.
+    /// One answer, as the decision card sends one: never while the card cannot be answered or one is on its way.
     private func send(_ decision: AnswerDecision, from control: String) {
         guard status.isAnswerable, !inFlight, blocked == nil else { return }
         sending = control
-        authNotice = nil
         Task {
-            if DecisionCard.needsSecondFactor(risk: risk, decision: decision) {
-                let check = await BiometricGate.confirm(reason: BiometricGate.reason(for: approval.card.toolName))
-                guard check.isAuthenticated else {
-                    sending = nil
-                    authNotice = check.message
-                    return
-                }
-            }
             _ = await model.answer(item: approval, decision: decision)
             sending = nil
         }
