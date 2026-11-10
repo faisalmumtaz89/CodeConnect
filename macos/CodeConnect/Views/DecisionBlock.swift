@@ -146,7 +146,7 @@ struct DecisionBlock: View {
         .accessibilityValue(showInput ? "open" : "closed")
         if showInput {
             VStack(alignment: .leading, spacing: 6) {
-                Text(approval.card.shownToolInput.displaySafe)
+                Text(approval.card.shownToolInput)
                     .font(Theme.mono(11.5))
                     .foregroundStyle(Theme.text)
                     .fixedSize(horizontal: false, vertical: true)

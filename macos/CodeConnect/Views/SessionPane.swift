@@ -6,6 +6,7 @@ import SwiftUI
 struct SessionPane: View {
     let row: FleetRow
     let model: AppModel
+    @State private var height: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -15,8 +16,11 @@ struct SessionPane: View {
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model)
             Conversation(model: model, key: row.id)
+            // What waits on you sits at the foot, in at most half the pane, outside the conversation's scroll.
+            PendingRequests(model: model, key: row.id, maxHeight: height / 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.pane")
