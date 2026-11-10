@@ -218,7 +218,7 @@ struct DecisionBlock: View {
                             .padding(.horizontal, 8)
                             .frame(height: 26)
                             .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                            .accessibilityLabel("Reason for denying")
+                            .accessibilityLabel("What should Claude do instead?")
                             .accessibilityIdentifier("\(id).reason.text")
                         ActionButton(title: "Deny", key: nil, prominent: false, id: "\(id).reason.send") {
                             let words = reason.trimmingCharacters(in: .whitespacesAndNewlines)

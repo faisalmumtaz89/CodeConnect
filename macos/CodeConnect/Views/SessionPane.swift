@@ -149,7 +149,6 @@ private struct StopTurn: View {
         }
         .disabled(stopping || greyed)
         .help(greyed ? "Try again in a moment." : "Stop the turn this run is running")
-        .accessibilityLabel(stopping ? "Stopping" : "Stop the turn this run is running")
     }
 }
 
