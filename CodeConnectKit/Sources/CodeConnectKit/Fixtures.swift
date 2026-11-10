@@ -458,6 +458,19 @@ enum Fixtures {
             """
     }
 
+    /// `turn-ended`: the turn a `/model` was typed into ends, and no receipt
+    /// ever arrives — ccd's `turn_complete` for Claude Code's `turn_duration`,
+    /// the shape recorded on 2.1.308 (`transcript-local-commands-wire.json`,
+    /// run `commands-mid-turn`, seq 19). Seq 14, for `receiptFrame`'s reason.
+    static func turnEndFrame(mode: String, session: String, now: Date = Date()) -> String? {
+        guard mode == "turn-ended" else { return nil }
+        return """
+            {"type":"event","event":{"seq":14,"session_id":"\(session)",\
+            "ts":"\(rfc3339(now))","kind":"turn_complete","source":"transcript",\
+            "payload":{"type":"system","subtype":"turn_duration","durationMs":15143}}}
+            """
+    }
+
     /// `-cc.debug.sendText <mode>` — what the stubbed daemon says to any
     /// send. `recovered` carries the measured pane above, as the real
     /// daemon does for the three snapshot commands. The `kept-*` and

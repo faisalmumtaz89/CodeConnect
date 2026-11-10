@@ -219,6 +219,13 @@ public final class SessionState {
     /// session's model, and because the sheet correlates on the sequence.
     private(set) var lastModelCommandSignal: ModelCommandSignal?
 
+    /// Where the newest turn ended — its `turn_complete`, or the line an Esc
+    /// writes instead of one — among the events appended as they arrived; an
+    /// older page or a replay filling a hole is not read. A `/model` typed
+    /// while Claude Code works is applied with no line in the transcript, so a
+    /// turn's end is the moment a watch for one knows that none is coming.
+    private(set) var lastTurnEndSeq: UInt64 = 0
+
     /// The last compaction outcome Claude Code reported — "Compacted (…)"
     /// or the measured refusal on a near-empty context.
     private(set) var lastCompactSignal: CompactConfirmation?
@@ -230,7 +237,7 @@ public final class SessionState {
     /// one. Never from `shown`: a receipt answers a send, and the sheet fences
     /// it against the stream position it captured.
     public struct Receipts {
-        public let modelSignal: ModelCommandSignal?
+        public let modelSignal: ModelWatchSignal
         public let effort: EffortConfirmation?
         public let effortSeq: UInt64
         public let compact: CompactConfirmation?
@@ -239,8 +246,8 @@ public final class SessionState {
 
     var receipts: Receipts {
         Receipts(
-            modelSignal: lastModelCommandSignal, effort: lastConfirmedEffort,
-            effortSeq: lastConfirmedEffortSeq, compact: lastCompactSignal,
+            modelSignal: ModelWatchSignal(command: lastModelCommandSignal, turnEndSeq: lastTurnEndSeq),
+            effort: lastConfirmedEffort, effortSeq: lastConfirmedEffortSeq, compact: lastCompactSignal,
             compactSeq: lastCompactSignalSeq)
     }
 
@@ -612,6 +619,9 @@ public final class SessionState {
             {
                 lastModelCommandSignal = signal
             }
+            if event.isTurnComplete || event.isClaudeInterrupt {
+                lastTurnEndSeq = event.seq
+            }
         }
 
         loadedFromCacheAt = nil
@@ -883,6 +893,7 @@ public final class SessionState {
         lastCompactSignal = nil
         lastCompactSignalSeq = 0
         lastModelCommandSignal = nil
+        lastTurnEndSeq = 0
         gap = notice
     }
 
