@@ -1,8 +1,9 @@
 import CodeConnectKit
 import SwiftUI
 
-/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation or its
-/// terminal. Opening and closing it mark the run reviewed, as the iPhone does; opening it opens no terminal.
+/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation, its
+/// changes or its terminal. Opening and closing it mark the run reviewed, as the iPhone does; opening it opens no
+/// terminal.
 struct SessionPane: View {
     let row: FleetRow
     let model: AppModel
@@ -32,6 +33,7 @@ struct SessionPane: View {
                         ComposerBar(key: row.id, kept: composerDraft)
                     }
                 }
+                if tab == .changes { ChangesTab(model: model, key: row.id) }
                 if tab == .terminal || terminalShown {
                     TerminalTab(row: row, model: model, onScreen: tab == .terminal, pairAgain: pairAgain)
                         .opacity(tab == .terminal ? 1 : 0)
@@ -82,7 +84,7 @@ private struct Place<Actions: View>: View {
 }
 
 /// What the run is called, how it stands, which agent and model it is, the lines it has changed, how long ago it
-/// last said anything, and its two tabs.
+/// last said anything, and its three tabs.
 private struct Heading: View {
     let row: FleetRow
     let model: AppModel
@@ -121,7 +123,10 @@ private struct Heading: View {
             if row.summary.isCodex { StopOutcome(activity: model.codexStop(for: row.id)) }
             HStack(spacing: 20) {
                 ForEach(SessionTab.allCases, id: \.self) { each in
-                    TabButton(tab: each, selected: tab == each) { tab = each }
+                    TabButton(
+                        tab: each, selected: tab == each,
+                        count: each == .changes ? ChangesTab.fileCount(model: model, key: row.id) : nil
+                    ) { tab = each }
                 }
             }
             .padding(.top, 6)
@@ -143,11 +148,13 @@ private struct Heading: View {
 /// What the pane shows below its heading.
 enum SessionTab: CaseIterable {
     case conversation
+    case changes
     case terminal
 
     var title: String {
         switch self {
         case .conversation: return "Conversation"
+        case .changes: return "Changes"
         case .terminal: return "Terminal"
         }
     }
@@ -156,22 +163,28 @@ enum SessionTab: CaseIterable {
     var id: String {
         switch self {
         case .conversation: return "session.tab.conversation"
+        case .changes: return "session.tab.changes"
         case .terminal: return "session.tab.terminal"
         }
     }
 }
 
-/// One tab: its word, underlined while it is the one shown. Both are buttons; only the shown one reads selected, and
-/// each keeps the header trait the single Conversation tab had.
+/// One tab: its word, and a count beside it when it has one, underlined while it is the one shown. Every tab is a
+/// button; only the shown one reads selected, and each keeps the header trait the single Conversation tab had.
 private struct TabButton: View {
     let tab: SessionTab
     let selected: Bool
+    let count: Int?
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 7) {
-                Text(tab.title).font(Theme.ui(12.5, .medium)).foregroundStyle(selected ? Theme.text : Theme.text3)
+                HStack(spacing: 5) {
+                    Text(tab.title).foregroundStyle(selected ? Theme.text : Theme.text3)
+                    if let count { Text(verbatim: "\(count)").foregroundStyle(Theme.text3) }
+                }
+                .font(Theme.ui(12.5, .medium))
                 Rectangle().fill(selected ? Theme.text : Color.clear).frame(height: 1.5)
             }
             .fixedSize()
