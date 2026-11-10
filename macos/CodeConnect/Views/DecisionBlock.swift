@@ -3,8 +3,8 @@ import SwiftUI
 
 /// A decision where it happened: what the agent asks to do, word for word as it was hashed, how risky Kit rates it
 /// and why, the edit a Codex card carries, and the answers this Mac may give, or why it can give none. Every rule is
-/// Kit's (`DecisionCard`, `AppModel.answer`); this view draws them, measures that the command and its risk were on
-/// screen before an answer that says yes, and asks for Touch ID or the password before a yes at HIGH.
+/// Kit's (`DecisionCard`, `AppModel.answer`); this view draws them and measures that the command and its risk were on
+/// screen before an answer that says yes.
 struct DecisionBlock: View {
     let approval: ApprovalItem
     let model: AppModel
@@ -13,7 +13,6 @@ struct DecisionBlock: View {
     @State private var sending: String?
     @State private var sentAt: Date?
     /// Why the second factor said no, in its own words.
-    @State private var authNotice: String?
     @State private var reason = ""
     @State private var askingReason = false
     @State private var showAllChanges = false
@@ -126,7 +125,6 @@ struct DecisionBlock: View {
         case .unavailable: return BannerLine(DecisionCard.unavailableBanner())
         case .none: break
         }
-        if let authNotice { return BannerLine(title: HostDevice.current.biometric, message: authNotice, tone: .warning) }
         return nil
     }
 
@@ -253,7 +251,7 @@ struct DecisionBlock: View {
                     Spacer()
                     ActionButton(title: "Deny", key: nil, prominent: false, id: "\(id).deny") { send(.deny, from: "deny") }
                         .disabled(refusalBlocked != nil)
-                    ActionButton(title: allowTitle, key: nil, prominent: true, id: "\(id).allow") { send(.allow, from: "allow") }
+                    ActionButton(title: "Allow", key: nil, prominent: true, id: "\(id).allow") { send(.allow, from: "allow") }
                         .disabled(assentBlocked != nil)
                         .opacity(assentBlocked != nil ? 0.45 : 1)
                 }
@@ -288,9 +286,6 @@ struct DecisionBlock: View {
                             Text(option.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
-                            if !refusal, risk == .high {
-                                Text(HostDevice.current.biometric).font(Theme.ui(11)).foregroundStyle(Theme.text3)
-                            }
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
@@ -307,34 +302,18 @@ struct DecisionBlock: View {
         }
     }
 
-    /// Allow, saying when it will ask for Touch ID or the password first.
-    private var allowTitle: String {
-        DecisionCard.needsSecondFactor(risk: risk, decision: .allow) ? "Allow with \(HostDevice.current.biometric)" : "Allow"
-    }
-
     @ViewBuilder private func blockedLine(_ reason: String?) -> some View {
         if let reason {
             Text(reason).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).accessibilityIdentifier("\(id).blocked")
         }
     }
 
-    /// Sends one answer as Kit's rules have it: never on a card that cannot be answered or while one is on its way,
-    /// and at HIGH only after Touch ID or the password says yes. A refusal at the check sends nothing.
+    /// Sends one answer as Kit's rules have it: never on a card that cannot be answered or while one is on its way.
     private func send(_ decision: AnswerDecision, from control: String) {
         guard actionable, !inFlight else { return }
         sending = control
         sentAt = Date()
-        authNotice = nil
         Task {
-            if DecisionCard.needsSecondFactor(risk: risk, decision: decision) {
-                let check = await BiometricGate.confirm(reason: BiometricGate.reason(for: approval.card.toolName))
-                guard check.isAuthenticated else {
-                    sending = nil
-                    sentAt = nil
-                    authNotice = check.message
-                    return
-                }
-            }
             _ = await model.answer(item: approval, decision: decision)
             sending = nil
         }

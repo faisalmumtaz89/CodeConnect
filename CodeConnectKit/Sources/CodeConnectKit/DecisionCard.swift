@@ -133,8 +133,8 @@ public enum DecisionCard {
         "Waiting for \(host.computer("your computer")) to confirm…"
     }
 
-    /// **At HIGH, every answer but a refusal takes a second factor.** Allowing, choosing an option or submitting a
-    /// question's answers at HIGH waits for the device's own check (Face ID on the iPhone, the Mac's own). Denying,
+    /// **At HIGH, every answer but a refusal takes a second factor on the iPhone.** Allowing, choosing an option or
+    /// submitting a question's answers at HIGH waits for Face ID or the passcode; the Mac asks for none. Denying,
     /// denying with a reason, declining and a Codex card's `cancel` option ("No, and tell Codex what to do
     /// differently", the one refusal among the options the daemon offers) are the safe direction, and a product that
     /// promises silence never decides anything cannot put friction in front of them.
