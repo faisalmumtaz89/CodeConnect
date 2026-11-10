@@ -16,7 +16,7 @@ struct Conversation: View {
             LazyVStack(alignment: .leading, spacing: 14) {
                 Earlier(model: model, key: key)
                 ForEach(items) { item in
-                    ConversationRow(item: item)
+                    ConversationRow(item: item, model: model)
                         // One element per row: an identifier on a row of several texts otherwise lands on each of them.
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("session.row.\(item.id)")
@@ -60,6 +60,7 @@ private struct Earlier: View {
 
 private struct ConversationRow: View {
     let item: TimelineItem
+    let model: AppModel
 
     var body: some View {
         switch item.content {
@@ -70,7 +71,13 @@ private struct ConversationRow: View {
         case .tool(let tool):
             ToolLine(tool: tool, id: item.id)
         case .approval(let approval):
-            DecisionLine(approval: approval)
+            if let questions = DecisionCard.questionCard(
+                card: approval.card, agent: model.shownSummary(for: approval.sessionKey)?.agent)
+            {
+                QuestionBlock(approval: approval, questions: questions, model: model)
+            } else {
+                DecisionBlock(approval: approval, model: model)
+            }
         case .notice(let notice):
             NoticeLine(notice: notice)
         }
@@ -241,41 +248,6 @@ private struct ToolLine: View {
         case .denied: "hand.raised"
         case .unresolved: "questionmark.circle"
         }
-    }
-}
-
-/// A decision where it happened, read-only: what was asked, word for word as it was hashed, and whether it still
-/// waits or how it was answered.
-private struct DecisionLine: View {
-    let approval: ApprovalItem
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Rectangle().fill(approval.isPending ? Theme.amber : Theme.text3).frame(width: 2)
-            VStack(alignment: .leading, spacing: 8) {
-                Text(state)
-                    .font(Theme.ui(12.5, .medium))
-                    .foregroundStyle(approval.isPending ? Theme.amber : Theme.text2)
-                Text(approval.card.displayText)
-                    .font(Theme.mono(12))
-                    .foregroundStyle(Theme.text)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-            }
-            .padding(12)
-        }
-        .background(Theme.raised.opacity(0.45))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var state: String {
-        if approval.isPending { return "Waiting for you: \(approval.card.toolName)" }
-        if let outcome = approval.outcome { return "\(outcome.decision.label): \(approval.card.toolName)" }
-        return "Resolved: \(approval.card.toolName)"
     }
 }
 

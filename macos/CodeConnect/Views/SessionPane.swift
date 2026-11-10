@@ -9,7 +9,9 @@ struct SessionPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Place(summary: row.summary, computer: row.machineName)
+            Place(summary: row.summary, computer: row.machineName) {
+                if row.summary.isCodex, model.stopUnavailable(for: row.id) == nil { StopTurn(model: model, key: row.id) }
+            }
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model)
             Conversation(model: model, key: row.id)
@@ -24,10 +26,11 @@ struct SessionPane: View {
 }
 
 /// Where the run is: its computer, its folder as a shell prints it, and the branch checked out there when git
-/// names one (none outside a repository or on a detached head).
-private struct Place: View {
+/// names one (none outside a repository or on a detached head); what can be done to the run sits at its end.
+private struct Place<Actions: View>: View {
     let summary: SessionSummary
     let computer: String?
+    @ViewBuilder let actions: Actions
 
     var body: some View {
         HStack(spacing: 6) {
@@ -38,7 +41,8 @@ private struct Place: View {
                 separator
                 Text(branch).font(Theme.mono(11.5)).lineLimit(1).accessibilityIdentifier("session.branch")
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
+            actions
         }
         .font(Theme.ui(12))
         .foregroundStyle(Theme.text2)
@@ -88,6 +92,7 @@ private struct Heading: View {
             }
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text2)
+            if row.summary.isCodex { StopOutcome(activity: model.codexStop(for: row.id)) }
             VStack(spacing: 7) {
                 Text("Conversation").font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
                 Rectangle().fill(Theme.text).frame(height: 1.5)
@@ -127,5 +132,71 @@ struct LineDelta: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("+\(added) −\(removed)")
         .accessibilityIdentifier("session.diffStat")
+    }
+}
+
+/// Stops the turn a Codex run is running, over Codex's own link: no keyboard involved. Greyed for a moment after a
+/// turn changes, as Kit rules.
+private struct StopTurn: View {
+    let model: AppModel
+    let key: String
+
+    var body: some View {
+        let stopping = model.codexStop(for: key) == .inFlight
+        let greyed = model.codexControls(for: key).isStopGreyed(now: model.now)
+        ActionButton(title: stopping ? "Stopping…" : "Stop this turn", key: nil, prominent: false, id: "session.stop") {
+            Task { await model.stopCodexTurn(sessionKey: key) }
+        }
+        .disabled(stopping || greyed)
+        .help(greyed ? "Try again in a moment." : "Stop the turn this run is running")
+        .accessibilityLabel(stopping ? "Stopping" : "Stop the turn this run is running")
+    }
+}
+
+/// What became of the last stop, while it answers the turn running now: Kit's sentence for a settled stop, or why
+/// it was not sent, or that no answer came.
+private struct StopOutcome: View {
+    let activity: CodexControls.Activity<InterruptResult>
+
+    var body: some View {
+        switch activity {
+        case .settled(let result):
+            let banner = CodexProse.interrupt(result)
+            line(banner.oneLine, tone: banner.tone)
+        case .notSent(let reason), .sentNoAnswer(let reason):
+            line(reason, tone: .warning)
+        case .idle, .inFlight:
+            EmptyView()
+        }
+    }
+
+    private func line(_ text: String, tone: CodexProse.CodexTone) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: tone.symbol).foregroundStyle(tone.color).accessibilityHidden(true)
+            Text(text).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Theme.ui(12))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("session.stop.outcome")
+    }
+}
+
+extension CodexProse.CodexTone {
+    /// A Kit outcome's tone on the Mac: its colour only where it means something, and one symbol per tone.
+    var color: Color {
+        switch self {
+        case .info, .success: Theme.text3
+        case .warning: Theme.amber
+        case .danger: Theme.red
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .info: "info.circle"
+        case .success: "checkmark.circle"
+        case .warning: "exclamationmark.circle"
+        case .danger: "xmark.circle"
+        }
     }
 }
