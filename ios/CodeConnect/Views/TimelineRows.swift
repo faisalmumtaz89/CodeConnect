@@ -778,12 +778,12 @@ struct ApprovalRow: View {
     static func resolutionText(for outcome: AnswerOutcome) -> String {
         // The daemon accepted the answer but never confirmed it reached the
         // agent, so the footer must not state a decision or an actor as fact.
-        if outcome.wasSentToClaude { return AnswerOutcome.sentToClaude }
+        if outcome.wasSentToClaude { return outcome.sentToClaudeLine() }
         if outcome.indeterminate { return "Answer not confirmed" }
         // An inferred decision is the daemon noticing the prompt is gone, not
         // watching an answer happen. Rendering it as "Allowed" would put a fact
         // on screen that nobody observed (`decisionLabel` says "Closed").
-        return "\(outcome.decisionLabel) \(outcome.provenance)"
+        return "\(outcome.decisionLabel) \(outcome.provenance())"
     }
 
     /// The spoken label for a row carrying a recorded outcome. An unconfirmed
