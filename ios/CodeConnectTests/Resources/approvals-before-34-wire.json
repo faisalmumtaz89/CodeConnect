@@ -1,0 +1,179 @@
+{
+  "answered_allow": {
+    "kind": "approval_resolved",
+    "payload": {
+      "applied_via": "hook_return",
+      "decision": {
+        "type": "allow"
+      },
+      "detail": "Sent to Claude from a phone",
+      "indeterminate": true,
+      "request_id": "toolu_allowed",
+      "resolved_at": "2026-10-08T00:00:00.000Z",
+      "resolved_by": "phone",
+      "session_id": "cc-1"
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_allowed",
+    "ts": "2026-10-08T00:00:00.000Z"
+  },
+  "at_mac_request": {
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "display_text": "Bash\n{\"command\":\"touch a.txt\"}",
+        "generation": 0,
+        "identity_bound": false,
+        "payload_hash": "ebd5297cd59264d93cdcee5ef72eed7daeca3d4c83a316fe67cd31a61e433247",
+        "prompt_id": "p1",
+        "question_hold": "at_mac",
+        "request_id": "toolu_at_mac",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "command": "touch a.txt"
+        },
+        "tool_name": "Bash"
+      },
+      "hook": {
+        "agent_id": "agentA",
+        "agent_type": "fork",
+        "cwd": "/tmp",
+        "hook_event_name": "PermissionRequest",
+        "prompt_id": "p1",
+        "tool_input": {
+          "command": "touch a.txt"
+        },
+        "tool_name": "Bash"
+      }
+    },
+    "seq": 2,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "hook",
+    "source_event_id": "perm:toolu_at_mac",
+    "ts": "2026-10-08T00:00:00.000Z"
+  },
+  "closed_when_run_ended": {
+    "kind": "approval_resolved",
+    "payload": {
+      "applied_via": "send_keys",
+      "decision": {
+        "type": "deny"
+      },
+      "detail": "the session ended before anyone answered",
+      "inferred": true,
+      "request_id": "toolu_run_ended",
+      "resolved_at": "2026-10-08T00:00:00.000Z",
+      "resolved_by": "timeout",
+      "session_id": "cc-1"
+    },
+    "seq": 4,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_run_ended",
+    "ts": "2026-10-08T00:00:00.000Z"
+  },
+  "denied_with_reason": {
+    "kind": "approval_resolved",
+    "payload": {
+      "applied_via": "hook_return",
+      "decision": {
+        "text": "use the other file",
+        "type": "text"
+      },
+      "detail": "Sent to Claude from a phone",
+      "indeterminate": true,
+      "request_id": "toolu_reason",
+      "resolved_at": "2026-10-08T00:00:00.000Z",
+      "resolved_by": "phone",
+      "session_id": "cc-1"
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_reason",
+    "ts": "2026-10-08T00:00:00.000Z"
+  },
+  "held_request": {
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "display_text": "Bash\n{\"command\":\"make zz-target\"}",
+        "generation": 0,
+        "identity_bound": true,
+        "payload_hash": "2c94dcf1f5a30aefabf79af4c395a63a74cc8b185f8440795861f2b3aa9af884",
+        "permission_suggestions": [
+          {
+            "behavior": "allow",
+            "destination": "localSettings",
+            "rules": [
+              {
+                "ruleContent": "make zz-target *",
+                "toolName": "Bash"
+              }
+            ],
+            "type": "addRules"
+          }
+        ],
+        "prompt_id": "p1",
+        "question_hold": "held",
+        "request_id": "toolu_allowed",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "command": "make zz-target"
+        },
+        "tool_name": "Bash"
+      },
+      "hook": {
+        "cwd": "/tmp/work",
+        "hook_event_name": "PermissionRequest",
+        "permission_suggestions": [
+          {
+            "behavior": "allow",
+            "destination": "localSettings",
+            "rules": [
+              {
+                "ruleContent": "make zz-target *",
+                "toolName": "Bash"
+              }
+            ],
+            "type": "addRules"
+          }
+        ],
+        "prompt_id": "p1",
+        "tool_input": {
+          "command": "make zz-target"
+        },
+        "tool_name": "Bash"
+      }
+    },
+    "seq": 2,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "hook",
+    "source_event_id": "perm:toolu_allowed",
+    "ts": "2026-10-08T00:00:00.000Z"
+  },
+  "hold_ended": {
+    "kind": "question_hold",
+    "payload": {
+      "question_hold": "ended",
+      "request_id": "toolu_ended"
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "hold:toolu_ended:ended",
+    "ts": "2026-10-08T00:00:00.000Z"
+  }
+}

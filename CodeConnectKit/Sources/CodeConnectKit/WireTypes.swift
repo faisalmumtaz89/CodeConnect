@@ -161,6 +161,11 @@ public enum ResolvedBy: String, Codable, Sendable, Hashable {
 /// the name its app says hello with. Attribution only: it chooses words.
 public enum AnsweredOn: String, Codable, Sendable, Hashable {
     case iphone, mac
+
+    /// The kind of device `host` is.
+    init(_ host: HostDevice) {
+        self = host == .mac ? .mac : .iphone
+    }
 }
 
 /// Which agent is running in a session.
@@ -1240,21 +1245,24 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
     public static let sentToClaude = "Sent to Claude from a phone"
 
     /// The line a card shows for an answer handed to Claude's hook, naming the
-    /// device that sent it by its kind.
-    public func sentToClaudeLine(on host: HostDevice = .current) -> String {
-        Self.answeringDevice(answeredOn, on: host).map { "Sent to Claude from \($0)" } ?? Self.sentToClaude
+    /// device that sent it by its kind. `sentHere` is for the reply to this
+    /// device's own answer: a record that names no device is then this one's.
+    public func sentToClaudeLine(on host: HostDevice = .current, sentHere: Bool = false) -> String {
+        let device = answeredOn ?? (sentHere ? AnsweredOn(host) : nil)
+        return Self.answeringDevice(device, on: host).map { "Sent to Claude from \($0)" } ?? Self.sentToClaude
     }
 
-    /// The device a paired answer came from, by its kind, or nil where the words
-    /// stay as they were: where the record does not say (an older daemon, an
-    /// answer a restart settled), and where an iPhone answered and an iPhone
-    /// reads it. Never "this Mac" or "your iPhone": the record names a kind of
+    /// The device a paired answer came from, by its kind, or nil where the
+    /// iPhone's words stay as they were: where an iPhone answered, or the record
+    /// does not say (an older daemon, an answer a restart settled). A Mac reading
+    /// a record that names no device says "a paired device", which is all it
+    /// knows. Never "this Mac" or "your iPhone": the record names a kind of
     /// device, not which one.
     static func answeringDevice(_ device: AnsweredOn?, on host: HostDevice) -> String? {
         switch device {
         case .mac: return "a Mac"
         case .iphone: return host == .mac ? "an iPhone" : nil
-        case nil: return nil
+        case nil: return host == .mac ? "a paired device" : nil
         }
     }
 
@@ -1263,8 +1271,9 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
     static let sessionEnded = "the session ended before anyone answered"
 
     /// Where the answer came from, as far as the record proves it: `phone`
-    /// names a paired device by its kind (`answeredOn`), "a phone" where the
-    /// record does not say; `local` is the computer.
+    /// names a paired device by its kind (`answeredOn`), and where the record
+    /// does not say, "a phone" on the iPhone and "a paired device" on a Mac;
+    /// `local` is the computer.
     public func provenance(on host: HostDevice = .current) -> String {
         switch resolvedBy {
         case .phone: return Self.answeringDevice(answeredOn, on: host).map { "from \($0)" } ?? "from a phone"
