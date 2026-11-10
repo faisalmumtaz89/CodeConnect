@@ -4,7 +4,9 @@ import SwiftUI
 /// A decision where it happened: what the agent asks to do, word for word as it was hashed, how risky Kit rates it
 /// and why, the edit a Codex card carries, and the answers this Mac may give, or why it can give none. Every rule is
 /// Kit's (`DecisionCard`, `AppModel.answer`); this view draws them and measures that the command and its risk were on
-/// screen before an answer that says yes.
+/// screen before an answer that says yes. At the pane's foot what is asked is read in its own scroll, and its answers
+/// take the reply box's place: the reason a Deny carries, then Deny and Allow, each with the key it answers to. In the
+/// conversation it is what was asked and what became of it.
 struct DecisionBlock: View {
     let approval: ApprovalItem
     let model: AppModel
@@ -12,11 +14,14 @@ struct DecisionBlock: View {
     /// The control whose answer is on its way, so a second click waits for the first.
     @State private var sending: String?
     @State private var sentAt: Date?
-    /// Why the second factor said no, in its own words.
+    /// The reason a Deny carries, typed in the box.
     @State private var reason = ""
-    @State private var askingReason = false
+    @FocusState private var reasonFocused: Bool
     @State private var showAllChanges = false
     @State private var showInput = false
+    /// How tall what is asked is, for its own scroll at the foot.
+    @State private var askedHeight: CGFloat = 0
+    @Environment(\.pendingSlot) private var slot
 
     /// The card as the fleet holds it now; nil once nothing backs it.
     private var live: ApprovalItem? { model.shownApproval(sessionKey: approval.sessionKey, id: approval.id) }
@@ -45,66 +50,106 @@ struct DecisionBlock: View {
     /// …and an answer that says yes also waits for the command, and at HIGH its risk, to have been on screen.
     private var assentBlocked: String? { refusalBlocked ?? gate.blockedReason(at: risk) }
 
+    /// This Mac can answer it now, so at the foot its answers take the reply box's place.
+    private var answerable: Bool {
+        if case .noneAnswerable = surface { return false }
+        return actionable
+    }
+
+    /// The reply field holds the keyboard: the box stays the writer's, and the answers wait above it, keyless.
+    private var held: Bool { slot?.held == true }
+    /// The box holds this request: its keys answer.
+    private var keyed: Bool { slot != nil && answerable && !held }
+    private var agentName: String { summary?.agent.displayName ?? "The agent" }
+    private var placeholder: String { "What should \(agentName) do instead?" }
+    private var reasonTyped: Bool { !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
     var body: some View {
-        HStack(spacing: 0) {
-            Rectangle().fill(actionable ? Theme.amber : Theme.text3).frame(width: 2)
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("\(summary?.agent.displayName ?? "The agent") asks to use \(approval.card.toolName)")
-                        .font(Theme.ui(12.5, .medium))
-                        .foregroundStyle(actionable ? Theme.amber : Theme.text2)
-                    Spacer(minLength: 8)
-                    if let cwd = CodexCard.cwd(in: approval.card.toolInput) {
-                        Text(FleetGroup.shellPath(cwd)).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1)
-                            .truncationMode(.head)
+        Group {
+            if let slot {
+                VStack(spacing: 0) {
+                    ScrollView {
+                        asked
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 14)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { askedHeight = $0 }
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(height: min(askedHeight, slot.maxHeight))
+                    .accessibilityIdentifier("session.pending")
+                    if answerable {
+                        if held {
+                            controls.padding(.horizontal, 28).padding(.bottom, 14)
+                        } else {
+                            ReplyBoxFrame { controls }.preference(key: HoldsReplyBox.self, value: true)
+                        }
                     }
                 }
-                VStack(spacing: 0) {
-                    Text(approval.card.primaryText(verification: approval.card.verification, agent: summary?.agent))
-                        .font(Theme.mono(12))
-                        .foregroundStyle(Theme.text)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                    // The command block's bottom edge: on screen once, and the command has been.
-                    Color.clear.frame(height: 1)
-                        .onScrollVisibilityChange(threshold: 1) { if $0 { gate.hasSeenCommand = true } }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("\(id).command")
-                if summary?.agent == .claude { fullInput }
-                if let why = CodexCard.reason(in: approval.card.toolInput) {
-                    Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
-                }
-                changes
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("\(risk.label.capitalized) risk · \(assessment.provenance)")
-                        .font(Theme.ui(11.5))
-                        .foregroundStyle(risk == .high ? Theme.red : Theme.text3)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("\(id).risk")
-                    Color.clear.frame(height: 1)
-                        .onScrollVisibilityChange(threshold: 1) { if $0 { gate.hasSeenProvenance = true } }
-                }
-                if let banner { banner.accessibilityIdentifier("\(id).banner") }
-                if actionable { controls } else if case .noneAnswerable = surface, banner == nil { readOnly }
-                if let sentAt, inFlight, model.now.timeIntervalSince(sentAt) >= 3 {
-                    Text(
-                        DecisionCard.stillWaiting(
-                            after: model.now.timeIntervalSince(sentAt), computer: model.machineName)
-                    )
-                    .font(Theme.ui(11.5)).foregroundStyle(Theme.amber)
-                }
+            } else {
+                asked
             }
-            .padding(12)
         }
-        .background(Theme.raised.opacity(0.45))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)
+    }
+
+    /// What the agent asks: who and which tool (waiting on you while it can be answered), the command as it was
+    /// hashed, what it was given, a Codex edit, the risk, then what became of it, or why it can't be answered here.
+    private var asked: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
+                if actionable { StateIcon(status: .blocked) }
+                Text("\(agentName) asks to use \(approval.card.toolName)")
+                    .font(Theme.ui(12.5, .medium))
+                    .foregroundStyle(actionable ? Theme.text : Theme.text2)
+                Spacer(minLength: 8)
+                if let cwd = CodexCard.cwd(in: approval.card.toolInput) {
+                    Text(FleetGroup.shellPath(cwd)).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1)
+                        .truncationMode(.head)
+                }
+                MoreWaiting(count: slot?.more ?? 0)
+            }
+            VStack(spacing: 0) {
+                Text(approval.card.primaryText(verification: approval.card.verification, agent: summary?.agent))
+                    .font(Theme.mono(12))
+                    .foregroundStyle(Theme.text)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+                // The command block's bottom edge: on screen once, and the command has been.
+                Color.clear.frame(height: 1)
+                    .onScrollVisibilityChange(threshold: 1) { if $0 { gate.hasSeenCommand = true } }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("\(id).command")
+            if summary?.agent == .claude { fullInput }
+            if let why = CodexCard.reason(in: approval.card.toolInput) {
+                Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
+            }
+            changes
+            VStack(alignment: .leading, spacing: 0) {
+                Text("\(risk.label.capitalized) risk · \(assessment.provenance)")
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(risk == .high ? Theme.red : Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("\(id).risk")
+                Color.clear.frame(height: 1)
+                    .onScrollVisibilityChange(threshold: 1) { if $0 { gate.hasSeenProvenance = true } }
+            }
+            if let banner { banner.accessibilityIdentifier("\(id).banner") }
+            if case .noneAnswerable = surface, actionable || banner == nil { readOnly }
+            if let sentAt, inFlight, model.now.timeIntervalSince(sentAt) >= 3 {
+                Text(
+                    DecisionCard.stillWaiting(
+                        after: model.now.timeIntervalSince(sentAt), computer: model.machineName)
+                )
+                .font(Theme.ui(11.5)).foregroundStyle(Theme.amber)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: What the card says
@@ -238,47 +283,49 @@ struct DecisionBlock: View {
 
     // MARK: Answering
 
+    /// The answers. In the box (`keyed`): for Allow/Deny the reason a Deny carries, then Deny and Allow, whose keys
+    /// follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return denies with it, and Allow keeps no key);
+    /// for Codex its options, ⌘1 onwards. Held above the reply box: the same answers, with no field and no keys.
     @ViewBuilder private var controls: some View {
         switch surface {
         case .allowDeny:
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Button("Deny with a reason…") { askingReason.toggle() }
-                        .buttonStyle(.hover(outset: 4, id: "\(id).reason"))
-                        .font(Theme.ui(12)).foregroundStyle(Theme.text2)
-                        .disabled(refusalBlocked != nil)
-                        .accessibilityIdentifier("\(id).reason")
-                    Spacer()
-                    ActionButton(title: "Deny", key: nil, prominent: false, id: "\(id).deny") { send(.deny, from: "deny") }
-                        .disabled(refusalBlocked != nil)
-                    ActionButton(title: "Allow", key: nil, prominent: true, id: "\(id).allow") { send(.allow, from: "allow") }
-                        .disabled(assentBlocked != nil)
-                        .opacity(assentBlocked != nil ? 0.45 : 1)
-                }
-                if askingReason {
-                    HStack(spacing: 8) {
-                        TextField("What should Claude do instead?", text: $reason)
-                            .textFieldStyle(.plain)
-                            .font(Theme.ui(12.5))
-                            .padding(.horizontal, 8)
-                            .frame(height: 26)
-                            .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                            .accessibilityLabel("What should Claude do instead?")
-                            .accessibilityIdentifier("\(id).reason.text")
-                        ActionButton(title: "Deny", key: nil, prominent: false, id: "\(id).reason.send") {
-                            let words = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-                            send(words.isEmpty ? .deny : .text(words), from: "reason")
-                        }
-                        .disabled(refusalBlocked != nil)
-                    }
-                }
+            if keyed {
+                TextField("", text: $reason, prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(13))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1...4)
+                    .focused($reasonFocused)
+                    // Return sends a Deny only with a reason in it; on an empty field it does nothing.
+                    .onSubmit { if reasonTyped { send(.text(trimmedReason), from: "reason") } }
+                    // Esc leaves the field before it closes the run, as in the reply box.
+                    .onExitCommand { reasonFocused = false }
+                    .focusedValue(\.composerHoldsEscape, reasonFocused ? true : nil)
+                    .disabled(refusalBlocked != nil)
+                    .accessibilityLabel(placeholder)
+                    .accessibilityIdentifier("\(id).reason.text")
+            }
+            HStack(spacing: 8) {
                 blockedLine(assentBlocked)
+                Spacer(minLength: 8)
+                ActionButton(title: "Deny", key: keyed ? (reasonTyped ? "↩" : "⌘D") : nil, prominent: false, id: "\(id).deny") {
+                    send(reasonTyped ? .text(trimmedReason) : .deny, from: reasonTyped ? "reason" : "deny")
+                }
+                .disabled(refusalBlocked != nil)
+                .answerKey(reasonTyped ? .return : "d", reasonTyped ? [] : .command, when: keyed)
+                ActionButton(title: "Allow", key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
+                    send(.allow, from: "allow")
+                }
+                .disabled(assentBlocked != nil)
+                .opacity(assentBlocked != nil ? 0.45 : 1)
+                .answerKey(.return, .command, when: keyed && !reasonTyped)
             }
         case .codexOptions(let options):
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(options, id: \.id) { option in
+                ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
                     let refusal = !DecisionCard.needsSecondFactor(risk: .high, decision: .optionId(option.id))
                     let blocked = refusal ? refusalBlocked : assentBlocked
+                    let number = keyed && index < 9 ? Character(String(index + 1)) : nil
                     Button { send(.optionId(option.id), from: option.id) } label: {
                         HStack(spacing: 8) {
                             Image(systemName: refusal ? "xmark" : "checkmark").font(.system(size: 10, weight: .semibold))
@@ -286,6 +333,7 @@ struct DecisionBlock: View {
                             Text(option.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
+                            if let number { KeyCap("⌘\(number)") }
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
@@ -293,14 +341,17 @@ struct DecisionBlock: View {
                     .buttonStyle(.hover(id: "\(id).option.\(option.id)"))
                     .disabled(blocked != nil)
                     .opacity(blocked != nil ? 0.45 : 1)
+                    .answerKey(KeyEquivalent(number ?? "0"), .command, when: number != nil)
                     .accessibilityIdentifier("\(id).option.\(option.id)")
                 }
                 blockedLine(assentBlocked)
             }
         case .noneAnswerable:
-            readOnly
+            EmptyView()
         }
     }
+
+    private var trimmedReason: String { reason.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     @ViewBuilder private func blockedLine(_ reason: String?) -> some View {
         if let reason {

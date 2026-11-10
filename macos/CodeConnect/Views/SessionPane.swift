@@ -19,6 +19,10 @@ struct SessionPane: View {
     /// from the terminal, and the words being written must not go with them.
     @State private var composerDraft = ComposerDraft()
     @State private var height: CGFloat = 0
+    /// A request holds the reply box's place.
+    @State private var boxTaken = false
+    /// The reply field (or its command list) holds the keyboard.
+    @FocusedValue(\.composerHoldsEscape) private var composerHolds
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -36,10 +40,21 @@ struct SessionPane: View {
                     VStack(spacing: 0) {
                         Conversation(model: model, key: row.id)
                         // What waits on you sits at the foot, in at most half the pane, outside the conversation's
-                        // scroll.
-                        PendingRequests(model: model, key: row.id, maxHeight: height / 2)
+                        // scroll, and its answers take the reply box's place. Not while the reply field holds the
+                        // keyboard: the box stays the writer's until it lets go. Once a request has the box, the
+                        // field can't take the keyboard back, so what holds it then is the request's own field.
+                        PendingRequests(
+                            model: model, key: row.id, maxHeight: height / 2, held: composerHolds == true && !boxTaken)
+                        // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
+                        // way are kept. It takes no room, no click and no reading.
                         ComposerBar(key: row.id, kept: composerDraft)
+                            .frame(height: boxTaken ? 0 : nil, alignment: .top)
+                            .clipped()
+                            .opacity(boxTaken ? 0 : 1)
+                            .allowsHitTesting(!boxTaken)
+                            .accessibilityHidden(boxTaken)
                     }
+                    .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
                 }
                 if tab == .changes { ChangesTab(model: model, key: row.id) }
                 if tab == .terminal || terminalShown {
