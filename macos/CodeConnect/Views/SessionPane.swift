@@ -21,6 +21,8 @@ struct SessionPane: View {
     @State private var height: CGFloat = 0
     /// A request holds the reply box's place.
     @State private var boxTaken = false
+    /// How tall the reply box stands (none while a request holds its place): a request shares the half pane with it.
+    @State private var replyHeight: CGFloat = 0
     /// The reply field (or its command list) holds the keyboard.
     @FocusedValue(\.composerHoldsEscape) private var composerHolds
     /// The window's Add sheet, and its setup checklist: either covers the window, and then a request's answers take no
@@ -43,18 +45,21 @@ struct SessionPane: View {
                 if tab == .conversation {
                     VStack(spacing: 0) {
                         Conversation(model: model, key: row.id)
-                        // What waits on you sits at the foot, in at most half the pane, outside the conversation's
-                        // scroll, and its answers take the reply box's place. Not while the reply field holds the
-                        // keyboard: the box stays the writer's until it lets go. Once a request has the box, the
-                        // field can't take the keyboard back, so what holds it then is the request's own field.
+                        // What waits on you sits at the foot, outside the conversation's scroll, in at most half the
+                        // pane with the reply box when that shows, so the window holds them both at its smallest; its
+                        // answers take the reply box's place. Not while the reply field holds the keyboard: the box
+                        // stays the writer's until it lets go. Once a request has the box, the field can't take the
+                        // keyboard back, so what holds it then is the request's own field.
                         PendingRequests(
-                            model: model, key: row.id, maxHeight: height / 2, held: composerHolds == true && !boxTaken,
+                            model: model, key: row.id, maxHeight: max(0, height / 2 - replyHeight),
+                            held: composerHolds == true && !boxTaken,
                             sheetUp: adding.map { $0.wrappedValue != nil } ?? false || setup.shown)
                         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
                         // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
                         // Not clipped: its command list opens above it.
                         ComposerBar(key: row.id, kept: composerDraft)
                             .frame(height: boxTaken ? 0 : nil, alignment: .top)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
                             .opacity(boxTaken ? 0 : 1)
                             .allowsHitTesting(!boxTaken)
                             .disabled(boxTaken)
