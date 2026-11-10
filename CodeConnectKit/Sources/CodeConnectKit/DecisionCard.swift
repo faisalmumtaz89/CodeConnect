@@ -127,6 +127,12 @@ public enum DecisionCard {
         isBacked && outcome == nil && codex == nil && attempt?.isTerminal != true
     }
 
+    /// What a card's controls say while its answer is on the way, in the words of the device reading it: on a Mac,
+    /// "your computer" would be the Mac itself.
+    public static func waitingSentence(on host: HostDevice = .current) -> String {
+        "Waiting for \(host.computer("your computer")) to confirm…"
+    }
+
     /// **At HIGH, every answer but a refusal takes a second factor.** Allowing, choosing an option or submitting a
     /// question's answers at HIGH waits for the device's own check (Face ID on the iPhone, the Mac's own). Denying,
     /// denying with a reason, declining and a Codex card's `cancel` option ("No, and tell Codex what to do
@@ -233,7 +239,7 @@ extension AppModel {
     public func answerBlockedReason(for approval: ApprovalItem, inFlight: Bool) -> String? {
         // A second tap while the first is in flight would be a silent no-op;
         // saying "waiting" is the honest version of the same refusal.
-        if inFlight { return "Waiting for your computer to confirm…" }
+        if inFlight { return DecisionCard.waitingSentence() }
         if let reason = actionsBlockedReason { return reason }
         if let summary = shownSummary(for: approval.sessionKey) {
             let badge = FleetStatusRule.capability(summary: summary, capabilities: connection.capabilities)
