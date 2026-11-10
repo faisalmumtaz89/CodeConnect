@@ -55,8 +55,7 @@ struct FleetList: View {
     @State private var folded: Set<String> = []
 
     var body: some View {
-        let all = scope.rows(machines.fleet)
-        let rows = filter?.narrow(all) ?? all
+        let rows = narrowed(scope.rows(machines.fleet))
         let namingComputer = machines.models.filter(\.showsFleet).count > 1
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -104,7 +103,7 @@ struct FleetList: View {
                                 }
                             }
                         }
-                        let finished = FleetScope.finished.rows(machines.fleet).count
+                        let finished = narrowed(FleetScope.finished.rows(machines.fleet)).count
                         if scope == .active, finished > 0 {
                             Button { scope = .finished } label: {
                                 HStack(spacing: 8) {
@@ -137,6 +136,9 @@ struct FleetList: View {
         }
         .background(Theme.window)
     }
+
+    /// These rows as the sidebar's filter leaves them.
+    private func narrowed(_ rows: [FleetRow]) -> [FleetRow] { filter?.narrow(rows) ?? rows }
 }
 
 /// What the list is narrowed to, beside its count; a click shows every run again.

@@ -58,7 +58,11 @@ struct MainWindow: View {
             }
         #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: repairing) { scope = .active }
+            AddSheet(kind: kind, address: repairing) {
+                // The run just started is on screen: every active agent, unfiltered.
+                scope = .active
+                filter = nil
+            }
                 #if DEBUG
                     .renderLook()
                 #endif
@@ -217,6 +221,7 @@ private struct ComputerRow: View {
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
+        .help([computer.machineSystem, computer.linkHealth.word].compactMap { $0 }.joined(separator: " · "))
     }
 
     private var row: some View {
@@ -237,7 +242,6 @@ private struct ComputerRow: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .help([computer.machineSystem, computer.linkHealth.word].compactMap { $0 }.joined(separator: " · "))
     }
 }
 
