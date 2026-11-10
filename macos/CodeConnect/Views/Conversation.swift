@@ -3,12 +3,17 @@ import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it happened, and the run's
-/// notices. Lazy, so a run thousands of rows long builds only what is near the screen, and anchored at the bottom, so
-/// it opens at the newest row and a page of earlier history arriving above leaves what is on screen where it was.
-/// Reaching the top pages back on its own, as the iPhone does.
+/// notices. Lazy, so a run thousands of rows long builds only what is near the screen. It opens at the newest row,
+/// follows new rows while the newest is on screen, and holds the row the reader is on in place when a page of earlier
+/// history arrives above; scrolling is otherwise the reader's alone. Reaching the top pages back on its own, as the
+/// iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
+    /// The row the scroll view keeps in place as rows arrive or are measured.
+    @State private var position: String?
+    /// The newest row is on screen, so a row that arrives is followed.
+    @State private var following = true
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
@@ -20,12 +25,20 @@ struct Conversation: View {
                         // One element per row: an identifier on a row of several texts otherwise lands on each of them.
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("session.row.\(item.id)")
+                        .onScrollVisibilityChange { visible in
+                            if item.id == items.last?.id { following = visible }
+                        }
                 }
             }
+            .scrollTargetLayout()
             .padding(.horizontal, 28)
             .padding(.vertical, 18)
         }
-        .defaultScrollAnchor(.bottom)
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .scrollPosition(id: $position, anchor: .bottom)
+        .onChange(of: items.last?.id) { _, last in
+            if following, let last { position = last }
+        }
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
         #endif
