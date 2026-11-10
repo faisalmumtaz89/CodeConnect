@@ -1067,7 +1067,6 @@ struct SessionDetailView: View {
                     TerminalTabView(
                         sessionUID: key,
                         tmuxName: model.tmuxName(for: key),
-                        unhosted: model.shownSummary(for: key)?.tmuxSession.isEmpty == true,
                         runLabel: label.spoken,
                         onScreen: surface == .terminal
                     )
