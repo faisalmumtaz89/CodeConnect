@@ -124,17 +124,17 @@ final class HookOnlyApprovalTests: XCTestCase {
     func testAPhoneAnswerReadsAsSentToClaude() throws {
         let outcome = try XCTUnwrap(try event("answered_allow").approvalOutcome)
         let attempt = AnswerAttempt.classify(applied: outcome)
-        XCTAssertEqual(ResolutionBanner.classificationLabel(for: attempt), "Sent")
+        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).title, "Sent")
         XCTAssertEqual(
-            ResolutionBanner.headline(for: attempt), "Allowed · Sent to Claude from a phone")
-        XCTAssertEqual(DecisionCardView.alreadyResolvedTitle(for: outcome), "Sent")
+            DecisionCard.resultBanner(for: attempt).message, "Allowed · Sent to Claude from a phone")
+        XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: outcome, now: Date()).title, "Sent")
         XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Sent to Claude from a phone")
         let shown = [
-            ResolutionBanner.classificationLabel(for: attempt),
-            ResolutionBanner.headline(for: attempt),
-            ResolutionBanner.provenance(for: attempt) ?? "",
-            DecisionCardView.alreadyResolvedTitle(for: outcome),
-            DecisionCardView.alreadyResolvedMessage(for: outcome, now: Date()),
+            DecisionCard.resultBanner(for: attempt).title,
+            DecisionCard.resultBanner(for: attempt).message,
+            DecisionCard.resultBanner(for: attempt).provenance ?? "",
+            DecisionCard.alreadyResolvedBanner(for: outcome, now: Date()).title,
+            DecisionCard.alreadyResolvedBanner(for: outcome, now: Date()).message,
             ApprovalRow.resolvedAccessibilityLabel(for: outcome, call: "Bash"),
         ].joined(separator: " | ").lowercased()
         XCTAssertFalse(shown.contains("confirm"), shown)
@@ -146,10 +146,10 @@ final class HookOnlyApprovalTests: XCTestCase {
     func testATapOnACardAlreadySentToClaudeIsADuplicate() throws {
         let earlier = try XCTUnwrap(try event("answered_allow").approvalOutcome)
         let attempt = AnswerAttempt.classify(duplicate: earlier, staleHash: false)
-        XCTAssertEqual(ResolutionBanner.classificationLabel(for: attempt), "Duplicate")
-        XCTAssertEqual(ResolutionBanner.headline(for: attempt), "Already answered")
+        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).title, "Duplicate")
+        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).message, "Already answered")
         XCTAssertEqual(
-            ResolutionBanner.provenance(for: attempt),
+            DecisionCard.resultBanner(for: attempt).provenance,
             "Original outcome: Allowed from a phone, \(earlier.resolvedAt).")
     }
 
@@ -165,8 +165,8 @@ final class HookOnlyApprovalTests: XCTestCase {
                 + "rather than sent again)",
             inferred: sent.inferred, indeterminate: sent.indeterminate)
         let attempt = AnswerAttempt.classify(applied: unrecorded)
-        XCTAssertEqual(ResolutionBanner.classificationLabel(for: attempt), "Sent")
-        XCTAssertEqual(DecisionCardView.alreadyResolvedTitle(for: unrecorded), "Sent")
+        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).title, "Sent")
+        XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: unrecorded, now: Date()).title, "Sent")
         XCTAssertEqual(ApprovalRow.resolutionText(for: unrecorded), "Sent to Claude from a phone")
     }
 
@@ -177,7 +177,7 @@ final class HookOnlyApprovalTests: XCTestCase {
         XCTAssertEqual(closed.resolvedBy, .timeout)
         XCTAssertEqual(ApprovalRow.resolutionText(for: closed), "Closed when the session ended")
         XCTAssertTrue(
-            DecisionCardView.alreadyResolvedMessage(for: closed, now: closed.resolvedDate)
+            DecisionCard.alreadyResolvedBanner(for: closed, now: closed.resolvedDate).message
                 .hasPrefix("Closed when the session ended · "))
     }
 

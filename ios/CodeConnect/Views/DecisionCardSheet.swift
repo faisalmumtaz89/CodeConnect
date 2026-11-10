@@ -59,123 +59,16 @@ struct ResolutionBanner: View {
     let attempt: AnswerAttempt
 
     var body: some View {
+        let banner = DecisionCard.resultBanner(for: attempt)
         VStack(alignment: .leading, spacing: CC.space.xs) {
-            CCBanner(classification, message: headline, tone: tone, icon: symbol)
-            if let provenance {
+            CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
+            if let provenance = banner.provenance {
                 Text(provenance)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-        }
-    }
-
-    private var tone: CCTone {
-        switch attempt {
-        case .applied: return .success
-        case .indeterminate, .duplicate, .answeredAtKeyboard: return .warning
-        case .staleCard, .rejected, .failed: return .danger
-        }
-    }
-
-    private var symbol: String {
-        switch attempt {
-        case .applied: return "check-circle-fill"
-        case .indeterminate: return "question-fill"
-        case .duplicate: return "copy"
-        case .answeredAtKeyboard: return "keyboard"
-        case .staleCard: return "clock-countdown"
-        case .rejected, .failed: return "x-circle"
-        }
-    }
-
-    private var classification: String { Self.classificationLabel(for: attempt) }
-    private var headline: String { Self.headline(for: attempt) }
-    private var provenance: String? { Self.provenance(for: attempt) }
-
-    /// The `micro` label. Short, because the component uppercases it. Static
-    /// and pure so the copy can be asserted without standing up a `View`.
-    static func classificationLabel(for attempt: AnswerAttempt) -> String {
-        switch attempt {
-        case .applied: return "Confirmed"
-        // Never "Confirmed": the daemon did not confirm this one landed.
-        case .indeterminate(let outcome): return outcome.wasSentToClaude ? "Sent" : "Unconfirmed"
-        case .duplicate: return "Duplicate"
-        case .answeredAtKeyboard: return "Not answered here"
-        case .staleCard: return "Out of date"
-        case .rejected: return "Refused"
-        case .failed: return "Not delivered"
-        }
-    }
-
-    /// The sentence. Sentence case, verbatim, and never uppercased — an
-    /// outcome a reader has to decode from `ALLOWED — CONFIRMED BY THE DAEMON`
-    /// is an outcome they skim. Static and pure for the same reason as above.
-    static func headline(for attempt: AnswerAttempt) -> String {
-        switch attempt {
-        case .applied(let outcome): return "\(outcome.decisionLabel), confirmed by your computer"
-        // The one honesty this case exists to protect: the daemon accepted the
-        // answer but could not confirm it reached the agent, so this must never
-        // read as confirmed/applied.
-        case .indeterminate(let outcome):
-            if outcome.wasSentToClaude {
-                return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude)"
-            }
-            return "\(outcome.decisionLabel), but your computer couldn’t confirm it landed"
-        case .duplicate: return "Already answered"
-        case .answeredAtKeyboard: return "Answered at the computer"
-        case .staleCard: return "This card is out of date"
-        case .rejected: return "Your computer refused this answer"
-        case .failed: return "The answer did not reach your computer"
-        }
-    }
-
-    /// How an answer was *applied*, in plain words — never a claim this
-    /// build cannot support. An `AnswerPath.unknown` is a path this build has
-    /// never heard of, so it is described as unrecognised rather than asserted
-    /// to be keystrokes or a hook return we cannot vouch for.
-    static func actuationPhrase(for path: AnswerPath) -> String {
-        switch path {
-        case .sendKeys: return "typed into the session on your computer"
-        case .hookReturn: return "handed straight to Claude"
-        // A real actuation, and it reads like one. Codex asked, over its own
-        // control link, and this is the answer written back to that request —
-        // no keyboard, no pane, nothing inferred from a prompt disappearing.
-        case .codexResponse: return "sent straight to Codex"
-        case .unknown: return "applied in a way this app doesn’t recognise"
-        }
-    }
-
-    static func provenance(for attempt: AnswerAttempt) -> String? {
-        switch attempt {
-        case .applied(let outcome):
-            return [actuationPhrase(for: outcome.appliedVia), outcome.detail]
-                .compactMap { $0 }.joined(separator: " · ")
-        // Never the `actuationPhrase` — that would claim the answer was "typed into
-        // the session on your computer" or "handed straight to Claude", the exact positive actuation the
-        // daemon could not confirm. The provenance states the uncertainty instead.
-        case .indeterminate(let outcome) where outcome.wasSentToClaude:
-            return "Claude takes the first answer, the computer’s or this one, so whether it used this one is not known."
-        case .indeterminate(let outcome):
-            return [
-                "Your computer accepted this but never confirmed it reached the agent.",
-                outcome.detail,
-            ].compactMap { $0 }.joined(separator: " · ")
-        case .duplicate(let outcome, let stale):
-            let original =
-                "Original outcome: \(outcome.decisionLabel) \(outcome.provenance), \(outcome.resolvedAt)."
-                + (outcome.inferred
-                    ? " Your computer inferred that from the prompt disappearing rather than observing the answer."
-                    : "")
-            return stale
-                ? original + " The card you answered was also out of date." : original
-        case .answeredAtKeyboard(let reason):
-            return
-                "The prompt was gone before the keystrokes could land, so somebody answered it on the computer. Nothing was typed. (\(reason))"
-        case .staleCard(let reason): return reason
-        case .rejected(let reason): return reason
-        case .failed(let reason): return "\(reason) Answers are idempotent. Retrying is safe."
         }
     }
 }

@@ -1011,17 +1011,7 @@ struct DecisionCardView: View {
     /// A genuinely *pending* card whose backing vanished still has `nil` from both
     /// sources, so the `isBacked` gate below still renders it `.unavailable`.
     private var effectiveOutcome: AnswerOutcome? {
-        Self.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome)
-    }
-
-    /// The governing outcome, from the live lookup OR the opened snapshot. Static
-    /// and pure so the regression it closes is testable off the real resolver: a
-    /// recorded outcome from either source makes the card non-actionable, so a
-    /// resolved card can never revert to actionable when a replay re-supplies its
-    /// id as pending. A card pending in both sources is `nil`, and the `isBacked`
-    /// gate decides whether it is live-pending or `.unavailable`.
-    static func effectiveOutcome(live: AnswerOutcome?, snapshot: AnswerOutcome?) -> AnswerOutcome? {
-        live ?? snapshot
+        DecisionCard.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome)
     }
 
     private var statusBanner: StatusBanner? {
@@ -1033,7 +1023,7 @@ struct DecisionCardView: View {
         // computer, or its log was reset"), which is the wrong sentence for a question that
         // was answered at the keyboard thirty seconds ago.
         if let resolution = effectiveCodexResolution { return .codex(resolution) }
-        switch Self.resolvedBanner(attempt: attempt, persisted: effectiveOutcome, isBacked: live != nil) {
+        switch DecisionCard.resolvedBanner(attempt: attempt, persisted: effectiveOutcome, isBacked: live != nil) {
         case .attempt(let attempt): return .resolution(attempt)
         case .persisted(let outcome): return .alreadyResolved(outcome)
         case .unavailable: return .unavailable
@@ -1042,48 +1032,6 @@ struct DecisionCardView: View {
         if let authNotice { return .authRefused(authNotice) }
         if let sampleNotice { return .sample(sampleNotice) }
         return nil
-    }
-
-    /// Which resolved banner a card shows, given this session's own answer
-    /// `attempt`, any authoritative outcome the LIVE card carries (`persisted`),
-    /// and whether live state still backs the card at all (`isBacked`). Pure and
-    /// static so the whole precedence is testable off the real resolver.
-    ///
-    /// The rules, in order:
-    ///   * a **terminal** local attempt (`.applied`, `.indeterminate`,
-    ///     `.duplicate`, `.answeredAtKeyboard`) is this session's own observation
-    ///     and keeps its richer receipt, even if the backing was later dropped;
-    ///   * an authoritative persisted outcome outranks a *stale, non-terminal*
-    ///     local attempt — the crash/recovery false-negative, where a dead-socket
-    ///     `.failed` would otherwise mask the recovered `approval_resolved`;
-    ///   * **no live backing** and no terminal receipt ⇒ `.unavailable`: a
-    ///     departed/reset/left-the-log card is neither actionable nor an outcome
-    ///     we can claim, so it must never fall back to a frozen actionable
-    ///     snapshot or a stale local failure the user could retry;
-    ///   * a live pending card with a non-terminal attempt still shows that
-    ///     attempt (a genuine failure the user may retry); with none, `.none`
-    ///     (the ordinary pending path, action bar available).
-    enum ResolvedBanner {
-        case attempt(AnswerAttempt)
-        case persisted(AnswerOutcome)
-        /// No live state backs this card, and this session holds no terminal
-        /// receipt for it. Non-actionable by construction.
-        case unavailable
-        case none
-    }
-
-    static func resolvedBanner(
-        attempt: AnswerAttempt?, persisted: AnswerOutcome?, isBacked: Bool
-    ) -> ResolvedBanner {
-        if let attempt {
-            if attempt.isTerminal { return .attempt(attempt) }
-            if let persisted { return .persisted(persisted) }
-            if !isBacked { return .unavailable }
-            return .attempt(attempt)
-        }
-        if let persisted { return .persisted(persisted) }
-        if !isBacked { return .unavailable }
-        return .none
     }
 
     /// The card's one banner slot, by case.
@@ -1112,25 +1060,16 @@ struct DecisionCardView: View {
         case .resolution(let attempt):
             ResolutionBanner(attempt: attempt)
         case .alreadyResolved(let outcome):
-            CCBanner(
-                Self.alreadyResolvedTitle(for: outcome),
-                message: Self.alreadyResolvedMessage(for: outcome, now: model.now),
-                tone: outcome.indeterminate ? .warning : .info,
-                icon: Self.alreadyResolvedIcon(for: outcome))
+            let banner = DecisionCard.alreadyResolvedBanner(for: outcome, now: model.now)
+            CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
         case .codex(let resolution):
             let banner = CodexProse.resolution(resolution)
             CCBanner(
                 banner.title, message: banner.message, tone: banner.tone.ccTone,
                 icon: banner.icon)
         case .unavailable:
-            // No live state backs this card: the session left the fleet, the log
-            // was reset, or the card left the timeline. Non-actionable, and it
-            // says so rather than presenting a frozen card the reader could act on.
-            CCBanner(
-                "No longer available",
-                message:
-                    "This decision can't be acted on here — the run is no longer on your computer, or its log was reset.",
-                tone: .warning, icon: "question")
+            let banner = DecisionCard.unavailableBanner()
+            CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
         case .authRefused(let notice):
             // The gate's own words in the message, never a paraphrase, and never
             // swallowed: a biometric check that failed silently is
@@ -1141,34 +1080,6 @@ struct DecisionCardView: View {
             // arriving where the reader is looking.
             CCBanner("Sample fleet", message: notice, tone: .info, icon: "eye")
         }
-    }
-
-    /// The already-resolved banner's copy, extracted so the honesty rule is
-    /// unit-testable without rendering the card: a **recorded** outcome carrying
-    /// `indeterminate: true` — the shape the daemon replays for a
-    /// locally-resolved, never-confirmed answer — is "Unconfirmed", never
-    /// "Already resolved", and never wears the confirming seal.
-    static func alreadyResolvedTitle(for outcome: AnswerOutcome) -> String {
-        if outcome.wasSentToClaude { return "Sent" }
-        return outcome.indeterminate ? "Unconfirmed" : "Already resolved"
-    }
-
-    static func alreadyResolvedMessage(for outcome: AnswerOutcome, now: Date) -> String {
-        let age = Format.ago(since: outcome.resolvedDate, now: now)
-        if outcome.wasSentToClaude {
-            return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude) · \(age)"
-        }
-        let ending = "\(outcome.decisionLabel) \(outcome.provenance)"
-        if outcome.indeterminate {
-            return "\(ending) · \(age), but your computer couldn’t confirm it reached the agent"
-        }
-        return "\(ending) · \(age)"
-    }
-
-    /// Never a checkmark for an unconfirmed outcome — the seal *is* the visual
-    /// "confirmed" claim this rule exists to prevent.
-    static func alreadyResolvedIcon(for outcome: AnswerOutcome) -> String {
-        outcome.indeterminate ? "question" : "seal-check"
     }
 
     // MARK: Actions
