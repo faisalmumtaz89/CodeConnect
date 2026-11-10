@@ -9,13 +9,15 @@ public enum CommandPhase: Equatable, Sendable {
     /// Keystrokes landed; Claude Code has not yet answered in the transcript. `quietly` flips once the usual window
     /// has passed: the same watch, an honest caption. **It never becomes a failure** — a receipt that arrives late
     /// still has to be able to settle the sheet. A terminal "no confirmation" over a transcript that went on to say
-    /// `Set model to X` is a stale claim, and stale claims are the thing these sheets may not make.
+    /// `Set model to X` is a stale claim, and stale claims are the thing these sheets may not make. The one end that
+    /// is not a receipt is a `/model` wait outlived by the turn it was typed into: Claude Code writes nothing for a
+    /// change made while it works, so the turn's end settles it, neutrally.
     case waiting(request: String, quietly: Bool)
     case confirmed(String)
     /// Terminal, and neither success nor failure: the request was answered, and the answer was not a change. Claude
-    /// Code kept the value, or the daemon replayed a settled mutation that carries no outcome. A green tick over
-    /// either would be the exact lie this app exists not to tell; a warning would invent a fault that is not there.
-    /// The sentence carries which it was.
+    /// Code kept the value, or the daemon replayed a settled mutation that carries no outcome, or a turn ended with
+    /// a `/model` typed into it unanswered. A green tick over any of them would be the exact lie this app exists not
+    /// to tell; a warning would invent a fault that is not there. The sentence carries which it was.
     case neutral(String)
     case failed(String)
 
@@ -56,6 +58,14 @@ public enum NativeCommand: Sendable, Hashable {
     /// One sentence, three sheets. A duplicate response proves the mutation was typed once and settled; it does not
     /// carry what Claude Code then did, so this claims neither a change nor the absence of one.
     public static let alreadySentLine = "This request was sent earlier; this retry does not confirm its outcome."
+
+    /// A `/model` the turn outlived. Measured on 2.1.308, 2.1.316 and 2.1.322: typed while Claude Code works, it is
+    /// applied at once and shown on Claude Code's own screen, and nothing is written to the transcript, then or
+    /// later. So this says what CodeConnect can read, not what Claude Code did, and does not claim the change took.
+    static func modelUnconfirmedLine(_ alias: String) -> String {
+        "CodeConnect can't confirm /model \(alias): Claude Code writes no result to the conversation for a change "
+            + "sent while it's working. The model shown may be out of date."
+    }
 
     /// The phase a send leads to at once, or nil when the keystrokes landed and only Claude Code's own receipt can
     /// settle it: landing proves typing, not execution. A Compact whose composer came back returns a waiting phase
@@ -111,14 +121,18 @@ public enum NativeCommand: Sendable, Hashable {
 
     /// Claude Code's own answer to this command above `baseline`, as a terminal phase, or nil while there is none.
     /// The sequence fences out a backfill that publishes an older receipt; for `/model`, `ModelChangeWatch` also
-    /// requires a change or a not-found line to name the value that was asked for.
+    /// requires a change or a not-found line to name the value that was asked for, and a turn that ends above
+    /// `baseline` with no such answer settles the wait in `modelUnconfirmedLine`'s words.
     func receiptPhase(from receipts: SessionState.Receipts?, after baseline: UInt64) -> CommandPhase? {
         switch self {
         case .model(let alias):
             guard
                 let outcome = ModelChangeWatch.outcome(
-                    after: baseline, requested: alias, signal: receipts?.modelSignal)
-            else { return nil }
+                    after: baseline, requested: alias, signal: receipts?.modelSignal.command)
+            else {
+                guard let turnEnd = receipts?.modelSignal.turnEndSeq, turnEnd > baseline else { return nil }
+                return .neutral(Self.modelUnconfirmedLine(alias))
+            }
             switch outcome {
             case .receipt(let receipt):
                 return receipt.isChange ? .confirmed(receipt.sheetStatus) : .neutral(receipt.sheetStatus)
@@ -161,7 +175,8 @@ extension NativeCommand {
 
 extension AppModel {
     /// Claude Code's own answer to `command` in this run since `baseline` (`eventHighWater(for:)`, taken just
-    /// before the send), as a terminal phase, or nil while there is none.
+    /// before the send), or for `/model` the end of the turn it was typed into, as a terminal phase, or nil while
+    /// there is neither.
     public func receiptPhase(for command: NativeCommand, in key: String, after baseline: UInt64) -> CommandPhase? {
         command.receiptPhase(from: receipts(for: key), after: baseline)
     }

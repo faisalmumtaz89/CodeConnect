@@ -57,7 +57,8 @@ final class NativeCommandTests: XCTestCase {
             compact: CompactConfirmation? = nil, seq: UInt64 = 5
         ) -> SessionState.Receipts {
             SessionState.Receipts(
-                modelSignal: model.map { ModelCommandSignal(outcome: $0, seq: seq) },
+                modelSignal: ModelWatchSignal(
+                    command: model.map { ModelCommandSignal(outcome: $0, seq: seq) }, turnEndSeq: 0),
                 effort: effort, effortSeq: effort == nil ? 0 : seq,
                 compact: compact, compactSeq: compact == nil ? 0 : seq)
         }
@@ -91,6 +92,33 @@ final class NativeCommandTests: XCTestCase {
         for command in commands {
             XCTAssertNil(command.receiptPhase(from: nil, after: 0), "\(command)")
         }
+    }
+
+    /// A `/model` typed while Claude Code works gets no receipt, ever: the end of
+    /// the turn settles the wait, neutrally, claiming nothing. A receipt above the
+    /// fence still wins, however late the turn's end behind it.
+    func testATurnEndingWithNoReceiptSettlesAModelWait() {
+        func receipts(_ model: ModelCommandOutcome? = nil, seq: UInt64 = 0, turnEnd: UInt64) -> SessionState.Receipts {
+            SessionState.Receipts(
+                modelSignal: ModelWatchSignal(
+                    command: model.map { ModelCommandSignal(outcome: $0, seq: seq) }, turnEndSeq: turnEnd),
+                effort: nil, effortSeq: 0, compact: nil, compactSeq: 0)
+        }
+        let sonnet = NativeCommand.model("sonnet")
+        let unconfirmed = CommandPhase.neutral(
+            "CodeConnect can't confirm /model sonnet: Claude Code writes no result to the conversation for a change "
+                + "sent while it's working. The model shown may be out of date.")
+        XCTAssertEqual(sonnet.receiptPhase(from: receipts(turnEnd: 5), after: 4), unconfirmed)
+        XCTAssertNil(sonnet.receiptPhase(from: receipts(turnEnd: 4), after: 4), "a turn that ended before the send")
+        let set = ModelConfirmation.set("Sonnet 5.5")
+        XCTAssertEqual(
+            sonnet.receiptPhase(from: receipts(.receipt(set), seq: 5, turnEnd: 9), after: 4),
+            .confirmed(set.sheetStatus), "the receipt, not the turn's end behind it")
+        XCTAssertEqual(
+            sonnet.receiptPhase(from: receipts(.receipt(.set("Opus 5")), seq: 5, turnEnd: 9), after: 4), unconfirmed,
+            "somebody else's change is not this one's answer")
+        let high = NativeCommand.effort("high")
+        XCTAssertNil(high.receiptPhase(from: receipts(turnEnd: 5), after: 4), "only /model is settled by a turn")
     }
 
     /// A quiet wait frees the controls while the watch stays armed, and a

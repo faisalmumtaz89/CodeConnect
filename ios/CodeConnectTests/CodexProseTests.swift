@@ -40,7 +40,7 @@ final class CodexProseTests: XCTestCase {
     /// are two endings a reader cannot tell apart, and four of these are the
     /// difference between "your file was written" and "nothing happened".
     func testEveryCodexTerminalHasItsOwnSentence() {
-        let banners = allEndings.map(CodexProse.resolution)
+        let banners = allEndings.map { CodexProse.resolution($0) }
         XCTAssertEqual(
             Set(banners.map(\.title)).count, banners.count,
             "each ending is titled distinctly")

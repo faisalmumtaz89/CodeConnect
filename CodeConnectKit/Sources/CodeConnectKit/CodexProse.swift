@@ -69,10 +69,10 @@ public enum CodexProse {
     /// computer, or its log was reset"). That sentence is about the phone losing sight of
     /// a run; every sentence here is about the *question* ending, which is a
     /// different fact and usually a completely ordinary one.
-    public static func resolution(_ resolution: CodexResolution) -> Banner {
+    public static func resolution(_ resolution: CodexResolution, on host: HostDevice = .current) -> Banner {
         switch resolution {
         case .answered(let by, let decision):
-            return answered(by: by, decision: decision)
+            return answered(by: by, decision: decision, on: host)
 
         case .cleared(.turnAborted):
             return Banner(
@@ -100,14 +100,14 @@ public enum CodexProse {
         case .cleared(.itemCompleted):
             return Banner(
                 title: "This step finished",
-                message: "It was settled at \(HostDevice.current.computer("the computer")). Codex is still working.",
+                message: "It was settled at \(host.computer("the computer")). Codex is still working.",
                 icon: "check-circle", tone: .info)
 
         case .cleared(.unknown(let raw)):
             return Banner(
                 title: "The question was withdrawn",
                 message:
-                    "\(HostDevice.current.computer("The computer")) gave a reason this app does not recognise (\(raw)). "
+                    "\(host.computer("The computer")) gave a reason this app does not recognise (\(raw)). "
                     + "Nothing was approved and nothing was denied.",
                 icon: "question", tone: .warning)
 
@@ -121,29 +121,35 @@ public enum CodexProse {
         // human text written to be shown, so it is shown — and the stage says
         // how far the attempt got, in words rather than in its wire spelling.
         case .unknown(let attemptedBy, _, let stage, let cause):
-            let who = attemptedBy == .phone ? "This \(HostDevice.current.noun)'s answer" : "The answer"
+            // A paired device's attempt, which on a Mac may be any of them: the iPhone keeps its words.
+            let who =
+                attemptedBy == .phone
+                ? AnswerOutcome.answeringDevice(nil, on: host).map { "The answer from \($0)" }
+                    ?? "This \(host.noun)'s answer"
+                : "The answer"
             return Banner(
                 title: "Sent, outcome unknown",
                 message:
-                    "\(who) was written and \(HostDevice.current.computer("the computer")) did not learn what became of it. "
-                    + "\(writeStage(stage)) It will not be sent again — check \(HostDevice.current.computer("the computer")). (\(cause))",
+                    "\(who) was written and \(host.computer("the computer")) did not learn what became of it. "
+                    + "\(writeStage(stage)) It will not be sent again — check \(host.computer("the computer")). (\(cause))",
                 icon: "question", tone: .warning)
 
         case .unrecognisedStatus(let raw):
             return Banner(
                 title: "Ending not recognised",
                 message:
-                    "\(HostDevice.current.computer("The computer")) reported an ending this app has never seen (\(raw)), so it cannot say "
-                    + "what became of this question. Check \(HostDevice.current.computer("the computer")).",
+                    "\(host.computer("The computer")) reported an ending this app has never seen (\(raw)), so it cannot say "
+                    + "what became of this question. Check \(host.computer("the computer")).",
                 icon: "question", tone: .warning)
         }
     }
 
-    private static func answered(by: ResolutionActor, decision: AnswerDecision?) -> Banner {
+    private static func answered(by: ResolutionActor, decision: AnswerDecision?, on host: HostDevice) -> Banner {
         switch by {
         case .phone:
+            // `phone` is any paired device, and the record names none: the iPhone keeps "a phone".
             return Banner(
-                title: "Answered from a phone",
+                title: "Answered from \(AnswerOutcome.answeringDevice(nil, on: host) ?? "a phone")",
                 message: "Codex has the answer.",
                 icon: "seal-check", tone: .success)
         // **The honesty this arm exists for.** `decision` is absent for a
@@ -151,16 +157,16 @@ public enum CodexProse {
         // so the daemon knows somebody answered and not what they chose.
         case .local:
             return Banner(
-                title: "Answered at \(HostDevice.current.computer("the computer"))",
+                title: "Answered at \(host.computer("the computer"))",
                 message:
-                    "Someone answered at the keyboard before this \(HostDevice.current.noun) did. "
+                    "Someone answered at the keyboard before this \(host.noun) did. "
                     + "Codex does not report which choice they made.",
                 icon: "keyboard", tone: .info)
         case .unknown(let raw):
             return Banner(
                 title: "Answered",
                 message:
-                    "\(HostDevice.current.computer("The computer")) names an answerer this app does not recognise (\(raw)), "
+                    "\(host.computer("The computer")) names an answerer this app does not recognise (\(raw)), "
                     + "so it cannot say where this was decided.",
                 icon: "question", tone: .warning)
         }
