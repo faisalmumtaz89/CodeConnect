@@ -2,33 +2,60 @@ import CodeConnectKit
 import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
-/// and code, each tool call folded to one line with its output under it, a decision where it happened, and the run's
-/// notices. Lazy, so a run thousands of rows long builds only what is near the screen, and anchored at the bottom, so
-/// it opens at the newest row and a page of earlier history arriving above leaves what is on screen where it was.
-/// Reaching the top pages back on its own, as the iPhone does.
+/// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
+/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. Lazy, so a run thousands of rows long builds
+/// only what is near the screen. It opens at the newest row and moves for two reasons only: new rows are followed
+/// while the newest is on screen, and a page of earlier history that lands while the reader is up there keeps the row
+/// that was first at the top. Reaching the top pages back on its own, as the iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
+    /// The newest row is on screen, so a row that arrives is followed.
+    @State private var following = true
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                Earlier(model: model, key: key)
-                ForEach(items) { item in
-                    ConversationRow(item: item, model: model)
-                        // One element per row: an identifier on a row of several texts otherwise lands on each of them.
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("session.row.\(item.id)")
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    Earlier(model: model, key: key)
+                    ForEach(items) { item in
+                        ConversationRow(item: item, model: model)
+                            // One element per row: an identifier on a row of several texts otherwise lands on each.
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("session.row.\(item.id)")
+                    }
+                }
+                .padding(.horizontal, 28)
+            }
+            // The column's top and bottom margin, kept by the scroll view, so a row scrolled to the bottom shows the end.
+            .contentMargins(.vertical, 18, for: .scrollContent)
+            // At the bottom from the first frame, so nothing above the newest row is passed over on the way.
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(.bottom, for: .alignment)
+            // A reader at the end is kept there as the column grows. Each time is one scroll, which, unlike a bottom
+            // anchor, does not come back as rows change, so a reader who went up stays where they are.
+            .onScrollGeometryChange(for: ScrollGeometry.self) { $0 } action: { old, new in
+                following = Self.atEnd(new)
+                if Self.atEnd(old), new.contentSize.height > old.contentSize.height, let last = items.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 18)
+            .onChange(of: items.first?.id) { first, _ in
+                if !following, let first { proxy.scrollTo(first, anchor: .top) }
+            }
+            .accessibilityIdentifier("session.conversation")
         }
-        .defaultScrollAnchor(.bottom)
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
         #endif
+    }
+
+    /// The end of the column is on screen. From the scroll view's own geometry, whose top inset is the column's margin or
+    /// the space above a column shorter than the pane: a lazy row that scrolled far away is gone, and never says so.
+    private static func atEnd(_ geometry: ScrollGeometry) -> Bool {
+        geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height
+            >= geometry.contentSize.height - 2
     }
 }
 
@@ -71,16 +98,32 @@ private struct ConversationRow: View {
         case .tool(let tool):
             ToolLine(tool: tool, id: item.id)
         case .approval(let approval):
-            if let questions = DecisionCard.questionCard(
-                card: approval.card, agent: model.shownSummary(for: approval.sessionKey)?.agent)
-            {
-                QuestionBlock(approval: approval, questions: questions, model: model)
-            } else {
-                DecisionBlock(approval: approval, model: model)
-            }
+            if approval.isPending { WaitingLine(approval: approval) } else { RequestBlock(approval: approval, model: model) }
         case .notice(let notice):
             NoticeLine(notice: notice)
         }
+    }
+}
+
+/// Where a request still waiting on you was asked: one line in its place, pointing at the pane's foot, where the
+/// request itself is read and answered.
+private struct WaitingLine: View {
+    let approval: ApprovalItem
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle").font(.system(size: 11)).foregroundStyle(Theme.amber)
+                .accessibilityHidden(true)
+            Text(sentence).font(Theme.ui(12.5)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.tail)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(sentence)
+    }
+
+    private var sentence: String {
+        let argument = ToolSummary.principalArgument(tool: approval.card.toolName, input: approval.card.toolInput)
+        return ["Waiting on you below", approval.card.toolName, argument?.firstLine ?? ""]
+            .map(\.displaySafe).filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
 
@@ -198,6 +241,7 @@ private struct ToolLine: View {
             if let output = tool.output, !output.isEmpty {
                 Button { open.toggle() } label: { line(opens: true) }
                     .buttonStyle(.hover(outset: 4, id: "session.tool.\(id)"))
+                    .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")
                 if open {
@@ -209,10 +253,16 @@ private struct ToolLine: View {
             } else {
                 // One element either way, found by the same id; its name starts with how the call stands.
                 line(opens: false)
-                    .accessibilityElement(children: .combine)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
             }
         }
+    }
+
+    /// How the call reads aloud: how it stands, then the tool and what it was given.
+    private var spoken: String {
+        [tool.status.label, tool.name, tool.argument ?? ""].filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     private func line(opens: Bool) -> some View {
@@ -221,7 +271,8 @@ private struct ToolLine: View {
                 .font(.system(size: 11))
                 .foregroundStyle(tool.status == .failed ? Theme.red : Theme.text3)
                 .frame(width: 14)
-                .accessibilityLabel(tool.status.label)
+                // Hidden: a checkmark symbol in a button's label marks the button selected; the name carries the word.
+                .accessibilityHidden(true)
             Text(tool.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
             if let argument = tool.argument, !argument.isEmpty {
                 Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)

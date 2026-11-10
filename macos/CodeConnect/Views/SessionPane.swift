@@ -18,6 +18,7 @@ struct SessionPane: View {
     /// The run's draft, kept here above the tabs: the conversation and its composer are built again on each return
     /// from the terminal, and the words being written must not go with them.
     @State private var composerDraft = ComposerDraft()
+    @State private var height: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -30,6 +31,9 @@ struct SessionPane: View {
                 if tab == .conversation {
                     VStack(spacing: 0) {
                         Conversation(model: model, key: row.id)
+                        // What waits on you sits at the foot, in at most half the pane, outside the conversation's
+                        // scroll.
+                        PendingRequests(model: model, key: row.id, maxHeight: height / 2)
                         ComposerBar(key: row.id, kept: composerDraft)
                     }
                 }
@@ -43,6 +47,7 @@ struct SessionPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.pane")
