@@ -19,6 +19,8 @@ struct MainWindow: View {
     /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
     /// conversation, and each run opens on it.
     @State private var chosen: (run: String, tab: SessionTab)?
+    /// The window's width, from which the list's share beside an open run is worked out.
+    @State private var width: CGFloat = 0
 
     init() {
         #if DEBUG
@@ -40,16 +42,15 @@ struct MainWindow: View {
                 let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
                 let model = open.flatMap { machines.model(forSession: $0.id) }
                 FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
-                    // Beside an open run the list gives way first, down to what its rows still read at.
-                    .frame(minWidth: model == nil ? nil : 290, maxWidth: model == nil ? .infinity : 580)
+                    // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
+                    // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
+                    .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
                     SessionPane(row: open, model: model, tab: tab(of: open.id)) {
                         if let address = model.endpoint?.typedAddress { pairAgain(address) }
                     }
                     .id(open.id)
-                    // Room for a card's answers in one row.
-                    .frame(minWidth: 450)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -57,6 +58,7 @@ struct MainWindow: View {
         }
         .background(Theme.window)
         .ignoresSafeArea()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .toolbar(removing: .title)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())

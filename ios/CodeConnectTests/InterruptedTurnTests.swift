@@ -183,4 +183,18 @@ final class InterruptedTurnTests: XCTestCase {
             ["[Request interrupted by user]"],
             "Claude writes the marker as a text block, never as a bare string")
     }
+
+    /// An Esc writes no turn end, only its marker: a `/model` wait typed into
+    /// the turn it stopped settles on the marker (18), not before it (17).
+    func testAnEscSettlesAModelWaitTypedIntoItsTurn() async throws {
+        let sonnet = NativeCommand.model("sonnet")
+        let streaming = await WireRecording.state(try events("esc-mid-reply", through: 17))
+        XCTAssertNil(sonnet.receiptPhase(from: streaming.receipts, after: 5), "still waiting")
+        let stopped = await WireRecording.state(try events("esc-mid-reply", through: 18))
+        XCTAssertEqual(
+            sonnet.receiptPhase(from: stopped.receipts, after: 5),
+            .neutral(
+                "CodeConnect can't confirm /model sonnet: Claude Code writes no result to the conversation for a "
+                    + "change sent while it's working. The model shown may be out of date."))
+    }
 }

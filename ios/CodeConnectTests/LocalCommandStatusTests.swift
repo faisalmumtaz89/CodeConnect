@@ -96,6 +96,28 @@ final class LocalCommandStatusTests: XCTestCase {
         }
     }
 
+    /// The `/model sonnet` typed into `commands-mid-turn`'s first turn is never
+    /// answered in the transcript: its wait holds through the turn (to 18) and
+    /// settles, claiming nothing, when the turn ends (19). The one typed after
+    /// `model-after-turn`'s finished turn settles on its receipt (23), with the
+    /// next turn's end (30) already behind it.
+    func testAModelWaitSettlesWhenTheTurnItWasTypedIntoEnds() async throws {
+        let sonnet = NativeCommand.model("sonnet")
+        let working = await state(try recorded("commands-mid-turn", through: 18))
+        XCTAssertNil(sonnet.receiptPhase(from: working.receipts, after: 16), "still waiting")
+        let ended = await state(try recorded("commands-mid-turn", through: 19))
+        XCTAssertEqual(
+            sonnet.receiptPhase(from: ended.receipts, after: 16),
+            .neutral(
+                "CodeConnect can't confirm /model sonnet: Claude Code writes no result to the conversation for a "
+                    + "change sent while it's working. The model shown may be out of date."))
+        let answered = await state(try recorded("model-after-turn", through: 30))
+        let settled = sonnet.receiptPhase(from: answered.receipts, after: 20)
+        guard case .confirmed? = settled else {
+            return XCTFail("the receipt at 23 settles it, not \(String(describing: settled))")
+        }
+    }
+
     /// Which recorded user lines start a turn: the typed prompts and the
     /// output lines of the two commands that ask the model — never a
     /// command's invocation, its caveat, `/model`'s output, or the note

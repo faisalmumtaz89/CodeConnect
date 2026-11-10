@@ -286,7 +286,8 @@ extension DecisionCard {
         case .indeterminate(let outcome) where outcome.wasSentToClaude:
             return Banner(
                 title: "Sent",
-                message: "\(outcome.decisionLabel) · \(outcome.sentToClaudeLine(on: host))",
+                // This device's own answer: a replayed one stays a duplicate (`AnswerAttempt.classify(duplicate:)`).
+                message: "\(outcome.decisionLabel) · \(outcome.sentToClaudeLine(on: host, sentHere: true))",
                 provenance: "Claude takes the first answer, \(host.computer("the computer"))’s or this one, "
                     + "so whether it used this one is not known.",
                 tone: .warning, icon: "question-fill")

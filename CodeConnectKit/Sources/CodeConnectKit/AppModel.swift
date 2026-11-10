@@ -975,6 +975,17 @@ public final class AppModel {
                     {
                         connection?.injectForTesting(message)
                     }
+                    // A turn's end comes after the answer, as it does when the
+                    // turn a send was typed into ends: the sheet settles through
+                    // its re-read on `modelSignal`, not its post-send check.
+                    if let frame = Fixtures.turnEndFrame(mode: sendMode, session: session),
+                        let message = Fixtures.decode(frame)
+                    {
+                        Task { @MainActor [weak connection] in
+                            try? await Task.sleep(for: .seconds(1))
+                            connection?.injectForTesting(message)
+                        }
+                    }
                     return Fixtures.sendTextResult(mode: sendMode)
                 }
             }
