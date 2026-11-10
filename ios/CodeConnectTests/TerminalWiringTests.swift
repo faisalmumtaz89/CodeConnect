@@ -542,6 +542,12 @@ final class TerminalWiringTests: XCTestCase {
                 + TerminalTabView.trimmedBufferNotice)
     }
 
+    /// One sentence on both devices: Kit holds it, the iPhone shows Kit's, and the words are the ones it always had.
+    func testTheNoticeIsKitsWordsUnchanged() {
+        XCTAssertEqual(TerminalCarrier.trimmedBufferNotice, "Earlier output not shown")
+        XCTAssertEqual(TerminalTabView.trimmedBufferNotice, TerminalCarrier.trimmedBufferNotice)
+    }
+
     // MARK: - Two screens over one carrier
 
     /// A screen that was built before the buffer lost its head, and one built

@@ -16,6 +16,9 @@ struct MainWindow: View {
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
     @State private var opened: String?
+    /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
+    /// conversation, and each run opens on it.
+    @State private var chosen: (run: String, tab: SessionTab)?
     /// The window's width, from which the list's share beside an open run is worked out.
     @State private var width: CGFloat = 0
 
@@ -32,10 +35,7 @@ struct MainWindow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(adding: $adding, scope: $scope, filter: $filter) { address in
-                repairing = address
-                adding = .computer
-            }
+            Sidebar(adding: $adding, scope: $scope, filter: $filter, pairAgain: pairAgain)
                 .frame(width: 216)
             Rectangle().fill(Theme.hairline).frame(width: 1)
             if machines.showsFleet {
@@ -47,7 +47,10 @@ struct MainWindow: View {
                     .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
-                    SessionPane(row: open, model: model).id(open.id)
+                    SessionPane(row: open, model: model, tab: tab(of: open.id)) {
+                        if let address = model.endpoint?.typedAddress { pairAgain(address) }
+                    }
+                    .id(open.id)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -60,9 +63,11 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
-        // Esc closes the open run; a sheet's own Esc is its Cancel.
+        .onChange(of: opened) { chosen = nil }
+        // Esc closes the open run; a sheet's own Esc is its Cancel. Not while its terminal is shown: there Esc is the
+        // agent's (it interrupts a turn), and a window shortcut would take it before the terminal saw it.
         .background {
-            if opened != nil, adding == nil {
+            if opened != nil, adding == nil, !(chosen?.run == opened && chosen?.tab == .terminal) {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -92,6 +97,20 @@ struct MainWindow: View {
                     .renderLook()
                 #endif
         }
+    }
+
+    /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run
+    /// opened from another run's terminal shows its conversation from its first frame.
+    private func tab(of run: String) -> Binding<SessionTab> {
+        Binding(
+            get: { chosen.flatMap { $0.run == run ? $0.tab : nil } ?? .conversation },
+            set: { chosen = $0 == .conversation ? nil : (run, $0) })
+    }
+
+    /// A refused computer paired again: the Add Computer sheet, its address already in the code form.
+    private func pairAgain(_ address: String) {
+        repairing = address
+        adding = .computer
     }
 }
 
