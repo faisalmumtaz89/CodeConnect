@@ -10,6 +10,10 @@ struct SessionPane: View {
     @Binding var tab: SessionTab
     /// The run's computer paired again, for a terminal its connection may not open.
     let pairAgain: () -> Void
+    /// Whether this run's terminal was shown. It is built the first time its tab is, and kept after that, hidden
+    /// behind the conversation: the emulator holds the run's screen and scrollback, and Kit keeps only the stream's
+    /// tail, so a terminal rebuilt from it draws a wrong screen once the run has printed more than that.
+    @State private var terminalShown = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -18,9 +22,14 @@ struct SessionPane: View {
             }
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model, tab: $tab)
-            switch tab {
-            case .conversation: Conversation(model: model, key: row.id)
-            case .terminal: TerminalTab(row: row, model: model, pairAgain: pairAgain)
+            ZStack(alignment: .topLeading) {
+                if tab == .conversation { Conversation(model: model, key: row.id) }
+                if tab == .terminal || terminalShown {
+                    TerminalTab(row: row, model: model, onScreen: tab == .terminal, pairAgain: pairAgain)
+                        .opacity(tab == .terminal ? 1 : 0)
+                        .allowsHitTesting(tab == .terminal)
+                        .accessibilityHidden(tab != .terminal)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -29,6 +38,7 @@ struct SessionPane: View {
         .accessibilityIdentifier("session.pane")
         .onAppear { model.markReviewed(row.id) }
         .onDisappear { model.markReviewed(row.id) }
+        .onChange(of: tab) { if tab == .terminal { terminalShown = true } }
     }
 }
 

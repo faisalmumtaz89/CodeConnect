@@ -16,8 +16,8 @@ struct MainWindow: View {
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
     @State private var opened: String?
-    /// The open run's tab; each run opens on its conversation.
-    @State private var tab = SessionTab.conversation
+    /// The run whose Terminal tab is shown. Any other run shows its conversation, and each run opens on it.
+    @State private var terminalRun: String?
 
     init() {
         #if DEBUG
@@ -42,7 +42,7 @@ struct MainWindow: View {
                     .frame(width: model == nil ? nil : 580)
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
-                    SessionPane(row: open, model: model, tab: $tab) {
+                    SessionPane(row: open, model: model, tab: tab(of: open.id)) {
                         if let address = model.endpoint?.typedAddress { pairAgain(address) }
                     }
                     .id(open.id)
@@ -57,11 +57,11 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
-        .onChange(of: opened) { tab = .conversation }
+        .onChange(of: opened) { terminalRun = nil }
         // Esc closes the open run; a sheet's own Esc is its Cancel. Not while its terminal is shown: there Esc is the
         // agent's (it interrupts a turn), and a window shortcut would take it before the terminal saw it.
         .background {
-            if opened != nil, adding == nil, tab != .terminal {
+            if opened != nil, adding == nil, terminalRun != opened {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -91,6 +91,14 @@ struct MainWindow: View {
                     .renderLook()
                 #endif
         }
+    }
+
+    /// A run's tab. It is the terminal only while that run is the one whose terminal was chosen, so a run opened from
+    /// another run's terminal shows its conversation from its first frame.
+    private func tab(of run: String) -> Binding<SessionTab> {
+        Binding(
+            get: { terminalRun == run ? .terminal : .conversation },
+            set: { terminalRun = $0 == .terminal ? run : nil })
     }
 
     /// A refused computer paired again: the Add Computer sheet, its address already in the code form.

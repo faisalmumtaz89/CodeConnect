@@ -305,7 +305,7 @@
 			repositoryURL = "https://github.com/faisalmumtaz89/SwiftTerm.git";
 			requirement = {
 				kind = revision;
-				revision = caa4f03b8ca3ff34c53d6372b5a76eff1592f3c3;
+				revision = a6de9daddf9823a7f5b49ad9d9b913aa49cac387;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

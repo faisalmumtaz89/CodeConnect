@@ -8,6 +8,8 @@ import SwiftUI
 struct TerminalTab: View {
     let row: FleetRow
     let model: AppModel
+    /// Whether the tab is the one shown; once shown, the pane keeps it, hidden behind the conversation.
+    let onScreen: Bool
     /// The computer's own re-pair, for a terminal this connection may not open.
     let pairAgain: () -> Void
 
@@ -20,15 +22,16 @@ struct TerminalTab: View {
             case .blocked(let reason, let fix):
                 Blocked(reason: reason, fix: fix) { run(fix) }
             case .ready(let uid):
-                Live(carrier: carrier, sessionUID: uid) { open(uid) }
+                Live(carrier: carrier, sessionUID: uid, onScreen: onScreen) { open(uid) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("terminal.tab")
-        .onAppear {
-            if model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
+        // Coming to the tab, the first time or again, is when this run's own terminal comes back.
+        .onChange(of: onScreen, initial: true) {
+            if onScreen, model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
         }
     }
 
@@ -73,6 +76,7 @@ private struct Blocked: View {
 private struct Live: View {
     let carrier: TerminalCarrier
     let sessionUID: String
+    let onScreen: Bool
     let open: () -> Void
 
     var body: some View {
@@ -96,7 +100,7 @@ private struct Live: View {
             .frame(height: 44)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             if isOpen(phase) || shown {
-                TerminalSurface(carrier: carrier, sessionUID: sessionUID)
+                TerminalSurface(carrier: carrier, sessionUID: sessionUID, onScreen: onScreen)
             } else {
                 Text("Open the terminal to see this run on its computer and type into it.")
                     .font(Theme.ui(12.5))
