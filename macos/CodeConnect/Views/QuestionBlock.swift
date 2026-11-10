@@ -58,7 +58,8 @@ struct QuestionBlock: View {
                         if held {
                             controls(keys: false).padding(.horizontal, 28).padding(.bottom, 14)
                         } else {
-                            ReplyBoxFrame { controls(keys: true) }.preference(key: HoldsReplyBox.self, value: true)
+                            // Its keys answer while no sheet covers the window.
+                            ReplyBoxFrame { controls(keys: !slot.sheetUp) }.preference(key: HoldsReplyBox.self, value: true)
                         }
                     }
                 }

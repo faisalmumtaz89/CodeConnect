@@ -58,8 +58,10 @@ struct DecisionBlock: View {
 
     /// The reply field holds the keyboard: the box stays the writer's, and the answers wait above it, keyless.
     private var held: Bool { slot?.held == true }
-    /// The box holds this request: its keys answer.
-    private var keyed: Bool { slot != nil && answerable && !held }
+    /// The box holds this request…
+    private var boxed: Bool { slot != nil && answerable && !held }
+    /// …and its keys answer, while no sheet covers the window: a key meant for the sheet never answers behind it.
+    private var keyed: Bool { boxed && slot?.sheetUp != true }
     private var agentName: String { summary?.agent.displayName ?? "The agent" }
     private var placeholder: String { "What should \(agentName) do instead?" }
     private var reasonTyped: Bool { !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -283,13 +285,14 @@ struct DecisionBlock: View {
 
     // MARK: Answering
 
-    /// The answers. In the box (`keyed`): for Allow/Deny the reason a Deny carries, then Deny and Allow, whose keys
-    /// follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return denies with it, and Allow keeps no key);
-    /// for Codex its options, ⌘1 onwards. Held above the reply box: the same answers, with no field and no keys.
+    /// The answers. In the box (`boxed`): for Allow/Deny the reason a Deny carries, then Deny and Allow, whose keys
+    /// (`keyed`) follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return denies with it, and Allow
+    /// keeps no key); for Codex its options, ⌘1 onwards. Held above the reply box: the same answers, with no field and
+    /// no keys.
     @ViewBuilder private var controls: some View {
         switch surface {
         case .allowDeny:
-            if keyed {
+            if boxed {
                 TextField("", text: $reason, prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(Theme.ui(13))

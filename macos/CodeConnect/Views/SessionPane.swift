@@ -23,6 +23,10 @@ struct SessionPane: View {
     @State private var boxTaken = false
     /// The reply field (or its command list) holds the keyboard.
     @FocusedValue(\.composerHoldsEscape) private var composerHolds
+    /// The window's Add sheet, and its setup checklist: either covers the window, and then a request's answers take no
+    /// keys, as the window's own Esc stands down for the Add sheet.
+    @FocusedValue(\.adding) private var adding
+    @Environment(Setup.self) private var setup
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -44,7 +48,8 @@ struct SessionPane: View {
                         // keyboard: the box stays the writer's until it lets go. Once a request has the box, the
                         // field can't take the keyboard back, so what holds it then is the request's own field.
                         PendingRequests(
-                            model: model, key: row.id, maxHeight: height / 2, held: composerHolds == true && !boxTaken)
+                            model: model, key: row.id, maxHeight: height / 2, held: composerHolds == true && !boxTaken,
+                            sheetUp: adding.map { $0.wrappedValue != nil } ?? false || setup.shown)
                         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
                         // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
                         // Not clipped: its command list opens above it.

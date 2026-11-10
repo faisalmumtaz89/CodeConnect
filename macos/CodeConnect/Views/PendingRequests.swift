@@ -14,6 +14,8 @@ struct PendingRequests: View {
     let maxHeight: CGFloat
     /// The reply field holds the keyboard.
     let held: Bool
+    /// A sheet covers the window.
+    let sheetUp: Bool
 
     var body: some View {
         let pending = model.shown(for: key)?.pendingApprovals ?? []
@@ -22,16 +24,20 @@ struct PendingRequests: View {
             RequestBlock(approval: first, model: model)
                 // A request of its own: the next one starts with its own read gate and an empty reason.
                 .id(first.id)
-                .environment(\.pendingSlot, PendingSlot(maxHeight: maxHeight, held: held, more: pending.count - 1))
+                .environment(
+                    \.pendingSlot,
+                    PendingSlot(maxHeight: maxHeight, held: held, sheetUp: sheetUp, more: pending.count - 1))
         }
     }
 }
 
 /// A request in the pane's foot rather than a row of the conversation: the most height what it asks may take,
-/// whether the reply field holds the keyboard, and how many requests wait behind it.
+/// whether the reply field holds the keyboard, whether a sheet covers the window (its answers then take no keys), and
+/// how many requests wait behind it.
 struct PendingSlot: Equatable {
     let maxHeight: CGFloat
     let held: Bool
+    let sheetUp: Bool
     let more: Int
 }
 
