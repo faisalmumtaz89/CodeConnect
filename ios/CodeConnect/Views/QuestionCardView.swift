@@ -54,7 +54,7 @@ struct QuestionCardView: View {
 
     private var status: QuestionCardStatus {
         QuestionCardStatus.resolve(
-            outcome: DecisionCardView.effectiveOutcome(
+            outcome: DecisionCard.effectiveOutcome(
                 live: live?.outcome, snapshot: approval.outcome),
             attempt: attempt, isBacked: live != nil,
             hold: (live ?? approval).questionHold,

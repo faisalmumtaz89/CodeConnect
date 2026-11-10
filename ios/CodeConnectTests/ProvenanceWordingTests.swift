@@ -35,8 +35,8 @@ final class ProvenanceWordingTests: XCTestCase {
         XCTAssertEqual(ApprovalRow.resolutionText(for: inferred), "Closed at the computer")
         XCTAssertEqual(inferred.decisionLabel, "Closed")
         XCTAssertEqual(
-            DecisionCardView.alreadyResolvedMessage(
-                for: inferred, now: inferred.resolvedDate.addingTimeInterval(65)),
+            DecisionCard.alreadyResolvedBanner(
+                for: inferred, now: inferred.resolvedDate.addingTimeInterval(65)).message,
             "Closed at the computer · 1m ago", "the place said once")
     }
 
@@ -49,10 +49,10 @@ final class ProvenanceWordingTests: XCTestCase {
     func testTheCardsBannerUsesTheSameWords() throws {
         let phone = try outcome("phone")
         XCTAssertEqual(
-            DecisionCardView.alreadyResolvedMessage(
-                for: phone, now: phone.resolvedDate.addingTimeInterval(5)),
+            DecisionCard.alreadyResolvedBanner(
+                for: phone, now: phone.resolvedDate.addingTimeInterval(5)).message,
             "Allowed from a phone · 5s ago")
         XCTAssertEqual(
-            ResolutionBanner.headline(for: .answeredAtKeyboard("x")), "Answered at the computer")
+            DecisionCard.resultBanner(for: .answeredAtKeyboard("x")).message, "Answered at the computer")
     }
 }
