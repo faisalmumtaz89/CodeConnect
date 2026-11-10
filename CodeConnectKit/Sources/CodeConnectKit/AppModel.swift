@@ -3069,7 +3069,7 @@ public final class AppModel {
         // issued, and the daemon's own sentence says it will not be sent again.
         // Neither will this.
         guard !controls.stopIsSpent(material: hash) else {
-            controls.stopNotSent(Self.alreadyIssuedSentence(verb: "stop"), turn: turn)
+            controls.stopNotSent(Self.alreadyIssuedSentence, turn: turn)
             return nil
         }
         let requestID = controls.stopRequestID(material: hash)
@@ -3088,7 +3088,7 @@ public final class AppModel {
         } catch ConnectionError.sentButUnanswered {
             // The frame left. Saying "nothing was sent" here would be the app
             // inventing a guarantee the transport never gave it.
-            controls.stopSentNoAnswer(Self.sentNoAnswerSentence(verb: "stop"), material: hash)
+            controls.stopSentNoAnswer(Self.sentNoAnswerSentence, material: hash)
             return nil
         } catch {
             controls.stopNotSent(error.localizedDescription, turn: turn)
@@ -3133,7 +3133,7 @@ public final class AppModel {
         // unknown. Editing them makes a different message, which is a different
         // hash, and goes.
         guard !controls.composeIsSpent(material: hash) else {
-            controls.composeNotSent(Self.alreadyIssuedSentence(verb: "send"))
+            controls.composeNotSent(Self.alreadyIssuedSentence)
             return nil
         }
         let requestID = controls.composeRequestID(material: hash)
@@ -3150,7 +3150,7 @@ public final class AppModel {
             return nil
         } catch ConnectionError.sentButUnanswered {
             controls.composeSentNoAnswer(
-                Self.sentNoAnswerSentence(verb: "send"), material: hash)
+                Self.sentNoAnswerSentence, material: hash)
             return nil
         } catch {
             controls.composeNotSent(error.localizedDescription)
@@ -3167,15 +3167,15 @@ public final class AppModel {
     private static let noUidSentence =
         "\(HostDevice.current.computer("The computer")) has not given this run an id of its own, so nothing was sent."
 
-    private static func alreadyIssuedSentence(verb: String) -> String {
-        "This was already sent and what became of it is not known; it will not be \(verb) again. "
+    /// A stop or a message whose outcome nobody knows, refused again. "Sent" for both, as the computer's own sentence
+    /// for the same case says: a stop that was "stopped" would claim the turn ended, which nobody knows.
+    private static let alreadyIssuedSentence =
+        "This was already sent and what became of it is not known; it will not be sent again. "
             + "Check \(HostDevice.current.computer("the computer"))."
-    }
 
-    static func sentNoAnswerSentence(verb: String) -> String {
+    static let sentNoAnswerSentence =
         "This left the \(HostDevice.current.noun) and \(HostDevice.current.computer("the computer")) never answered, so what became of it is not known; "
-            + "it will not be \(verb) again. Check \(HostDevice.current.computer("the computer"))."
-    }
+            + "it will not be sent again. Check \(HostDevice.current.computer("the computer"))."
 
     /// A typed refusal in the app's own words. **Never dressed as the daemon's**
     /// — nothing was sent, so the daemon has said nothing about it.
