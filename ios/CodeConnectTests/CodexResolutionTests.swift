@@ -106,7 +106,7 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertEqual(card.codexResolution, .answered(by: .local, decision: nil))
         XCTAssertFalse(card.isPending, "an answered card is not still waiting on a human")
         XCTAssertFalse(
-            DecisionCardView.actionBarAvailable(
+            DecisionCard.actionBarAvailable(
                 outcome: card.outcome, codex: card.codexResolution, attempt: nil, isBacked: true),
             "a resolved Codex card must not offer an answer")
     }

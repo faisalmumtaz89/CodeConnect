@@ -52,7 +52,7 @@ struct DecisionCardView: View {
 
     /// The read-before-you-decide gate. A geometry test, never a lifecycle one —
     /// see `ReadGate`.
-    @State private var gate = ReadGate()
+    @State private var gate = DecisionCard.ReadGate()
     /// Where the gate's five measurements live — **deliberately outside the
     /// view's own state.**
     ///
@@ -505,10 +505,10 @@ struct DecisionCardView: View {
         // fallback, not a sentinel: no measurement means no arming.
         guard let visibleBottom = probe.visibleBottom else { return }
         var next = gate
-        if ReadGate.isVisible(bottom: probe.commandBottom, visibleBottom: visibleBottom) {
+        if DecisionCard.ReadGate.isVisible(bottom: probe.commandBottom, visibleBottom: visibleBottom) {
             next.hasSeenCommand = true
         }
-        if ReadGate.isVisible(bottom: probe.provenanceBottom, visibleBottom: visibleBottom) {
+        if DecisionCard.ReadGate.isVisible(bottom: probe.provenanceBottom, visibleBottom: visibleBottom) {
             next.hasSeenProvenance = true
         }
         guard next != gate else { return }
@@ -1107,8 +1107,7 @@ struct DecisionCardView: View {
         case .hashMismatch:
             CCBanner(
                 "Hash mismatch",
-                message:
-                    "The text on this card does not match its hash. It cannot be answered safely.",
+                message: DecisionCard.hashMismatchSentence,
                 tone: .danger, icon: "shield-warning-fill")
         case .resolution(let attempt):
             ResolutionBanner(attempt: attempt)
@@ -1232,31 +1231,13 @@ struct DecisionCardView: View {
         .ccAnimation(CC.motion.small, value: statusBanner != nil)
     }
 
-    /// Whether the answer controls should be offered. Requires **live backing**
-    /// (`isBacked`) and withdraws the moment the card carries an authoritative
-    /// outcome or the local attempt is terminal. Static and pure so the whole
-    /// guard is testable off the real resolver: a card with no live state behind
-    /// it can never present an action bar, closing the "act on a departed/reset
-    /// card" half of the class, and a resolved card disables it even while a
-    /// stale non-terminal `.failed` is still stored locally.
-    /// `codex` is the second authoritative ending, and it is checked here rather
-    /// than mapped onto `outcome`: a Codex resolution says things `AnswerOutcome`
-    /// cannot express — cleared because the turn was aborted, answered at the Mac
-    /// with no decision recorded, retired because the item finished — and every
-    /// one of them means the same thing about this bar, which is that it must go.
-    static func actionBarAvailable(
-        outcome: AnswerOutcome?, codex: CodexResolution?, attempt: AnswerAttempt?, isBacked: Bool
-    ) -> Bool {
-        isBacked && outcome == nil && codex == nil && attempt?.isTerminal != true
-    }
-
     /// The single actionability verdict for this card — the one computed the
     /// action bar, the in-body option rows and `submit` all read, so no answer
     /// surface can be offered (or acted on) that the others withhold. False the
     /// moment the card carries an outcome, the local attempt is terminal, or —
     /// the class this closes — no live state backs it at all.
     private var isActionable: Bool {
-        Self.actionBarAvailable(
+        DecisionCard.actionBarAvailable(
             outcome: effectiveOutcome, codex: effectiveCodexResolution, attempt: attempt,
             isBacked: live != nil)
     }
@@ -1676,25 +1657,7 @@ struct DecisionCardView: View {
     private var denyBlockedReason: String? { sharedBlockedReason }
 
     private var sharedBlockedReason: String? {
-        Self.blockedReason(model: model, approval: approval, inFlight: inFlight != nil)
-    }
-
-    /// Why no control on `approval` can act now, in the order that matters —
-    /// the same for every surface that answers a card.
-    static func blockedReason(model: AppModel, approval: ApprovalItem, inFlight: Bool) -> String? {
-        // A second tap while the first is in flight would be a silent no-op;
-        // saying "waiting" is the honest version of the same refusal.
-        if inFlight { return "Waiting for your computer to confirm…" }
-        if let reason = model.actionsBlockedReason { return reason }
-        if let summary = model.shownSummary(for: approval.sessionKey) {
-            let badge = FleetStatusRule.capability(
-                summary: summary, capabilities: model.connection.capabilities)
-            if let reason = badge.reason { return reason }
-        }
-        if !approval.card.verification.hashMatchesDisplayText {
-            return "The text on this card does not match its hash. It cannot be answered safely."
-        }
-        return nil
+        model.answerBlockedReason(for: approval, inFlight: inFlight != nil)
     }
 
     /// What became of a send: refused at the face check, or answered.
@@ -1722,15 +1685,6 @@ struct DecisionCardView: View {
     }
 
     // MARK: Submission
-
-    /// HIGH-risk *approvals* need a second factor. Denials never do.
-    private func requiresBiometrics(for decision: AnswerDecision) -> Bool {
-        guard risk == .high else { return false }
-        switch decision {
-        case .deny, .text: return false
-        default: return true
-        }
-    }
 
     /// What a decision would have been called on the wire, in the words the
     /// control the reader just pressed uses.
@@ -1771,7 +1725,8 @@ struct DecisionCardView: View {
         sentAt = Date()
         Task {
             let sent = await Self.send(
-                decision, for: approval, model: model, needsFace: requiresBiometrics(for: decision))
+                decision, for: approval, model: model,
+                needsFace: DecisionCard.needsSecondFactor(risk: risk, decision: decision))
             spinningControl = nil
             switch sent {
             case .faceRefused(let message):
@@ -1802,90 +1757,6 @@ struct DecisionCardView: View {
 }
 
 // MARK: - The read gate
-
-/// The read-before-you-decide gate, as a value.
-///
-/// **This is a viewport test, and it was not one.** The previous implementation
-/// armed on `onAppear` of a 1pt marker nested inside a `LazyVStack` child, on
-/// the premise that laziness would make the callback mean "scrolled into view".
-/// Laziness operates on a stack's *direct children*; `commandBlock` was the
-/// second one, so it was materialised at first layout and the marker inside it
-/// fired then. `onAppear` is a lifecycle callback and never a visibility test.
-///
-/// What that cost, read off the AX5 renders rather than off the code:
-///
-///  * A MEDIUM `Write` outside the worktree, with thirteen characters of the
-///    path on screen and `Allow` drawn as the enabled white primary. At MEDIUM
-///    there is no hold and no Face ID, so this gate is the *only* thing between
-///    one tap and a write to an arbitrary path.
-///  * A HIGH `git push --force origin main` with **zero characters of the
-///    command rendered** and `Hold to allow` fully armed: a face authenticating
-///    a command the product never showed.
-///
-/// The rule lives here, apart from the view, so it can be tested without a
-/// viewport — and the geometry test lives here too, so it can be tested without
-/// a rule.
-struct ReadGate: Equatable {
-    /// The bottom edge of the block carrying the command has been inside
-    /// the visible region at least once.
-    var hasSeenCommand = false
-    /// …and so has the bottom edge of the risk class and its provenance.
-    var hasSeenProvenance = false
-
-    /// Both edges are measured in the scroll view's own space. `visibleBottom`
-    /// is where the readable part of the scroll view ends: its own bottom, or
-    /// the pinned action bar's top where that is higher.
-    ///
-    /// Every way of not knowing answers **no**: an unmeasured edge (`nil`), a
-    /// layout that has not happened (`visibleBottom <= 0`), a non-finite value
-    /// from a degenerate proposal, or a block that has scrolled off the top.
-    /// Only a real measurement can open a gate.
-    static func isVisible(bottom: CGFloat?, visibleBottom: CGFloat) -> Bool {
-        guard let bottom, bottom.isFinite, visibleBottom.isFinite else { return false }
-        guard visibleBottom > 0, bottom > 0 else { return false }
-        return bottom <= visibleBottom
-    }
-
-    /// Whether this class may be answered yet.
-    ///
-    /// **The gate applies at every tier**, and the reason is that risk governs
-    /// *friction* — tap, hold, Face ID — and never whether the command has to be
-    /// visible. LOW used to return `true` unconditionally on the argument that
-    /// "a `Read` that costs a scroll is a gate people learn to defeat". The
-    /// argument is sound and the implementation did not follow from it: at
-    /// reading sizes a LOW command fits above the bar on the first frame, so the
-    /// gate is already open by the time the card is drawn and costs the reader
-    /// nothing at all. It is only when the command does *not* fit that the two
-    /// behaviours differ, and that is precisely the case an AX5 render of a LOW
-    /// card measured: `Allow` enabled, in the thumb zone, over **13 of the 24
-    /// characters** of `/Users/dev/app/README.md` — the 11 that were missing
-    /// being the ones that tell a README from `~/.aws/credentials`.
-    ///
-    /// A tier-shaped exception here is not "less friction for a small risk", it
-    /// is "the product will let you approve something it never showed you", and
-    /// that is not a property any tier gets.
-    func isOpen(at risk: RiskClass) -> Bool {
-        switch risk {
-        case .low:
-            return hasSeenCommand
-        case .medium:
-            return hasSeenCommand
-        // Stated separately rather than left to fall out of the layout: at HIGH
-        // a face is about to authorise this, and the two facts that say what it
-        // authorises are the command and the class it was given. That the one
-        // is drawn above the other is not evidence that both were seen.
-        case .high:
-            return hasSeenCommand && hasSeenProvenance
-        }
-    }
-
-    /// What a closed gate says. Drawn by `ccDisabled`, never only hinted.
-    func blockedReason(at risk: RiskClass) -> String? {
-        guard !isOpen(at: risk) else { return nil }
-        guard hasSeenCommand else { return "Scroll the command into view before deciding." }
-        return "Scroll to the end of the command block before deciding."
-    }
-}
 
 /// The five numbers the read gate is decided from.
 ///
