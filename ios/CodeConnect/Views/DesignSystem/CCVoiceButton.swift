@@ -17,12 +17,9 @@ enum CCVoiceButtonPhase: Equatable {
     /// The daemon is typing the text. A spinner, **not** the disabled palette —
     /// a busy button is not an unavailable one.
     case sending
-    /// The daemon confirmed the echo. The checkmark holds for a beat, then the
-    /// face returns to rest.
-    case sent
 }
 
-/// A circle whose face *is* the state: mic, arrow, stop, spinner, check.
+/// A circle whose face *is* the state: mic, arrow, stop, spinner.
 ///
 /// One control in one position doing the compose bar's whole job, so the pill
 /// never grows a second button for the thumb to arbitrate at 2am. The disc is
@@ -52,7 +49,7 @@ struct CCVoiceButton: View {
 
     var body: some View {
         Button {
-            guard !isBlocked, phase != .sending, phase != .sent else { return }
+            guard !isBlocked, phase != .sending else { return }
             action()
         } label: {
             face
@@ -122,10 +119,6 @@ struct CCVoiceButton: View {
             // Inherits `onAccent`, so the ring is black on the white face
             // without being told — same contract as CCButton's spinner.
             CCProgressRing(inheritingSize: 13)
-        case .sent:
-            CCIcon(
-                "check", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
-                maxSize: Self.glyphCap)
         }
     }
 
@@ -158,7 +151,6 @@ struct CCVoiceButton: View {
         case .send: return "Send"
         case .stop: return "Stop dictation"
         case .sending: return "Send"
-        case .sent: return "Sent"
         }
     }
 
@@ -168,7 +160,7 @@ struct CCVoiceButton: View {
         case .dictate: return "Transcribes speech on this phone into the message field."
         case .send: return "Types this into the agent's prompt."
         case .stop: return "Keeps the transcript in the field for review."
-        case .sending, .sent: return ""
+        case .sending: return ""
         }
     }
 }
@@ -192,7 +184,6 @@ private struct CCVoiceButtonStyle: ButtonStyle {
             CCVoiceButton(phase: .send) {}
             CCVoiceButton(phase: .stop) {}
             CCVoiceButton(phase: .sending) {}
-            CCVoiceButton(phase: .sent) {}
         }
         HStack(spacing: CC.space.md) {
             CCVoiceButton(phase: .dictate, blockedReason: "Link stale.") {}

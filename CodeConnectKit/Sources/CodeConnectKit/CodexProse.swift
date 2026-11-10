@@ -271,35 +271,12 @@ public enum CodexProse {
 
     // MARK: What became of a message
 
-    /// The five `ComposeResult` arms.
-    ///
-    /// `started` and `steered` are **never the same sentence**: which one
-    /// arrived is the whole answer to "what did my words do", and it was decided
-    /// by what the session was doing at the instant the daemon wrote — not by
-    /// anything the reader could have predicted when they tapped.
-    public static func compose(_ result: ComposeResult) -> Banner {
+    /// What became of a message, or nil when it landed (started, steered, or a replay of one that did): the
+    /// message appearing in the conversation says so.
+    public static func compose(_ result: ComposeResult) -> Banner? {
         switch result {
-        case .started:
-            return Banner(
-                title: "Your words started a new turn",
-                message: "Codex was idle, so this began the turn it is running now.",
-                icon: "play-circle", tone: .success)
-        case .steered:
-            return Banner(
-                title: "Your words joined the running turn",
-                message: "Codex was already working, so this went in alongside what it was doing.",
-                icon: "arrow-elbow-down-right", tone: .success)
-        // A replay reports the route **snapshotted at the claim**, so the verb
-        // is the one that was true when the words landed, not the one that
-        // would be true now.
-        case .duplicate(_, let started):
-            return Banner(
-                title: started
-                    ? "Your words started a new turn" : "Your words joined the running turn",
-                message:
-                    "This was already sent. Nothing was said a second time — "
-                    + "this is the same answer you got the first time.",
-                icon: "copy", tone: .info)
+        case .started, .steered, .duplicate:
+            return nil
         case .rejected(let reason):
             return Banner(
                 title: "\(HostDevice.current.computer("The computer")) refused this",

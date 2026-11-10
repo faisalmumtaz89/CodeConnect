@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Sending says nothing when it works
+
+- A message you send no longer puts "Typed into the session." above the message box, on the iPhone
+  or the Mac, and a message to Codex no longer says it "started a new turn" or "joined the running
+  turn". The message appearing in the conversation is what says it went. The iPhone's Send button
+  no longer flashes a check mark either. Anything that went wrong is still said there: a message
+  that was refused, one that isn't confirmed, or why sending can't work right now.
+
 ## A Mac app
 
 - CodeConnect now has a Mac app, `CodeConnect-0.18.0.dmg` on the release page, for macOS 26. Opened

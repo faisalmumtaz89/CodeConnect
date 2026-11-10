@@ -611,8 +611,8 @@ should not have been drawn still cannot write.
 
 **Every outcome is named, and none is collapsed.** A compose answers with `started`,
 `steered`, `duplicate`, `rejected` or `indeterminate` — plus an arm for a status this
-build does not know — and `started` and `steered` are rendered as the different news
-they are: the first began a turn, the second joined the one already running. Stop
+build does not know. A message that landed (`started`, `steered`, or a `duplicate`
+replay of one) draws no line: the message appearing in the conversation is the news. Stop
 answers with `aborted`, `duplicate`, `rejected` or `indeterminate`, and the same unknown
 arm. A `rejected` or `indeterminate` message is the daemon's own sentence, rendered
 verbatim and attributed to the Mac rather than paraphrased. The two enums are

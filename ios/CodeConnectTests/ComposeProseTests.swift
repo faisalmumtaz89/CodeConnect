@@ -17,13 +17,13 @@ final class ComposeProseTests: XCTestCase {
         .composerLost(command: "/effort high"),
     ]
 
-    /// Each outcome of a Claude send, in its sentence, tone and mark.
+    /// Each outcome of a Claude send, in its sentence, tone and mark; a landed send has none.
     func testEverySendOutcomeHasItsSentenceToneAndMark() {
-        let expected: [(String, ComposeProse.Tone, String)] = [
-            ("Typed into the session.", .success, "check"),
+        let expected: [(String, ComposeProse.Tone, String)?] = [
+            nil,
             ("Not typed: the composer is not on screen.", .warning, "warning-fill"),
             ("Couldn’t type the message: the link dropped.", .danger, "x-circle-fill"),
-            ("Already typed earlier — not repeated.", .success, "check"),
+            nil,
             (
                 "Not confirmed: no answer came back. Retry is safe; the message won’t be typed twice.", .warning,
                 "question-fill"
@@ -37,16 +37,20 @@ final class ComposeProseTests: XCTestCase {
                 .danger, "warning-fill"
             ),
         ]
-        for (attempt, (text, tone, icon)) in zip(outcomes, expected) {
+        for (attempt, expected) in zip(outcomes, expected) {
             let note = ComposeProse.note(attempt)
-            XCTAssertEqual(note.text, text)
-            XCTAssertEqual(note.tone, tone, "\(attempt)")
-            XCTAssertEqual(note.icon, icon, "\(attempt)")
-            XCTAssertFalse(note.offersWhy, "\(attempt)")
+            guard let (text, tone, icon) = expected else {
+                XCTAssertNil(note, "\(attempt)")
+                continue
+            }
+            XCTAssertEqual(note?.text, text)
+            XCTAssertEqual(note?.tone, tone, "\(attempt)")
+            XCTAssertEqual(note?.icon, icon, "\(attempt)")
+            XCTAssertEqual(note?.offersWhy, false, "\(attempt)")
         }
     }
 
-    /// What landed clears the draft and retires by itself; a refusal, a failure
+    /// What landed clears the draft, and a recovered composer's note retires by itself; a refusal, a failure
     /// and an unknown outcome stand until the next edit; a lost composer stands
     /// until another attempt.
     func testWhichOutcomesLandAndWhichAnEditRetires() {
@@ -73,15 +77,12 @@ final class ComposeProseTests: XCTestCase {
             .unknown(status: "s"),
         ]
         let marks =
-            outcomes.compactMap { ComposeProse.note($0).icon }
-            + codexMessages.compactMap { ComposeProse.note(CodexProse.compose($0)).icon }
+            outcomes.compactMap { ComposeProse.note($0)?.icon }
+            + codexMessages.compactMap { CodexProse.compose($0).map(ComposeProse.note)?.icon }
             + codexStops.compactMap { ComposeProse.note(CodexProse.interrupt($0)).icon }
             + ["warning-circle-fill", "question-fill"]
         XCTAssertEqual(
             Set(marks),
-            [
-                "arrow-elbow-down-right", "check", "copy", "play-circle", "question", "question-fill",
-                "stop-circle-fill", "warning-circle-fill", "warning-fill", "x-circle-fill",
-            ])
+            ["copy", "question", "question-fill", "stop-circle-fill", "warning-circle-fill", "warning-fill", "x-circle-fill"])
     }
 }

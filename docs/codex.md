@@ -213,9 +213,7 @@ happens depends on whether the session is busy:
 
 | You see | It means |
 |---|---|
-| Started | The session was idle and your words began a new turn. |
-| Joined | A turn was running and your words went into it. |
-| Already said | This exact message had already been sent. Nothing was said twice. |
+| Nothing above the box | Your words reached the session, and they appear in the conversation: as a new turn if it was idle, inside the running turn if it was busy. Sending words that had already gone says nothing too, and nothing is said twice. |
 | Refused, with a sentence | Nothing was said, and the sentence says why. Sending the same words again is a new try — unless the sentence reports an earlier attempt under the same request, which the daemon answers from its record without sending anything. |
 | Not known | It was written, and the outcome was never seen or Codex's answer does not show whether it was taken. **Never retried for you** — saying the same thing twice cannot be undone. |
 

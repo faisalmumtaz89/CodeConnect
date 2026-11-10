@@ -1116,7 +1116,7 @@ struct SessionDetailView: View {
                 .onChange(of: composeText) { _, _ in
                     unansweredSend = nil
                     // Editing is the user's next act; a standing failure
-                    // note has been read. Success notes retire themselves.
+                    // note has been read. A landed outcome's note retires itself.
                     if composeResult?.clearsOnEdit == true { composeResult = nil }
                 }
             }
@@ -1500,8 +1500,9 @@ struct SessionDetailView: View {
     }
 
     /// One place to show a compose outcome that did not go through `send()` —
-    /// the same note strip, the same persistence rule: good news retires
-    /// itself after four seconds, while a refusal stands until the text
+    /// the same note strip, the same persistence rule: a landed outcome's note
+    /// (only a recovered composer has one) retires itself after four seconds,
+    /// while a refusal stands until the text
     /// changes or another attempt begins. A blocked command's explanation
     /// vanishing mid-read was a shipped defect, not a style choice.
     private func noteComposeResult(_ result: ComposeAttempt) {
@@ -1593,8 +1594,8 @@ struct SessionDetailView: View {
         Task { await model.stopCodexTurn(sessionKey: key) }
     }
 
-    /// `/clear`, past its confirmation. The receipt claims typing, nothing
-    /// more; "Conversation cleared." appears in the timeline when the
+    /// `/clear`, past its confirmation. A landed send says nothing;
+    /// "Conversation cleared." appears in the timeline when the
     /// rotated transcript's own `/clear` entry arrives — the observable
     /// fact, in the place records live.
     private func performClear() {
@@ -1657,7 +1658,7 @@ struct SessionDetailView: View {
                 // Speaking is following: the reply lands at the tail.
                 composeText = ""
                 tailWatch.arrive()
-                // Good news may retire itself.
+                // A landed outcome's note retires itself.
                 composeResultClearTask = Task {
                     try? await Task.sleep(for: .seconds(4))
                     guard !Task.isCancelled else { return }
@@ -2142,8 +2143,6 @@ private struct SessionComposeBar: View {
     /// around the keyboard, and focus mirrored through a second flag is focus
     /// that drifts. One owner, one binding, passed in.
     let focused: FocusState<Bool>.Binding
-    /// The 0.9s the checkmark holds the circle's face after a confirmed send.
-    @State private var sentFlash = false
     /// When Stop handed text back. The send face ignores taps for 300ms after,
     /// so the finger that just ended a recording cannot also fire the send.
     @State private var stoppedAt: Date?
@@ -2163,14 +2162,6 @@ private struct SessionComposeBar: View {
         // indicator; over the keyboard it keeps 8pt of air.
         .padding(.bottom, focused.wrappedValue ? CC.space.xs : 0)
         .background { ground }
-        .onChange(of: result) { _, newValue in
-            guard case .sent = newValue else { return }
-            sentFlash = true
-            Task {
-                try? await Task.sleep(for: .seconds(0.9))
-                withAnimation(CC.motion.micro) { sentFlash = false }
-            }
-        }
         // Typing is the user's next act as much as retrying the mic is; a
         // stale mic-failure note must not stand over a hand-typed message.
         .onChange(of: text) { _, _ in dictation.clearFailure() }
@@ -2333,7 +2324,6 @@ private struct SessionComposeBar: View {
         // one is "this cancels what you started".
         if dictation.isRecording || dictation.isStarting { return .stop }
         if sending { return .sending }
-        if sentFlash { return .sent }
         return text.isEmpty ? .dictate : .send
     }
 
@@ -2362,7 +2352,7 @@ private struct SessionComposeBar: View {
             // Deliberately silent: Send fires dozens of times a day, and the
             // haptic that matters is the daemon's own confirm.
             onSend()
-        case .sending, .sent:
+        case .sending:
             break
         }
     }

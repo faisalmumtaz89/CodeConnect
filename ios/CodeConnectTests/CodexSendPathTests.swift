@@ -592,19 +592,18 @@ final class CodexSendPathTests: XCTestCase {
 
     /// A Codex run's own outcome outranks the last Claude send: on a Codex run
     /// the Claude sentences describe machinery that is not there. A stop and a
-    /// message share the one slot, the later act's outcome in it.
+    /// message share the one slot, the later act's outcome in it, and a message
+    /// that landed leaves it empty.
     func testTheComposerLineShowsCodexsOwnOutcomeOverAClaudeSend() async {
         let (model, wire) = model(link: "subscribed")
-        let typed = ComposeAttempt.sent(matched: "cc-1")
+        let typed = ComposeAttempt.refused("the composer is not on screen.")
         XCTAssertEqual(
-            model.outcomeNote(for: key(), lastSend: typed), ComposeProse.note(typed), "nothing from Codex yet")
+            model.outcomeNote(for: key(), lastSend: typed)?.text, "Not typed: the composer is not on screen.",
+            "nothing from Codex yet")
 
         wire.composeResult = .steered(turnID: "turn-9")
         _ = await model.composeToCodex(sessionKey: key(), text: "hello")
-        let steered = CodexProse.compose(.steered(turnID: "turn-9"))
-        let message = model.outcomeNote(for: key(), lastSend: typed)
-        XCTAssertEqual(message?.text, steered.oneLine)
-        XCTAssertEqual(message?.icon, steered.icon)
+        XCTAssertNil(model.outcomeNote(for: key(), lastSend: typed), "a landed message says nothing")
 
         wire.interruptResult = .rejected(reason: "the turn already ended.")
         _ = await model.stopCodexTurn(sessionKey: key())
@@ -612,6 +611,69 @@ final class CodexSendPathTests: XCTestCase {
         let stop = model.outcomeNote(for: key(), lastSend: typed)
         XCTAssertEqual(stop?.text, refused.oneLine)
         XCTAssertEqual(stop?.icon, refused.icon)
+    }
+
+    /// A landed send leaves the line above the field empty: a message typed into Claude, one typed earlier, and a
+    /// Codex message that started a turn, joined one, or was a replay of one that did. The message appearing in the
+    /// conversation is what says it went.
+    func testALandedSendLeavesNoLine() async {
+        let (claude, _) = model(link: "subscribed")
+        XCTAssertNil(claude.outcomeNote(for: key(), lastSend: .sent(matched: "cc-1")))
+        XCTAssertNil(claude.outcomeNote(for: key(), lastSend: .alreadyApplied(appliedAt: "2026-11-10T03:00:00Z")))
+
+        let landed: [ComposeResult] = [
+            .started(turnID: "turn-9"), .steered(turnID: "turn-9"), .duplicate(turnID: "turn-9", started: true),
+            .duplicate(turnID: "turn-9", started: false),
+        ]
+        for (index, result) in landed.enumerated() {
+            let (model, wire) = model(link: "subscribed")
+            wire.composeResult = result
+            _ = await model.composeToCodex(sessionKey: key(), text: "message \(index)")
+            XCTAssertNil(model.outcomeNote(for: key(), lastSend: nil), "\(result)")
+        }
+    }
+
+    /// Every outcome that is not a landed send reads, word for word, as it did before a landed send went quiet:
+    /// a Codex message nobody could account for, and every stop, the settled one included.
+    func testEveryOtherOutcomeReadsAsBefore() async {
+        let unknown =
+            "Answer not recognised. The computer answered with a status this app does not know (“quiesced”), so "
+            + "what became of this is not something the app can say. Update the app, and check the computer."
+        let messages: [(ComposeResult, String, ComposeProse.Tone, String)] = [
+            (.rejected(reason: "the turn already ended."), "The computer refused this: the turn already ended.",
+             .warning, "warning-fill"),
+            (.indeterminate(reason: "written, outcome unknown"), "Sent, outcome unknown: written, outcome unknown",
+             .warning, "question"),
+            (.unknown(status: "quiesced"), unknown, .warning, "question"),
+        ]
+        for (result, text, tone, icon) in messages {
+            let (model, wire) = model(link: "subscribed")
+            wire.composeResult = result
+            _ = await model.composeToCodex(sessionKey: key(), text: "hello")
+            let note = model.outcomeNote(for: key(), lastSend: nil)
+            XCTAssertEqual(note?.text, text, "\(result)")
+            XCTAssertEqual(note?.tone, tone, "\(result)")
+            XCTAssertEqual(note?.icon, icon, "\(result)")
+        }
+        let stops: [(InterruptResult, String, ComposeProse.Tone, String)] = [
+            (.aborted(turnID: "turn-9"), "Stopped. Codex stopped the turn.", .success, "stop-circle-fill"),
+            (.duplicate(turnID: "turn-9"),
+             "Already stopped. This exact request already did that. The turn was not stopped twice.", .info, "copy"),
+            (.rejected(reason: "the turn already ended."), "The computer refused this: the turn already ended.",
+             .warning, "warning-fill"),
+            (.indeterminate(reason: "written, outcome unknown"), "Sent, outcome unknown: written, outcome unknown",
+             .warning, "question"),
+            (.unknown(status: "quiesced"), unknown, .warning, "question"),
+        ]
+        for (result, text, tone, icon) in stops {
+            let (model, wire) = model(link: "subscribed")
+            wire.interruptResult = result
+            _ = await model.stopCodexTurn(sessionKey: key())
+            let note = model.outcomeNote(for: key(), lastSend: nil)
+            XCTAssertEqual(note?.text, text, "\(result)")
+            XCTAssertEqual(note?.tone, tone, "\(result)")
+            XCTAssertEqual(note?.icon, icon, "\(result)")
+        }
     }
 
     /// Why a Codex run cannot be sent to: the draft's own ceiling first, then
