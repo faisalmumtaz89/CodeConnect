@@ -31,7 +31,9 @@ final class TerminalPaneView: TerminalView {
     }
 
     // What the terminal shows, for a screen reader and the accessibility driver: SwiftTerm's Mac view exposes nothing.
-    // A text area whose value is the screen's lines, top to bottom, and whose label is the real grid.
+    // A text area whose value is the screen's lines, top to bottom, each the grid's full width so a column is an
+    // offset; whose insertion point is the terminal's cursor; whose label is the real grid; and which reads focused
+    // while it has the keyboard.
 
     override func isAccessibilityElement() -> Bool { true }
 
@@ -42,11 +44,23 @@ final class TerminalPaneView: TerminalView {
         return "Terminal, \(terminal.cols) columns, \(terminal.rows) rows"
     }
 
-    override func accessibilityValue() -> Any? {
+    override func accessibilityValue() -> Any? { screenLines().joined(separator: "\n") }
+
+    override func accessibilityInsertionPointLineNumber() -> Int { getTerminal().buffer.y }
+
+    override func accessibilitySelectedTextRange() -> NSRange {
+        let cursor = getTerminal().getCursorLocation()
+        let lines = screenLines()
+        guard cursor.y < lines.count else { return NSRange(location: 0, length: 0) }
+        let before = lines.prefix(cursor.y).reduce(0) { $0 + ($1 as NSString).length + 1 }
+        return NSRange(location: before + min(cursor.x, (lines[cursor.y] as NSString).length), length: 0)
+    }
+
+    override func isAccessibilityFocused() -> Bool { window?.firstResponder === self }
+
+    private func screenLines() -> [String] {
         let terminal = getTerminal()
-        return (0..<terminal.rows)
-            .map { terminal.getLine(row: $0)?.translateToString(trimRight: true) ?? "" }
-            .joined(separator: "\n")
+        return (0..<terminal.rows).map { terminal.getLine(row: $0)?.translateToString(trimRight: false) ?? "" }
     }
 
     /// One cell in points, from SwiftTerm's own pixel-snapped cell.
@@ -115,6 +129,8 @@ struct TerminalSurface: NSViewRepresentable {
         pane.installColors(CC.ansi.table.map { SwiftTerm.Color(red: $0.red, green: $0.green, blue: $0.blue) })
         pane.setAccessibilityIdentifier("terminal.view")
         context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID)
+        // The terminal takes the keyboard when it appears, as a terminal window does: what is typed next is the run's.
+        DispatchQueue.main.async { [weak scroller] in scroller?.window?.makeFirstResponder(scroller?.pane) }
         return scroller
     }
 
