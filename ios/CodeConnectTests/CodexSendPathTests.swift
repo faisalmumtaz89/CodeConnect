@@ -285,6 +285,41 @@ final class CodexSendPathTests: XCTestCase {
             "words that may already have landed are not said again")
     }
 
+    /// The sentences for a stop or a message nobody heard back about, and for the retry refused because of it,
+    /// read as English: it will not be *sent* again. A stop too, as the computer says it: "stopped" would claim the
+    /// turn ended.
+    func testAnUnansweredStopOrMessageSaysItWillNotBeSentAgain() async {
+        let (composeModel, composeWire) = model(link: "subscribed")
+        composeWire.composeResult = nil
+        _ = await composeModel.composeToCodex(sessionKey: key(), text: "deploy")
+        XCTAssertEqual(
+            composeModel.codexControls(for: key()).compose,
+            .sentNoAnswer(
+                "This left the phone and the computer never answered, so what became of it is not known; "
+                    + "it will not be sent again. Check the computer."))
+        _ = await composeModel.composeToCodex(sessionKey: key(), text: "deploy")
+        XCTAssertEqual(
+            composeModel.codexControls(for: key()).compose,
+            .notSent(
+                "This was already sent and what became of it is not known; it will not be sent again. "
+                    + "Check the computer."))
+
+        let (stopModel, stopWire) = model(link: "subscribed")
+        stopWire.interruptResult = nil
+        _ = await stopModel.stopCodexTurn(sessionKey: key())
+        XCTAssertEqual(
+            stopModel.codexStop(for: key()),
+            .sentNoAnswer(
+                "This left the phone and the computer never answered, so what became of it is not known; "
+                    + "it will not be sent again. Check the computer."))
+        _ = await stopModel.stopCodexTurn(sessionKey: key())
+        XCTAssertEqual(
+            stopModel.codexStop(for: key()),
+            .notSent(
+                "This was already sent and what became of it is not known; it will not be sent again. "
+                    + "Check the computer."))
+    }
+
     /// A failure **before** the send is still honestly not-sent.
     func testAFailureBeforeTheSendIsStillNotSent() async {
         let (model, wire) = model(link: "subscribed")
