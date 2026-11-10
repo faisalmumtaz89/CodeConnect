@@ -43,8 +43,21 @@ struct QuestionBlock: View {
                 Text(questions.questions.count == 1 ? "Claude asks" : "Claude asks \(questions.questions.count) questions")
                     .font(Theme.ui(12.5, .medium))
                     .foregroundStyle(status.isAnswerable ? Theme.amber : Theme.text2)
-                ForEach(Array(questions.questions.enumerated()), id: \.offset) { index, question in
-                    questionView(question, at: index)
+                if status.isAnswerable {
+                    ForEach(Array(questions.questions.enumerated()), id: \.offset) { index, question in
+                        questionView(question, at: index)
+                    }
+                } else {
+                    // Once it can't be answered here, the card says what was asked and, when known, what was answered.
+                    ForEach(Array(questions.questions.enumerated()), id: \.offset) { _, question in
+                        Text(question.text).font(Theme.ui(13)).foregroundStyle(Theme.text2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let summary = status.summary(of: questions) {
+                        Text(summary).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("\(id).summary")
+                    }
                 }
                 if let banner = status.banner {
                     BannerLine(title: banner.title, message: banner.message, tone: banner.tone)

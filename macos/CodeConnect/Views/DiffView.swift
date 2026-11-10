@@ -8,8 +8,11 @@ struct FileDiffView: View {
     let file: UnifiedDiff.FileDiff
     /// The file as the wire named it, when that differs from the parsed header (a Codex card's change).
     var path: String?
-    /// The most rows to draw, where a card's budget limits them; the rest are counted by the card.
-    var rowLimit: Int?
+    /// What the change is, when the wire said so (a Codex card's kind) rather than the parsed header.
+    var status: UnifiedDiff.FileDiff.Status?
+    /// The most diff lines to draw, counted as Kit's card budget counts them (every line of every hunk, folded or
+    /// not, and never a hunk's header); the card counts the rest.
+    var lineLimit: Int?
 
     /// One drawn row: a hunk's header, a line, a folded stretch, or a note.
     private enum Row: Identifiable {
@@ -24,18 +27,21 @@ struct FileDiffView: View {
 
     private var rows: [Row] {
         var rows: [Row] = []
-        for hunk in file.hunks {
+        var left = lineLimit ?? Int.max
+        for hunk in file.hunks where left > 0 {
             rows.append(.header(hunk.header, rows.count))
-            for segment in hunk.segments {
+            for segment in hunk.segments where left > 0 {
                 if segment.isFolded {
                     rows.append(.folded(segment.lines.count, rows.count))
+                    left -= segment.lines.count
                 } else {
-                    for line in segment.lines { rows.append(.line(line, rows.count)) }
+                    for line in segment.lines.prefix(left) { rows.append(.line(line, rows.count)) }
+                    left -= min(left, segment.lines.count)
                 }
             }
         }
-        for note in file.notes { rows.append(.note(note, rows.count)) }
-        return rowLimit.map { Array(rows.prefix($0)) } ?? rows
+        if left > 0 { for note in file.notes { rows.append(.note(note, rows.count)) } }
+        return rows
     }
 
     var body: some View {
@@ -43,7 +49,7 @@ struct FileDiffView: View {
             HStack(spacing: 6) {
                 Image(systemName: "doc.text").font(.system(size: 10)).accessibilityHidden(true)
                 Text(path ?? file.displayPath).font(Theme.mono(11.5)).lineLimit(1).truncationMode(.head)
-                Text(file.status.label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+                Text((status ?? file.status).label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
                 Spacer(minLength: 8)
                 LineDelta(added: UInt64(file.additions), removed: UInt64(file.deletions))
             }
@@ -89,6 +95,17 @@ private struct DiffLine: View {
         .padding(.vertical, 1.5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
+    }
+
+    /// The line as a screen reader says it: whether it was added or removed, then its text.
+    private var spoken: String {
+        switch line.kind {
+        case .addition: "Added: \(line.text)"
+        case .deletion: "Removed: \(line.text)"
+        case .context, .note: line.text
+        }
     }
 
     private var mark: String {

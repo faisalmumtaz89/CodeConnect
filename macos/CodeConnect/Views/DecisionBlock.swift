@@ -60,7 +60,7 @@ struct DecisionBlock: View {
                     }
                 }
                 VStack(spacing: 0) {
-                    Text(approval.card.displayText)
+                    Text(approval.card.primaryText(verification: approval.card.verification, agent: summary?.agent))
                         .font(Theme.mono(12))
                         .foregroundStyle(Theme.text)
                         .textSelection(.enabled)
@@ -166,7 +166,9 @@ struct DecisionBlock: View {
                     if index < plan.allowances.count, plan.allowances[index] > 0,
                         let file = CodexCard.parsedDiff(for: change)
                     {
-                        FileDiffView(file: file, path: change.path, rowLimit: plan.allowances[index])
+                        FileDiffView(
+                            file: file, path: change.path, status: Self.status(of: change.kind),
+                            lineLimit: plan.allowances[index])
                     } else {
                         Text(change.path).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
                     }
@@ -185,6 +187,17 @@ struct DecisionBlock: View {
                         .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                 }
             }
+        }
+    }
+
+    /// A Codex change's kind as a file status: the wire's word, not the header the parser was handed.
+    private static func status(of kind: String) -> UnifiedDiff.FileDiff.Status? {
+        switch kind {
+        case "add": .added
+        case "delete": .deleted
+        case "rename": .renamed
+        case "update": .modified
+        default: nil
         }
     }
 
@@ -239,13 +252,14 @@ struct DecisionBlock: View {
                             Image(systemName: refusal ? "xmark" : "checkmark").font(.system(size: 10, weight: .semibold))
                                 .frame(width: 14).accessibilityHidden(true)
                             Text(option.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                                .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                             if !refusal, risk == .high {
                                 Text(HostDevice.current.biometric).font(Theme.ui(11)).foregroundStyle(Theme.text3)
                             }
                         }
                         .padding(.horizontal, 8)
-                        .frame(height: 28)
+                        .padding(.vertical, 6)
                     }
                     .buttonStyle(.hover(id: "\(id).option.\(option.id)"))
                     .disabled(blocked != nil)
