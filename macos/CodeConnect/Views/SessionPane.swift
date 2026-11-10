@@ -71,7 +71,9 @@ private struct Heading: View {
                     StateIcon(status: row.status)
                     Text(row.status.label)
                 }
-                .accessibilityElement(children: .combine)
+                // The mark and the word say one thing; read once.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(row.status.label)
                 .accessibilityIdentifier(row.status == .ended ? "session.ended" : "session.state")
                 HStack(spacing: 6) {
                     AgentMark(agent: row.summary.agent)

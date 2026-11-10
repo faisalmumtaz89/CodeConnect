@@ -16,6 +16,8 @@ struct Conversation: View {
             ForEach(items) { item in
                 ConversationRow(item: item)
                     .reading()
+                    // One element per row: an identifier on a row of several texts otherwise lands on each of them.
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("session.row.\(item.id)")
             }
         }
