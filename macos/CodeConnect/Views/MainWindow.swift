@@ -40,10 +40,13 @@ struct MainWindow: View {
                 let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
                 let model = open.flatMap { machines.model(forSession: $0.id) }
                 FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
-                    .frame(width: model == nil ? nil : 580)
+                    // Beside an open run the list gives way first, down to what its rows still read at.
+                    .frame(minWidth: model == nil ? nil : 290, maxWidth: model == nil ? .infinity : 580)
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
                     SessionPane(row: open, model: model).id(open.id)
+                        // Room for a card's answers in one row.
+                        .frame(minWidth: 450)
                 }
             } else {
                 EmptyFleet(adding: $adding)

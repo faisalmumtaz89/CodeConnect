@@ -54,7 +54,7 @@ struct QuestionBlock: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let summary = status.summary(of: questions) {
-                        Text(summary).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                        Text(summary.displaySafe).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("\(id).summary")
                     }
