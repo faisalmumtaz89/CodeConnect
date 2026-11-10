@@ -53,8 +53,6 @@ struct MainWindow: View {
                         if let address = model.endpoint?.typedAddress { pairAgain(address) }
                     }
                     .id(open.id)
-                    // Room for a card's answers in one row.
-                    .frame(minWidth: 450)
                 }
             } else {
                 EmptyFleet(adding: $adding)
