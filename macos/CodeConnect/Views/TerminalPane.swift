@@ -30,10 +30,12 @@ final class TerminalPaneView: TerminalView {
         return nil
     }
 
-    /// A sideways swipe pans the window across a pane wider than it. Every other swipe stays the terminal's, as
-    /// SwiftTerm has it: its scrollback, or the agent's own mouse wheel.
+    /// A sideways swipe pans the window across a pane wider than it. The window also gets every event with no
+    /// vertical movement, which SwiftTerm drops: a gesture begins and ends with one, and a window that never saw its
+    /// end would stay pulled past the pane's edge. Every other swipe stays the terminal's, as SwiftTerm has it: its
+    /// scrollback, or the agent's own mouse wheel.
     override func scrollWheel(with event: NSEvent) {
-        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+        if event.scrollingDeltaY == 0 || abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
             enclosingScrollView?.scrollWheel(with: event)
         } else {
             super.scrollWheel(with: event)
