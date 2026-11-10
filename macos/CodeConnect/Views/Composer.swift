@@ -289,7 +289,8 @@ private struct Composer: View {
             opener = draft
             clearing = true
         case .nativeDiff:
-            noteResult(.refused(takesComposer("/diff")))
+            // Kit's policy refuses it, before the wire, in its own words: they point to the Changes tab.
+            Task { noteResult(await model.send(text: draft, to: key)) }
         case .nativeSnapshot(let command):
             noteResult(.refused(takesComposer("/\(command.rawValue)")))
         case .blocked(_, let reason):
