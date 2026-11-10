@@ -364,6 +364,15 @@ public struct ModelCommandSignal: Sendable, Hashable {
     var seq: UInt64
 }
 
+/// What a `/model` watch reads: the last thing `/model` said back, and where
+/// the newest turn ended. One value, so a view that re-reads its watch when
+/// this changes re-reads it on either. Two fields, so a receipt and a later
+/// turn end that arrive together still settle on the receipt.
+public struct ModelWatchSignal: Sendable, Hashable {
+    var command: ModelCommandSignal?
+    var turnEndSeq: UInt64
+}
+
 /// The Model sheet's correlation rule: **a fence in the event stream, and a
 /// match on the value that was asked for.**
 ///

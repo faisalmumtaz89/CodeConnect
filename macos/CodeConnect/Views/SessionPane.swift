@@ -15,6 +15,7 @@ struct SessionPane: View {
     /// behind the conversation: the emulator holds the run's screen and scrollback, and Kit keeps only the stream's
     /// tail, so a terminal rebuilt from it draws a wrong screen once the run has printed more than that.
     @State private var terminalShown = false
+    @State private var height: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -24,7 +25,14 @@ struct SessionPane: View {
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model, tab: $tab)
             ZStack(alignment: .topLeading) {
-                if tab == .conversation { Conversation(model: model, key: row.id) }
+                if tab == .conversation {
+                    VStack(spacing: 0) {
+                        Conversation(model: model, key: row.id)
+                        // What waits on you sits at the foot, in at most half the pane, outside the conversation's
+                        // scroll.
+                        PendingRequests(model: model, key: row.id, maxHeight: height / 2)
+                    }
+                }
                 if tab == .changes { ChangesTab(model: model, key: row.id) }
                 if tab == .terminal || terminalShown {
                     TerminalTab(row: row, model: model, onScreen: tab == .terminal, pairAgain: pairAgain)
@@ -35,6 +43,7 @@ struct SessionPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.pane")
