@@ -774,6 +774,114 @@ final class TerminalWiringTests: XCTestCase {
             panes(in: host.view).count, 1, "the terminal reattached but the tab draws no pane")
     }
 
+    // MARK: - Whether the terminal can open, and when it reopens by itself
+
+    /// Whether this run's terminal can open, in the order that matters and in
+    /// each device's words: the iPhone's are unchanged, and a Mac names the
+    /// computer the agent runs on.
+    func testTheTerminalSaysWhyItCannotOpenInEachDevicesWords() async throws {
+        func said(_ model: AppModel, _ run: String) -> [TerminalConnect] {
+            [model.terminalConnect(sessionUID: run, on: .iPhone), model.terminalConnect(sessionUID: run, on: .mac)]
+        }
+        let unpaired = AppModel(machineID: "unpaired")
+        XCTAssertEqual(
+            said(unpaired, "A"),
+            [
+                .blocked(reason: "Pair with your computer first; the terminal uses the same connection.", fix: .pair),
+                .blocked(
+                    reason: "Pair with the agent's computer first; the terminal uses the same connection.", fix: .pair),
+            ])
+
+        let daemon = StubbedDaemon()
+        let model = daemon.model
+        let name = try XCTUnwrap(model.machineName, "a paired model knows its computer")
+
+        // A link that drops takes the daemon's capabilities with it.
+        daemon.dropSocket()
+        model.connection.simulateCapabilitiesForTesting(Capabilities(extra: [:]), minor: 0)
+        XCTAssertEqual(
+            said(model, "A"),
+            [
+                .blocked(reason: "Not connected to the computer. The terminal uses the same connection.", fix: nil),
+                .blocked(reason: "Not connected to \(name). The terminal uses the same connection.", fix: nil),
+            ])
+        daemon.reconnect()
+
+        model.connection.simulateCapabilitiesForTesting(Capabilities(extra: ["terminal_pty": .bool(false)]), minor: 0)
+        XCTAssertEqual(
+            said(model, "A"),
+            [
+                .blocked(
+                    reason: "The computer opens the live terminal over Tailscale, not over this connection.", fix: nil),
+                .blocked(reason: "\(name) opens the live terminal over Tailscale, not over this connection.", fix: nil),
+            ])
+        model.connection.simulateCapabilitiesForTesting(Capabilities(extra: [:]), minor: 0)
+        XCTAssertEqual(
+            said(model, "A"),
+            [
+                .blocked(
+                    reason: "This connection may not open a terminal. Pair this device with the computer, then try again.",
+                    fix: .pair),
+                .blocked(
+                    reason: "This connection may not open a terminal. Pair this Mac with \(name), then try again.",
+                    fix: .pair),
+            ])
+        model.connection.simulateCapabilitiesForTesting(Capabilities(extra: ["terminal_pty": .bool(true)]), minor: 0)
+
+        model.adoptSummariesForTesting([])
+        XCTAssertEqual(
+            said(model, "A"),
+            [
+                .blocked(reason: "Your computer no longer lists this run, so there is no terminal to attach to.", fix: nil),
+                .blocked(reason: "\(name) no longer lists this run, so there is no terminal to attach to.", fix: nil),
+            ])
+        let adoptedRun = listedRun("A", tmux: "")
+        model.adoptSummariesForTesting([adoptedRun])
+        let adopted = TerminalConnect.blocked(
+            reason: "CodeConnect did not launch this session, so there is no terminal of its own to attach to.", fix: nil)
+        XCTAssertEqual(said(model, "A"), [adopted, adopted])
+
+        let runA = listedRun("A", tmux: "cc-a")
+        let runB = listedRun("B", tmux: "cc-b")
+        model.adoptSummariesForTesting([runA, runB])
+        XCTAssertEqual(model.terminalConnect(sessionUID: "A"), .ready(sessionUID: "A"))
+        try await daemon.attach(to: "B")
+        XCTAssertEqual(
+            model.terminalConnect(sessionUID: "A"),
+            .blocked(
+                reason: "\(model.runLabel(for: "B").spoken) has the terminal open, and this connection allows one at a time.",
+                fix: .takeOver))
+        // A Codex run is never offered the takeover: the daemon refuses its attach, so it would end B's terminal for
+        // nothing.
+        model.adoptSummariesForTesting([runA, runB, listedRun("C", tmux: "cc-c", agent: "codex")])
+        let claudeOnly = TerminalConnect.blocked(reason: "The terminal opens for Claude Code runs only.", fix: nil)
+        XCTAssertEqual(said(model, "C"), [claudeOnly, claudeOnly])
+
+        XCTAssertEqual(TerminalConnect.Fix.pair.title(on: .iPhone), "Pair")
+        XCTAssertEqual(TerminalConnect.Fix.pair.title(on: .mac), "Pair again")
+        XCTAssertEqual(TerminalConnect.Fix.takeOver.title(on: .mac), "End that terminal and open this one")
+    }
+
+    /// The terminal reopens by itself only back into this run's own terminal
+    /// that was already open, and never into one the daemon closed for good.
+    func testTheTerminalReopensByItselfOnlyIntoItsOwnOpenTerminal() async throws {
+        let daemon = StubbedDaemon()
+        let model = daemon.model
+        XCTAssertFalse(model.terminalReopensByItself(sessionUID: "A"), "never opened: opening one is a deliberate act")
+        try await daemon.attach(to: "A")
+        try daemon.deliverOutput(Array("the agent's own pane\r\n".utf8))
+        daemon.dropSocket()
+        daemon.reconnect()
+        await model.terminal.settleForTesting()
+        XCTAssertTrue(model.terminalReopensByItself(sessionUID: "A"), "its own terminal, open before the drop")
+        XCTAssertFalse(model.terminalReopensByItself(sessionUID: "B"), "never another run's")
+        try await daemon.attach(to: "A")
+        try daemon.close(code: "session_exited", reason: "the session ended")
+        await model.terminal.settleForTesting()
+        XCTAssertFalse(
+            model.terminalReopensByItself(sessionUID: "A"), "a session that ended does not come back by asking again")
+    }
+
     // MARK: - The pane at its own size
 
     /// **Bytes drawn for the pane are drawn on the pane's grid.** While a Mac
@@ -1043,7 +1151,7 @@ final class TerminalWiringTests: XCTestCase {
 
     private func tab(over daemon: StubbedDaemon, run: String = "A") -> some View {
         TerminalTabView(
-            sessionUID: run, tmuxName: "cc-\(run.lowercased())", unhosted: false, runLabel: run
+            sessionUID: run, tmuxName: "cc-\(run.lowercased())", runLabel: run
         )
         .environment(daemon.model)
     }
@@ -1198,6 +1306,21 @@ private struct SurfaceHarness: View {
     }
 }
 
+/// A run the fleet lists, under the tmux name it is reached by (empty for a run
+/// CodeConnect did not launch), of the agent named.
+private func listedRun(_ uid: String, tmux: String, agent: String = "claude") -> SessionSummary {
+    // A fixture that does not decode is a decoder change, not a test bug.
+    // swiftlint:disable:next force_try
+    try! JSONDecoder().decode(
+        SessionSummary.self,
+        from: Data(
+            """
+            {"session_uid":"\(uid)","session_id":"cc-\(uid)","tmux_session":"\(tmux)","agent":"\(agent)",
+             "cwd":"/work","project_label":"\(uid)","lifecycle":"live","link":"attached","last_seq":0,
+             "created_at":"2026-11-10T10:00:00Z","updated_at":"2026-11-10T10:00:00Z","blocked_on":[]}
+            """.utf8))
+}
+
 // MARK: - A Mac that is only the far end of the wire
 
 /// A real `AppModel` with the socket taken out and nothing else.
@@ -1230,6 +1353,9 @@ private final class StubbedDaemon {
         model.connection.simulateConnectedForTesting()
         model.connection.simulateCapabilitiesForTesting(
             Capabilities(extra: ["terminal_pty": .bool(true)]), minor: 0)
+        // Listed, as every run whose tab is open is: the terminal attaches to a
+        // run the fleet vouches for, under the tmux name the fleet gives it.
+        model.adoptSummariesForTesting([listedRun("A", tmux: "cc-a"), listedRun("B", tmux: "cc-b")])
         model.connection.sendStub = { [weak self] message in
             if case .terminalResize(_, let cols, let rows) = message {
                 self?.resizes.append(PaneSize(cols: cols, rows: rows))

@@ -35,10 +35,6 @@ struct TerminalTabView: View {
     /// this run, or never hosted it, which is also when there is nothing to
     /// attach to.
     let tmuxName: String?
-    /// True when the run is listed but has no tmux location: adopted, observed
-    /// through its hooks, launched by something other than CodeConnect. The
-    /// blocked reason has to tell that story rather than claim the run is gone.
-    let unhosted: Bool
     /// What to call this run on screen.
     /// What to call the run out loud — see `RunLabel.spoken`. The tmux name is
     /// still what this view *attaches* to; it is simply not what a reader is
@@ -848,106 +844,33 @@ struct TerminalTabView: View {
         }
     }
 
-    /// **One switch, two answers.**
-    ///
-    /// Either the connection has everything it needs — in which case this
-    /// carries the exact target `connect()` will dial — or it is blocked, in
-    /// which case it carries the sentence the screen has to print and the
-    /// route to the fix.
-    ///
-    /// **One value, because the two answers have to agree.** Three reconnect
-    /// affordances share this tab, and each of them needs both halves: what to
-    /// dial, and what to say instead. Computed separately they drift, and the
-    /// drift shows up as a control that does nothing — `connect()` returning at
-    /// a guard the screen never stated. Deriving both from here makes "an
-    /// action the connection would refuse" unconstructible rather than
-    /// something three call sites have to remember.
-    private enum ConnectState {
-        /// Everything the attach needs: the run's uid, which the daemon
-        /// resolves to the one live session carrying it.
-        case ready(sessionUID: String)
-        case blocked(Blocked)
-    }
-
-    private var connectState: ConnectState {
-        guard host != nil else {
-            return .blocked(
-                Blocked(
-                    reason: "Pair with your computer first; the terminal uses the same connection.",
-                    fix: .init(title: "Pair", run: { showPairing = true })))
-        }
-        // The terminal is the same connection as everything else, so a link
-        // that is down is the whole story — there is no second thing to try.
-        guard model.connection.phase.isConnected else {
-            return .blocked(
-                Blocked(reason: "Not connected to the computer. The terminal uses the same connection."))
-        }
-        // Shell-equivalent authority is never granted to the bootstrap token,
-        // so the daemon says per connection whether it will open one at all.
-        guard model.connection.capabilities?.servesTerminal == true else {
-            // A paired phone refused anyway is on a connection the daemon
-            // cannot vouch for as private: pairing again would change nothing, so it
-            // is not offered.
-            if model.connection.helloAck?.deviceID != nil,
-                model.connection.capabilities?.withholdsTerminal == true
-            {
-                return .blocked(
-                    Blocked(
-                        reason:
-                            "The computer opens the live terminal over Tailscale, not over this connection."
-                    ))
-            }
-            return .blocked(
-                Blocked(
-                    reason:
-                        "This connection may not open a terminal. Pair this device with the computer, then try again.",
-                    fix: .init(title: "Pair", run: { showPairing = true })))
-        }
-        guard tmuxName != nil else {
-            // No route to a fix, and honestly so — but two different truths.
-            // An adopted run was never in CodeConnect's tmux, so "no longer
-            // lists" would be a lie about a session the fleet is showing.
-            return .blocked(
-                Blocked(
-                    reason: unhosted
-                        ? "CodeConnect did not launch this session, so there is no terminal of its own to attach to."
-                        : "Your computer no longer lists this run, so there is no terminal to attach to."
-                ))
-        }
-        // The daemon allows one terminal per connection and the carrier is
-        // shared, so this is the one block whose route ends something the
-        // reader owns. It names the run it would end: a control that closes
-        // another agent's keyboard without saying whose is not one to offer.
-        if case .heldByAnotherRun(let held) = standing {
-            return .blocked(
-                Blocked(
-                    reason:
-                        "\(model.runLabel(for: held).spoken) has the terminal open, and this connection allows one at a time.",
-                    fix: .init(title: "End that terminal and open this one", run: takeOver)))
-        }
-        return .ready(sessionUID: sessionUID)
+    /// Whether this run's terminal can open now — the exact target `connect()`
+    /// dials, or the sentence the screen prints and the route to the fix. One
+    /// Kit value, so every control here and the connection it opens agree.
+    private var connectState: TerminalConnect {
+        model.terminalConnect(sessionUID: sessionUID)
     }
 
     private var blockedReason: Blocked? {
-        guard case .blocked(let blocked) = connectState else { return nil }
-        return blocked
+        guard case .blocked(let reason, let fix) = connectState else { return nil }
+        return Blocked(
+            reason: reason,
+            fix: fix.map { fix in
+                Blocked.Fix(
+                    title: fix.title(),
+                    run: {
+                        switch fix {
+                        case .pair: showPairing = true
+                        case .takeOver: takeOver()
+                        }
+                    })
+            })
     }
 
     private func connectIfPossible() {
-        // Back into *this run's* terminal or none. The carrier is shared, so
-        // anything automatic here would open a shell for a run the reader
-        // merely navigated to — and, where another run holds the terminal,
-        // end that one to do it. A takeover is a decision, never a side
-        // effect of appearing.
-        guard case .mine = standing, session.canAttach else { return }
-        // Only auto-attach back into a terminal that was already open. Opening
-        // one is a deliberate act: it is shell-equivalent authority, and a tab
-        // that opens a shell merely by being looked at is not something to do
-        // on the user's behalf.
-        if case .idle = session.phase, session.transcript(forRun: sessionUID).isEmpty { return }
-        // And never re-open one the daemon closed for a reason a retry cannot
-        // change — a session that ended does not come back by asking again.
-        if let close = session.lastClose, !close.isRetryable { return }
+        // Back into this run's own, already-open terminal or none, and never one
+        // the daemon closed for good (see `AppModel.terminalReopensByItself`).
+        guard model.terminalReopensByItself(sessionUID: sessionUID) else { return }
         connect()
     }
 

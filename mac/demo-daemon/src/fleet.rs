@@ -334,6 +334,7 @@ impl Fleet {
             session_id: run.name.clone(),
             decision: decision.clone(),
             resolved_by: ResolvedBy::Phone,
+            answered_on: None,
             applied_via: APPLIED_VIA,
             resolved_at: protocol::time::now_rfc3339(),
             detail: Some("answered from the phone".into()),

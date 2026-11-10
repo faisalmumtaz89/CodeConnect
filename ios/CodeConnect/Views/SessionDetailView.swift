@@ -1067,7 +1067,6 @@ struct SessionDetailView: View {
                     TerminalTabView(
                         sessionUID: key,
                         tmuxName: model.tmuxName(for: key),
-                        unhosted: model.shownSummary(for: key)?.tmuxSession.isEmpty == true,
                         runLabel: label.spoken,
                         onScreen: surface == .terminal
                     )
@@ -1159,13 +1158,11 @@ struct SessionDetailView: View {
             // not an order at all.
             .ccTallSheet()
         }
-        .alert("Clear Claude’s context?", isPresented: $showClearConfirm) {
-            Button("Clear context", role: .destructive) { performClear() }
-            Button("Keep context", role: .cancel) {}
+        .alert(ClearConfirmation.title, isPresented: $showClearConfirm) {
+            Button(ClearConfirmation.clear, role: .destructive) { performClear() }
+            Button(ClearConfirmation.keep, role: .cancel) {}
         } message: {
-            Text(
-                "Claude Code will forget this conversation’s context. "
-                    + "CodeConnect’s timeline will stay here.")
+            Text(ClearConfirmation.message)
         }
         .sheet(item: $openApproval) { approval in
             // `openApproval` is only the sheet's IDENTITY (and a last-known
