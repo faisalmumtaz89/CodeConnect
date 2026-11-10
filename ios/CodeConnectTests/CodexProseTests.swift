@@ -115,31 +115,16 @@ final class CodexProseTests: XCTestCase {
         XCTAssertNil(ComposeResult.indeterminate(reason: "?").turnID)
     }
 
-    // MARK: started vs steered
+    // MARK: A message that landed
 
-    /// **Never the same sentence.** Which of the two arrived is the answer to
-    /// "what did my words do", and it was decided at the Mac, at the instant the
-    /// daemon wrote — not by anything the reader could predict when they tapped.
-    func testStartedAndSteeredAreNeverTheSameSentence() {
-        let started = CodexProse.compose(.started(turnID: "t-1"))
-        let steered = CodexProse.compose(.steered(turnID: "t-1"))
-        XCTAssertNotEqual(started.title, steered.title)
-        XCTAssertNotEqual(started.message, steered.message)
-        XCTAssertTrue(started.title.contains("started"), started.title)
-        XCTAssertTrue(steered.title.contains("joined"), steered.title)
-    }
-
-    /// A replay reads with the **verb that was true when the words landed**,
-    /// because the route was snapshotted at the claim. `started: false` says
-    /// they joined a running turn even if the session is idle now.
-    func testADuplicateReadsWithTheVerbTheOriginalEarned() {
-        let asSteer = CodexProse.compose(.duplicate(turnID: "t-1", started: false))
-        let asStart = CodexProse.compose(.duplicate(turnID: "t-1", started: true))
-        XCTAssertEqual(asSteer.title, CodexProse.compose(.steered(turnID: "t-1")).title)
-        XCTAssertEqual(asStart.title, CodexProse.compose(.started(turnID: "t-1")).title)
-        // And both say plainly that nothing was said twice.
-        for banner in [asSteer, asStart] {
-            XCTAssertTrue(banner.message.contains("second time"), banner.message)
+    /// A message that started a turn, joined one, or was a replay of one that did has no banner: the message
+    /// appearing in the conversation is what says it went.
+    func testALandedMessageHasNoBanner() {
+        for result: ComposeResult in [
+            .started(turnID: "t-1"), .steered(turnID: "t-1"), .duplicate(turnID: "t-1", started: true),
+            .duplicate(turnID: "t-1", started: false),
+        ] {
+            XCTAssertNil(CodexProse.compose(result), "\(result)")
         }
     }
 
@@ -308,12 +293,12 @@ final class CodexProseTests: XCTestCase {
     /// seam the rejection titles had, still there for every other arm. One rule,
     /// stated where the banner is built: a colon before a sentence the daemon
     /// wrote, a period before one the app wrote.
-    func testAVerbatimDaemonSentenceIsNotIntroducedByAFullStop() {
+    func testAVerbatimDaemonSentenceIsNotIntroducedByAFullStop() throws {
         let daemonWritten: [CodexProse.Banner] = [
             CodexProse.interrupt(.indeterminate(reason: "this interrupt was already sent")),
             CodexProse.interrupt(.rejected(reason: "this Mac has lost its control link")),
-            CodexProse.compose(.indeterminate(reason: "that message was written")),
-            CodexProse.compose(.rejected(reason: "this Mac is connected but not watching")),
+            try XCTUnwrap(CodexProse.compose(.indeterminate(reason: "that message was written"))),
+            try XCTUnwrap(CodexProse.compose(.rejected(reason: "this Mac is connected but not watching"))),
         ]
         for banner in daemonWritten {
             XCTAssertTrue(
@@ -327,9 +312,9 @@ final class CodexProseTests: XCTestCase {
         // The app's own sentences are whole sentences and keep the full stop.
         let appWritten: [CodexProse.Banner] = [
             CodexProse.interrupt(.aborted(turnID: "t-1")),
-            CodexProse.compose(.started(turnID: "t-1")),
-            CodexProse.compose(.duplicate(turnID: "t-1", started: true)),
+            CodexProse.interrupt(.duplicate(turnID: "t-1")),
             CodexProse.interrupt(.unknown(status: "quiesced")),
+            try XCTUnwrap(CodexProse.compose(.unknown(status: "quiesced"))),
         ]
         for banner in appWritten {
             XCTAssertTrue(
@@ -440,23 +425,23 @@ final class CodexProseTests: XCTestCase {
     /// sentences proves nothing about the daemon. Parity belongs to a
     /// daemon-emitted fixture (see `CodexRefusalClassifierTests`); passthrough
     /// belongs here, once.
-    func testARefusalIsPassedThroughUntouched() {
+    func testARefusalIsPassedThroughUntouched() throws {
         let arbitrary =
             "  Any sentence at all — 4 KiB of it, with «punctuation», a\nnewline, "
             + "and a trailing space "
         XCTAssertEqual(CodexProse.interrupt(.rejected(reason: arbitrary)).message, arbitrary)
-        XCTAssertEqual(CodexProse.compose(.rejected(reason: arbitrary)).message, arbitrary)
+        XCTAssertEqual(try XCTUnwrap(CodexProse.compose(.rejected(reason: arbitrary))).message, arbitrary)
         XCTAssertEqual(CodexProse.interrupt(.indeterminate(reason: arbitrary)).message, arbitrary)
-        XCTAssertEqual(CodexProse.compose(.indeterminate(reason: arbitrary)).message, arbitrary)
+        XCTAssertEqual(try XCTUnwrap(CodexProse.compose(.indeterminate(reason: arbitrary))).message, arbitrary)
     }
 
     /// **The title must not restate the sentence's own clause.** It read
     /// "Nothing was sent" over a daemon sentence ending `…; nothing was sent`.
-    func testTheRefusalTitleDoesNotRestateTheSentence() {
+    func testTheRefusalTitleDoesNotRestateTheSentence() throws {
         let sentence =
             "this Mac is connected to the Codex session but is not yet watching its thread, "
             + "so a message cannot be confirmed; nothing was sent"
-        let banner = CodexProse.compose(.rejected(reason: sentence))
+        let banner = try XCTUnwrap(CodexProse.compose(.rejected(reason: sentence)))
         XCTAssertEqual(banner.title, "The computer refused this")
         XCTAssertFalse(
             banner.title.lowercased().contains("nothing was sent"),
@@ -466,10 +451,10 @@ final class CodexProseTests: XCTestCase {
     /// **An unknown status claims nothing either way.** It used to decode
     /// as `.indeterminate`, which asserts the mutation *was* issued; a future
     /// `cancelled_before_send` would have read "Sent, outcome unknown".
-    func testAnUnknownStatusClaimsNeitherActuationNorNonActuation() {
+    func testAnUnknownStatusClaimsNeitherActuationNorNonActuation() throws {
         for banner in [
             CodexProse.interrupt(.unknown(status: "cancelled_before_send")),
-            CodexProse.compose(.unknown(status: "cancelled_before_send")),
+            try XCTUnwrap(CodexProse.compose(.unknown(status: "cancelled_before_send"))),
         ] {
             XCTAssertTrue(banner.message.contains("cancelled_before_send"), banner.message)
             for forbidden in ["Sent,", "nothing was sent", "was written"] {

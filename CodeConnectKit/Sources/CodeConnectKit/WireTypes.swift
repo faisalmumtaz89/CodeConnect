@@ -1536,8 +1536,7 @@ public enum ComposeResult: Decodable, Sendable, Hashable {
     /// A replay of a request already claimed. `started` is **required** on the
     /// wire, no default: the route is snapshotted at the claim, so a retry after
     /// the session moved reports what actually happened rather than what would
-    /// happen now — and a defaulted flag would render a replay with the wrong
-    /// verb.
+    /// happen now, and a defaulted flag would report the wrong route.
     case duplicate(turnID: String, started: Bool)
     /// Nothing was sent, and `reason` says why. Verbatim.
     case rejected(reason: String)

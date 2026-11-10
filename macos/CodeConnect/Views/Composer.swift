@@ -214,8 +214,8 @@ private struct Composer: View {
         }
     }
 
-    /// Typed into Claude's prompt. The draft clears only on a landed send; a refusal stands until the text changes,
-    /// and good news retires by itself.
+    /// Typed into Claude's prompt. The draft clears only on a landed send, which shows nothing; a refusal stands
+    /// until the text changes, and a recovered composer's note retires by itself.
     private func sendToClaude(_ draft: String, again: Bool) {
         sending = true
         running = nil
@@ -372,7 +372,7 @@ private struct Composer: View {
         }
     }
 
-    /// `/clear`, past its confirmation. The note claims typing, nothing more.
+    /// `/clear`, past its confirmation. A landed send says nothing; the conversation shows the clear.
     private func performClear() {
         let draft = opener
         opener = nil

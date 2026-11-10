@@ -23,17 +23,15 @@ public enum ComposeProse {
         case neutral, info, success, warning, danger
     }
 
-    /// What became of a Claude send.
-    public static func note(_ attempt: ComposeAttempt) -> Note {
+    /// What became of a Claude send, or nil when it landed: the message appearing in the conversation says so.
+    public static func note(_ attempt: ComposeAttempt) -> Note? {
         switch attempt {
-        case .sent:
-            return Note(text: "Typed into the session.", tone: .success, icon: "check")
+        case .sent, .alreadyApplied:
+            return nil
         case .refused(let reason):
             return Note(text: "Not typed: \(reason)", tone: .warning, icon: "warning-fill")
         case .failed(let reason):
             return Note(text: "Couldn’t type the message: \(reason)", tone: .danger, icon: "x-circle-fill")
-        case .alreadyApplied:
-            return Note(text: "Already typed earlier — not repeated.", tone: .success, icon: "check")
         case .indeterminate(let reason):
             return Note(
                 text: "Not confirmed: \(reason) Retry is safe; the message won’t be typed twice.",
@@ -79,7 +77,8 @@ extension ComposeProse.Tone {
 
 extension ComposeAttempt {
     /// The words reached the run — typed, typed earlier, or typed with the composer recovered after: the draft
-    /// clears and the note retires by itself. Never optimistic: nothing else clears the draft.
+    /// clears, and the note, which only a recovered composer has, retires by itself. Never optimistic: nothing else
+    /// clears the draft.
     public var landed: Bool {
         switch self {
         case .sent, .alreadyApplied, .composerRecovered: return true
@@ -88,7 +87,7 @@ extension ComposeAttempt {
     }
 
     /// A note the next edit retires: editing is the reader's next act, so a standing failure has been read. A lost
-    /// composer stands until another attempt, and good news retires by itself.
+    /// composer stands until another attempt, and a landed outcome's note retires by itself.
     public var clearsOnEdit: Bool {
         switch self {
         case .refused, .failed, .indeterminate: return true
@@ -142,8 +141,8 @@ extension AppModel {
 
     /// What became of the last thing sent to this run, or nil.
     ///
-    /// A Codex outcome outranks the last Claude send, because on a Codex run the Claude vocabulary — "typed into the
-    /// session", "the composer did not come back" — describes machinery that is not there. A stop and a message share
+    /// A Codex outcome outranks the last Claude send, because on a Codex run the Claude vocabulary — "not typed",
+    /// "the composer did not come back" — describes machinery that is not there. A stop and a message share
     /// this one slot, where the reader is looking after they act.
     public func outcomeNote(for key: String, lastSend: ComposeAttempt?) -> ComposeProse.Note? {
         if shownSummary(for: key)?.isCodex == true {
@@ -156,7 +155,7 @@ extension AppModel {
                 return ComposeProse.Note(text: reason, tone: .warning, icon: "question-fill")
             }
             let compose = codexControls(for: key).compose
-            if case .settled(let result) = compose { return ComposeProse.note(CodexProse.compose(result)) }
+            if case .settled(let result) = compose { return CodexProse.compose(result).map(ComposeProse.note) }
             if case .notSent(let reason) = compose {
                 return ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill")
             }
@@ -164,7 +163,7 @@ extension AppModel {
                 return ComposeProse.Note(text: reason, tone: .warning, icon: "question-fill")
             }
         }
-        return lastSend.map(ComposeProse.note)
+        return lastSend.flatMap(ComposeProse.note)
     }
 
     /// Why sending to this run cannot work now, or nil.

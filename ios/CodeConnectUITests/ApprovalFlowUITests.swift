@@ -313,9 +313,9 @@ final class ApprovalFlowUITests: XCTestCase {
         try XCTSkipUnless(send.isEnabled, "send is disabled — link or capability says so")
         send.tap()
 
-        let sent = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Typed into the session'")
-        ).firstMatch
+        // A landed send says nothing: the field gives the words up only once
+        // the computer typed them, so their leaving it is the confirmation.
+        let typed = { !((field.value as? String) ?? "").contains("hi from the ui test") }
         let refused = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH 'Not typed:'")
         ).firstMatch
@@ -326,7 +326,7 @@ final class ApprovalFlowUITests: XCTestCase {
         // skip, not a failure. What must never happen is silence.
         let outcome = expectation(description: "the daemon reports what happened to the text")
         let poll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            if sent.exists || refused.exists { outcome.fulfill() }
+            if typed() || refused.exists { outcome.fulfill() }
         }
         defer { poll.invalidate() }
         wait(for: [outcome], timeout: 30)
@@ -334,7 +334,10 @@ final class ApprovalFlowUITests: XCTestCase {
         attachScreenshot(app, name: "compose")
         try XCTSkipIf(
             refused.exists, "the session is not at its composer: \(refused.label)")
-        XCTAssertTrue(sent.exists, "send_text must be confirmed by the daemon")
+        XCTAssertTrue(typed(), "send_text must be confirmed by the daemon")
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Typed into the session'")).firstMatch.exists,
+            "a landed send shows no note")
     }
 
     /// The bar that rises when something is pending — found by the identifier

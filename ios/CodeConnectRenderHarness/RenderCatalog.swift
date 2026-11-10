@@ -1566,26 +1566,12 @@ enum RenderCatalog {
 
         // ---- C-series: Compose -----------------------------------------
         codexScenario(
-            "compose-started", purpose: "Codex was idle: your words began the turn it is running",
+            "compose-started", purpose: "Codex was idle: your words began a turn, and nothing says so but the conversation",
             route: "session",
             reach: { app, driver in
-                try driver.require(
-                    driver.element(containing: "started a new turn", in: app),
-                    "the started sentence")
-                // **The exchange is certified by `phone-turn-stream`, not
-                // here.** Requiring it in this scenario was tried and is not
-                // satisfiable at AX5: the compose banner wraps to five lines
-                // and takes the whole region between the tab bar and the
-                // composer, so the timeline is laid out at zero height and its
-                // rows are never realized — visible in
-                // `codex-compose-started--ax5` and `codex-compose-steered--ax5`,
-                // where the timeline is simply blank. That squeeze is a
-                // pre-existing property of the banner at accessibility sizes,
-                // not something Codex introduced, and it is reported
-                // rather than worked around with a weaker gate.
-                //
-                // The L photograph of this scenario does carry the whole
-                // exchange, which is what proves the message shape here.
+                // A message that landed says nothing: the photograph shows the line above the field empty, and the
+                // timeline laid out to the composer.
+                try driver.require(app.collectionViews["session-timeline"], "the session timeline")
             }),
         // **The one Codex render whose input is the daemon's own output.**
         //
@@ -1628,21 +1614,20 @@ enum RenderCatalog {
                     inside: timeline)
             }),
         codexScenario(
-            "compose-steered", purpose: "Codex was working: your words joined the running turn",
+            "compose-steered", purpose: "Codex was working: your words joined the turn, and nothing says so but the conversation",
             route: "session",
             reach: { app, driver in
-                try driver.require(
-                    driver.element(containing: "joined the running turn", in: app),
-                    "the steered sentence — never the same as started")
+                // A message that landed says nothing: the photograph shows the line above the field empty, and the
+                // timeline laid out to the composer.
+                try driver.require(app.collectionViews["session-timeline"], "the session timeline")
             }),
         codexScenario(
-            "compose-duplicate",
-            purpose: "a replay reading with the verb the ORIGINAL earned (started:false ⇒ steered)",
+            "compose-duplicate", purpose: "a replay of words that landed: nothing is said a second time, and nothing says so",
             route: "session",
             reach: { app, driver in
-                try driver.require(
-                    driver.element(containing: "second time", in: app),
-                    "the nothing-was-said-twice sentence")
+                // A message that landed says nothing: the photograph shows the line above the field empty, and the
+                // timeline laid out to the composer.
+                try driver.require(app.collectionViews["session-timeline"], "the session timeline")
             }),
         codexScenario(
             "compose-rejected", purpose: "nothing was sent, in the daemon's own words",

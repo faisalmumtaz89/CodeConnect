@@ -1093,10 +1093,6 @@ import SwiftUI
                             CCVoiceButton(phase: .sending) {}
                             caption("SENDING")
                         }
-                        VStack(spacing: CC.space.xxs) {
-                            CCVoiceButton(phase: .sent) {}
-                            caption("SENT")
-                        }
                     }
                     Text("BLOCKED - DISABLED RECIPE, REASON IN THE NOTE ABOVE")
                         .ccType(CC.type.micro)
