@@ -15,12 +15,19 @@ struct SessionPane: View {
     /// behind the conversation: the emulator holds the run's screen and scrollback, and Kit keeps only the stream's
     /// tail, so a terminal rebuilt from it draws a wrong screen once the run has printed more than that.
     @State private var terminalShown = false
+    /// The run's draft, kept here above the tabs: the conversation and its composer are built again on each return
+    /// from the terminal, and the words being written must not go with them.
+    @State private var composerDraft = ComposerDraft()
     @State private var height: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Place(summary: row.summary, computer: row.machineName) {
-                if row.summary.isCodex, model.stopUnavailable(for: row.id) == nil { StopTurn(model: model, key: row.id) }
+                // Only on the conversation, where the composer's note says what became of the stop. On the terminal,
+                // Codex's own Esc stops the turn.
+                if tab == .conversation, row.summary.isCodex, model.stopUnavailable(for: row.id) == nil {
+                    StopTurn(model: model, key: row.id)
+                }
             }
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model, tab: $tab)
@@ -31,6 +38,7 @@ struct SessionPane: View {
                         // What waits on you sits at the foot, in at most half the pane, outside the conversation's
                         // scroll.
                         PendingRequests(model: model, key: row.id, maxHeight: height / 2)
+                        ComposerBar(key: row.id, kept: composerDraft)
                     }
                 }
                 if tab == .changes { ChangesTab(model: model, key: row.id) }
@@ -121,7 +129,6 @@ private struct Heading: View {
             }
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text2)
-            if row.summary.isCodex { StopOutcome(activity: model.codexStop(for: row.id)) }
             HStack(spacing: 20) {
                 ForEach(SessionTab.allCases, id: \.self) { each in
                     TabButton(
@@ -226,34 +233,6 @@ private struct StopTurn: View {
         }
         .disabled(stopping || greyed)
         .help(greyed ? "Try again in a moment." : "Stop the turn this run is running")
-    }
-}
-
-/// What became of the last stop, while it answers the turn running now: Kit's sentence for a settled stop, or why
-/// it was not sent, or that no answer came.
-private struct StopOutcome: View {
-    let activity: CodexControls.Activity<InterruptResult>
-
-    var body: some View {
-        switch activity {
-        case .settled(let result):
-            let banner = CodexProse.interrupt(result)
-            line(banner.oneLine, tone: banner.tone)
-        case .notSent(let reason), .sentNoAnswer(let reason):
-            line(reason, tone: .warning)
-        case .idle, .inFlight:
-            EmptyView()
-        }
-    }
-
-    private func line(_ text: String, tone: CodexProse.CodexTone) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: tone.symbol).foregroundStyle(tone.color).accessibilityHidden(true)
-            Text(text).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
-        }
-        .font(Theme.ui(12))
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("session.stop.outcome")
     }
 }
 
