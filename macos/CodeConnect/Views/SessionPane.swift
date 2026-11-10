@@ -125,7 +125,6 @@ private struct Heading: View {
             }
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text2)
-            if row.summary.isCodex { StopOutcome(activity: model.codexStop(for: row.id)) }
             HStack(spacing: 20) {
                 ForEach(SessionTab.allCases, id: \.self) { each in
                     TabButton(
@@ -230,34 +229,6 @@ private struct StopTurn: View {
         }
         .disabled(stopping || greyed)
         .help(greyed ? "Try again in a moment." : "Stop the turn this run is running")
-    }
-}
-
-/// What became of the last stop, while it answers the turn running now: Kit's sentence for a settled stop, or why
-/// it was not sent, or that no answer came.
-private struct StopOutcome: View {
-    let activity: CodexControls.Activity<InterruptResult>
-
-    var body: some View {
-        switch activity {
-        case .settled(let result):
-            let banner = CodexProse.interrupt(result)
-            line(banner.oneLine, tone: banner.tone)
-        case .notSent(let reason), .sentNoAnswer(let reason):
-            line(reason, tone: .warning)
-        case .idle, .inFlight:
-            EmptyView()
-        }
-    }
-
-    private func line(_ text: String, tone: CodexProse.CodexTone) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: tone.symbol).foregroundStyle(tone.color).accessibilityHidden(true)
-            Text(text).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
-        }
-        .font(Theme.ui(12))
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("session.stop.outcome")
     }
 }
 
