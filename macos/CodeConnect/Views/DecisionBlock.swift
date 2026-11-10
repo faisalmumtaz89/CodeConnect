@@ -12,7 +12,7 @@ struct DecisionBlock: View {
     /// The control whose answer is on its way, so a second click waits for the first.
     @State private var sending: String?
     @State private var sentAt: Date?
-    /// Why the second factor said no, in its own words.
+    /// The reason a deny with a reason sends, as it is typed.
     @State private var reason = ""
     @State private var askingReason = false
     @State private var showAllChanges = false
@@ -110,7 +110,7 @@ struct DecisionBlock: View {
     // MARK: What the card says
 
     /// The card's one banner: a text that does not match its hash, then how a Codex question ended, then what became
-    /// of an answer (this Mac's, or one recorded), then why the second factor refused.
+    /// of an answer (this Mac's, or one recorded).
     private var banner: BannerLine? {
         if !approval.card.verification.hashMatchesDisplayText {
             return BannerLine(title: "Can't be verified", message: DecisionCard.hashMismatchSentence, tone: .danger)
