@@ -1360,12 +1360,45 @@ pub enum ResolvedBy {
     Superseded,
 }
 
+/// The kind of paired device an answer came from (minor 34), by the
+/// `client_name` its connection said hello with. Attribution only, never trust:
+/// a client that calls itself the Mac app changes the words its answers are
+/// shown with, and nothing it may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnsweredOn {
+    Iphone,
+    Mac,
+}
+
+impl AnsweredOn {
+    /// The `client_name` every Mac app says hello with: CodeConnectKit's
+    /// `"CodeConnect \(HostDevice.mac.name)"` (`DaemonConnection.clientName`).
+    pub const MAC_CLIENT_NAME: &'static str = "CodeConnect Mac";
+
+    /// A Mac's when the hello named the Mac app, and an iPhone's otherwise, as
+    /// every answer was recorded before there was a Mac app.
+    pub fn from_client_name(client_name: Option<&str>) -> Self {
+        if client_name == Some(Self::MAC_CLIENT_NAME) {
+            AnsweredOn::Mac
+        } else {
+            AnsweredOn::Iphone
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnswerOutcome {
     pub request_id: String,
     pub session_id: String,
     pub decision: AnswerDecision,
     pub resolved_by: ResolvedBy,
+    /// Which kind of device sent an answer from a paired device
+    /// (`resolved_by: phone`), from minor 34. Absent on every other outcome, from
+    /// an older daemon, and on an answer a restart settled, which keeps no record
+    /// of the device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_on: Option<AnsweredOn>,
     pub applied_via: AnswerPath,
     pub resolved_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2107,10 +2140,14 @@ mod tests {
             "the models each agent offers and whether it is signed in (`models`, \
              `signed_in`), and `start_session`'s `model`, are minor 33"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 34,
+            "which kind of device sent an answer (`answered_on`) is minor 34"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 33);
+        assert_eq!(crate::PROTOCOL_MINOR, 34);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2483,6 +2520,7 @@ mod tests {
             session_id: "cc-1".into(),
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
+            answered_on: None,
             applied_via: AnswerPath::SendKeys,
             resolved_at: "t".into(),
             detail: None,
@@ -2635,6 +2673,7 @@ mod tests {
             session_id: "cc-1".into(),
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
+            answered_on: None,
             applied_via: AnswerPath::SendKeys,
             resolved_at: "2026-08-18T00:00:00.000Z".into(),
             detail: None,
@@ -3583,6 +3622,7 @@ mod tests {
             session_id: "cc-1".into(),
             decision: AnswerDecision::Deny,
             resolved_by: ResolvedBy::Local,
+            answered_on: None,
             applied_via: AnswerPath::SendKeys,
             resolved_at: "t".into(),
             detail: Some("prompt left the pane".into()),
@@ -3632,6 +3672,7 @@ mod tests {
             session_id: "cc-1".into(),
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
+            answered_on: None,
             applied_via: AnswerPath::SendKeys,
             resolved_at: "2026-07-30T16:36:58.412Z".into(),
             detail: None,
