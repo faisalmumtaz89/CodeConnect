@@ -22,6 +22,39 @@ User-facing changes, newest first. Mac releases are cut per
 - Its window lists the agents running on your computers, grouped by computer or by project, each
   with its state, what it is doing, its agent and how long ago, and every "… ago" keeps counting. A
   group says how many decisions wait in it, and folds away.
+- Clicking a computer or a project in the sidebar narrows the list to its agents, with its name in a
+  chip beside the count; clicking it again, or the chip, shows them all. Rows and buttons light up
+  under the pointer.
+- Clicking an agent opens it beside the list: its computer, folder and branch, its state, agent and
+  model, the lines it has changed, and its conversation, newest at the bottom. Scrolling to the top
+  loads earlier history. Clicking the agent again, or Esc, closes it.
+- A reply box under the conversation sends the agent a message, which then shows in the
+  conversation; the line above the box says something only when a message didn't simply go through,
+  or can't be sent right now. For Claude Code, the button beside Send changes the model or the
+  effort, or compacts the context, with instructions if you like; /clear asks first. What you are
+  writing stays in the box while you look at another tab, and Esc leaves the box first.
+- A request waiting on you is answered where you write to the agent. What it asks sits at the foot
+  of the conversation: the command it asks to run, how risky that is and why, a Claude request's
+  full tool input a click away, and the edit a Codex request carries. Its answers take the reply
+  box's place: Deny and Allow, with a field whose words a Deny carries as its reason; Codex's own
+  options; or, for Claude's questions, Decline and Submit. Allow waits until the command has been on
+  screen. The Mac asks for no Touch ID or password; the iPhone keeps asking for Face ID or the
+  passcode at high risk.
+- The oldest request takes the box, saying how many more wait, and each keeps a "Waiting on you
+  below" line in the conversation; once answered, it is back there, saying what became of the
+  answer. ⌘↩ allows and ⌘D denies; with a reason typed, Return denies with it. Codex's options
+  answer to ⌘1 onwards, and each key shows on its button. A request that arrives while you are
+  typing a reply waits above the box, with buttons but no keys, until you leave the field.
+- A Codex run can be stopped from the top of its pane while its conversation shows (Stop this
+  turn), and the box under the conversation then says what became of the stop.
+- A Changes tab, between Conversation and Terminal, shows what the run has changed since its last
+  commit, as `git diff HEAD` reads it on its computer: each file with what happened to it and its
+  lines added and removed, and a total at the top. It reads them when you first open it and again
+  on Check again, says how long ago it checked, and then counts the files on the tab. When there is
+  nothing to show, or the changes can't be read, it says why.
+- A Terminal tab, the last of the three, opens a Claude Code run's live terminal when you click
+  Open terminal. While it is shown, what you type goes to the agent, Esc included. When it can't open,
+  the tab says why, with the fix when there is one.
 - File › New Agent… (⌘N) starts Claude Code or Codex on one of your computers: pick the computer, a
   folder, and a model from those the agents offer there (choosing the model chooses the agent), and
   add a first message if you like.
