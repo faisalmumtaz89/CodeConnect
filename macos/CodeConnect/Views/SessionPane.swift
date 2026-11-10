@@ -23,7 +23,11 @@ struct SessionPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Place(summary: row.summary, computer: row.machineName) {
-                if row.summary.isCodex, model.stopUnavailable(for: row.id) == nil { StopTurn(model: model, key: row.id) }
+                // Only on the conversation, where the composer's note says what became of the stop. On the terminal,
+                // Codex's own Esc stops the turn.
+                if tab == .conversation, row.summary.isCodex, model.stopUnavailable(for: row.id) == nil {
+                    StopTurn(model: model, key: row.id)
+                }
             }
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model, tab: $tab)
