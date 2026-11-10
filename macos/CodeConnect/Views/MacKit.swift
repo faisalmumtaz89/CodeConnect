@@ -42,3 +42,57 @@ extension FleetGroup {
     /// which reads as `computer:folder` here.
     var axID: String { id.replacingOccurrences(of: "\n", with: ":") }
 }
+
+/// Every button that draws its own look: its label as given, with a faint fill while the pointer is on it, so anything
+/// clickable reads as clickable before it is clicked. The fill goes behind the label, so a label that marks itself
+/// selected keeps its own fill on top; a label with an opaque face of its own (`over`) takes it on top instead. `id` is
+/// the button's accessibility identifier, which a test launch names to draw it hovered.
+struct HoverButtonStyle: ButtonStyle {
+    var radius: CGFloat = 6
+    /// For a label with an opaque fill of its own (a raised chip, a filled button): it lightens by the same step
+    /// instead, as a fill under it would not show.
+    var over = false
+    /// How far the fill reaches past a label with no padding of its own, such as a word alone.
+    var outset: CGFloat = 0
+    var id: String?
+
+    func makeBody(configuration: Configuration) -> some View {
+        Hovered(configuration: configuration, radius: radius, over: over, outset: outset, id: id)
+    }
+
+    private struct Hovered: View {
+        let configuration: Configuration
+        let radius: CGFloat
+        let over: Bool
+        let outset: CGFloat
+        let id: String?
+        @State private var hovering = false
+        @Environment(\.isEnabled) private var enabled
+
+        var body: some View {
+            let lit = (hovering || forced) && enabled
+            configuration.label
+                .background(lit && !over ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: radius).inset(by: -outset))
+                .brightness(lit && over ? Theme.hoverLift : 0)
+                .opacity(configuration.isPressed ? 0.7 : 1)
+                // What lights is what a click takes, the label's clear gaps included.
+                .contentShape(RoundedRectangle(cornerRadius: radius).inset(by: -outset))
+                .onHover { hovering = $0 }
+        }
+
+        private var forced: Bool {
+            #if DEBUG
+                id.map(RenderWindow.hovered.contains) ?? false
+            #else
+                false
+            #endif
+        }
+    }
+}
+
+extension ButtonStyle where Self == HoverButtonStyle {
+    /// `HoverButtonStyle`.
+    static func hover(radius: CGFloat = 6, over: Bool = false, outset: CGFloat = 0, id: String? = nil) -> HoverButtonStyle {
+        HoverButtonStyle(radius: radius, over: over, outset: outset, id: id)
+    }
+}

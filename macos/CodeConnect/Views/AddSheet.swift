@@ -66,7 +66,7 @@ struct AddSheet: View {
                                 .frame(height: 24)
                                 .background(kind == option ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.hover(radius: 5, id: "add.tab.\(option.rawValue.lowercased())"))
                         .accessibilityIdentifier("add.tab.\(option.rawValue.lowercased())")
                         .accessibilityAddTraits(kind == option ? .isSelected : [])
                     }
@@ -112,7 +112,7 @@ struct SheetBar<Leading: View>: View {
                 Spacer()
                 if let cancel {
                     Button(cancelTitle, action: cancel)
-                        .buttonStyle(.plain)
+                        .buttonStyle(.hover(outset: 5, id: cancelID))
                         .font(Theme.ui(12.5))
                         .foregroundStyle(Theme.text2)
                         .keyboardShortcut(.cancelAction)
@@ -226,7 +226,7 @@ private struct ComputerForm: View {
                     .foregroundStyle(Theme.text2)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.hover(outset: 5, id: "computer.useCode"))
                 .accessibilityIdentifier("computer.useCode")
                 .accessibilityValue(usesCode ? "open" : "closed")
                 .padding(.top, 4)

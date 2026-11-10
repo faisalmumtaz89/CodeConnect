@@ -12,6 +12,12 @@ struct MainWindow: View {
     @State private var repairing: String?
     @State private var scope = FleetScope.active
     @State private var grouping = FleetGroup.Kind.computer
+    /// What the sidebar narrows the list to, if anything.
+    @State private var filter: FleetFilter?
+    /// The run open beside the list, by its key; none, and the list fills the window.
+    @State private var opened: String?
+    /// The window's width, from which the list's share beside an open run is worked out.
+    @State private var width: CGFloat = 0
 
     init() {
         #if DEBUG
@@ -20,31 +26,68 @@ struct MainWindow: View {
                     ? .iPhone : RenderWindow.opensOnAgent ? .agent : RenderWindow.opensAddComputer ? .computer : nil)
             _scope = State(initialValue: RenderWindow.fleetScope)
             _grouping = State(initialValue: RenderWindow.fleetGrouping)
+            _opened = State(initialValue: RenderWindow.opened)
         #endif
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(adding: $adding, scope: $scope) { address in
+            Sidebar(adding: $adding, scope: $scope, filter: $filter) { address in
                 repairing = address
                 adding = .computer
             }
                 .frame(width: 216)
             Rectangle().fill(Theme.hairline).frame(width: 1)
             if machines.showsFleet {
-                FleetList(scope: $scope, grouping: $grouping) { adding = .agent }
+                let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
+                let model = open.flatMap { machines.model(forSession: $0.id) }
+                FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
+                    // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
+                    // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
+                    .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
+                if let open, let model {
+                    Rectangle().fill(Theme.hairline).frame(width: 1)
+                    SessionPane(row: open, model: model).id(open.id)
+                }
             } else {
                 EmptyFleet(adding: $adding)
             }
         }
         .background(Theme.window)
         .ignoresSafeArea()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .toolbar(removing: .title)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
+        // Esc closes the open run; a sheet's own Esc is its Cancel.
+        .background {
+            if opened != nil, adding == nil {
+                Button("Close") { opened = nil }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("session.close")
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            }
+        }
+        #if DEBUG
+            .task {
+                // A test launch's fleet is in place a moment after the window is.
+                try? await Task.sleep(for: .seconds(1))
+                let active = FleetScope.active.rows(machines.fleet)
+                switch RenderWindow.filter {
+                case "computer": filter = FleetGroup.groups(active, by: .computer).first.map { .computer($0.id) }
+                case "project": filter = FleetGroup.groups(active, by: .project).first.map { .project($0.id) }
+                default: break
+                }
+            }
+        #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: repairing) { scope = .active }
+            AddSheet(kind: kind, address: repairing) {
+                // The run just started is on screen: every active agent, unfiltered.
+                scope = .active
+                filter = nil
+            }
                 #if DEBUG
                     .renderLook()
                 #endif
@@ -82,6 +125,7 @@ private struct Sidebar: View {
     @Environment(Machines.self) private var machines
     @Binding var adding: AddKind?
     @Binding var scope: FleetScope
+    @Binding var filter: FleetFilter?
     let pairAgain: (String) -> Void
 
     var body: some View {
@@ -110,9 +154,12 @@ private struct Sidebar: View {
                     } else {
                         VStack(spacing: 2) {
                             ForEach(computers, id: \.machineID) { computer in
+                                let narrowed = FleetFilter.computer(computer.machineID ?? "")
                                 ComputerRow(
                                     computer: computer,
                                     count: active.filter { $0.machineID == computer.machineID }.count,
+                                    selected: filter == narrowed,
+                                    select: { filter = filter == narrowed ? nil : narrowed },
                                     pairAgain: pairAgain)
                             }
                         }
@@ -124,23 +171,29 @@ private struct Sidebar: View {
                         SidebarHeading("Projects")
                         VStack(spacing: 1) {
                             ForEach(projects) { project in
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text3)
-                                            .frame(width: 16)
-                                            .accessibilityHidden(true)
-                                        Text(project.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
-                                        Spacer()
-                                        Text(verbatim: "\(project.rows.count)").font(Theme.ui(11.5))
-                                            .foregroundStyle(Theme.text3).monospacedDigit()
+                                let narrowed = FleetFilter.project(project.id)
+                                let selected = filter == narrowed
+                                Button { filter = selected ? nil : narrowed } label: {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                                                .frame(width: 16)
+                                                .accessibilityHidden(true)
+                                            Text(project.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                                            Spacer()
+                                            Text(verbatim: "\(project.rows.count)").font(Theme.ui(11.5))
+                                                .foregroundStyle(Theme.text3).monospacedDigit()
+                                        }
+                                        ProjectPlace(project: project, namingComputer: computers.count > 1, size: 10)
+                                            .padding(.leading, 24)
                                     }
-                                    ProjectPlace(project: project, namingComputer: computers.count > 1, size: 10)
-                                        .padding(.leading, 24)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .accessibilityElement(children: .contain)
+                                .buttonStyle(.hover(id: "sidebar.project.\(project.axID)"))
                                 .accessibilityIdentifier("sidebar.project.\(project.axID)")
+                                .accessibilityAddTraits(selected ? .isSelected : [])
                             }
                         }
                         .padding(.horizontal, 8)
@@ -157,7 +210,7 @@ private struct Sidebar: View {
             NavRow(symbol: symbol, title: target.rawValue, count: target.rows(machines.fleet).count,
                 selected: scope == target)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hover(id: "sidebar.scope.\(target.rawValue.lowercased())"))
         .accessibilityIdentifier("sidebar.scope.\(target.rawValue.lowercased())")
         .accessibilityAddTraits(scope == target ? .isSelected : [])
     }
@@ -168,6 +221,9 @@ private struct Sidebar: View {
 private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
+    let selected: Bool
+    /// Narrows the list to this computer, or back to every run when it already is.
+    let select: () -> Void
     let pairAgain: (String) -> Void
 
     private var address: String? { computer.endpoint?.typedAddress }
@@ -176,14 +232,21 @@ private struct ComputerRow: View {
     var body: some View {
         Group {
             if computer.linkHealth.level == .rejected, let address {
-                Button { pairAgain(address) } label: { row.contentShape(Rectangle()) }.buttonStyle(.plain)
+                Button { pairAgain(address) } label: { row.contentShape(Rectangle()) }
+                    .buttonStyle(.hover(id: "\(id).pairAgain"))
                     .accessibilityIdentifier("\(id).pairAgain")
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(id)
             } else {
-                row
+                Button(action: select) {
+                    row.background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.hover(id: id))
+                .accessibilityIdentifier(id)
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(id)
+        .help([computer.machineSystem, computer.linkHealth.word].compactMap { $0 }.joined(separator: " · "))
     }
 
     private var row: some View {
@@ -204,7 +267,6 @@ private struct ComputerRow: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .help([computer.machineSystem, computer.linkHealth.word].compactMap { $0 }.joined(separator: " · "))
     }
 }
 
@@ -226,17 +288,18 @@ private struct SidebarHeading: View {
             Text(title).font(Theme.ui(11, .medium)).foregroundStyle(Theme.text3)
             Spacer()
             if let add, let adding {
+                let id = add == .agent ? "sidebar.newAgent" : "sidebar.addComputer"
                 Button { adding.wrappedValue = add } label: {
                     Image(systemName: "plus").font(.system(size: 11, weight: .medium))
                         .frame(width: 20, height: 18)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.hover(radius: 4, id: id))
                 .foregroundStyle(Theme.text2)
                 .help(add.shortcut.map { "\(add.title) (\($0))" } ?? add.title)
                 // Its symbol alone reads "Add", the same in both sections.
                 .accessibilityLabel(add.title)
-                .accessibilityIdentifier(add == .agent ? "sidebar.newAgent" : "sidebar.addComputer")
+                .accessibilityIdentifier(id)
             }
         }
         .padding(.leading, 18)
@@ -343,7 +406,7 @@ struct ActionButton: View {
             .background(prominent ? Theme.text : Theme.raised, in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(prominent ? Color.clear : Theme.hairline))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hover(over: true, id: id))
         .accessibilityIdentifier(id)
     }
 }

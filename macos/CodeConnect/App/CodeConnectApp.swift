@@ -95,7 +95,7 @@ struct RootView: View {
 
     var body: some View {
         MainWindow()
-            .frame(minWidth: 760, minHeight: 520)
+            .frame(minWidth: 960, minHeight: 520)
             .environment(machines.linkModel)
             .sheet(isPresented: Bindable(setup).shown) { SetupView().environment(setup).environment(machines) }
             #if DEBUG

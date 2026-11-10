@@ -13,11 +13,16 @@ enum Theme {
     static let code = Color(themeHex: 0x0E0E10)
     static let hairline = Color.white.opacity(0.07)
     static let selected = Color.white.opacity(0.075)
+    /// Under a clickable thing while the pointer is on it: fainter than `selected`, so the two never read alike.
+    static let hover = Color.white.opacity(0.04)
+    /// The same step for a surface with its own fill (a raised chip, a filled button): a lift in brightness.
+    static let hoverLift = 0.04
 
     static let text = Color(themeHex: 0xE4E4E7)
     static let text2 = Color(themeHex: 0x9C9CA3)
     static let text3 = Color(themeHex: 0x6B6B72)
 
+    static let green = Color(themeHex: 0x4CB782)
     static let red = Color(themeHex: 0xE5636A)
     static let amber = Color(themeHex: 0xE9A23B)
 

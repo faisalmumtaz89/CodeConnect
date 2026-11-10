@@ -26,7 +26,7 @@ struct ModelButton: View {
             .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hover(radius: 5, id: "start.model"))
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
@@ -116,10 +116,10 @@ struct ModelButton: View {
             .padding(.horizontal, 8)
             .frame(height: 24)
             .background(choice == pick ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .padding(.horizontal, 4)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hover(radius: 5, id: "start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")"))
+        .padding(.horizontal, 4)
         .help(choice.detail ?? "")
         .accessibilityIdentifier("start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")")
         .accessibilityAddTraits(choice == pick ? .isSelected : [])

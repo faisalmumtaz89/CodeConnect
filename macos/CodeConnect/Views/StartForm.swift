@@ -218,7 +218,7 @@ struct StartForm: View {
             .background(folderPath == project.path ? Theme.selected : .clear)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
     }
@@ -372,7 +372,7 @@ private struct StartProgress: View {
                         .foregroundStyle(Theme.text2)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.hover(outset: 5, id: "start.failed.details"))
                     .accessibilityIdentifier("start.failed.details")
                     .accessibilityValue(details ? "open" : "closed")
                     if details {
