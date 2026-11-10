@@ -30,9 +30,16 @@ struct TerminalTab: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("terminal.tab")
         // Coming to the tab, the first time or again, is when this run's own terminal comes back.
-        .onChange(of: onScreen, initial: true) {
-            if onScreen, model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
+        .onChange(of: onScreen, initial: true) { reopen() }
+        // So is the link coming back while the tab shows, after a sleep or a drop, as on the iPhone. The daemon then
+        // repaints the pane whole. Only once connected: an attach before that would only be refused.
+        .onChange(of: model.connection.phase.isConnected) { _, connected in
+            if connected { reopen() }
         }
+    }
+
+    private func reopen() {
+        if onScreen, model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
     }
 
     private func open(_ uid: String) {
