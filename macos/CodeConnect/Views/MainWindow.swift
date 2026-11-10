@@ -16,8 +16,9 @@ struct MainWindow: View {
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
     @State private var opened: String?
-    /// The run whose Terminal tab is shown. Any other run shows its conversation, and each run opens on it.
-    @State private var terminalRun: String?
+    /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
+    /// conversation, and each run opens on it.
+    @State private var chosen: (run: String, tab: SessionTab)?
 
     init() {
         #if DEBUG
@@ -57,11 +58,11 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
-        .onChange(of: opened) { terminalRun = nil }
+        .onChange(of: opened) { chosen = nil }
         // Esc closes the open run; a sheet's own Esc is its Cancel. Not while its terminal is shown: there Esc is the
         // agent's (it interrupts a turn), and a window shortcut would take it before the terminal saw it.
         .background {
-            if opened != nil, adding == nil, terminalRun != opened {
+            if opened != nil, adding == nil, !(chosen?.run == opened && chosen?.tab == .terminal) {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -93,12 +94,12 @@ struct MainWindow: View {
         }
     }
 
-    /// A run's tab. It is the terminal only while that run is the one whose terminal was chosen, so a run opened from
-    /// another run's terminal shows its conversation from its first frame.
+    /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run
+    /// opened from another run's terminal shows its conversation from its first frame.
     private func tab(of run: String) -> Binding<SessionTab> {
         Binding(
-            get: { terminalRun == run ? .terminal : .conversation },
-            set: { terminalRun = $0 == .terminal ? run : nil })
+            get: { chosen.flatMap { $0.run == run ? $0.tab : nil } ?? .conversation },
+            set: { chosen = $0 == .conversation ? nil : (run, $0) })
     }
 
     /// A refused computer paired again: the Add Computer sheet, its address already in the code form.
