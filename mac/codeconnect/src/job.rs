@@ -256,7 +256,8 @@ fn hold(agent: libc::pid_t, pause: &dyn Fn(bool)) -> Release {
 }
 
 /// Whether the stopped `agent` has ended, without collecting its status: its waiter
-/// still reaps it.
+/// still reaps it. macOS answers this `waitid` with a stop nobody has collected too,
+/// though only `WEXITED` is asked for, so only an end counts.
 fn exited(agent: libc::pid_t) -> bool {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let waited = unsafe {
@@ -267,7 +268,12 @@ fn exited(agent: libc::pid_t) -> bool {
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         )
     };
-    waited == 0 && unsafe { info.si_pid() } == agent
+    waited == 0
+        && unsafe { info.si_pid() } == agent
+        && matches!(
+            info.si_code,
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+        )
 }
 
 /// How many viewers at the Mac the pane's session has, if its tmux server answers:
@@ -327,4 +333,40 @@ fn tmux(args: &[&str]) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A held agent can be stopped once more, and that stop is not collected while it is
+    /// held: it has not ended, and its end, when it comes, is still seen.
+    #[test]
+    fn a_child_stopped_again_has_not_exited_until_it_ends() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::kill(pid, libc::SIGSTOP);
+            // Until it is stopped, leaving the stop uncollected.
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WSTOPPED | libc::WNOWAIT,
+            );
+        }
+        let taken_for_ended = exited(pid);
+        // Killed before the assertion: a stopped child left behind would hold the test
+        // run's output open, and a failure would hang instead of being reported.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(!taken_for_ended, "it is only stopped");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !exited(pid) {
+            assert!(Instant::now() < deadline, "its end was never seen");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.wait().unwrap();
+    }
 }
