@@ -50,6 +50,8 @@ struct FleetList: View {
     @Binding var scope: FleetScope
     @Binding var grouping: FleetGroup.Kind
     @Binding var filter: FleetFilter?
+    /// The run open beside the list, if any.
+    @Binding var opened: String?
     /// Opens Start an agent.
     let newAgent: () -> Void
     @State private var folded: Set<String> = []
@@ -99,7 +101,15 @@ struct FleetList: View {
                             .accessibilityValue(isFolded ? "folded" : "open")
                             if !isFolded {
                                 ForEach(group.rows) { row in
-                                    FleetLine(row: row)
+                                    let selected = opened == row.id
+                                    Button { opened = selected ? nil : row.id } label: {
+                                        FleetLine(row: row, selected: selected)
+                                    }
+                                    .buttonStyle(.hover(radius: 0, id: "fleet.row.\(row.id)"))
+                                    .accessibilityElement(children: .contain)
+                                    .accessibilityAction { opened = selected ? nil : row.id }
+                                    .accessibilityIdentifier("fleet.row.\(row.id)")
+                                    .accessibilityAddTraits(selected ? .isSelected : [])
                                 }
                             }
                         }
@@ -251,6 +261,8 @@ struct ProjectPlace: View {
 /// since it last did anything. Its computer is its group's to say.
 private struct FleetLine: View {
     let row: FleetRow
+    /// Open beside the list: the selected fill, and a bar on its leading edge.
+    let selected: Bool
     @State private var lastTick = Date()
 
     private var since: Date { row.lastEventAt ?? row.summary.updatedDate }
@@ -284,9 +296,10 @@ private struct FleetLine: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 36)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("fleet.row.\(row.id)")
+        .background(selected ? Theme.selected : .clear)
+        .overlay(alignment: .leading) {
+            if selected { Rectangle().fill(Theme.text2).frame(width: 2) }
+        }
         .task(id: AgeClock(since: since, scale: .age)) {
             await AgeTick.follow(AgeClock(since: since, scale: .age)) { lastTick = $0 }
         }
@@ -294,7 +307,7 @@ private struct FleetLine: View {
 }
 
 /// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you.
-private struct StateIcon: View {
+struct StateIcon: View {
     let status: FleetStatus
 
     var body: some View {
@@ -330,7 +343,7 @@ private struct StateIcon: View {
 
 /// Which agent a run is: Claude's asterisk, Codex's brackets, or the daemon's own word for one this
 /// build does not know.
-private struct AgentMark: View {
+struct AgentMark: View {
     let agent: AgentKind
 
     var body: some View {

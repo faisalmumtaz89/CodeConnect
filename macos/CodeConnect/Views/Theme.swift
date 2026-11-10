@@ -22,6 +22,7 @@ enum Theme {
     static let text2 = Color(themeHex: 0x9C9CA3)
     static let text3 = Color(themeHex: 0x6B6B72)
 
+    static let green = Color(themeHex: 0x4CB782)
     static let red = Color(themeHex: 0xE5636A)
     static let amber = Color(themeHex: 0xE9A23B)
 

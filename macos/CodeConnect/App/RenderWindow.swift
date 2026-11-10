@@ -102,6 +102,9 @@
         /// `-CC_FILTER computer` or `project`: the list opens narrowed to the sidebar's first computer or project.
         static var filter: String? { UserDefaults.standard.string(forKey: "CC_FILTER") }
 
+        /// `-CC_OPEN <key>`: the run with this key opens beside the list.
+        static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
+
         /// `-CC_HOVER <id>,<id>`: the buttons with these identifiers draw as if the pointer were on them, since a test
         /// launch has no pointer.
         static var hovered: Set<String> {

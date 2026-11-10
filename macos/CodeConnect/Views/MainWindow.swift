@@ -14,6 +14,8 @@ struct MainWindow: View {
     @State private var grouping = FleetGroup.Kind.computer
     /// What the sidebar narrows the list to, if anything.
     @State private var filter: FleetFilter?
+    /// The run open beside the list, by its key; none, and the list fills the window.
+    @State private var opened: String?
 
     init() {
         #if DEBUG
@@ -22,6 +24,7 @@ struct MainWindow: View {
                     ? .iPhone : RenderWindow.opensOnAgent ? .agent : RenderWindow.opensAddComputer ? .computer : nil)
             _scope = State(initialValue: RenderWindow.fleetScope)
             _grouping = State(initialValue: RenderWindow.fleetGrouping)
+            _opened = State(initialValue: RenderWindow.opened)
         #endif
     }
 
@@ -34,7 +37,14 @@ struct MainWindow: View {
                 .frame(width: 216)
             Rectangle().fill(Theme.hairline).frame(width: 1)
             if machines.showsFleet {
-                FleetList(scope: $scope, grouping: $grouping, filter: $filter) { adding = .agent }
+                let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
+                let model = open.flatMap { machines.model(forSession: $0.id) }
+                FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
+                    .frame(width: model == nil ? nil : 580)
+                if let open, let model {
+                    Rectangle().fill(Theme.hairline).frame(width: 1)
+                    SessionPane(row: open, model: model).id(open.id)
+                }
             } else {
                 EmptyFleet(adding: $adding)
             }
@@ -45,6 +55,16 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
+        // Esc closes the open run; a sheet's own Esc is its Cancel.
+        .background {
+            if opened != nil, adding == nil {
+                Button("Close") { opened = nil }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("session.close")
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            }
+        }
         #if DEBUG
             .task {
                 // A test launch's fleet is in place a moment after the window is.
