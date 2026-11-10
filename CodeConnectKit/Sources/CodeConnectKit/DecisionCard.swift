@@ -286,7 +286,7 @@ extension DecisionCard {
         case .indeterminate(let outcome) where outcome.wasSentToClaude:
             return Banner(
                 title: "Sent",
-                message: "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude)",
+                message: "\(outcome.decisionLabel) · \(outcome.sentToClaudeLine(on: host))",
                 provenance: "Claude takes the first answer, \(host.computer("the computer"))’s or this one, "
                     + "so whether it used this one is not known.",
                 tone: .warning, icon: "question-fill")
@@ -301,7 +301,7 @@ extension DecisionCard {
                 tone: .warning, icon: "question-fill")
         case .duplicate(let outcome, let stale):
             let original =
-                "Original outcome: \(outcome.decisionLabel) \(outcome.provenance), \(outcome.resolvedAt)."
+                "Original outcome: \(outcome.decisionLabel) \(outcome.provenance(on: host)), \(outcome.resolvedAt)."
                 + (outcome.inferred
                     ? " \(host.computer("Your computer")) inferred that from the prompt disappearing "
                         + "rather than observing the answer."
@@ -359,10 +359,10 @@ extension DecisionCard {
         let message: String
         if outcome.wasSentToClaude {
             title = "Sent"
-            message = "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude) · \(age)"
+            message = "\(outcome.decisionLabel) · \(outcome.sentToClaudeLine(on: host)) · \(age)"
         } else {
             title = outcome.indeterminate ? "Unconfirmed" : "Already resolved"
-            let ending = "\(outcome.decisionLabel) \(outcome.provenance) · \(age)"
+            let ending = "\(outcome.decisionLabel) \(outcome.provenance(on: host)) · \(age)"
             message =
                 outcome.indeterminate
                 ? "\(ending), but \(host.computer("your computer")) couldn’t confirm it reached the agent" : ending

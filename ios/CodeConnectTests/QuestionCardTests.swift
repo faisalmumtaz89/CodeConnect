@@ -127,9 +127,17 @@ final class QuestionCardTests: XCTestCase {
 
         let phone = try XCTUnwrap(try event("answered_from_phone").approvalOutcome)
         guard case .answers(let sent) = phone.decision else { return XCTFail("answers") }
-        XCTAssertEqual(status(hold: .held, outcome: phone), .answeredOnPhone(sent))
+        XCTAssertEqual(status(hold: .held, outcome: phone), .answeredOnPhone(sent, from: phone.answeredOn))
+        var fields = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(phone)) as? [String: Any])
+        fields["answered_on"] = "mac"
+        let fromMac = try JSONDecoder().decode(
+            AnswerOutcome.self, from: JSONSerialization.data(withJSONObject: fields))
         XCTAssertEqual(
-            status(hold: .held, attempt: .applied(phone)), .answeredOnPhone(sent),
+            status(hold: .held, outcome: fromMac), .answeredOnPhone(sent, from: .mac),
+            "the record's device reaches the card")
+        XCTAssertEqual(
+            status(hold: .held, attempt: .applied(phone)), .answeredOnPhone(sent, from: phone.answeredOn),
             "this phone's own confirmed answer")
         let mac = try XCTUnwrap(try event("answered_at_mac").approvalOutcome)
         XCTAssertEqual(status(hold: .held, outcome: mac), .answeredAtMac)

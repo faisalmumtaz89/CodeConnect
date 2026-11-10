@@ -127,7 +127,7 @@ struct QuestionCardView: View {
                         // pinned bar, as on the decision card: stacked there they
                         // own the screen and leave the question unreadable.
                         if typeSize.isAccessibilitySize { subordinateControls }
-                    case .answeredOnPhone(let answers):
+                    case .answeredOnPhone(let answers, _):
                         answeredList(answers)
                     default:
                         ForEach(questions.questions.indices, id: \.self) { readOnlyQuestion($0) }
