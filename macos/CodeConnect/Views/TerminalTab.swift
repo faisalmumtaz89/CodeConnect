@@ -88,7 +88,7 @@ private struct Live: View {
                         .accessibilityIdentifier("terminal.status")
                 }
                 Spacer(minLength: 0)
-                if !isOpen(phase) {
+                if !isOpen(phase), mayOpen {
                     ActionButton(title: "Open terminal", key: nil, prominent: true, id: "terminal.open", action: open)
                 }
             }
@@ -106,6 +106,13 @@ private struct Live: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    /// Not after a close of this run's terminal that asking again cannot change (the session ended, or is not
+    /// CodeConnect's): Open would only be refused the same way. Another run's close says nothing about this one.
+    private var mayOpen: Bool {
+        guard carrier.standing(forRun: sessionUID).isMine, let close = carrier.lastClose else { return true }
+        return close.isRetryable
     }
 
     private func isOpen(_ phase: TerminalCarrier.Phase) -> Bool {

@@ -58,9 +58,12 @@ final class TerminalPaneView: TerminalView {
 
     override func isAccessibilityFocused() -> Bool { window?.firstResponder === self }
 
+    /// An empty cell is a NUL to SwiftTerm; read out, it is the blank it draws.
     private func screenLines() -> [String] {
         let terminal = getTerminal()
-        return (0..<terminal.rows).map { terminal.getLine(row: $0)?.translateToString(trimRight: false) ?? "" }
+        return (0..<terminal.rows).map {
+            (terminal.getLine(row: $0)?.translateToString(trimRight: false) ?? "").replacingOccurrences(of: "\u{0}", with: " ")
+        }
     }
 
     /// One cell in points, from SwiftTerm's own pixel-snapped cell.
