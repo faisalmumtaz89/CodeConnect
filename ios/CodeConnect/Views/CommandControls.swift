@@ -179,6 +179,8 @@ struct ModelSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var phase: CommandPhase = .idle
+    /// The command the last tap typed: what the status line is about.
+    @State private var sent: NativeCommand?
     @State private var custom: String = ""
     @State private var timeoutTask: Task<Void, Never>?
     /// How far the event stream had got when a row was tapped. Only a `/model`
@@ -224,11 +226,7 @@ struct ModelSheet: View {
                         // conversation cached for the current model, and after
                         // `/clear` a conversation has run and the command is
                         // inline with no re-read.
-                        Text(
-                            "A confirmed change also becomes your default for new sessions. "
-                                + "Switching mid-conversation makes Claude Code re-read the "
-                                + "whole conversation on your next message."
-                        )
+                        Text(NativeCommand.modelConsent)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.secondary)
                         chooserCard
@@ -416,23 +414,8 @@ struct ModelSheet: View {
 
     @ViewBuilder
     private var statusSlot: some View {
-        switch phase {
-        case .idle:
-            EmptyView()
-        case .sending(let alias):
-            statusLine("Typing /model \(alias) on the computer…", tone: .neutral)
-        case .waiting(_, quietly: false):
-            statusLine("Waiting for Claude Code to confirm…", tone: .neutral)
-        case .waiting(let alias, quietly: true):
-            statusLine(
-                "Sent /model \(alias) to the computer. Still waiting for Claude Code to confirm.",
-                tone: .neutral)
-        case .confirmed(let line):
-            statusLine(line, tone: .success)
-        case .neutral(let line):
-            statusLine(line, tone: .neutral)
-        case .failed(let line):
-            statusLine(line, tone: .warning)
+        if let sent, let status = model.commandStatus(sent, phase) {
+            statusLine(status.text, tone: status.tone.ccTone)
         }
     }
 
@@ -450,6 +433,7 @@ struct ModelSheet: View {
     private func apply(_ alias: String) {
         guard !busy else { return }
         let command = NativeCommand.model(alias)
+        sent = command
         baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(alias) }
         Task {
@@ -496,15 +480,11 @@ struct EffortSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     /// The five ruled levels, machine value and human label.
-    private static let levels: [(value: String, label: String)] = [
-        ("low", "Low"),
-        ("medium", "Medium"),
-        ("high", "High"),
-        ("xhigh", "Extra high"),
-        ("max", "Maximum"),
-    ]
+    private static let levels = NativeCommand.effortLevels
 
     @State private var phase: CommandPhase = .idle
+    /// The command the last tap typed: what the status line is about.
+    @State private var sent: NativeCommand?
     @State private var timeoutTask: Task<Void, Never>?
     /// How far the event stream had got when a row was tapped; only a receipt
     /// above this line answers this send.
@@ -531,10 +511,7 @@ struct EffortSheet: View {
                         // measured to differ per value (`max` is this-session
                         // only, the rest save as the default), so the receipt
                         // states it afterwards in Claude Code's own words.
-                        Text(
-                            "Switching mid-conversation makes Claude Code re-read the whole "
-                                + "conversation on your next message."
-                        )
+                        Text(NativeCommand.effortConsent)
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -606,23 +583,8 @@ struct EffortSheet: View {
 
     @ViewBuilder
     private var statusSlot: some View {
-        switch phase {
-        case .idle:
-            EmptyView()
-        case .sending(let value):
-            effortStatusLine("Typing /effort \(value) on the computer…", tone: .neutral)
-        case .waiting(_, quietly: false):
-            effortStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
-        case .waiting(let value, quietly: true):
-            effortStatusLine(
-                "Sent /effort \(value) to the computer. Still waiting for Claude Code to confirm.",
-                tone: .neutral)
-        case .confirmed(let line):
-            effortStatusLine(line, tone: .success)
-        case .neutral(let line):
-            effortStatusLine(line, tone: .neutral)
-        case .failed(let line):
-            effortStatusLine(line, tone: .warning)
+        if let sent, let status = model.commandStatus(sent, phase) {
+            effortStatusLine(status.text, tone: status.tone.ccTone)
         }
     }
 
@@ -638,6 +600,7 @@ struct EffortSheet: View {
     private func apply(_ value: String) {
         guard !busy else { return }
         let command = NativeCommand.effort(value)
+        sent = command
         baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(value) }
         Task {
@@ -681,6 +644,8 @@ struct CompactSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var phase: CommandPhase = .idle
+    /// The command the last tap typed: what the status line is about.
+    @State private var sent: NativeCommand?
     @State private var instructions: String = ""
     @State private var timeoutTask: Task<Void, Never>?
     /// How far the event stream had got when Compact was tapped; only a
@@ -693,11 +658,11 @@ struct CompactSheet: View {
     private var busy: Bool { phase.busy }
 
     var body: some View {
-        CCSheetChrome("Compact context", onClose: { dismiss() }) {
+        CCSheetChrome(CompactPrompt.title, onClose: { dismiss() }) {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: CC.space.md) {
-                        Text("Ask Claude Code to compact its current context. Instructions are optional.")
+                        Text(CompactPrompt.explanation)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -711,13 +676,13 @@ struct CompactSheet: View {
                         // exactly this container.
                         CCCard {
                             CCField(
-                                label: "Instructions (optional)", text: $instructions,
-                                placeholder: "What should Claude preserve?",
+                                label: CompactPrompt.fieldLabel, text: $instructions,
+                                placeholder: CompactPrompt.placeholder,
                                 submitLabel: .done,
                                 onSubmit: { apply() })
                         }
                         CCButton(
-                            "Compact now",
+                            CompactPrompt.action,
                             variant: .primary,
                             isLoading: busy
                         ) { apply() }
@@ -754,24 +719,8 @@ struct CompactSheet: View {
 
     @ViewBuilder
     private var statusSlot: some View {
-        switch phase {
-        case .idle:
-            EmptyView()
-        case .sending:
-            compactStatusLine("Typing /compact on the computer…", tone: .neutral)
-        case .waiting(_, quietly: false):
-            compactStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
-        case .waiting(_, quietly: true):
-            compactStatusLine(
-                "Compaction requested on the computer. "
-                    + "CodeConnect has not received a completion signal.",
-                tone: .neutral)
-        case .confirmed(let line):
-            compactStatusLine(line, tone: .success)
-        case .neutral(let line):
-            compactStatusLine(line, tone: .neutral)
-        case .failed(let line):
-            compactStatusLine(line, tone: .warning)
+        if let sent, let status = model.commandStatus(sent, phase) {
+            compactStatusLine(status.text, tone: status.tone.ccTone)
         }
     }
 
@@ -787,6 +736,7 @@ struct CompactSheet: View {
     private func apply() {
         guard !busy else { return }
         let command = NativeCommand.compact(instructions: instructions)
+        sent = command
         baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(command.request) }
         Task {

@@ -17,6 +17,7 @@ struct DecisionBlock: View {
     @State private var reason = ""
     @State private var askingReason = false
     @State private var showAllChanges = false
+    @State private var showInput = false
 
     /// The card as the fleet holds it now; nil once nothing backs it.
     private var live: ApprovalItem? { model.shownApproval(sessionKey: approval.sessionKey, id: approval.id) }
@@ -75,6 +76,7 @@ struct DecisionBlock: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("\(id).command")
+                if summary?.agent == .claude { fullInput }
                 if let why = CodexCard.reason(in: approval.card.toolInput) {
                     Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
                 }
@@ -126,6 +128,38 @@ struct DecisionBlock: View {
         }
         if let authNotice { return BannerLine(title: HostDevice.current.biometric, message: authNotice, tone: .warning) }
         return nil
+    }
+
+    /// Every field a Claude tool was called with, as the iPhone offers it under "Full tool input", and the ids the
+    /// answer is checked against. Codex cards show no wire. Display-safe: JSON leaves direction marks as they are.
+    @ViewBuilder private var fullInput: some View {
+        Button { showInput.toggle() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: showInput ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .semibold))
+                    .accessibilityHidden(true)
+                Text("Full tool input").font(Theme.ui(12))
+            }
+            .foregroundStyle(Theme.text2)
+        }
+        .buttonStyle(.hover(outset: 4, id: "\(id).input"))
+        .accessibilityIdentifier("\(id).input")
+        .accessibilityValue(showInput ? "open" : "closed")
+        if showInput {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(approval.card.shownToolInput.displaySafe)
+                    .font(Theme.mono(11.5))
+                    .foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("request_id \(approval.card.requestID)\npayload_hash \(approval.card.payloadHash)")
+                    .font(Theme.mono(10.5))
+                    .foregroundStyle(Theme.text3)
+            }
+            .textSelection(.enabled)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+            .accessibilityIdentifier("\(id).input.text")
+        }
     }
 
     /// Why this Mac offers nothing to answer with, in Kit's words.

@@ -110,6 +110,7 @@ struct FleetList: View {
                                     .accessibilityAction { opened = selected ? nil : row.id }
                                     .accessibilityIdentifier("fleet.row.\(row.id)")
                                     .accessibilityAddTraits(selected ? .isSelected : [])
+                                    .id(group.id + "/" + row.id)
                                 }
                             }
                         }

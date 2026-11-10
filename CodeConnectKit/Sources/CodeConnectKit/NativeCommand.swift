@@ -140,10 +140,85 @@ public enum NativeCommand: Sendable, Hashable {
     }
 }
 
+extension NativeCommand {
+    /// What a Model control states above its rows. The daemon completes Claude Code's confirmation for the tap, so the
+    /// tap is the consent, and both consequences are said before it.
+    public static let modelConsent =
+        "A confirmed change also becomes your default for new sessions. Switching mid-conversation makes Claude Code "
+        + "re-read the whole conversation on your next message."
+
+    /// What an Effort control states above its rows, for the same reason. The scope is not claimed: it differs per
+    /// level, and Claude Code's receipt states it afterwards.
+    public static let effortConsent =
+        "Switching mid-conversation makes Claude Code re-read the whole conversation on your next message."
+
+    /// The five levels an Effort control offers, the value typed and the label shown, in order. `ultracode` and `auto`
+    /// stay typing-only.
+    public static let effortLevels: [(value: String, label: String)] = ["low", "medium", "high", "xhigh", "max"].map {
+        ($0, EffortConfirmation.label(for: $0))
+    }
+}
+
 extension AppModel {
     /// Claude Code's own answer to `command` in this run since `baseline` (`eventHighWater(for:)`, taken just
     /// before the send), as a terminal phase, or nil while there is none.
     public func receiptPhase(for command: NativeCommand, in key: String, after baseline: UInt64) -> CommandPhase? {
         command.receiptPhase(from: receipts(for: key), after: baseline)
     }
+
+    /// What a command's status says in `phase`, naming the computer in the words of the device reading it; nil at
+    /// rest. Typing and waiting are neutral; a settled phase is its own words, a change confirmed, a kept value
+    /// neutral, a failure a warning.
+    public func commandStatus(_ command: NativeCommand, _ phase: CommandPhase, on host: HostDevice = .current)
+        -> ComposeProse.Note?
+    {
+        let computer = host.computer("the computer", named: machineName)
+        let typed: String
+        switch command {
+        case .model(let alias): typed = "/model \(alias)"
+        case .effort(let value): typed = "/effort \(value)"
+        case .compact: typed = "/compact"
+        }
+        switch phase {
+        case .idle:
+            return nil
+        case .sending:
+            return ComposeProse.Note(text: "Typing \(typed) on \(computer)…", tone: .neutral, icon: nil)
+        case .waiting(_, quietly: false):
+            return ComposeProse.Note(text: "Waiting for Claude Code to confirm…", tone: .neutral, icon: nil)
+        case .waiting(_, quietly: true):
+            if case .compact = command {
+                return ComposeProse.Note(
+                    text: "Compaction requested on \(computer). CodeConnect has not received a completion signal.",
+                    tone: .neutral, icon: nil)
+            }
+            return ComposeProse.Note(
+                text: "Sent \(typed) to \(computer). Still waiting for Claude Code to confirm.", tone: .neutral,
+                icon: nil)
+        case .confirmed(let line):
+            return ComposeProse.Note(text: line, tone: .success, icon: nil)
+        case .neutral(let line):
+            return ComposeProse.Note(text: line, tone: .neutral, icon: nil)
+        case .failed(let line):
+            return ComposeProse.Note(text: line, tone: .warning, icon: nil)
+        }
+    }
+}
+
+/// The words of the confirmation `/clear` asks for first.
+public enum ClearConfirmation {
+    public static let title = "Clear Claude’s context?"
+    public static let clear = "Clear context"
+    public static let keep = "Keep context"
+    public static let message =
+        "Claude Code will forget this conversation’s context. CodeConnect’s timeline will stay here."
+}
+
+/// The words of the control `/compact` opens.
+public enum CompactPrompt {
+    public static let title = "Compact context"
+    public static let explanation = "Ask Claude Code to compact its current context. Instructions are optional."
+    public static let fieldLabel = "Instructions (optional)"
+    public static let placeholder = "What should Claude preserve?"
+    public static let action = "Compact now"
 }
