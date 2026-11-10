@@ -922,6 +922,22 @@ enum RenderCatalog {
                     "the quiet caption")
             }),
         RenderScenario(
+            name: "session-model-turn-ended",
+            purpose: "the turn a /model was typed into ended with no receipt: settled, nothing claimed",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "turn-ended",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.tapRow(app, "Sonnet")
+                // The turn's end arrives a second after the send, so this is
+                // the sheet's re-read on `modelSignal`, as on a live run.
+                try driver.require(
+                    driver.text(containing: "can't confirm /model", in: app),
+                    "the unconfirmed line")
+            }),
+        RenderScenario(
             name: "session-model-composer-taken",
             purpose: "the command took the composer and CodeConnect gave it back — no change claimed",
             arguments: [
