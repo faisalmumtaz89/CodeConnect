@@ -99,6 +99,15 @@
             UserDefaults.standard.string(forKey: "CC_FLEET_GROUPING") == "project" ? .project : .computer
         }
 
+        /// `-CC_FILTER computer` or `project`: the list opens narrowed to the sidebar's first computer or project.
+        static var filter: String? { UserDefaults.standard.string(forKey: "CC_FILTER") }
+
+        /// `-CC_HOVER <id>,<id>`: the buttons with these identifiers draw as if the pointer were on them, since a test
+        /// launch has no pointer.
+        static var hovered: Set<String> {
+            Set((UserDefaults.standard.string(forKey: "CC_HOVER") ?? "").split(separator: ",").map(String.init))
+        }
+
         /// The address and code `-CC_RENDER_PAIR` asks the pairing form to submit.
         static var pairing: (address: String, code: String)? {
             guard let words = UserDefaults.standard.string(forKey: "CC_RENDER_PAIR")?.split(separator: " "),

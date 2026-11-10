@@ -15,24 +15,56 @@ extension FleetGroup.Kind {
     var title: String { self == .computer ? "Computer" : "Project" }
 }
 
+/// What the sidebar narrows the list to: one computer's runs, or one project's, a project being one folder on one
+/// computer. Each names a group by its `FleetGroup` id.
+enum FleetFilter: Hashable {
+    case computer(String)
+    case project(String)
+
+    /// The rows of the group this names, as the list groups them; none once that group has no rows.
+    func narrow(_ rows: [FleetRow]) -> [FleetRow] {
+        let (kind, id): (FleetGroup.Kind, String) =
+            switch self {
+            case .computer(let id): (.computer, id)
+            case .project(let id): (.project, id)
+            }
+        return FleetGroup.groups(rows, by: kind).first { $0.id == id }?.rows ?? []
+    }
+
+    /// What the list's chip calls it: a computer as the sidebar names it, whether or not anything runs there.
+    @MainActor func name(in machines: Machines) -> String {
+        switch self {
+        case .computer(let id):
+            machines.models.first { ($0.machineID ?? "") == id }?.machineName ?? "Unknown computer"
+        case .project(let key):
+            FleetGroup.groups(machines.fleet, by: .project).first { $0.id == key }?.name ?? "Project"
+        }
+    }
+}
+
 /// Every run on every paired computer, one line each, grouped by computer or by project in the
-/// fleet's own order. A run waiting on you is a state of its row, and its group says how many
-/// decisions wait there.
+/// fleet's own order, or only one computer's or project's when the sidebar narrows it. A run waiting on you is a
+/// state of its row, and its group says how many decisions wait there.
 struct FleetList: View {
     @Environment(Machines.self) private var machines
     @Binding var scope: FleetScope
     @Binding var grouping: FleetGroup.Kind
+    @Binding var filter: FleetFilter?
     /// Opens Start an agent.
     let newAgent: () -> Void
     @State private var folded: Set<String> = []
 
     var body: some View {
-        let rows = scope.rows(machines.fleet)
+        let all = scope.rows(machines.fleet)
+        let rows = filter?.narrow(all) ?? all
         let namingComputer = machines.models.filter(\.showsFleet).count > 1
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Text(scope.rawValue).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
                 Text(verbatim: "\(rows.count)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                if let filter {
+                    FilterChip(name: filter.name(in: machines)) { self.filter = nil }
+                }
                 Spacer()
                 GroupingSwitch(selection: $grouping)
             }
@@ -63,7 +95,7 @@ struct FleetList: View {
                                     group: group, grouping: grouping, namingComputer: namingComputer,
                                     folded: isFolded)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.hover(radius: 0, id: "fleet.group.\(group.axID)"))
                             .accessibilityIdentifier("fleet.group.\(group.axID)")
                             .accessibilityValue(isFolded ? "folded" : "open")
                             if !isFolded {
@@ -86,7 +118,7 @@ struct FleetList: View {
                                 .frame(height: 34)
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.hover(radius: 0, id: "fleet.showFinished"))
                             .accessibilityIdentifier("fleet.showFinished")
                         }
                     }
@@ -107,6 +139,29 @@ struct FleetList: View {
     }
 }
 
+/// What the list is narrowed to, beside its count; a click shows every run again.
+private struct FilterChip: View {
+    let name: String
+    let clear: () -> Void
+
+    var body: some View {
+        Button(action: clear) {
+            HStack(spacing: 6) {
+                Text(name).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.text2)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 22)
+            .background(Theme.raised, in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.hairline))
+        }
+        .buttonStyle(.hover(radius: 11, over: true, id: "fleet.filter.clear"))
+        .help("Show every agent")
+        .accessibilityLabel("\(name), show every agent")
+        .accessibilityIdentifier("fleet.filter.clear")
+    }
+}
+
 private struct GroupingSwitch: View {
     @Binding var selection: FleetGroup.Kind
 
@@ -121,7 +176,7 @@ private struct GroupingSwitch: View {
                         .frame(height: 22)
                         .background(selection == option ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.hover(radius: 5, id: "fleet.grouping.\(option.title.lowercased())"))
                 .accessibilityIdentifier("fleet.grouping.\(option.title.lowercased())")
                 .accessibilityAddTraits(selection == option ? .isSelected : [])
             }
