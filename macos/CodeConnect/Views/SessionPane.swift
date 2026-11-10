@@ -84,7 +84,7 @@ private struct Heading: View {
                     Text(agentLine)
                 }
                 if let diff = row.summary.diffStat {
-                    LineDelta(added: diff.added, removed: diff.removed)
+                    LineDelta(added: diff.added, removed: diff.removed).accessibilityIdentifier("session.diffStat")
                 }
                 AgeText(since: since) { Format.ago(since: since, now: $0) }
                     .foregroundStyle(Theme.text3)
@@ -131,7 +131,6 @@ struct LineDelta: View {
         .font(Theme.mono(11))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("+\(added) −\(removed)")
-        .accessibilityIdentifier("session.diffStat")
     }
 }
 
