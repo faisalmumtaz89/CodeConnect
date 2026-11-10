@@ -1290,65 +1290,22 @@ struct DecisionCardView: View {
     private var unanswerableReason: String {
         // Unknown agent: the run is gone or has not been described yet, and
         // there is no vocabulary to offer. Never Claude's sentence by default.
-        guard let agent = sessionAgent else {
-            return "This run is no longer on the fleet, so this card cannot be answered from here."
-        }
+        guard let agent = sessionAgent else { return DecisionCard.notOnTheFleetReason }
         switch agent {
         case .codex:
-            return Self.codexUnanswerableReason(
+            return DecisionCard.codexUnanswerableReason(
                 isKnown: model.daemonProfile.isConnected,
                 caveat: model.daemonProfile.codexAnswerCaveat,
                 isVerified: verification.renderMatchesDisplayText,
                 linkReason: model.actionsBlockedReason)
         case .unsupported(let raw):
-            return "This app does not know how to answer a \(raw) session. Answer it at the "
-                + "computer."
+            return DecisionCard.unsupportedAgentReason(raw)
         case .claude:
-            return Self.claudeUnanswerableReason(
+            return DecisionCard.claudeUnanswerableReason(
                 isQuestion: approval.card.toolName == QuestionCard.toolName,
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
                 linkReason: model.actionsBlockedReason, hold: hold)
         }
-    }
-
-    /// Why a Codex card offers nothing to tap. Static so the words can be
-    /// asserted without a `View`.
-    ///
-    /// Unknown is not old: while nothing is known of the Mac (`isKnown` false,
-    /// its link down) the card says what is known, which is the link — never the
-    /// caveat, and never that the card came without its options.
-    static func codexUnanswerableReason(
-        isKnown: Bool, caveat: String?, isVerified: Bool, linkReason: String?
-    ) -> String {
-        guard isKnown else {
-            return linkReason ?? "The phone can no longer answer this. Answer it at the computer."
-        }
-        if let caveat { return caveat }
-        guard isVerified else { return ApprovalCard.unverifiableCodexLine }
-        return "This card arrived without the options Codex answers by, so it can only be "
-            + "answered at the computer."
-    }
-
-    /// Why a Claude card offers nothing to tap: the Mac's CodeConnect would type
-    /// the answer, or the card is not held for the phone. Static so the words can
-    /// be asserted without a `View`.
-    ///
-    /// `hookOnlyApprovals` is nil while nothing is known of the Mac — its link
-    /// is down and took its capabilities with it. Unknown is not old: the card
-    /// then says what is known, which is the link.
-    static func claudeUnanswerableReason(
-        isQuestion: Bool, hookOnlyApprovals: Bool?, linkReason: String?, hold: QuestionHold?
-    ) -> String {
-        if isQuestion { return "This card cannot be answered from here." }
-        guard let hookOnlyApprovals else {
-            return linkReason ?? "The phone can no longer answer this. Answer it at the computer."
-        }
-        guard hookOnlyApprovals else {
-            return "This computer's CodeConnect is too old to answer Claude's approvals from the "
-                + "phone. Update it, or answer at the computer."
-        }
-        if hold == .atMac { return "Claude is asking this at the computer, so answer it there." }
-        return "The phone can no longer answer this. Answer it at the computer."
     }
 
     private var codexBarNote: String {
@@ -1367,12 +1324,11 @@ struct DecisionCardView: View {
                 )
                 .foregroundStyle(CC.color.warning)
                 .ccMark(beside: CC.type.footnote)
-                Text("Still waiting on the computer - \(Format.age(elapsed)).")
+                Text(DecisionCard.stillWaiting(after: elapsed))
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel(
-                        "Still waiting on the computer, \(Format.spokenDuration(elapsed)).")
+                    .accessibilityLabel(DecisionCard.stillWaiting(after: elapsed, spoken: true))
             }
             if elapsed >= 20 {
                 CCButton("Check link", variant: .ghost, size: .sm) {

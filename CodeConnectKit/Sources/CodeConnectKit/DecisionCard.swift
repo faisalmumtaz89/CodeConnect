@@ -427,3 +427,71 @@ extension DecisionCard {
         return .none
     }
 }
+
+// MARK: - Why a card offers nothing to tap
+
+extension DecisionCard {
+    /// The run is gone, or has not been described yet: there is no vocabulary to offer, and never Claude's sentence
+    /// by default.
+    public static let notOnTheFleetReason =
+        "This run is no longer on the fleet, so this card cannot be answered from here."
+
+    /// Why a Codex card offers nothing to tap. `computer` is the run's computer by name, where the device knows it.
+    ///
+    /// Unknown is not old: while nothing is known of the computer (`isKnown` false, its link down) the card says what
+    /// is known, which is the link — never the caveat, and never that the card came without its options.
+    public static func codexUnanswerableReason(
+        isKnown: Bool, caveat: String?, isVerified: Bool, linkReason: String?, computer: String? = nil,
+        on host: HostDevice = .current
+    ) -> String {
+        guard isKnown else { return linkReason ?? cannotAnswerHere(computer: computer, on: host) }
+        if let caveat { return caveat }
+        guard isVerified else { return ApprovalCard.unverifiableCodexLine }
+        return "This card arrived without the options Codex answers by, so it can only be answered at "
+            + "\(host.computer("the computer", named: computer))."
+    }
+
+    /// Why a Claude card offers nothing to tap: the computer's CodeConnect would type the answer, or the card is not
+    /// held for this device.
+    ///
+    /// `hookOnlyApprovals` is nil while nothing is known of the computer — its link is down and took its capabilities
+    /// with it. Unknown is not old: the card then says what is known, which is the link.
+    public static func claudeUnanswerableReason(
+        isQuestion: Bool, hookOnlyApprovals: Bool?, linkReason: String?, hold: QuestionHold?,
+        computer: String? = nil, on host: HostDevice = .current
+    ) -> String {
+        if isQuestion { return "This card cannot be answered from here." }
+        guard let hookOnlyApprovals else { return linkReason ?? cannotAnswerHere(computer: computer, on: host) }
+        guard hookOnlyApprovals else {
+            return "\(host.computer("This computer", named: computer))'s CodeConnect is too old to answer Claude's "
+                + "approvals from the \(host.noun). Update it, or answer at \(host.computer("the computer", named: computer))."
+        }
+        if hold == .atMac {
+            return "Claude is asking this at \(host.computer("the computer", named: computer)), so answer it there."
+        }
+        return cannotAnswerHere(computer: computer, on: host)
+    }
+
+    /// A session of an agent this app does not know how to answer.
+    public static func unsupportedAgentReason(
+        _ raw: String, computer: String? = nil, on host: HostDevice = .current
+    ) -> String {
+        "This app does not know how to answer a \(raw) session. Answer it at "
+            + "\(host.computer("the computer", named: computer))."
+    }
+
+    static func cannotAnswerHere(computer: String?, on host: HostDevice) -> String {
+        "The \(host.noun) can no longer answer this. Answer it at \(host.computer("the computer", named: computer))."
+    }
+
+    /// An answer that left and is not yet confirmed, `elapsed` after it was sent: as text, or `spoken` for a screen
+    /// reader.
+    public static func stillWaiting(
+        after elapsed: TimeInterval, spoken: Bool = false, computer: String? = nil, on host: HostDevice = .current
+    ) -> String {
+        let place = host.computer("the computer", named: computer)
+        return spoken
+            ? "Still waiting on \(place), \(Format.spokenDuration(elapsed))."
+            : "Still waiting on \(place) - \(Format.age(elapsed))."
+    }
+}

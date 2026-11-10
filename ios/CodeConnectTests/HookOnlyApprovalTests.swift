@@ -61,7 +61,7 @@ final class HookOnlyApprovalTests: XCTestCase {
                 card: held, agent: .claude, hold: .held, hookOnlyApprovals: false),
             .noneAnswerable)
         XCTAssertTrue(
-            DecisionCardView.claudeUnanswerableReason(
+            DecisionCard.claudeUnanswerableReason(
                 isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: .held
             ).contains("too old"))
         for decision in [AnswerDecision.allow, .deny, .option(index: 1), .text("no")] {
@@ -86,7 +86,7 @@ final class HookOnlyApprovalTests: XCTestCase {
         model.connection.setPhaseForTesting(.waiting(until: Date(), reason: "down"))
         let link = model.actionsBlockedReason
 
-        let reason = DecisionCardView.claudeUnanswerableReason(
+        let reason = DecisionCard.claudeUnanswerableReason(
             isQuestion: false, hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
             linkReason: link, hold: .held)
 
@@ -105,7 +105,7 @@ final class HookOnlyApprovalTests: XCTestCase {
                 card: atMac, agent: .claude, hold: .atMac, hookOnlyApprovals: true),
             .noneAnswerable)
         XCTAssertEqual(
-            DecisionCardView.claudeUnanswerableReason(
+            DecisionCard.claudeUnanswerableReason(
                 isQuestion: false, hookOnlyApprovals: true, linkReason: nil, hold: .atMac),
             "Claude is asking this at the computer, so answer it there.")
 

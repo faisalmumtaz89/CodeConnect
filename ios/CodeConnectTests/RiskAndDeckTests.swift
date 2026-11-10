@@ -273,6 +273,74 @@ final class RiskAndDeckTests: XCTestCase {
         XCTAssertEqual(DecisionCard.waitingSentence(on: .mac), "Waiting for the agent's computer to confirm…")
     }
 
+    /// Why a card offers nothing to tap, and the wait for an unconfirmed
+    /// answer, in each device's words. The iPhone keeps "the phone" and "the
+    /// computer"; a Mac names the computer when it knows it, and says "the
+    /// agent's computer" when it does not.
+    func testTheNothingToTapReasonsNameTheComputerInEachDevicesWords() {
+        let studio = "Jordan’s Mac Studio"
+        func reasons(_ host: HostDevice, _ computer: String?) -> [String] {
+            [
+                DecisionCard.codexUnanswerableReason(
+                    isKnown: false, caveat: nil, isVerified: true, linkReason: nil, computer: computer, on: host),
+                DecisionCard.codexUnanswerableReason(
+                    isKnown: true, caveat: nil, isVerified: true, linkReason: nil, computer: computer, on: host),
+                DecisionCard.claudeUnanswerableReason(
+                    isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: nil, computer: computer,
+                    on: host),
+                DecisionCard.claudeUnanswerableReason(
+                    isQuestion: false, hookOnlyApprovals: true, linkReason: nil, hold: .atMac, computer: computer,
+                    on: host),
+                DecisionCard.unsupportedAgentReason("aider", computer: computer, on: host),
+                DecisionCard.stillWaiting(after: 120, computer: computer, on: host),
+                DecisionCard.stillWaiting(after: 120, spoken: true, computer: computer, on: host),
+            ]
+        }
+        let age = Format.age(120)
+        let spoken = Format.spokenDuration(120)
+        let iPhone = [
+            "The phone can no longer answer this. Answer it at the computer.",
+            "This card arrived without the options Codex answers by, so it can only be answered at the computer.",
+            "This computer's CodeConnect is too old to answer Claude's approvals from the phone. "
+                + "Update it, or answer at the computer.",
+            "Claude is asking this at the computer, so answer it there.",
+            "This app does not know how to answer a aider session. Answer it at the computer.",
+            "Still waiting on the computer - \(age).",
+            "Still waiting on the computer, \(spoken).",
+        ]
+        XCTAssertEqual(reasons(.iPhone, nil), iPhone)
+        XCTAssertEqual(reasons(.iPhone, studio), iPhone, "the iPhone keeps its words whatever the name")
+        XCTAssertEqual(
+            reasons(.mac, nil),
+            [
+                "The Mac can no longer answer this. Answer it at the agent's computer.",
+                "This card arrived without the options Codex answers by, so it can only be answered at the "
+                    + "agent's computer.",
+                "The agent's computer's CodeConnect is too old to answer Claude's approvals from the Mac. "
+                    + "Update it, or answer at the agent's computer.",
+                "Claude is asking this at the agent's computer, so answer it there.",
+                "This app does not know how to answer a aider session. Answer it at the agent's computer.",
+                "Still waiting on the agent's computer - \(age).",
+                "Still waiting on the agent's computer, \(spoken).",
+            ])
+        XCTAssertEqual(
+            reasons(.mac, studio),
+            [
+                "The Mac can no longer answer this. Answer it at Jordan’s Mac Studio.",
+                "This card arrived without the options Codex answers by, so it can only be answered at "
+                    + "Jordan’s Mac Studio.",
+                "Jordan’s Mac Studio's CodeConnect is too old to answer Claude's approvals from the Mac. "
+                    + "Update it, or answer at Jordan’s Mac Studio.",
+                "Claude is asking this at Jordan’s Mac Studio, so answer it there.",
+                "This app does not know how to answer a aider session. Answer it at Jordan’s Mac Studio.",
+                "Still waiting on Jordan’s Mac Studio - \(age).",
+                "Still waiting on Jordan’s Mac Studio, \(spoken).",
+            ])
+        XCTAssertEqual(
+            DecisionCard.notOnTheFleetReason,
+            "This run is no longer on the fleet, so this card cannot be answered from here.")
+    }
+
     /// Why a card's controls cannot act, in the order that matters: a send in
     /// flight, then the link, then the run, then a card whose text does not
     /// match its hash.
