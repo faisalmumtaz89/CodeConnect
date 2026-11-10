@@ -1235,19 +1235,40 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
 
     /// The daemon's own words for that record (`SENT_TO_CLAUDE` in ccd), which
     /// it follows with a note when the record could not be written. The same
-    /// whichever device sent the answer: `answeredOn` says which.
+    /// whichever device sent the answer: `answeredOn` says which. A marker, not
+    /// words to show: a card shows `sentToClaudeLine(on:)`.
     public static let sentToClaude = "Sent to Claude from a phone"
+
+    /// The line a card shows for an answer handed to Claude's hook, naming the
+    /// device that sent it by its kind.
+    public func sentToClaudeLine(on host: HostDevice = .current) -> String {
+        Self.answeringDevice(answeredOn, on: host).map { "Sent to Claude from \($0)" } ?? Self.sentToClaude
+    }
+
+    /// The device a paired answer came from, by its kind, or nil where the words
+    /// stay as they were: where the record does not say (an older daemon, an
+    /// answer a restart settled), and where an iPhone answered and an iPhone
+    /// reads it. Never "this Mac" or "your iPhone": the record names a kind of
+    /// device, not which one.
+    static func answeringDevice(_ device: AnsweredOn?, on host: HostDevice) -> String? {
+        switch device {
+        case .mac: return "a Mac"
+        case .iphone: return host == .mac ? "an iPhone" : nil
+        case nil: return nil
+        }
+    }
 
     /// The daemon's words (`RUN_ENDED` in ccd) for a card closed because the
     /// session that asked it ended, which it records as a `timeout`.
     static let sessionEnded = "the session ended before anyone answered"
 
     /// Where the answer came from, as far as the record proves it: `phone`
-    /// names a paired phone, not this one, so "a phone"; `local` is the Mac.
-    public var provenance: String {
+    /// names a paired device by its kind (`answeredOn`), "a phone" where the
+    /// record does not say; `local` is the computer.
+    public func provenance(on host: HostDevice = .current) -> String {
         switch resolvedBy {
-        case .phone: return "from a phone"
-        case .local: return "at \(HostDevice.current.computer("the computer"))"
+        case .phone: return Self.answeringDevice(answeredOn, on: host).map { "from \($0)" } ?? "from a phone"
+        case .local: return "at \(host.computer("the computer"))"
         case .timeout where detail == Self.sessionEnded: return "when the session ended"
         case .timeout: return "by timeout - nobody answered"
         case .superseded: return "superseded"

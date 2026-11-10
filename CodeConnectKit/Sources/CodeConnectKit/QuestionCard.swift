@@ -175,10 +175,11 @@ public enum QuestionCardStatus: Sendable, Hashable {
     /// Nothing is known of the Mac: its link is down and took its
     /// capabilities with it. Carries the link's own reason.
     case unreachable(String)
-    /// Claude ran with exactly the answers sent from a phone, which carries
-    /// them. Which phone is not recorded, and the same answers chosen at the
+    /// Claude ran with exactly the answers sent from a paired device, which
+    /// carries them, with the kind of device that sent them when the record
+    /// says. Which device is not recorded, and the same answers chosen at the
     /// Mac would read no differently.
-    case answeredOnPhone([QuestionAnswer])
+    case answeredOnPhone([QuestionAnswer], from: AnsweredOn?)
     case answeredAtMac
     /// Declined from a phone, and recorded as taken.
     case declined
@@ -245,7 +246,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         switch self {
         case .answerable:
             return nil
-        case .answeredOnPhone(let answers):
+        case .answeredOnPhone(let answers, _):
             let chosen = zip(card.questions.indices, answers).map { index, answer in
                 card.choices(of: answer, for: index).joined(separator: ", ")
             }
@@ -262,7 +263,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
     private static func ended(by outcome: AnswerOutcome) -> QuestionCardStatus {
         if outcome.indeterminate { return .unconfirmed }
         switch (outcome.resolvedBy, outcome.decision) {
-        case (.phone, .answers(let answers)): return .answeredOnPhone(answers)
+        case (.phone, .answers(let answers)): return .answeredOnPhone(answers, from: outcome.answeredOn)
         case (.phone, .decline), (.phone, .deny): return .declined
         case (.local, .answers) where !outcome.inferred: return .answeredAtMac
         default: return .closed
@@ -271,52 +272,61 @@ public enum QuestionCardStatus: Sendable, Hashable {
 
     /// The banner a card in this status carries, or nil when it needs none.
     public var banner: (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
+        banner(on: .current)
+    }
+
+    /// The banner in the words of `host`: an answer names the device that sent it, not the one reading.
+    func banner(on host: HostDevice) -> (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
         switch self {
         case .answerable:
             return nil
         case .askingAtMac:
             return (
-                "Asking at \(HostDevice.current.computer("the computer"))",
-                "Claude is asking this at \(HostDevice.current.computer("the computer")), so it can only be answered there.",
+                "Asking at \(host.computer("the computer"))",
+                "Claude is asking this at \(host.computer("the computer")), so it can only be answered there.",
                 .info, "desktop"
             )
         case .answerAtMac:
             return (
-                "Answer at \(HostDevice.current.computer("the computer"))",
-                "This question can no longer be answered from the \(HostDevice.current.noun). It may still be open "
-                    + "at \(HostDevice.current.computer("the computer")).",
+                "Answer at \(host.computer("the computer"))",
+                "This question can no longer be answered from the \(host.noun). It may still be open "
+                    + "at \(host.computer("the computer")).",
                 .warning, "desktop"
             )
         case .macTooOld:
             return (
-                "Answer at \(HostDevice.current.computer("the computer"))",
-                "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to answer Claude's questions from the "
-                    + "\(HostDevice.current.noun). Answer it at \(HostDevice.current.computer("the computer")), or update it to answer here.",
+                "Answer at \(host.computer("the computer"))",
+                "\(host.computer("This computer"))'s CodeConnect is too old to answer Claude's questions from the "
+                    + "\(host.noun). Answer it at \(host.computer("the computer")), or update it to answer here.",
                 .warning, "desktop"
             )
         case .unreachable(let reason):
             return ("Not connected", reason, .warning, "desktop")
-        case .answeredOnPhone:
+        case .answeredOnPhone(_, let device):
+            let sender = AnswerOutcome.answeringDevice(device, on: host) ?? "the \(host.noun)"
             return (
-                "Answered", "Claude has the answers sent from the \(HostDevice.current.noun).", .success,
+                "Answered",
+                "Claude has the answers sent from \(sender).",
+                .success,
                 "check-circle-fill"
             )
         case .answeredAtMac:
             return (
-                "Answered at \(HostDevice.current.computer("the computer"))",
-                "This question was answered at \(HostDevice.current.computer("the computer")). Nothing from this \(HostDevice.current.noun) was used.",
+                "Answered at \(host.computer("the computer"))",
+                "This question was answered at \(host.computer("the computer")). Nothing from this \(host.noun) was used.",
                 .info, "desktop"
             )
         case .declined:
             return (
-                "Declined", "Declined from the \(HostDevice.current.noun), as Escape does at \(HostDevice.current.computer("the computer")).", .info,
+                "Declined", "Declined from the \(host.noun), as Escape does at \(host.computer("the computer")).",
+                .info,
                 "x-circle"
             )
         case .unconfirmed:
             return (
                 "Unconfirmed",
-                "\(HostDevice.current.computer("The computer")) took this answer but could not confirm Claude received it. "
-                    + "Check \(HostDevice.current.computer("the computer")).",
+                "\(host.computer("The computer")) took this answer but could not confirm Claude received it. "
+                    + "Check \(host.computer("the computer")).",
                 .warning, "question"
             )
         case .closed:
@@ -324,7 +334,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .unavailable:
             return (
                 "No longer available",
-                "This question can't be answered here — the run is no longer on \(HostDevice.current.computer("the computer")), or its "
+                "This question can't be answered here — the run is no longer on \(host.computer("the computer")), or its "
                     + "log was reset.",
                 .warning, "question"
             )
