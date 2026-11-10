@@ -686,7 +686,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         given to the agent as `--model=<value>`, except Claude Code's own
 ///         `default`, which is no flag. A client sends it only for a model the
 ///         daemon listed, so a daemon below 33 never receives it.
-pub const PROTOCOL_MINOR: u32 = 33;
+///   * `34` — **An answer says which kind of device sent it.**
+///
+///     Additive:
+///       - [`ws::AnswerOutcome::answered_on`] — `iphone` or `mac` on an answer from
+///         a paired device, by the `client_name` its connection said hello with
+///         ([`ws::AnsweredOn`]). A daemon below 34 sends none, and a client reads
+///         that as before. `resolved_by` stays `phone` for both, and an answer sent
+///         to Claude is detailed "Sent to Claude from a phone" whichever device
+///         sent it, because that sentence is how every app knows it was sent; so an
+///         app that does not know the field reads every answer as it always has.
+pub const PROTOCOL_MINOR: u32 = 34;
 
 #[cfg(test)]
 mod ledger_tests {

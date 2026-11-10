@@ -16,8 +16,9 @@ struct MainWindow: View {
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
     @State private var opened: String?
-    /// The open run's tab; each run opens on its conversation.
-    @State private var tab = SessionTab.conversation
+    /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
+    /// conversation, and each run opens on it.
+    @State private var chosen: (run: String, tab: SessionTab)?
 
     init() {
         #if DEBUG
@@ -39,13 +40,16 @@ struct MainWindow: View {
                 let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
                 let model = open.flatMap { machines.model(forSession: $0.id) }
                 FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
-                    .frame(width: model == nil ? nil : 580)
+                    // Beside an open run the list gives way first, down to what its rows still read at.
+                    .frame(minWidth: model == nil ? nil : 290, maxWidth: model == nil ? .infinity : 580)
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
-                    SessionPane(row: open, model: model, tab: $tab) {
+                    SessionPane(row: open, model: model, tab: tab(of: open.id)) {
                         if let address = model.endpoint?.typedAddress { pairAgain(address) }
                     }
                     .id(open.id)
+                    // Room for a card's answers in one row.
+                    .frame(minWidth: 450)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -57,11 +61,11 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
-        .onChange(of: opened) { tab = .conversation }
+        .onChange(of: opened) { chosen = nil }
         // Esc closes the open run; a sheet's own Esc is its Cancel. Not while its terminal is shown: there Esc is the
         // agent's (it interrupts a turn), and a window shortcut would take it before the terminal saw it.
         .background {
-            if opened != nil, adding == nil, tab != .terminal {
+            if opened != nil, adding == nil, !(chosen?.run == opened && chosen?.tab == .terminal) {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -91,6 +95,14 @@ struct MainWindow: View {
                     .renderLook()
                 #endif
         }
+    }
+
+    /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run
+    /// opened from another run's terminal shows its conversation from its first frame.
+    private func tab(of run: String) -> Binding<SessionTab> {
+        Binding(
+            get: { chosen.flatMap { $0.run == run ? $0.tab : nil } ?? .conversation },
+            set: { chosen = $0 == .conversation ? nil : (run, $0) })
     }
 
     /// A refused computer paired again: the Add Computer sheet, its address already in the code form.

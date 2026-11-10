@@ -542,6 +542,12 @@ final class TerminalWiringTests: XCTestCase {
                 + TerminalTabView.trimmedBufferNotice)
     }
 
+    /// One sentence on both devices: Kit holds it, the iPhone shows Kit's, and the words are the ones it always had.
+    func testTheNoticeIsKitsWordsUnchanged() {
+        XCTAssertEqual(TerminalCarrier.trimmedBufferNotice, "Earlier output not shown")
+        XCTAssertEqual(TerminalTabView.trimmedBufferNotice, TerminalCarrier.trimmedBufferNotice)
+    }
+
     // MARK: - Two screens over one carrier
 
     /// A screen that was built before the buffer lost its head, and one built
@@ -851,6 +857,11 @@ final class TerminalWiringTests: XCTestCase {
             .blocked(
                 reason: "\(model.runLabel(for: "B").spoken) has the terminal open, and this connection allows one at a time.",
                 fix: .takeOver))
+        // A Codex run is never offered the takeover: the daemon refuses its attach, so it would end B's terminal for
+        // nothing.
+        model.adoptSummariesForTesting([runA, runB, listedRun("C", tmux: "cc-c", agent: "codex")])
+        let claudeOnly = TerminalConnect.blocked(reason: "The terminal opens for Claude Code runs only.", fix: nil)
+        XCTAssertEqual(said(model, "C"), [claudeOnly, claudeOnly])
 
         XCTAssertEqual(TerminalConnect.Fix.pair.title(on: .iPhone), "Pair")
         XCTAssertEqual(TerminalConnect.Fix.pair.title(on: .mac), "Pair again")
@@ -1302,15 +1313,15 @@ private struct SurfaceHarness: View {
 }
 
 /// A run the fleet lists, under the tmux name it is reached by (empty for a run
-/// CodeConnect did not launch).
-private func listedRun(_ uid: String, tmux: String) -> SessionSummary {
+/// CodeConnect did not launch), of the agent named.
+private func listedRun(_ uid: String, tmux: String, agent: String = "claude") -> SessionSummary {
     // A fixture that does not decode is a decoder change, not a test bug.
     // swiftlint:disable:next force_try
     try! JSONDecoder().decode(
         SessionSummary.self,
         from: Data(
             """
-            {"session_uid":"\(uid)","session_id":"cc-\(uid)","tmux_session":"\(tmux)",
+            {"session_uid":"\(uid)","session_id":"cc-\(uid)","tmux_session":"\(tmux)","agent":"\(agent)",
              "cwd":"/work","project_label":"\(uid)","lifecycle":"live","link":"attached","last_seq":0,
              "created_at":"2026-11-10T10:00:00Z","updated_at":"2026-11-10T10:00:00Z","blocked_on":[]}
             """.utf8))

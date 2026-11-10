@@ -45,8 +45,8 @@ use protocol::ipc::{
 };
 use protocol::pairing::DeviceSummary;
 use protocol::ws::{
-    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, ApprovalCard, QuestionHold,
-    ResolvedBy, SendTextResult,
+    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, ApprovalCard,
+    QuestionHold, ResolvedBy, SendTextResult,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
@@ -2135,7 +2135,7 @@ impl Daemon {
                     claims.len()
                 );
                 for claim in claims {
-                    self.settle_indeterminate(&claim, None).await;
+                    self.settle_indeterminate(&claim, None, None).await;
                 }
             }
             Ok(_) => {}
@@ -2345,6 +2345,7 @@ impl Daemon {
         &self,
         claim: &AnswerClaim,
         unconfirmed: Option<(AnswerPath, &str)>,
+        answered_on: Option<AnsweredOn>,
     ) {
         let session = SessionKey::new(&claim.session_uid, &claim.session_id);
         let decision =
@@ -2369,6 +2370,7 @@ impl Daemon {
             session_id: session.name.clone(),
             decision,
             resolved_by: ResolvedBy::Phone,
+            answered_on,
             applied_via: unconfirmed.map_or(
                 if through_hook {
                     AnswerPath::HookReturn
@@ -3709,7 +3711,7 @@ impl Daemon {
                 AnswerDecision::Decline,
                 ResolvedBy::Local,
                 "the question was closed at the computer (Escape or the session ending) before \
-                 the phone answered it",
+                 it was answered from a paired device",
                 true,
             )
             .await;
@@ -3781,7 +3783,8 @@ impl Daemon {
                 session,
                 AnswerDecision::Decline,
                 ResolvedBy::Local,
-                "the question was closed at the computer before the phone answered it",
+                "the question was closed at the computer before it was answered from a paired \
+                 device",
                 true,
             )
             .await;
@@ -5416,6 +5419,7 @@ impl Daemon {
         request_id: &str,
         payload_hash: &str,
         decision: AnswerDecision,
+        answered_on: AnsweredOn,
     ) -> AnswerResult {
         let AnswerDecision::OptionId { option_id } = &decision else {
             return AnswerResult::Rejected {
@@ -5583,6 +5587,7 @@ impl Daemon {
                     session_id: session.name.clone(),
                     decision,
                     resolved_by: protocol::ws::ResolvedBy::Phone,
+                    answered_on: Some(answered_on),
                     applied_via: protocol::ws::AnswerPath::CodexResponse,
                     resolved_at: protocol::time::now_rfc3339(),
                     detail: None,
@@ -6651,6 +6656,7 @@ impl Daemon {
         payload_hash: &str,
         decision: AnswerDecision,
         session_ref: Option<&str>,
+        answered_on: AnsweredOn,
     ) -> AnswerResult {
         let session_uid = match self.approval_target(request_id, session_ref).await {
             Ok(uid) => uid,
@@ -6748,7 +6754,7 @@ impl Daemon {
         // first one's row rather than a race that claims twice.
         if let Some(row) = codex {
             return self
-                .answer_codex(&row, request_id, payload_hash, decision)
+                .answer_codex(&row, request_id, payload_hash, decision, answered_on)
                 .await;
         }
 
@@ -6801,7 +6807,7 @@ impl Daemon {
                     logged_request_id(request_id),
                     claim.started_at
                 );
-                self.settle_indeterminate(&claim, None).await;
+                self.settle_indeterminate(&claim, None, None).await;
                 self.inner.lock().await.pending.remove(&id);
                 return match self
                     .db
@@ -6846,7 +6852,7 @@ impl Daemon {
             // A card is answered through the hook Claude holds for its own call,
             // or not at all: nothing is ever typed, so every decision its hook
             // cannot carry is refused here, before anything is claimed.
-            let hook = match hook_decision(entry, &decision) {
+            let hook = match hook_decision(entry, &decision, answered_on) {
                 Ok(hook) => hook,
                 Err(reason) => return AnswerResult::Rejected { reason },
             };
@@ -6937,8 +6943,12 @@ impl Daemon {
                     "{request_id}: Claude never confirmed the answer ({reason}); recording it as \
                      indeterminate rather than allowing a retry"
                 );
-                self.settle_indeterminate(&claim, Some((AnswerPath::HookReturn, reason.as_str())))
-                    .await;
+                self.settle_indeterminate(
+                    &claim,
+                    Some((AnswerPath::HookReturn, reason.as_str())),
+                    Some(answered_on),
+                )
+                .await;
                 self.inner.lock().await.pending.remove(&id);
                 return match self
                     .db
@@ -6965,6 +6975,7 @@ impl Daemon {
             session_id: session.name.clone(),
             decision: decision.clone(),
             resolved_by: ResolvedBy::Phone,
+            answered_on: Some(answered_on),
             applied_via,
             resolved_at: protocol::time::now_rfc3339(),
             detail,
@@ -7048,8 +7059,8 @@ impl Daemon {
         };
         if responder.send(hook).is_err() {
             return Actuation::Refused(
-                "Claude stopped waiting for the phone's answer before it was sent; nothing was \
-                 sent. Answer at the computer."
+                "Claude stopped waiting for this answer before it was sent; nothing was sent. \
+                 Answer at the computer."
                     .into(),
             );
         }
@@ -7074,16 +7085,16 @@ impl Daemon {
         hook: HookDecision,
         confirm: oneshot::Receiver<serde_json::Value>,
     ) -> Actuation {
-        let answered_at_mac = "this question was answered at the computer first, so the phone's \
-                               answer was not used";
+        let answered_at_mac = "this question was answered at the computer first, so this answer \
+                               was not used";
         let Some(responder) = responder else {
             return Actuation::Refused(NOT_HELD.into());
         };
         let sent = hook.updated_input.clone();
         if responder.send(hook).is_err() {
             return Actuation::Refused(
-                "Claude stopped waiting for the phone's answer before it was sent; nothing was \
-                 sent. Answer at the computer."
+                "Claude stopped waiting for this answer before it was sent; nothing was sent. \
+                 Answer at the computer."
                     .into(),
             );
         }
@@ -10464,6 +10475,7 @@ impl Daemon {
             session_id: session.name.clone(),
             decision,
             resolved_by,
+            answered_on: None,
             applied_via: AnswerPath::SendKeys,
             resolved_at: protocol::time::now_rfc3339(),
             detail: Some(detail.to_string()),
@@ -10997,7 +11009,10 @@ const NOT_A_QUESTION: &str = "this answers a question, and this card is not one;
 
 /// How a card closes when its call's own result says the Mac answered it.
 const CALL_RAN: &str = "the tool ran, so it was approved at the computer";
-/// What a phone answer to an approval is recorded as: sent, not confirmed.
+/// What an answer to an approval from a paired device is recorded as: sent, not
+/// confirmed. Every app reads an answer as sent by exactly this sentence
+/// (CodeConnectKit's `AnswerOutcome.sentToClaude`), so it is the same whichever
+/// device sent it; `answered_on` says which.
 const SENT_TO_CLAUDE: &str = "Sent to Claude from a phone";
 const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the computer";
 /// How a card closes when the run that asked it ends first.
@@ -11005,8 +11020,7 @@ const RUN_ENDED: &str = "the session ended before anyone answered";
 
 /// Why a claimed answer was not handed over: its call ended first.
 const ANSWERED_AT_MAC: &str =
-    "this was answered at the computer before the phone's answer could be \
-                               handed over; nothing was sent";
+    "this was answered at the computer before this answer could be handed over; nothing was sent";
 
 /// Why a card cannot be answered from the phone right now.
 const NOT_HELD: &str = "this card is not being held for the phone (Claude is showing it at the \
@@ -11061,10 +11075,11 @@ fn main_thread(payload: &serde_json::Value) -> bool {
 fn hook_decision(
     entry: &PendingApproval,
     decision: &AnswerDecision,
+    answered_on: AnsweredOn,
 ) -> Result<HookDecision, String> {
     let held = hook_is_held(entry);
     if entry.question.is_some() {
-        return question_hook_decision(entry, decision, held);
+        return question_hook_decision(entry, decision, held, answered_on);
     }
     match decision {
         AnswerDecision::Answers { .. } | AnswerDecision::Decline => {
@@ -11112,6 +11127,7 @@ fn question_hook_decision(
     entry: &PendingApproval,
     decision: &AnswerDecision,
     held: bool,
+    answered_on: AnsweredOn,
 ) -> Result<HookDecision, String> {
     match decision {
         AnswerDecision::Allow
@@ -11141,7 +11157,13 @@ fn question_hook_decision(
         _ => Ok(HookDecision {
             interrupt: !entry.fork,
             decision: Decision::Deny,
-            reason: Some("Declined from iPhone".into()),
+            reason: Some(
+                match answered_on {
+                    AnsweredOn::Iphone => "Declined from iPhone",
+                    AnsweredOn::Mac => "Declined from Mac",
+                }
+                .into(),
+            ),
             ..HookDecision::passthrough()
         }),
     }
@@ -14559,6 +14581,7 @@ mod tests {
                     session_id: "cc-1".into(),
                     decision: AnswerDecision::Allow,
                     resolved_by: ResolvedBy::Phone,
+                    answered_on: None,
                     applied_via: AnswerPath::SendKeys,
                     resolved_at: protocol::time::now_rfc3339(),
                     detail: None,
@@ -14595,6 +14618,7 @@ mod tests {
                 "hash",
                 AnswerDecision::Allow,
                 Some(&second.session.uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match result {
@@ -14651,7 +14675,13 @@ mod tests {
 
         let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
         match daemon
-            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .answer(
+                &request_id,
+                &hash,
+                AnswerDecision::Allow,
+                Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await
         {
             AnswerResult::Rejected { reason } => {
@@ -14663,7 +14693,13 @@ mod tests {
         // protocol-minor-1 client hits.
         assert!(matches!(
             daemon
-                .answer(&request_id, &hash, AnswerDecision::Allow, None)
+                .answer(
+                    &request_id,
+                    &hash,
+                    AnswerDecision::Allow,
+                    None,
+                    protocol::ws::AnsweredOn::Iphone
+                )
                 .await,
             AnswerResult::Rejected { .. }
         ));
@@ -14676,6 +14712,7 @@ mod tests {
                 &hash,
                 AnswerDecision::Allow,
                 Some(&second.session.uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         assert!(
@@ -14699,7 +14736,13 @@ mod tests {
         // No supervisor can type, so this cannot be `Applied` — but it must
         // reach the injection attempt rather than be refused for ambiguity.
         match daemon
-            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .answer(
+                &request_id,
+                &hash,
+                AnswerDecision::Allow,
+                Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await
         {
             AnswerResult::Rejected { reason } => {
@@ -14712,7 +14755,7 @@ mod tests {
         }
         // A name nobody has ever used is still an honest error.
         assert!(matches!(
-            daemon.answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-9")).await,
+            daemon.answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-9"), protocol::ws::AnsweredOn::Iphone).await,
             AnswerResult::Rejected { reason } if reason.contains("unknown session")
         ));
     }
@@ -14735,7 +14778,13 @@ mod tests {
             let (card, hash) = (card.clone(), hash.clone());
             tasks.push(tokio::spawn(async move {
                 daemon
-                    .answer(&card, &hash, AnswerDecision::Allow, Some(TEST_UID))
+                    .answer(
+                        &card,
+                        &hash,
+                        AnswerDecision::Allow,
+                        Some(TEST_UID),
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
                     .await
             }));
         }
@@ -14803,6 +14852,7 @@ mod tests {
                         option_id: "acceptForSession".into()
                     },
                     Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
                 )
                 .await,
             AnswerResult::Rejected { .. }
@@ -14837,7 +14887,13 @@ mod tests {
 
         // A real Claude decision still resolves through the SAME held hook.
         match daemon
-            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .answer(
+                &request_id,
+                &hash,
+                AnswerDecision::Allow,
+                Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await
         {
             AnswerResult::Applied { outcome } => {
@@ -14876,6 +14932,7 @@ mod tests {
                         option_id: "accept".into()
                     },
                     Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
                 )
                 .await,
             AnswerResult::Rejected { .. }
@@ -15042,7 +15099,13 @@ mod tests {
             let command = "touch x; exit 3";
             let held = raise_held(&daemon, uid, command, id, agent).await;
             let result = daemon
-                .answer(id, &bash_hash(command), decision.clone(), Some("cc-1"))
+                .answer(
+                    id,
+                    &bash_hash(command),
+                    decision.clone(),
+                    Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
+                )
                 .await;
             let AnswerResult::Applied { outcome } = result else {
                 panic!("{id}: {result:?}");
@@ -15089,6 +15152,7 @@ mod tests {
                 &bash_hash("touch r.txt"),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         returned(held).await;
@@ -15143,6 +15207,7 @@ mod tests {
                 &bash_hash("touch v4.txt"),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         assert!(
@@ -15174,6 +15239,7 @@ mod tests {
                 &held_bash_hash(),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await
         {
@@ -15219,6 +15285,7 @@ mod tests {
                         &held_bash_hash(),
                         AnswerDecision::Allow,
                         Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -15257,6 +15324,7 @@ mod tests {
                         &held_bash_hash(),
                         AnswerDecision::Allow,
                         Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -15304,6 +15372,7 @@ mod tests {
                         &bash_hash("touch r.txt"),
                         AnswerDecision::Deny,
                         Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -15369,6 +15438,7 @@ mod tests {
                         &bash_hash("touch d.txt"),
                         AnswerDecision::Option { index: 2 },
                         Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
                 {
@@ -15384,6 +15454,7 @@ mod tests {
                     &bash_hash("touch d.txt"),
                     decision.clone(),
                     Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
                 )
                 .await;
             assert!(
@@ -15441,6 +15512,7 @@ mod tests {
                 &bash_hash("touch second-fork.txt"),
                 AnswerDecision::Deny,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
@@ -15455,6 +15527,7 @@ mod tests {
                 &bash_hash("touch fork-was-here.txt"),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
@@ -15515,7 +15588,13 @@ mod tests {
                 AnswerDecision::Text { text: "no".into() },
             ] {
                 match daemon
-                    .answer(&id, &hash, decision.clone(), Some("cc-1"))
+                    .answer(
+                        &id,
+                        &hash,
+                        decision.clone(),
+                        Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
                     .await
                 {
                     AnswerResult::Rejected { reason } => {
@@ -15577,6 +15656,7 @@ mod tests {
                 &bash_hash("touch b.txt"),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await
         {
@@ -15640,6 +15720,7 @@ mod tests {
                 &bash_hash("touch e.txt"),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await
         {
@@ -15659,6 +15740,7 @@ mod tests {
                 &bash_hash("touch f.txt"),
                 AnswerDecision::Allow,
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await
         {
@@ -15690,7 +15772,13 @@ mod tests {
         let mut result = None;
         for _ in 0..200 {
             match daemon
-                .answer("toolu_plan", &hash, AnswerDecision::Allow, Some("cc-1"))
+                .answer(
+                    "toolu_plan",
+                    &hash,
+                    AnswerDecision::Allow,
+                    Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
+                )
                 .await
             {
                 AnswerResult::Rejected { reason } if reason.contains("unknown") => {
@@ -15726,6 +15814,7 @@ mod tests {
                 &bash_hash(command),
                 AnswerDecision::Option { index: 2 },
                 Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         assert!(
@@ -25386,7 +25475,13 @@ mod tests {
 
         // And a late tap from the phone is a no-op returning that outcome.
         let late = daemon
-            .answer(&request_id, "any-hash", AnswerDecision::Deny, None)
+            .answer(
+                &request_id,
+                "any-hash",
+                AnswerDecision::Deny,
+                None,
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await;
         assert!(matches!(late, AnswerResult::Duplicate { .. }), "{late:?}");
     }
@@ -25587,7 +25682,13 @@ mod tests {
 
         // And the retry replays that, rather than re-injecting.
         match daemon
-            .answer(request_id, payload_hash, AnswerDecision::Allow, Some(uid))
+            .answer(
+                request_id,
+                payload_hash,
+                AnswerDecision::Allow,
+                Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await
         {
             AnswerResult::Duplicate { outcome, .. } => assert!(outcome.indeterminate),
@@ -25614,7 +25715,8 @@ mod tests {
                     "toolu_claim",
                     &hash,
                     AnswerDecision::Option { index: 2 },
-                    Some(uid)
+                    Some(uid),
+                    protocol::ws::AnsweredOn::Iphone
                 )
                 .await,
             AnswerResult::Rejected { .. }
@@ -25631,7 +25733,13 @@ mod tests {
         // Applied: the claim and the outcome settle in one transaction.
         assert!(matches!(
             daemon
-                .answer("toolu_claim", &hash, AnswerDecision::Allow, Some(uid))
+                .answer(
+                    "toolu_claim",
+                    &hash,
+                    AnswerDecision::Allow,
+                    Some(uid),
+                    protocol::ws::AnsweredOn::Iphone
+                )
                 .await,
             AnswerResult::Applied { .. }
         ));
@@ -25666,7 +25774,8 @@ mod tests {
                     "toolu_dup",
                     &bash_hash("touch /tmp/a"),
                     AnswerDecision::Allow,
-                    Some(uid)
+                    Some(uid),
+                    protocol::ws::AnsweredOn::Iphone
                 )
                 .await,
             AnswerResult::Applied { .. }
@@ -28523,6 +28632,7 @@ mod tests {
                             option_id: "accept".into(),
                         },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -28658,6 +28768,7 @@ mod tests {
                                 option_id: "accept".into(),
                             },
                             Some(&uid),
+                            protocol::ws::AnsweredOn::Iphone,
                         )
                         .await
                 })
@@ -28786,6 +28897,7 @@ mod tests {
                             option_id: "accept".into(),
                         },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -28922,6 +29034,7 @@ mod tests {
                             option_id: "accept".into(),
                         },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -29108,6 +29221,7 @@ mod tests {
                             option_id: "accept".into(),
                         },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -29485,6 +29599,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             ),
         )
         .await;
@@ -29538,6 +29653,7 @@ mod tests {
                             option_id: "accept".into(),
                         },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -29663,6 +29779,7 @@ mod tests {
                             option_id: "accept".into(),
                         },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -29720,6 +29837,7 @@ mod tests {
                     option_id: "decline".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &result {
@@ -29771,6 +29889,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &result {
@@ -29816,6 +29935,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &result {
@@ -29984,6 +30104,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &result {
@@ -30035,6 +30156,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &result {
@@ -30337,6 +30459,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
 
@@ -31958,7 +32081,13 @@ mod tests {
         );
 
         let result = daemon
-            .answer(request_id, &payload_hash, AnswerDecision::Allow, Some(uid))
+            .answer(
+                request_id,
+                &payload_hash,
+                AnswerDecision::Allow,
+                Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await;
 
         match &result {
@@ -31999,6 +32128,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &by_option {
@@ -33416,7 +33546,13 @@ mod tests {
 
     async fn answer_question(daemon: &Arc<Daemon>, decision: AnswerDecision) -> AnswerResult {
         daemon
-            .answer(QUESTION_ID, &question_hash(), decision, Some("cc-1"))
+            .answer(
+                QUESTION_ID,
+                &question_hash(),
+                decision,
+                Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await
     }
 
@@ -33681,6 +33817,7 @@ mod tests {
                             answers: keyboard_choices(),
                         },
                         Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -34175,6 +34312,42 @@ mod tests {
                     );
                 }
                 other => panic!("{decision:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The decline Claude is handed names the kind of device it came from.
+    #[tokio::test]
+    async fn a_decline_tells_claude_which_kind_of_device_declined() {
+        for (answered_on, reason) in [
+            (AnsweredOn::Iphone, "Declined from iPhone"),
+            (AnsweredOn::Mac, "Declined from Mac"),
+        ] {
+            let daemon = test_daemon();
+            let uid = TEST_UID;
+            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+            let raised = raise_question(&daemon, uid, None, true).await;
+            let answering = {
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    daemon
+                        .answer(
+                            QUESTION_ID,
+                            &question_hash(),
+                            AnswerDecision::Decline,
+                            Some("cc-1"),
+                            answered_on,
+                        )
+                        .await
+                })
+            };
+            let returned = returned(raised.hook).await;
+            assert_eq!(returned.reason.as_deref(), Some(reason), "{answered_on:?}");
+            match answering.await.unwrap() {
+                AnswerResult::Duplicate { outcome, .. } => {
+                    assert_eq!(outcome.answered_on, Some(answered_on))
+                }
+                other => panic!("{answered_on:?}: {other:?}"),
             }
         }
     }
@@ -34955,7 +35128,8 @@ mod tests {
                     "toolu_bash",
                     &bash_hash("touch ran.txt"),
                     AnswerDecision::Allow,
-                    Some(uid)
+                    Some(uid),
+                    protocol::ws::AnsweredOn::Iphone
                 )
                 .await,
             AnswerResult::Applied { .. }
@@ -35119,7 +35293,13 @@ mod tests {
             .payload_hash
             .clone();
         match daemon
-            .answer(request_id, &hash, AnswerDecision::Decline, Some("cc-1"))
+            .answer(
+                request_id,
+                &hash,
+                AnswerDecision::Decline,
+                Some("cc-1"),
+                protocol::ws::AnsweredOn::Iphone,
+            )
             .await
         {
             AnswerResult::Rejected { reason } => assert!(reason.contains("not being held")),
@@ -35178,7 +35358,13 @@ mod tests {
             (QUESTION_ID, question_hash(), AnswerDecision::Decline),
         ] {
             match daemon
-                .answer(request_id, &hash, AnswerDecision::Allow, Some(TEST_UID))
+                .answer(
+                    request_id,
+                    &hash,
+                    AnswerDecision::Allow,
+                    Some(TEST_UID),
+                    protocol::ws::AnsweredOn::Iphone,
+                )
                 .await
             {
                 AnswerResult::Duplicate { outcome, .. } => {
@@ -35287,6 +35473,68 @@ mod tests {
         .unwrap();
     }
 
+    /// **An answer from each kind of device, as a minor-34 daemon records it,
+    /// emitted by this build.** The apps' own tests read the copy under `ios/`.
+    #[tokio::test]
+    async fn the_minor_34_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-34-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_34_wire().await,
+            committed,
+            "the committed minor-34 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_34_wire_fixture, then copy it over its copy under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-34-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_34_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_34_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-34-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// One approval answered from each kind of device: its `approval_resolved`
+    /// event, with the timestamps fixed so the file is stable.
+    async fn derived_minor_34_wire() -> serde_json::Value {
+        let mut wire = serde_json::Map::new();
+        for (key, answered_on) in [
+            ("answered_on_iphone", AnsweredOn::Iphone),
+            ("answered_on_mac", AnsweredOn::Mac),
+        ] {
+            let daemon = test_daemon();
+            let command = "make zz-target";
+            let held = raise_held(&daemon, TEST_UID, command, "toolu_answered", None).await;
+            let result = daemon
+                .answer(
+                    "toolu_answered",
+                    &bash_hash(command),
+                    AnswerDecision::Allow,
+                    Some("cc-1"),
+                    answered_on,
+                )
+                .await;
+            assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+            returned(held).await;
+            let mut events = approval_events(&daemon, TEST_UID, EventKind::ApprovalResolved);
+            assert_eq!(events.len(), 1, "{key}");
+            let mut event = serde_json::to_value(events.remove(0)).unwrap();
+            event["ts"] = json!("2026-11-10T00:00:00.000Z");
+            event["payload"]["resolved_at"] = json!("2026-11-10T00:00:00.000Z");
+            wire.insert(key.into(), event);
+        }
+        serde_json::Value::Object(wire)
+    }
+
     async fn derived_minor_22_wire() -> serde_json::Value {
         let uid = TEST_UID;
         let event = |daemon: &Daemon, kind: EventKind| {
@@ -35319,7 +35567,13 @@ mod tests {
         let mut result = None;
         for _ in 0..200 {
             match allowed
-                .answer("toolu_allowed", &hash, AnswerDecision::Allow, Some("cc-1"))
+                .answer(
+                    "toolu_allowed",
+                    &hash,
+                    AnswerDecision::Allow,
+                    Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
+                )
                 .await
             {
                 AnswerResult::Rejected { .. } => {
@@ -35346,6 +35600,7 @@ mod tests {
                         text: "use the other file".into()
                     },
                     Some("cc-1"),
+                    protocol::ws::AnsweredOn::Iphone,
                 )
                 .await,
             AnswerResult::Applied { .. }
@@ -35602,6 +35857,7 @@ mod tests {
                             ],
                         },
                         Some("cc-1"),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })

@@ -776,14 +776,8 @@ struct TerminalTabView: View {
     }
 
     /// What the marker says, on screen and out loud — `CCGapMarker` speaks its
-    /// own label, so this string is both.
-    ///
-    /// A sentence about what is missing rather than a word about the buffer.
-    /// A listener who is handed "truncated" has been told the app hit a limit;
-    /// what they need to know is that the session printed more than this pane
-    /// is showing. Short enough not to be cut at two lines, which is the one
-    /// thing the component asks of a label.
-    static let trimmedBufferNotice = "Earlier output not shown"
+    /// own label, so this string is both. Kit's, so the Mac says the same.
+    static let trimmedBufferNotice = TerminalCarrier.trimmedBufferNotice
 
     /// What the pane is called out loud, which has to carry *which of the two
     /// it is*. The strip and the frame both say so on screen and neither is

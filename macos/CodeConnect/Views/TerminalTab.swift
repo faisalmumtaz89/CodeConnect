@@ -8,6 +8,8 @@ import SwiftUI
 struct TerminalTab: View {
     let row: FleetRow
     let model: AppModel
+    /// Whether the tab is the one shown; once shown, the pane keeps it, hidden behind the conversation.
+    let onScreen: Bool
     /// The computer's own re-pair, for a terminal this connection may not open.
     let pairAgain: () -> Void
 
@@ -20,16 +22,24 @@ struct TerminalTab: View {
             case .blocked(let reason, let fix):
                 Blocked(reason: reason, fix: fix) { run(fix) }
             case .ready(let uid):
-                Live(carrier: carrier, sessionUID: uid) { open(uid) }
+                Live(carrier: carrier, sessionUID: uid, onScreen: onScreen) { open(uid) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("terminal.tab")
-        .onAppear {
-            if model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
+        // Coming to the tab, the first time or again, is when this run's own terminal comes back.
+        .onChange(of: onScreen, initial: true) { reopen() }
+        // So is the link coming back while the tab shows, after a sleep or a drop, as on the iPhone. The daemon then
+        // repaints the pane whole. Only once connected: an attach before that would only be refused.
+        .onChange(of: model.connection.phase.isConnected) { _, connected in
+            if connected { reopen() }
         }
+    }
+
+    private func reopen() {
+        if onScreen, model.terminalReopensByItself(sessionUID: sessionUID) { open(sessionUID) }
     }
 
     private func open(_ uid: String) {
@@ -73,7 +83,11 @@ private struct Blocked: View {
 private struct Live: View {
     let carrier: TerminalCarrier
     let sessionUID: String
+    let onScreen: Bool
     let open: () -> Void
+    /// Whether this view's terminal began from a transcript that had lost its head to Kit's cap, so its screen may be
+    /// partial; as on the iPhone, it says so above the terminal. A fresh attach repaints the screen whole and clears it.
+    @State private var seededFromTrimmedBuffer = false
 
     var body: some View {
         let phase = carrier.phase(forRun: sessionUID)
@@ -88,7 +102,7 @@ private struct Live: View {
                         .accessibilityIdentifier("terminal.status")
                 }
                 Spacer(minLength: 0)
-                if !isOpen(phase) {
+                if !isOpen(phase), mayOpen {
                     ActionButton(title: "Open terminal", key: nil, prominent: true, id: "terminal.open", action: open)
                 }
             }
@@ -96,7 +110,19 @@ private struct Live: View {
             .frame(height: 44)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             if isOpen(phase) || shown {
-                TerminalSurface(carrier: carrier, sessionUID: sessionUID)
+                // A sibling, so showing it never rebuilds the terminal it describes.
+                if seededFromTrimmedBuffer {
+                    Text(TerminalCarrier.trimmedBufferNotice)
+                        .font(Theme.ui(11.5))
+                        .foregroundStyle(Theme.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 6)
+                        .accessibilityIdentifier("terminal.trimmed")
+                }
+                TerminalSurface(carrier: carrier, sessionUID: sessionUID, onScreen: onScreen) {
+                    seededFromTrimmedBuffer = $0
+                }
             } else {
                 Text("Open the terminal to see this run on its computer and type into it.")
                     .font(Theme.ui(12.5))
@@ -106,6 +132,21 @@ private struct Live: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onChange(of: isAttached(phase)) { _, attached in
+            if attached { seededFromTrimmedBuffer = false }
+        }
+    }
+
+    private func isAttached(_ phase: TerminalCarrier.Phase) -> Bool {
+        if case .attached = phase { return true }
+        return false
+    }
+
+    /// Not after a close of this run's terminal that asking again cannot change (the session ended, or is not
+    /// CodeConnect's): Open would only be refused the same way. Another run's close says nothing about this one.
+    private var mayOpen: Bool {
+        guard carrier.standing(forRun: sessionUID).isMine, let close = carrier.lastClose else { return true }
+        return close.isRetryable
     }
 
     private func isOpen(_ phase: TerminalCarrier.Phase) -> Bool {

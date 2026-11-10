@@ -74,6 +74,12 @@ extension AppModel {
                         + "no terminal to attach to.",
                 fix: nil)
         }
+        // The daemon opens a terminal for Claude Code runs only and refuses any
+        // other agent's attach. Said before the takeover below, which would
+        // otherwise end another run's terminal for an attach refused anyway.
+        if let agent = shownSummary(for: sessionUID)?.agent, agent != .claude {
+            return .blocked(reason: "The terminal opens for Claude Code runs only.", fix: nil)
+        }
         // The daemon allows one terminal per connection and the carrier is
         // shared, so this is the one block whose route ends something the
         // reader owns. It names the run it would end: a control that closes

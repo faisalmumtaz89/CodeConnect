@@ -30,10 +30,22 @@ final class TerminalPaneView: TerminalView {
         return nil
     }
 
+    /// A sideways swipe pans the window across a pane wider than it. The window also gets every event with no
+    /// vertical movement, which SwiftTerm drops: a gesture begins and ends with one, and a window that never saw its
+    /// end would stay pulled past the pane's edge. Every other swipe stays the terminal's, as SwiftTerm has it: its
+    /// scrollback, or the agent's own mouse wheel.
+    override func scrollWheel(with event: NSEvent) {
+        if event.scrollingDeltaY == 0 || abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            enclosingScrollView?.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+
     // What the terminal shows, for a screen reader and the accessibility driver: SwiftTerm's Mac view exposes nothing.
-    // A text area whose value is the screen's lines, top to bottom, each the grid's full width so a column is an
-    // offset; whose insertion point is the terminal's cursor; whose label is the real grid; and which reads focused
-    // while it has the keyboard.
+    // A text area whose value is the screen's lines, top to bottom, each a whole row, blanks included; whose
+    // insertion point is the terminal's cursor; whose label is the real grid; and which reads focused while it has
+    // the keyboard.
 
     override func isAccessibilityElement() -> Bool { true }
 
@@ -53,14 +65,20 @@ final class TerminalPaneView: TerminalView {
         let lines = screenLines()
         guard cursor.y < lines.count else { return NSRange(location: 0, length: 0) }
         let before = lines.prefix(cursor.y).reduce(0) { $0 + ($1 as NSString).length + 1 }
-        return NSRange(location: before + min(cursor.x, (lines[cursor.y] as NSString).length), length: 0)
+        return NSRange(location: before + (text(ofRow: cursor.y, upTo: cursor.x) as NSString).length, length: 0)
     }
 
     override func isAccessibilityFocused() -> Bool { window?.firstResponder === self }
 
-    private func screenLines() -> [String] {
+    private func screenLines() -> [String] { (0..<getTerminal().rows).map { text(ofRow: $0) } }
+
+    /// A row as SwiftTerm draws it: a wide character once, though it fills two cells; an emoji whole; and an empty
+    /// cell, a NUL to SwiftTerm, as the blank it is. Up to a column, the row before that cell.
+    private func text(ofRow row: Int, upTo column: Int = -1) -> String {
         let terminal = getTerminal()
-        return (0..<terminal.rows).map { terminal.getLine(row: $0)?.translateToString(trimRight: false) ?? "" }
+        let line = terminal.getLine(row: row)?.translateToString(
+            endCol: column, skipNullCellsFollowingWide: true, characterProvider: { terminal.getCharacter(for: $0) })
+        return (line ?? "").replacingOccurrences(of: "\u{0}", with: " ")
     }
 
     /// One cell in points, from SwiftTerm's own pixel-snapped cell.
@@ -85,6 +103,8 @@ final class TerminalPaneScroller: NSScrollView {
         hasVerticalScroller = true
         hasHorizontalScroller = true
         autohidesScrollers = true
+        // Bars that stay while the pane is larger than the window, so what lies past its edge is never out of sight.
+        scrollerStyle = .legacy
         drawsBackground = true
         documentView = pane
         pane.onPaneSize = { [weak self] _ in self?.needsLayout = true }
@@ -110,10 +130,15 @@ final class TerminalPaneScroller: NSScrollView {
 }
 
 /// The live terminal of one run, fed by its computer's terminal carrier. Typing goes to the carrier; the carrier's
-/// output comes here, and only here, while this view is shown.
+/// output comes here, and only here, while this view is in the pane, shown or hidden.
 struct TerminalSurface: NSViewRepresentable {
     let carrier: TerminalCarrier
     let sessionUID: String
+    /// Whether its tab is shown. Hidden, the terminal draws nothing, takes no clicks, is not read out, and gives up
+    /// the keyboard, so nothing typed elsewhere reaches the run; shown again, it takes the keyboard back.
+    let onScreen: Bool
+    /// Told once, when the new terminal is seeded, whether it began from a transcript that had lost its head.
+    let seeded: (_ fromTrimmedBuffer: Bool) -> Void
 
     func makeNSView(context: Context) -> TerminalPaneScroller {
         let scroller = TerminalPaneScroller()
@@ -128,14 +153,21 @@ struct TerminalSurface: NSViewRepresentable {
         // The app's own 16 colours: SwiftTerm's defaults are tuned for a light background.
         pane.installColors(CC.ansi.table.map { SwiftTerm.Color(red: $0.red, green: $0.green, blue: $0.blue) })
         pane.setAccessibilityIdentifier("terminal.view")
-        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID)
+        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID, seeded: seeded)
+        scroller.isHidden = !onScreen
         // The terminal takes the keyboard when it appears, as a terminal window does: what is typed next is the run's.
-        DispatchQueue.main.async { [weak scroller] in scroller?.window?.makeFirstResponder(scroller?.pane) }
+        if onScreen {
+            DispatchQueue.main.async { [weak scroller] in scroller?.window?.makeFirstResponder(scroller?.pane) }
+        }
         return scroller
     }
 
     func updateNSView(_ scroller: TerminalPaneScroller, context: Context) {
-        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID)
+        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID, seeded: seeded)
+        guard scroller.isHidden == onScreen else { return }
+        if !onScreen, scroller.window?.firstResponder === scroller.pane { scroller.window?.makeFirstResponder(nil) }
+        scroller.isHidden = !onScreen
+        if onScreen { scroller.window?.makeFirstResponder(scroller.pane) }
     }
 
     static func dismantleNSView(_ scroller: TerminalPaneScroller, coordinator: Coordinator) {
@@ -154,7 +186,10 @@ struct TerminalSurface: NSViewRepresentable {
         @MainActor private var replayedRun: String?
 
         @MainActor
-        func attach(scroller: TerminalPaneScroller, carrier: TerminalCarrier, sessionUID: String) {
+        func attach(
+            scroller: TerminalPaneScroller, carrier: TerminalCarrier, sessionUID: String,
+            seeded: @escaping (Bool) -> Void
+        ) {
             self.scroller = scroller
             self.carrier = carrier
             scroller.onViewport = { [weak self] cols, rows in self?.carrier?.resize(cols: cols, rows: rows) }
@@ -168,6 +203,10 @@ struct TerminalSurface: NSViewRepresentable {
             if let size = carrier.paneSize { scroller.pane.takePaneSize(size) }
             let transcript = carrier.transcript(forRun: sessionUID)
             if !transcript.isEmpty { scroller.pane.feed(byteArray: transcript) }
+            // The one moment a buffer's lost head becomes a fact about a screen: this emulator began after the cut.
+            // Off the update pass, since this runs inside makeNSView or updateNSView.
+            let fromTrimmedBuffer = !transcript.isEmpty && carrier.transcriptIsTruncated
+            DispatchQueue.main.async { seeded(fromTrimmedBuffer) }
             carrier.deliverOutput(to: self) { [weak scroller] bytes in scroller?.pane.feed(byteArray: bytes) }
         }
 

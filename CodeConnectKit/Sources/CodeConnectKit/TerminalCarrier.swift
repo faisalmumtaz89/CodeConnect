@@ -157,6 +157,12 @@ public final class TerminalCarrier {
     /// turn it into a claim about what that emulator is showing — see
     /// `TerminalTabView.seededFromTrimmedBuffer`.
     public private(set) var transcriptIsTruncated = false
+    /// What a terminal seeded from a trimmed buffer says above itself, on screen and out loud, on every device.
+    ///
+    /// A sentence about what is missing rather than a word about the buffer. A listener who is handed "truncated"
+    /// has been told the app hit a limit; what they need to know is that the session printed more than this pane is
+    /// showing. Short enough not to be cut at two lines.
+    nonisolated public static let trimmedBufferNotice = "Earlier output not shown"
     /// The session this terminal is for, while there is one.
     private(set) var sessionUID: String?
     /// The code the daemon closed with, for the view's explanation and retry.
