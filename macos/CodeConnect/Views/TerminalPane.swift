@@ -137,6 +137,8 @@ struct TerminalSurface: NSViewRepresentable {
     /// Whether its tab is shown. Hidden, the terminal draws nothing, takes no clicks, is not read out, and gives up
     /// the keyboard, so nothing typed elsewhere reaches the run; shown again, it takes the keyboard back.
     let onScreen: Bool
+    /// Told once, when the new terminal is seeded, whether it began from a transcript that had lost its head.
+    let seeded: (_ fromTrimmedBuffer: Bool) -> Void
 
     func makeNSView(context: Context) -> TerminalPaneScroller {
         let scroller = TerminalPaneScroller()
@@ -151,7 +153,7 @@ struct TerminalSurface: NSViewRepresentable {
         // The app's own 16 colours: SwiftTerm's defaults are tuned for a light background.
         pane.installColors(CC.ansi.table.map { SwiftTerm.Color(red: $0.red, green: $0.green, blue: $0.blue) })
         pane.setAccessibilityIdentifier("terminal.view")
-        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID)
+        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID, seeded: seeded)
         scroller.isHidden = !onScreen
         // The terminal takes the keyboard when it appears, as a terminal window does: what is typed next is the run's.
         if onScreen {
@@ -161,7 +163,7 @@ struct TerminalSurface: NSViewRepresentable {
     }
 
     func updateNSView(_ scroller: TerminalPaneScroller, context: Context) {
-        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID)
+        context.coordinator.attach(scroller: scroller, carrier: carrier, sessionUID: sessionUID, seeded: seeded)
         guard scroller.isHidden == onScreen else { return }
         if !onScreen, scroller.window?.firstResponder === scroller.pane { scroller.window?.makeFirstResponder(nil) }
         scroller.isHidden = !onScreen
@@ -184,7 +186,10 @@ struct TerminalSurface: NSViewRepresentable {
         @MainActor private var replayedRun: String?
 
         @MainActor
-        func attach(scroller: TerminalPaneScroller, carrier: TerminalCarrier, sessionUID: String) {
+        func attach(
+            scroller: TerminalPaneScroller, carrier: TerminalCarrier, sessionUID: String,
+            seeded: @escaping (Bool) -> Void
+        ) {
             self.scroller = scroller
             self.carrier = carrier
             scroller.onViewport = { [weak self] cols, rows in self?.carrier?.resize(cols: cols, rows: rows) }
@@ -198,6 +203,10 @@ struct TerminalSurface: NSViewRepresentable {
             if let size = carrier.paneSize { scroller.pane.takePaneSize(size) }
             let transcript = carrier.transcript(forRun: sessionUID)
             if !transcript.isEmpty { scroller.pane.feed(byteArray: transcript) }
+            // The one moment a buffer's lost head becomes a fact about a screen: this emulator began after the cut.
+            // Off the update pass, since this runs inside makeNSView or updateNSView.
+            let fromTrimmedBuffer = !transcript.isEmpty && carrier.transcriptIsTruncated
+            DispatchQueue.main.async { seeded(fromTrimmedBuffer) }
             carrier.deliverOutput(to: self) { [weak scroller] bytes in scroller?.pane.feed(byteArray: bytes) }
         }
 

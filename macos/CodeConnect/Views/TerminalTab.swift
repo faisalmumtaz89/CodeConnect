@@ -85,6 +85,9 @@ private struct Live: View {
     let sessionUID: String
     let onScreen: Bool
     let open: () -> Void
+    /// Whether this view's terminal began from a transcript that had lost its head to Kit's cap, so its screen may be
+    /// partial; as on the iPhone, it says so above the terminal. A fresh attach repaints the screen whole and clears it.
+    @State private var seededFromTrimmedBuffer = false
 
     var body: some View {
         let phase = carrier.phase(forRun: sessionUID)
@@ -107,7 +110,19 @@ private struct Live: View {
             .frame(height: 44)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             if isOpen(phase) || shown {
-                TerminalSurface(carrier: carrier, sessionUID: sessionUID, onScreen: onScreen)
+                // A sibling, so showing it never rebuilds the terminal it describes.
+                if seededFromTrimmedBuffer {
+                    Text(TerminalCarrier.trimmedBufferNotice)
+                        .font(Theme.ui(11.5))
+                        .foregroundStyle(Theme.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 6)
+                        .accessibilityIdentifier("terminal.trimmed")
+                }
+                TerminalSurface(carrier: carrier, sessionUID: sessionUID, onScreen: onScreen) {
+                    seededFromTrimmedBuffer = $0
+                }
             } else {
                 Text("Open the terminal to see this run on its computer and type into it.")
                     .font(Theme.ui(12.5))
@@ -117,6 +132,14 @@ private struct Live: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onChange(of: isAttached(phase)) { _, attached in
+            if attached { seededFromTrimmedBuffer = false }
+        }
+    }
+
+    private func isAttached(_ phase: TerminalCarrier.Phase) -> Bool {
+        if case .attached = phase { return true }
+        return false
     }
 
     /// Not after a close of this run's terminal that asking again cannot change (the session ended, or is not
