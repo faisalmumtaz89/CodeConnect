@@ -464,9 +464,10 @@ public enum TimelineBuilder {
                                 isTruncated: event.isTruncated))))
 
             case .toolResult:
-                // Folded into its call above, unless the call was never seen.
+                // Folded into its call above, the hook's or the transcript's,
+                // unless the call was never seen.
                 guard let id = event.toolUseID, !hookToolCallIDs.contains(id),
-                    !questionToolUseIDs.contains(id)
+                    transcriptToolUseSeqs[id] == nil, !questionToolUseIDs.contains(id)
                 else { break }
                 let outcome = resultsByToolUse[id]
                 let name = event.toolName ?? "tool"

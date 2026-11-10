@@ -332,8 +332,10 @@ is enforced.
   `inferred: true` — the daemon saw the prompt leave, it did not see the answer —
   so the UI says "Closed at the computer", never "Allowed" or "answered"
   (`AnswerOutcome.decisionLabel`). Where an answer came from is said as far as the
-  record proves it (`AnswerOutcome.provenance`): `phone` is "from a phone", any
-  paired one, never "this app"; `local` is "at the computer".
+  record proves it (`AnswerOutcome.provenance(on:)`): `phone` names the kind of
+  paired device the record says sent it (`answeredOn`), "from a Mac" or, read on a
+  Mac, "from an iPhone", and "from a phone" where an iPhone or an unknown device
+  answered and the phone reads it; never "this app". `local` is "at the computer".
 * **A disconnected terminal says so.** The last bytes stay on screen under an
   explicit not-live banner, because a frozen terminal is indistinguishable from
   a live one and clearing it would lie about what you just read.
@@ -689,7 +691,9 @@ screen.
 A sent answer is recorded as sent to Claude, not confirmed (`indeterminate`, detail
 "Sent to Claude from a phone"; `AnswerOutcome.wasSentToClaude`), because Claude
 takes the first answer and may not use the phone's. The banner, the resolved card
-and the timeline say "Sent", never "Confirmed" or "Unconfirmed".
+and the timeline say "Sent", never "Confirmed" or "Unconfirmed". The detail is a
+marker, the same whichever device answered; the words shown name that device from
+`answeredOn` (`AnswerOutcome.sentToClaudeLine(on:)`).
 
 `CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
 ccd's own test emits.
@@ -734,9 +738,10 @@ Whether the phone may answer is the card's `question_hold` — `held`, `at_mac` 
 (`ApprovalItem.questionHold`). Only `held` is answerable. Every other state shows
 the questions read-only and says why (`QuestionCardStatus`): *Asking at the Mac*,
 *Answer at the Mac* (the phone's hold ended, or the hold is missing or unknown),
-*too old* (no `question_card`), *Answered* with what was sent from the phone
-(Claude ran with exactly those answers; which phone sent them is not recorded, and
-the same answers chosen at the Mac would read the same), *Answered at the Mac*,
+*too old* (no `question_card`), *Answered* with what was sent from a paired device
+(Claude ran with exactly those answers; the kind of device that sent them is named
+when the record says, which one is not recorded, and the same answers chosen at the
+Mac would read the same), *Answered at the Mac*,
 *Declined* (a decline from a phone recorded as taken, which only an older Mac
 records), *Unconfirmed* (a current Mac's decline among them), and
 *Closed* when the question left the Mac (Escape, the session or turn ending)
