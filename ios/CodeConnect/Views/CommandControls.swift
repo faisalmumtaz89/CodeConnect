@@ -178,30 +178,7 @@ struct ModelSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    private enum Phase: Equatable {
-        case idle
-        /// The alias being typed on the Mac right now.
-        case sending(String)
-        /// Keystrokes landed; Claude Code has not yet answered in the
-        /// transcript. `quietly` flips once the usual window has passed: the
-        /// same watch, an honest caption. **It never becomes a failure** — a
-        /// receipt that arrives late still has to be able to settle this sheet.
-        /// A terminal "no confirmation" over a transcript that went on to say
-        /// `Set model to X` is a stale claim, and stale claims are the thing
-        /// this sheet may not make.
-        case waiting(request: String, quietly: Bool)
-        case confirmed(String)
-        /// Terminal, and neither success nor failure: the request was
-        /// answered, and the answer was not a change. Claude Code kept the
-        /// model, or the daemon replayed a settled mutation that carries no
-        /// outcome. A green tick over either would be the exact lie this app
-        /// exists not to tell; a warning would invent a fault that is not
-        /// there. The sentence carries which it was.
-        case neutral(String)
-        case failed(String)
-    }
-
-    @State private var phase: Phase = .idle
+    @State private var phase: CommandPhase = .idle
     @State private var custom: String = ""
     @State private var timeoutTask: Task<Void, Never>?
     /// How far the event stream had got when a row was tapped. Only a `/model`
@@ -211,18 +188,8 @@ struct ModelSheet: View {
 
     private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
 
-    /// **Quiet waiting is not busy.** The watch stays armed for a receipt that
-    /// may still arrive, but once the usual window has passed the controls come
-    /// back: a sheet whose every row is inert, with a spinner running and no
-    /// statement that only dismissing it will help, is a dead end. A receipt
-    /// that never arrives — reworded copy, a gap reset, a dropped socket —
-    /// must not cost the reader the sheet.
-    private var busy: Bool {
-        switch phase {
-        case .sending, .waiting(_, quietly: false): return true
-        case .waiting(_, quietly: true), .idle, .confirmed, .neutral, .failed: return false
-        }
-    }
+    /// See `CommandPhase.busy`.
+    private var busy: Bool { phase.busy }
 
     private var current: ModelDisplay? {
         model.confirmedModel(for: sessionKey).map { ModelDisplay.from($0.name) }
@@ -280,30 +247,14 @@ struct ModelSheet: View {
         .onAppear {
             if custom.isEmpty, !prefill.isEmpty { custom = prefill }
         }
-        .onChange(of: receipts?.modelSignal) { _, signal in
+        .onChange(of: receipts?.modelSignal) { _, _ in
             guard case .waiting(let request, _) = phase,
-                let outcome = ModelChangeWatch.outcome(
-                    after: baselineSeq, requested: request, signal: signal)
+                let settled = model.receiptPhase(for: .model(request), in: sessionKey, after: baselineSeq)
             else { return }
             timeoutTask?.cancel()
-            withAnimation(CC.motion.small) { phase = Self.phase(for: outcome) }
+            withAnimation(CC.motion.small) { phase = settled }
         }
         .onDisappear { timeoutTask?.cancel() }
-    }
-
-    /// Terminal phase for one `/model` outcome — the sentences live on
-    /// `ModelConfirmation` and on Claude Code's own error line, where a test
-    /// can assert them.
-    private static func phase(for outcome: ModelCommandOutcome) -> Phase {
-        switch outcome {
-        case .receipt(let receipt):
-            return receipt.isChange
-                ? .confirmed(receipt.sheetStatus) : .neutral(receipt.sheetStatus)
-        // Verbatim: Claude Code already said the useful thing, and the value it
-        // is quoting is the one the reader typed.
-        case .notFound(let line):
-            return .failed(line)
-        }
     }
 
     // MARK: Current
@@ -485,12 +436,6 @@ struct ModelSheet: View {
         }
     }
 
-    /// One sentence, three sheets. A duplicate response proves the mutation was
-    /// typed once and settled; it does not carry what Claude Code then did, so
-    /// this claims neither a change nor the absence of one.
-    static let alreadySentLine =
-        "This request was sent earlier; this retry does not confirm its outcome."
-
     private func statusLine(_ text: String, tone: CCTone) -> some View {
         CCProse(
             text, style: CC.type.footnote,
@@ -504,75 +449,32 @@ struct ModelSheet: View {
 
     private func apply(_ alias: String) {
         guard !busy else { return }
+        let command = NativeCommand.model(alias)
         baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(alias) }
         Task {
             let attempt = await model.sendModelCommand(alias, to: sessionKey)
-            switch attempt {
-            case .sent:
-                // Keystrokes landed — which proves typing, not execution.
-                // Claude Code's own transcript receipt flips this to done, and
-                // it may already have landed while `.sending`.
-                onLanded()
-                if let outcome = ModelChangeWatch.outcome(
-                    after: baselineSeq, requested: alias,
-                    signal: receipts?.modelSignal)
-                {
-                    phase = Self.phase(for: outcome)
-                } else {
-                    phase = .waiting(request: alias, quietly: false)
-                    armQuietFlip()
-                }
-            case .alreadyApplied:
-                // The daemon replayed a settled mutation without typing, so no
-                // new transcript line is coming. It proves the keys were typed
-                // once and nothing else — in particular, the settled outcome it
-                // is replaying may have been a cancelled confirmation.
-                onLanded()
-                phase = .neutral(Self.alreadySentLine)
-            case .refused(let reason):
-                phase = .failed("Nothing was typed: \(reason)")
-            case .failed(let reason):
-                phase = .failed("Couldn’t type the command: \(reason)")
-            case .indeterminate(let reason):
-                phase = .failed(
-                    "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
-            case .composerRecovered:
-                // The command took the composer and the daemon's generic
-                // slash-command rescue pressed Esc to give it back. Measured on
-                // 2.1.223: when the conversation is already cached for the
-                // current model, `/model <alias>` opens a confirmation, and that
-                // Esc answers it in the negative — Claude Code then prints
-                // `Kept model as …`. So this is never a change.
-                //
-                // Only what was observed is claimed: the composer went away and
-                // one Esc brought it back. The view is not named; the daemon
-                // does not identify views.
-                onLanded()
-                phase = .neutral(
-                    "/model \(alias) took the composer on the computer and CodeConnect "
-                        + "pressed Esc to give it back. No model change was confirmed.")
-                // On 2.1.223 that recovered path was followed by `Kept model as …`.
-                // The UI reports only the observed recovery and that no change
-                // was confirmed.
-            case .composerLost:
-                phase = .failed(
-                    "Couldn’t restore the composer. Open Terminal to recover.")
-            }
+            // The keystrokes landed: the draft that opened this sheet is consumed.
+            if attempt.landed { onLanded() }
+            // Claude Code's own receipt may already have landed while `.sending`.
+            phase = command.phase(after: attempt)
+                ?? model.receiptPhase(for: command, in: sessionKey, after: baselineSeq)
+                ?? .waiting(request: alias, quietly: false)
+            if case .waiting(_, quietly: false) = phase { armQuietFlip(command) }
         }
     }
 
     /// The observation window ends; the observation does not. Past it the
     /// caption stops promising and nothing else changes — the watch stays
     /// armed, so a receipt arriving late still settles this sheet correctly.
-    private func armQuietFlip() {
+    private func armQuietFlip(_ command: NativeCommand) {
         timeoutTask?.cancel()
         timeoutTask = Task {
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: command.quietAfter)
             guard !Task.isCancelled else { return }
-            if case .waiting(let alias, quietly: false) = phase {
+            if case .waiting(let request, quietly: false) = phase {
                 withAnimation(CC.motion.small) {
-                    phase = .waiting(request: alias, quietly: true)
+                    phase = .waiting(request: request, quietly: true)
                 }
             }
         }
@@ -602,20 +504,7 @@ struct EffortSheet: View {
         ("max", "Maximum"),
     ]
 
-    private enum Phase: Equatable {
-        case idle
-        case sending(String)
-        /// Keystrokes landed; watching for Claude Code's own receipt. See the
-        /// note on `ModelSheet.Phase.waiting` — `quietly` changes the caption
-        /// and nothing else, and this never becomes a failure.
-        case waiting(request: String, quietly: Bool)
-        case confirmed(String)
-        /// See `ModelSheet.Phase.neutral`.
-        case neutral(String)
-        case failed(String)
-    }
-
-    @State private var phase: Phase = .idle
+    @State private var phase: CommandPhase = .idle
     @State private var timeoutTask: Task<Void, Never>?
     /// How far the event stream had got when a row was tapped; only a receipt
     /// above this line answers this send.
@@ -623,19 +512,8 @@ struct EffortSheet: View {
 
     private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
 
-    /// See `ModelSheet.busy`.
-    private var busy: Bool {
-        switch phase {
-        case .sending, .waiting(_, quietly: false): return true
-        case .waiting(_, quietly: true), .idle, .confirmed, .neutral, .failed: return false
-        }
-    }
-
-    /// Terminal phase for one effort receipt — the sentence lives on
-    /// `EffortConfirmation`, where a test can assert it.
-    private static func phase(for receipt: EffortConfirmation) -> Phase {
-        receipt.isChange ? .confirmed(receipt.sheetStatus) : .neutral(receipt.sheetStatus)
-    }
+    /// See `CommandPhase.busy`.
+    private var busy: Bool { phase.busy }
 
     var body: some View {
         CCSheetChrome("Effort", onClose: { dismiss() }) {
@@ -670,12 +548,12 @@ struct EffortSheet: View {
         }
         // The *sequence*, not the fact: a fact can repeat verbatim, and a
         // backfill can publish a historical one into an empty slot.
-        .onChange(of: receipts?.effortSeq) { _, seq in
-            guard case .waiting = phase, let seq, seq > baselineSeq,
-                let fact = receipts?.effort
+        .onChange(of: receipts?.effortSeq) { _, _ in
+            guard case .waiting(let request, _) = phase,
+                let settled = model.receiptPhase(for: .effort(request), in: sessionKey, after: baselineSeq)
             else { return }
             timeoutTask?.cancel()
-            withAnimation(CC.motion.small) { phase = Self.phase(for: fact) }
+            withAnimation(CC.motion.small) { phase = settled }
         }
         .onDisappear { timeoutTask?.cancel() }
     }
@@ -759,53 +637,26 @@ struct EffortSheet: View {
 
     private func apply(_ value: String) {
         guard !busy else { return }
+        let command = NativeCommand.effort(value)
         baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(value) }
         Task {
             let attempt = await model.sendEffortCommand(value, to: sessionKey)
-            switch attempt {
-            case .sent:
-                onLanded()
-                // The receipt may already have landed while `.sending`.
-                if let fact = receipts?.effort,
-                    let seq = receipts?.effortSeq, seq > baselineSeq
-                {
-                    phase = Self.phase(for: fact)
-                } else {
-                    phase = .waiting(request: value, quietly: false)
-                    armQuietFlip(value)
-                }
-            case .alreadyApplied:
-                onLanded()
-                phase = .neutral(ModelSheet.alreadySentLine)
-            case .refused(let reason):
-                phase = .failed("Nothing was typed: \(reason)")
-            case .failed(let reason):
-                phase = .failed("Couldn’t type the command: \(reason)")
-            case .indeterminate(let reason):
-                phase = .failed(
-                    "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
-            case .composerRecovered:
-                // As on the Model sheet: on 2.1.223 `/effort <new value>` opens
-                // a confirmation whenever the conversation is already cached for
-                // the current level, and the generic rescue answers it with Esc.
-                // Claude Code then prints `Kept effort level as …`.
-                onLanded()
-                phase = .neutral(
-                    "/effort \(value) took the composer on the computer and CodeConnect "
-                        + "pressed Esc to give it back. No effort change was confirmed.")
-            case .composerLost:
-                phase = .failed("Couldn’t restore the composer. Open Terminal to recover.")
-            }
+            if attempt.landed { onLanded() }
+            // The receipt may already have landed while `.sending`.
+            phase = command.phase(after: attempt)
+                ?? model.receiptPhase(for: command, in: sessionKey, after: baselineSeq)
+                ?? .waiting(request: value, quietly: false)
+            if case .waiting(_, quietly: false) = phase { armQuietFlip(command) }
         }
     }
 
     /// See `ModelSheet.armQuietFlip`: the caption stops promising, the watch
     /// continues.
-    private func armQuietFlip(_ value: String) {
+    private func armQuietFlip(_ command: NativeCommand) {
         timeoutTask?.cancel()
         timeoutTask = Task {
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: command.quietAfter)
             guard !Task.isCancelled else { return }
             if case .waiting(let request, quietly: false) = phase {
                 withAnimation(CC.motion.small) {
@@ -829,19 +680,7 @@ struct CompactSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    private enum Phase: Equatable {
-        case idle
-        case sending
-        /// Keystrokes landed; watching for the completion line. `quietly`
-        /// flips after the observation window: same watch, honest caption.
-        case waiting(quietly: Bool)
-        case confirmed(String)
-        /// See `ModelSheet.Phase.neutral`.
-        case neutral(String)
-        case failed(String)
-    }
-
-    @State private var phase: Phase = .idle
+    @State private var phase: CommandPhase = .idle
     @State private var instructions: String = ""
     @State private var timeoutTask: Task<Void, Never>?
     /// How far the event stream had got when Compact was tapped; only a
@@ -850,13 +689,8 @@ struct CompactSheet: View {
 
     private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
 
-    /// See `ModelSheet.busy`.
-    private var busy: Bool {
-        switch phase {
-        case .sending, .waiting(quietly: false): return true
-        case .waiting(quietly: true), .idle, .confirmed, .neutral, .failed: return false
-        }
-    }
+    /// See `CommandPhase.busy`.
+    private var busy: Bool { phase.busy }
 
     var body: some View {
         CCSheetChrome("Compact context", onClose: { dismiss() }) {
@@ -898,19 +732,13 @@ struct CompactSheet: View {
             if instructions.isEmpty, !prefill.isEmpty { instructions = prefill }
         }
         // The sequence, not the fact — see the Effort sheet.
-        .onChange(of: receipts?.compactSeq) { _, seq in
-            guard case .waiting = phase, let seq, seq > baselineSeq,
-                let signal = receipts?.compact
+        .onChange(of: receipts?.compactSeq) { _, _ in
+            guard case .waiting(let request, _) = phase,
+                let settled = model.receiptPhase(
+                    for: .compact(instructions: request), in: sessionKey, after: baselineSeq)
             else { return }
             timeoutTask?.cancel()
-            withAnimation(CC.motion.small) {
-                switch signal {
-                case .compacted:
-                    phase = .confirmed("Claude Code confirmed the compaction.")
-                case .notEnoughMessages:
-                    phase = .failed("Not enough messages to compact.")
-                }
-            }
+            withAnimation(CC.motion.small) { phase = settled }
         }
         .onDisappear { timeoutTask?.cancel() }
     }
@@ -931,9 +759,9 @@ struct CompactSheet: View {
             EmptyView()
         case .sending:
             compactStatusLine("Typing /compact on the computer…", tone: .neutral)
-        case .waiting(quietly: false):
+        case .waiting(_, quietly: false):
             compactStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
-        case .waiting(quietly: true):
+        case .waiting(_, quietly: true):
             compactStatusLine(
                 "Compaction requested on the computer. "
                     + "CodeConnect has not received a completion signal.",
@@ -958,57 +786,29 @@ struct CompactSheet: View {
 
     private func apply() {
         guard !busy else { return }
+        let command = NativeCommand.compact(instructions: instructions)
         baselineSeq = model.eventHighWater(for: sessionKey)
-        withAnimation(CC.motion.micro) { phase = .sending }
+        withAnimation(CC.motion.micro) { phase = .sending(command.request) }
         Task {
             let attempt = await model.sendCompactCommand(
-                instructions: instructions, to: sessionKey)
-            switch attempt {
-            case .sent:
-                onLanded()
-                if let signal = receipts?.compact,
-                    let seq = receipts?.compactSeq, seq > baselineSeq
-                {
-                    switch signal {
-                    case .compacted:
-                        phase = .confirmed("Claude Code confirmed the compaction.")
-                    case .notEnoughMessages:
-                        phase = .failed("Not enough messages to compact.")
-                    }
-                } else {
-                    phase = .waiting(quietly: false)
-                    armQuietFlip()
-                }
-            case .alreadyApplied:
-                onLanded()
-                phase = .neutral(ModelSheet.alreadySentLine)
-            case .refused(let reason):
-                phase = .failed("Nothing was typed: \(reason)")
-            case .failed(let reason):
-                phase = .failed("Couldn’t type the command: \(reason)")
-            case .indeterminate(let reason):
-                phase = .failed(
-                    "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
-            case .composerRecovered:
-                onLanded()
-                phase = .waiting(quietly: false)
-                armQuietFlip()
-            case .composerLost:
-                phase = .failed("Couldn’t restore the composer. Open Terminal to recover.")
-            }
+                instructions: command.request, to: sessionKey)
+            if attempt.landed { onLanded() }
+            phase = command.phase(after: attempt)
+                ?? model.receiptPhase(for: command, in: sessionKey, after: baselineSeq)
+                ?? .waiting(request: command.request, quietly: false)
+            if case .waiting(_, quietly: false) = phase { armQuietFlip(command) }
         }
     }
 
-    /// A real compaction measured ~6s on a small context and grows with the
-    /// context, so the window's end is not a failure — the watch continues;
-    /// only the caption stops promising.
-    private func armQuietFlip() {
+    /// The window's end is not a failure: the watch continues and only the
+    /// caption stops promising (see `NativeCommand.quietAfter`).
+    private func armQuietFlip(_ command: NativeCommand) {
         timeoutTask?.cancel()
         timeoutTask = Task {
-            try? await Task.sleep(for: .seconds(10))
+            try? await Task.sleep(for: command.quietAfter)
             guard !Task.isCancelled else { return }
-            if case .waiting(quietly: false) = phase {
-                withAnimation(CC.motion.small) { phase = .waiting(quietly: true) }
+            if case .waiting(let request, quietly: false) = phase {
+                withAnimation(CC.motion.small) { phase = .waiting(request: request, quietly: true) }
             }
         }
     }

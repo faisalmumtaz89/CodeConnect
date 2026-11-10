@@ -266,6 +266,13 @@ final class RiskAndDeckTests: XCTestCase {
         }
     }
 
+    /// The wait while an answer is on the way names the computer the agents
+    /// run on, in each device's words.
+    func testTheWaitNamesTheAgentsComputerInEachDevicesWords() {
+        XCTAssertEqual(DecisionCard.waitingSentence(on: .iPhone), "Waiting for your computer to confirm…")
+        XCTAssertEqual(DecisionCard.waitingSentence(on: .mac), "Waiting for the agent's computer to confirm…")
+    }
+
     /// Why a card's controls cannot act, in the order that matters: a send in
     /// flight, then the link, then the run, then a card whose text does not
     /// match its hash.
