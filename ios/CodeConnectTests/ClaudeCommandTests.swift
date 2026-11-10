@@ -595,6 +595,39 @@ final class LastConfirmedModelTests: XCTestCase {
             ModelCommandSignal(outcome: .receipt(.kept("Fable 5")), seq: 12))
     }
 
+    /// A turn's end moves the `/model` watch's signal, so a sheet that re-reads
+    /// on it re-reads then: a `turn_complete`, and the marker an Esc writes
+    /// instead of one. A replayed older end never lowers it; a rewound log
+    /// clears it, or its old height would settle the next wait at once.
+    func testATurnsEndMovesTheModelWatchSignal() async throws {
+        let state = SessionState(sessionKey: "cc-1")
+        func ended(_ seq: UInt64) throws -> Event {
+            try event(
+                """
+                {"seq":\(seq),"session_id":"cc-1","ts":"2026-08-04T20:02:00.000Z",
+                 "kind":"turn_complete","source":"transcript",
+                 "payload":{"type":"system","subtype":"turn_duration","durationMs":15143}}
+                """)
+        }
+        state.ingest(try ended(10))
+        XCTAssertEqual(state.receipts.modelSignal, ModelWatchSignal(command: nil, turnEndSeq: 10))
+        state.ingest(
+            try event(
+                """
+                {"seq":11,"session_id":"cc-1","ts":"2026-08-04T20:03:00.000Z",
+                 "kind":"user_message","source":"transcript",
+                 "payload":{"type":"user","message":{"role":"user",
+                 "content":[{"type":"text","text":"[Request interrupted by user]"}]}}}
+                """))
+        XCTAssertEqual(state.receipts.modelSignal.turnEndSeq, 11, "an Esc ends the turn")
+        state.ingest(try ended(30))
+        state.ingest(try ended(19))
+        await state.settleForTesting()
+        XCTAssertEqual(state.receipts.modelSignal.turnEndSeq, 30, "a replayed older end never lowers it")
+        state.resetForRewoundLog()
+        XCTAssertEqual(state.receipts.modelSignal.turnEndSeq, 0)
+    }
+
     /// **The bytes a real transcript actually holds.** Claude Code bolds the
     /// model name, so the line arrives wrapped in SGR codes. A parser exercised
     /// only against tidied strings passes here and fails on every real
