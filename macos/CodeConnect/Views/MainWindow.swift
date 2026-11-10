@@ -16,6 +16,8 @@ struct MainWindow: View {
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
     @State private var opened: String?
+    /// The window's width, from which the list's share beside an open run is worked out.
+    @State private var width: CGFloat = 0
 
     init() {
         #if DEBUG
@@ -40,13 +42,12 @@ struct MainWindow: View {
                 let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
                 let model = open.flatMap { machines.model(forSession: $0.id) }
                 FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
-                    // Beside an open run the list gives way first, down to what its rows still read at.
-                    .frame(minWidth: model == nil ? nil : 290, maxWidth: model == nil ? .infinity : 580)
+                    // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
+                    // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
+                    .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
                     SessionPane(row: open, model: model).id(open.id)
-                        // Room for a card's answers in one row.
-                        .frame(minWidth: 450)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -54,6 +55,7 @@ struct MainWindow: View {
         }
         .background(Theme.window)
         .ignoresSafeArea()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .toolbar(removing: .title)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
