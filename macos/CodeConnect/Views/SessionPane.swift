@@ -46,12 +46,13 @@ struct SessionPane: View {
                         PendingRequests(
                             model: model, key: row.id, maxHeight: height / 2, held: composerHolds == true && !boxTaken)
                         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
-                        // way are kept. It takes no room, no click and no reading.
+                        // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
+                        // Not clipped: its command list opens above it.
                         ComposerBar(key: row.id, kept: composerDraft)
                             .frame(height: boxTaken ? 0 : nil, alignment: .top)
-                            .clipped()
                             .opacity(boxTaken ? 0 : 1)
                             .allowsHitTesting(!boxTaken)
+                            .disabled(boxTaken)
                             .accessibilityHidden(boxTaken)
                     }
                     .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
