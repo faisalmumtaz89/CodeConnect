@@ -13,6 +13,8 @@ struct QuestionBlock: View {
     @State private var sending: String?
     /// How tall the questions are, for their own scroll at the foot.
     @State private var askedHeight: CGFloat = 0
+    /// How tall Decline and Submit are with their box: the questions scroll in what they leave of the foot.
+    @State private var answersHeight: CGFloat = 0
     @Environment(\.pendingSlot) private var slot
 
     init(approval: ApprovalItem, questions: QuestionCard, model: AppModel) {
@@ -52,15 +54,19 @@ struct QuestionBlock: View {
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { askedHeight = $0 }
                     }
                     .scrollBounceBehavior(.basedOnSize)
-                    .frame(height: min(askedHeight, slot.maxHeight))
+                    .frame(height: min(askedHeight, max(0, slot.maxHeight - (status.isAnswerable ? answersHeight : 0))))
                     .accessibilityIdentifier("session.pending")
                     if status.isAnswerable {
-                        if held {
-                            controls(keys: false).padding(.horizontal, 28).padding(.bottom, 14)
-                        } else {
-                            // Its keys answer while no sheet covers the window.
-                            ReplyBoxFrame { controls(keys: !slot.sheetUp) }.preference(key: HoldsReplyBox.self, value: true)
+                        Group {
+                            if held {
+                                controls(keys: false).padding(.horizontal, 28).padding(.bottom, 14)
+                            } else {
+                                // Its keys answer while no sheet covers the window.
+                                ReplyBoxFrame { controls(keys: !slot.sheetUp) }
+                                    .preference(key: HoldsReplyBox.self, value: true)
+                            }
                         }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { answersHeight = $0 }
                     }
                 }
             } else {

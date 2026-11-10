@@ -2,15 +2,16 @@ import CodeConnectKit
 import SwiftUI
 
 /// What in this run waits on you, at the foot of the pane where you write to it: the oldest request still pending.
-/// What it asks is read in its own scroll above (`session.pending`), in at most `maxHeight` (the space its read gate
-/// measures), and its answers take the reply box's place, which stands aside mounted (`HoldsReplyBox`). The requests
-/// behind it wait their turn, counted on its title line, and the next takes the box when it is answered. While the
-/// reply field holds the keyboard (`held`), the box stays the writer's: the request waits above it with its answers,
-/// until the field lets go. Once answered or resolved, a request is a row of the conversation again.
+/// What it asks is read in its own scroll above (`session.pending`, the space its read gate measures), in what its
+/// answers leave of `maxHeight`, so at every window size the answers stay inside the window; the answers take the reply
+/// box's place, which stands aside mounted (`HoldsReplyBox`). The requests behind it wait their turn, counted on its
+/// title line, and the next takes the box when it is answered. While the reply field holds the keyboard (`held`), the
+/// box stays the writer's: the request waits above it with its answers, until the field lets go. Once answered or
+/// resolved, a request is a row of the conversation again.
 struct PendingRequests: View {
     let model: AppModel
     let key: String
-    /// The most of the pane what is asked takes.
+    /// The most of the pane a request takes, its answers included.
     let maxHeight: CGFloat
     /// The reply field holds the keyboard.
     let held: Bool
@@ -31,7 +32,7 @@ struct PendingRequests: View {
     }
 }
 
-/// A request in the pane's foot rather than a row of the conversation: the most height what it asks may take,
+/// A request in the pane's foot rather than a row of the conversation: the most height it may take, answers included,
 /// whether the reply field holds the keyboard, whether a sheet covers the window (its answers then take no keys), and
 /// how many requests wait behind it.
 struct PendingSlot: Equatable {
