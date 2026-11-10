@@ -161,6 +161,55 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertGreaterThan(stops, 10, "the recordings carry too few turns to prove anything")
     }
 
+    /// A call only the transcript announced — no PreToolUse hook saw it, as in
+    /// history read after an install, turns from while the daemon was stopped,
+    /// or a run's tail read after a restart — is one row under its own name,
+    /// with its result's status, and the result draws no second row. Every such
+    /// call the daemon's recordings carry, and each run's rows otherwise as
+    /// they were.
+    func testACallOnlyTheTranscriptAnnouncedIsOneRow() async throws {
+        let interrupted = "notice:Interrupted · What should Claude do instead?"
+        let runs: [(name: String, run: String?, rows: [String])] = [
+            (
+                "transcript-scheduled-prompt-wire", nil,
+                [
+                    "you", "tool:ToolSearch:succeeded", "tool:CronCreate:succeeded", "reply", "reply", "you",
+                    "reply",
+                ]
+            ),
+            (
+                "transcript-api-errors-wire", nil,
+                [
+                    "reply", "you", "notice:Turn complete", "you", "reply", "you", "reply", "you", "reply", "you",
+                    "tool:Read:succeeded", "reply", "you", "reply", "you", "reply", "tool:Read:succeeded", "reply",
+                    "reply",
+                ]
+            ),
+            (
+                "transcript-interrupts-wire", "esc-during-tool",
+                ["you", "reply", "tool:Bash:failed", interrupted, "you", "reply"]
+            ),
+            (
+                "transcript-interrupts-wire", "refuse-tool",
+                ["reply", "tool:Bash:failed", "you", interrupted, "notice:Turn complete", "you", "reply"]
+            ),
+        ]
+        for (name, run, rows) in runs {
+            let events = try WireRecording.events(name, run: run, through: .max)
+            let state = await WireRecording.state(events)
+            let drawn = TimelineBuilder.drawn(state.timeline).map { item -> String in
+                switch item.content {
+                case .userMessage: return "you"
+                case .agentMessage: return "reply"
+                case .tool(let tool): return "tool:\(tool.name):\(tool.status)"
+                case .approval: return "card"
+                case .notice(let notice): return "notice:\(notice.title)"
+                }
+            }
+            XCTAssertEqual(drawn, rows, "\(name) \(run ?? "")")
+        }
+    }
+
     /// The word beside a computer's name, on the home screen and in a
     /// session's header alike: none while the link is live or only lagging.
     func testAComputersLinkIsSaidInAWordOnlyWhenItIsNotLive() {
