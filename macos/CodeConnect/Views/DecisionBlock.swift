@@ -87,7 +87,11 @@ struct DecisionBlock: View {
                             if held {
                                 controls.padding(.horizontal, 28).padding(.bottom, 14)
                             } else {
-                                ReplyBoxFrame { controls }.preference(key: HoldsReplyBox.self, value: true)
+                                ReplyBoxFrame {
+                                    outcomeLine
+                                    controls
+                                }
+                                .preference(key: HoldsReplyBox.self, value: true)
                             }
                         }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { answersHeight = $0 }
@@ -99,6 +103,24 @@ struct DecisionBlock: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)
+    }
+
+    /// What became of the run's last stop or message, said in the box because the reply box that says it stands aside
+    /// while the box is up: Kit's own line (`outcomeNote`, the one the reply box reads), in the reply box's note style;
+    /// nothing at all when there is none. A stop refused, or never answered, leaves this request waiting, so the box is
+    /// where its outcome must be read.
+    @ViewBuilder private var outcomeLine: some View {
+        if let note = model.outcomeNote(for: approval.sessionKey, lastSend: nil) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if let symbol = note.tone.symbol {
+                    Image(systemName: symbol).foregroundStyle(note.tone.color).accessibilityHidden(true)
+                }
+                Text(note.text).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
+            }
+            .font(Theme.ui(12))
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("\(id).outcome")
+        }
     }
 
     /// What the agent asks: who and which tool (waiting on you while it can be answered), the command as it was
