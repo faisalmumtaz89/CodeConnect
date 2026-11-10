@@ -463,7 +463,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
     }
     private func liveBarAvailable(_ model: AppModel, attempt: AnswerAttempt?) -> Bool {
         let live = model.shownApproval(sessionKey: sessionKey, id: cardID)
-        return DecisionCardView.actionBarAvailable(
+        return DecisionCard.actionBarAvailable(
             outcome: live?.outcome, codex: live?.codexResolution, attempt: attempt,
             isBacked: live != nil)
     }
@@ -687,7 +687,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         let eff = DecisionCardView.effectiveOutcome(live: live?.outcome, snapshot: snapshot.outcome)
         XCTAssertNotNil(eff, "\(what): the resolved outcome still governs")
         XCTAssertFalse(
-            DecisionCardView.actionBarAvailable(
+            DecisionCard.actionBarAvailable(
                 outcome: eff, codex: live?.codexResolution, attempt: nil, isBacked: live != nil),
             "\(what): a resolved card must never be actionable")
         switch DecisionCardView.resolvedBanner(attempt: nil, persisted: eff, isBacked: live != nil) {

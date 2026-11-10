@@ -104,4 +104,143 @@ public enum DecisionCard {
         else { return nil }
         return QuestionCard(card: card)
     }
+
+    /// What a card whose text does not match its hash says, wherever it says it: the card's banner and the reason its
+    /// controls cannot act.
+    public static let hashMismatchSentence = "The text on this card does not match its hash. It cannot be answered safely."
+
+    /// Whether the answer controls should be offered. Requires **live backing**
+    /// (`isBacked`) and withdraws the moment the card carries an authoritative
+    /// outcome or the local attempt is terminal. Static and pure so the whole
+    /// guard is testable off the real resolver: a card with no live state behind
+    /// it can never present an action bar, closing the "act on a departed/reset
+    /// card" half of the class, and a resolved card disables it even while a
+    /// stale non-terminal `.failed` is still stored locally.
+    /// `codex` is the second authoritative ending, and it is checked here rather
+    /// than mapped onto `outcome`: a Codex resolution says things `AnswerOutcome`
+    /// cannot express — cleared because the turn was aborted, answered at the Mac
+    /// with no decision recorded, retired because the item finished — and every
+    /// one of them means the same thing about this bar, which is that it must go.
+    public static func actionBarAvailable(
+        outcome: AnswerOutcome?, codex: CodexResolution?, attempt: AnswerAttempt?, isBacked: Bool
+    ) -> Bool {
+        isBacked && outcome == nil && codex == nil && attempt?.isTerminal != true
+    }
+
+    /// **At HIGH, every answer but deny, deny with a reason and decline takes a second factor.** Allowing, choosing
+    /// any option (a Codex card's "No" option included) or submitting a question's answers at HIGH waits for the
+    /// device's own check (Face ID on the iPhone, the Mac's own); denying, denying with a reason and declining are the
+    /// safe direction, and a product that promises silence never decides anything cannot put friction in front of
+    /// them.
+    public static func needsSecondFactor(risk: RiskClass, decision: AnswerDecision) -> Bool {
+        guard risk == .high else { return false }
+        switch decision {
+        case .deny, .text, .decline: return false
+        default: return true
+        }
+    }
+
+    /// The read-before-you-decide gate, as a value.
+    ///
+    /// **This is a viewport test, and it was not one.** The previous implementation
+    /// armed on `onAppear` of a 1pt marker nested inside a `LazyVStack` child, on
+    /// the premise that laziness would make the callback mean "scrolled into view".
+    /// Laziness operates on a stack's *direct children*; `commandBlock` was the
+    /// second one, so it was materialised at first layout and the marker inside it
+    /// fired then. `onAppear` is a lifecycle callback and never a visibility test.
+    ///
+    /// What that cost, read off the AX5 renders rather than off the code:
+    ///
+    ///  * A MEDIUM `Write` outside the worktree, with thirteen characters of the
+    ///    path on screen and `Allow` drawn as the enabled white primary. At MEDIUM
+    ///    there is no hold and no Face ID, so this gate is the *only* thing between
+    ///    one tap and a write to an arbitrary path.
+    ///  * A HIGH `git push --force origin main` with **zero characters of the
+    ///    command rendered** and `Hold to allow` fully armed: a face authenticating
+    ///    a command the product never showed.
+    ///
+    /// The rule lives here, apart from any view, so every app's card follows it and
+    /// it can be tested without a viewport; each app measures the edges it reports.
+    public struct ReadGate: Equatable, Sendable {
+        /// The bottom edge of the block carrying the command has been inside
+        /// the visible region at least once.
+        public var hasSeenCommand = false
+        /// …and so has the bottom edge of the risk class and its provenance.
+        public var hasSeenProvenance = false
+
+        public init() {}
+
+        /// Both edges are measured in the scroll view's own space. `visibleBottom`
+        /// is where the readable part of the scroll view ends: its own bottom, or
+        /// the pinned action bar's top where that is higher.
+        ///
+        /// Every way of not knowing answers **no**: an unmeasured edge (`nil`), a
+        /// layout that has not happened (`visibleBottom <= 0`), a non-finite value
+        /// from a degenerate proposal, or a block that has scrolled off the top.
+        /// Only a real measurement can open a gate.
+        public static func isVisible(bottom: CGFloat?, visibleBottom: CGFloat) -> Bool {
+            guard let bottom, bottom.isFinite, visibleBottom.isFinite else { return false }
+            guard visibleBottom > 0, bottom > 0 else { return false }
+            return bottom <= visibleBottom
+        }
+
+        /// Whether this class may be answered yet.
+        ///
+        /// **The gate applies at every tier**, and the reason is that risk governs
+        /// *friction* — tap, hold, Face ID — and never whether the command has to be
+        /// visible. LOW used to return `true` unconditionally on the argument that
+        /// "a `Read` that costs a scroll is a gate people learn to defeat". The
+        /// argument is sound and the implementation did not follow from it: at
+        /// reading sizes a LOW command fits above the bar on the first frame, so the
+        /// gate is already open by the time the card is drawn and costs the reader
+        /// nothing at all. It is only when the command does *not* fit that the two
+        /// behaviours differ, and that is precisely the case an AX5 render of a LOW
+        /// card measured: `Allow` enabled, in the thumb zone, over **13 of the 24
+        /// characters** of `/Users/dev/app/README.md` — the 11 that were missing
+        /// being the ones that tell a README from `~/.aws/credentials`.
+        ///
+        /// A tier-shaped exception here is not "less friction for a small risk", it
+        /// is "the product will let you approve something it never showed you", and
+        /// that is not a property any tier gets.
+        public func isOpen(at risk: RiskClass) -> Bool {
+            switch risk {
+            case .low:
+                return hasSeenCommand
+            case .medium:
+                return hasSeenCommand
+            // Stated separately rather than left to fall out of the layout: at HIGH
+            // a face is about to authorise this, and the two facts that say what it
+            // authorises are the command and the class it was given. That the one
+            // is drawn above the other is not evidence that both were seen.
+            case .high:
+                return hasSeenCommand && hasSeenProvenance
+            }
+        }
+
+        /// What a closed gate says. Drawn as the control's disabled reason, never only hinted.
+        public func blockedReason(at risk: RiskClass) -> String? {
+            guard !isOpen(at: risk) else { return nil }
+            guard hasSeenCommand else { return "Scroll the command into view before deciding." }
+            return "Scroll to the end of the command block before deciding."
+        }
+    }
+}
+
+extension AppModel {
+    /// Why no control on `approval` can act now, in the order that matters — the
+    /// same for every surface that answers a card.
+    public func answerBlockedReason(for approval: ApprovalItem, inFlight: Bool) -> String? {
+        // A second tap while the first is in flight would be a silent no-op;
+        // saying "waiting" is the honest version of the same refusal.
+        if inFlight { return "Waiting for your computer to confirm…" }
+        if let reason = actionsBlockedReason { return reason }
+        if let summary = shownSummary(for: approval.sessionKey) {
+            let badge = FleetStatusRule.capability(summary: summary, capabilities: connection.capabilities)
+            if let reason = badge.reason { return reason }
+        }
+        if !approval.card.verification.hashMatchesDisplayText {
+            return DecisionCard.hashMismatchSentence
+        }
+        return nil
+    }
 }
