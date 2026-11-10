@@ -3,46 +3,47 @@ import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
-/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. Lazy, so a run thousands of rows long builds
-/// only what is near the screen. It opens at the newest row and moves for two reasons only: new rows are followed
-/// while the newest is on screen, and a page of earlier history that lands while the reader is up there keeps the row
-/// that was first at the top. Reaching the top pages back on its own, as the iPhone does.
+/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. Lazy, so
+/// a run thousands of rows long builds only what is near the screen. It opens at the newest row and moves for one
+/// reason only: new rows are followed while the newest is on screen. The row at the top of what is on screen stays
+/// where it is as rows or a page of earlier history land around it. Reaching the top pages back on its own, as the
+/// iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
-    /// The newest row is on screen, so a row that arrives is followed.
-    @State private var following = true
+    /// The row at the top of what is on screen, kept in place when a page of earlier history lands above it.
+    @State private var topRow: String?
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 14) {
                     Earlier(model: model, key: key)
-                    ForEach(items) { item in
-                        ConversationRow(item: item, model: model)
-                            // One element per row: an identifier on a row of several texts otherwise lands on each.
-                            .accessibilityElement(children: .contain)
-                            .accessibilityIdentifier("session.row.\(item.id)")
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(items) { item in
+                            ConversationRow(item: item, model: model)
+                        }
                     }
+                    .scrollTargetLayout()
                 }
                 .padding(.horizontal, 28)
             }
+            .scrollPosition(id: $topRow, anchor: .top)
             // The column's top and bottom margin, kept by the scroll view, so a row scrolled to the bottom shows the end.
             .contentMargins(.vertical, 18, for: .scrollContent)
             // At the bottom from the first frame, so nothing above the newest row is passed over on the way.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.bottom, for: .alignment)
-            // A reader at the end is kept there as the column grows. Each time is one scroll, which, unlike a bottom
-            // anchor, does not come back as rows change, so a reader who went up stays where they are.
+            // A reader at the end is kept there as the column grows or the pane's foot takes more of it. Each time is
+            // one scroll, which, unlike a bottom anchor, does not come back as rows change, so a reader who went up
+            // stays where they are.
             .onScrollGeometryChange(for: ScrollGeometry.self) { $0 } action: { old, new in
-                following = Self.atEnd(new)
-                if Self.atEnd(old), new.contentSize.height > old.contentSize.height, let last = items.last {
+                let endMoved = new.contentSize.height > old.contentSize.height
+                    || new.containerSize.height < old.containerSize.height
+                if Self.atEnd(old), endMoved, let last = items.last {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
-            }
-            .onChange(of: items.first?.id) { first, _ in
-                if !following, let first { proxy.scrollTo(first, anchor: .top) }
             }
             .accessibilityIdentifier("session.conversation")
         }
@@ -90,6 +91,18 @@ private struct ConversationRow: View {
     let model: AppModel
 
     var body: some View {
+        if case .approval(let approval) = item.content, approval.isPending {
+            // One element, named by its words.
+            WaitingLine().accessibilityIdentifier("session.row.\(item.id)")
+        } else {
+            content
+                // One element per row: an identifier on a row of several texts otherwise lands on each.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("session.row.\(item.id)")
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         switch item.content {
         case .userMessage(let text, let isCommand):
             Prompt(text: text, isCommand: isCommand)
@@ -98,7 +111,7 @@ private struct ConversationRow: View {
         case .tool(let tool):
             ToolLine(tool: tool, id: item.id)
         case .approval(let approval):
-            if approval.isPending { WaitingLine(approval: approval) } else { RequestBlock(approval: approval, model: model) }
+            RequestBlock(approval: approval, model: model)
         case .notice(let notice):
             NoticeLine(notice: notice)
         }
@@ -108,22 +121,14 @@ private struct ConversationRow: View {
 /// Where a request still waiting on you was asked: one line in its place, pointing at the pane's foot, where the
 /// request itself is read and answered.
 private struct WaitingLine: View {
-    let approval: ApprovalItem
-
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle").font(.system(size: 11)).foregroundStyle(Theme.amber)
                 .accessibilityHidden(true)
-            Text(sentence).font(Theme.ui(12.5)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.tail)
+            Text("Waiting on you below").font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(sentence)
-    }
-
-    private var sentence: String {
-        let argument = ToolSummary.principalArgument(tool: approval.card.toolName, input: approval.card.toolInput)
-        return ["Waiting on you below", approval.card.toolName, argument?.firstLine ?? ""]
-            .map(\.displaySafe).filter { !$0.isEmpty }.joined(separator: ", ")
+        .accessibilityLabel("Waiting on you below")
     }
 }
 
@@ -260,9 +265,10 @@ private struct ToolLine: View {
         }
     }
 
-    /// How the call reads aloud: how it stands, then the tool and what it was given.
+    /// How the call reads aloud: how it stands, the tool, what it was given and how long it took.
     private var spoken: String {
-        [tool.status.label, tool.name, tool.argument ?? ""].filter { !$0.isEmpty }.joined(separator: ", ")
+        [tool.status.label, tool.name, tool.argument ?? "", tool.durationMS.map { Format.duration(ms: $0) } ?? ""]
+            .filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     private func line(opens: Bool) -> some View {
