@@ -335,7 +335,10 @@ is enforced.
   record proves it (`AnswerOutcome.provenance(on:)`): `phone` names the kind of
   paired device the record says sent it (`answeredOn`), "from a Mac" or, read on a
   Mac, "from an iPhone", and "from a phone" where an iPhone or an unknown device
-  answered and the phone reads it; never "this app". `local` is "at the computer".
+  answered and the phone reads it; read on a Mac, a record that names no device is
+  "from a paired device", and only the Sent banner of the Mac's own approval
+  (`AnswerOutcome.sentToClaudeLine(on:sentHere:)`) names the Mac; never "this app".
+  `local` is "at the computer".
 * **A disconnected terminal says so.** The last bytes stay on screen under an
   explicit not-live banner, because a frozen terminal is indistinguishable from
   a live one and clearing it would lie about what you just read.
