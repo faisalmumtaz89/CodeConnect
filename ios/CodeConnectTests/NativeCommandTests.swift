@@ -108,4 +108,96 @@ final class NativeCommandTests: XCTestCase {
         XCTAssertEqual(NativeCommand.effort("high").quietAfter, .seconds(5))
         XCTAssertEqual(NativeCommand.compact(instructions: "").quietAfter, .seconds(10))
     }
+
+    /// Every word the native controls show, as every app reads them from Kit: the status in each phase on the
+    /// iPhone, unchanged, and on a Mac, which names the computer (or says "the agent's computer" when the model does
+    /// not know it); the consent lines, the effort levels, and the Clear and Compact controls.
+    @MainActor
+    func testTheCommandWordsInEachDevicesWords() {
+        let unnamed = AppModel(machineID: "unpaired")
+        let named = AppModel(
+            machineID: "automation", pairing: PairingStore(ephemeral: true),
+            cache: EventCache(
+                root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)),
+            settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
+        named.pairing.saveEphemeral(
+            DaemonEndpoint(host: "studio.tail1234.ts.net", port: 8787, credential: .token("t"), useTLS: false))
+        func said(_ command: NativeCommand, _ phase: CommandPhase) -> [String?] {
+            [
+                unnamed.commandStatus(command, phase, on: .iPhone)?.text,
+                named.commandStatus(command, phase, on: .iPhone)?.text,
+                unnamed.commandStatus(command, phase, on: .mac)?.text,
+                named.commandStatus(command, phase, on: .mac)?.text,
+            ]
+        }
+        let model = NativeCommand.model("sonnet"), effort = NativeCommand.effort("xhigh")
+        let compact = NativeCommand.compact(instructions: "keep the plan")
+        let host = "studio.tail1234.ts.net"
+        XCTAssertEqual(
+            said(model, .sending("sonnet")),
+            ["Typing /model sonnet on the computer…", "Typing /model sonnet on the computer…",
+             "Typing /model sonnet on the agent's computer…", "Typing /model sonnet on \(host)…"])
+        XCTAssertEqual(
+            said(effort, .sending("xhigh")),
+            ["Typing /effort xhigh on the computer…", "Typing /effort xhigh on the computer…",
+             "Typing /effort xhigh on the agent's computer…", "Typing /effort xhigh on \(host)…"])
+        XCTAssertEqual(
+            said(compact, .sending("keep the plan")),
+            ["Typing /compact on the computer…", "Typing /compact on the computer…",
+             "Typing /compact on the agent's computer…", "Typing /compact on \(host)…"])
+        for command in [model, effort, compact] {
+            XCTAssertEqual(
+                said(command, .waiting(request: command.request, quietly: false)),
+                Array(repeating: "Waiting for Claude Code to confirm…", count: 4), "\(command)")
+            XCTAssertEqual(said(command, .idle), [nil, nil, nil, nil], "\(command)")
+        }
+        XCTAssertEqual(
+            said(model, .waiting(request: "sonnet", quietly: true)),
+            ["Sent /model sonnet to the computer. Still waiting for Claude Code to confirm.",
+             "Sent /model sonnet to the computer. Still waiting for Claude Code to confirm.",
+             "Sent /model sonnet to the agent's computer. Still waiting for Claude Code to confirm.",
+             "Sent /model sonnet to \(host). Still waiting for Claude Code to confirm."])
+        XCTAssertEqual(
+            said(effort, .waiting(request: "xhigh", quietly: true))[0],
+            "Sent /effort xhigh to the computer. Still waiting for Claude Code to confirm.")
+        XCTAssertEqual(
+            said(compact, .waiting(request: "keep the plan", quietly: true)),
+            ["Compaction requested on the computer. CodeConnect has not received a completion signal.",
+             "Compaction requested on the computer. CodeConnect has not received a completion signal.",
+             "Compaction requested on the agent's computer. CodeConnect has not received a completion signal.",
+             "Compaction requested on \(host). CodeConnect has not received a completion signal."])
+        let settled: [(CommandPhase, ComposeProse.Tone)] = [
+            (.confirmed("Model set to Sonnet 5.5."), .success),
+            (.neutral("Claude Code kept Sonnet 5.5."), .neutral),
+            (.failed("Not enough messages to compact."), .warning),
+        ]
+        for (phase, tone) in settled {
+            for command in [model, effort, compact] {
+                let status = named.commandStatus(command, phase, on: .mac)
+                XCTAssertEqual(status?.tone, tone, "\(phase)")
+                XCTAssertEqual(said(command, phase), Array(repeating: status?.text, count: 4), "\(phase)")
+            }
+        }
+        XCTAssertEqual(named.commandStatus(model, .sending("sonnet"), on: .mac)?.tone, .neutral)
+        XCTAssertEqual(named.commandStatus(model, .waiting(request: "sonnet", quietly: true), on: .mac)?.tone, .neutral)
+
+        XCTAssertEqual(
+            NativeCommand.modelConsent,
+            "A confirmed change also becomes your default for new sessions. Switching mid-conversation makes "
+                + "Claude Code re-read the whole conversation on your next message.")
+        XCTAssertEqual(
+            NativeCommand.effortConsent,
+            "Switching mid-conversation makes Claude Code re-read the whole conversation on your next message.")
+        XCTAssertEqual(NativeCommand.effortLevels.map(\.value), ["low", "medium", "high", "xhigh", "max"])
+        XCTAssertEqual(NativeCommand.effortLevels.map(\.label), ["Low", "Medium", "High", "Extra high", "Maximum"])
+        XCTAssertEqual(
+            [ClearConfirmation.title, ClearConfirmation.clear, ClearConfirmation.keep, ClearConfirmation.message],
+            ["Clear Claude’s context?", "Clear context", "Keep context",
+             "Claude Code will forget this conversation’s context. CodeConnect’s timeline will stay here."])
+        XCTAssertEqual(
+            [CompactPrompt.title, CompactPrompt.explanation, CompactPrompt.fieldLabel, CompactPrompt.placeholder,
+             CompactPrompt.action],
+            ["Compact context", "Ask Claude Code to compact its current context. Instructions are optional.",
+             "Instructions (optional)", "What should Claude preserve?", "Compact now"])
+    }
 }
