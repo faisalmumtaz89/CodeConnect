@@ -42,6 +42,11 @@ User-facing changes, newest first. Mac releases are cut per
 - Allow again (or `codeconnect unblock <device>`) lets it back in with the pairing it already holds,
   as the same device, with no new code.
 
+## `fg` continues an agent that was stopped twice
+
+- On a Mac, an agent stopped with Ctrl+Z that was stopped once more while it waited, as a program
+  reading the terminal can be, could stay stopped after `fg`. It now continues.
+
 ## The end of a long session is no longer lost
 
 - A session that ended while the daemon was stopped, or before the daemon had read its transcript
