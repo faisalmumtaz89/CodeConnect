@@ -97,14 +97,16 @@ final class CodexSendPathTests: XCTestCase {
         return (model, wire)
     }
 
-    private static func summary(uid: String, agent: String, link: String) -> SessionSummary {
+    private static func summary(
+        uid: String, agent: String, link: String, runLink: String = "attached"
+    ) -> SessionSummary {
         let uidClause = uid.isEmpty ? "" : #""session_uid":"\#(uid)","#
         return try! JSONDecoder().decode(
             SessionSummary.self,
             from: Data(
                 """
                 {\(uidClause)"session_id":"cc-1","tmux_session":"cc-1",
-                 "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
+                 "cwd":"/work","project_label":"work","lifecycle":"live","link":"\(runLink)",
                  "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
                  "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],
                  "agent":"\(agent)","codex_link":"\(link)"}
@@ -171,6 +173,9 @@ final class CodexSendPathTests: XCTestCase {
             return XCTFail("expected a not-sent outcome")
         }
         XCTAssertEqual(reason, CodexLinkState.offline.blockedReason(for: .compose))
+        XCTAssertEqual(
+            model.outcomeNote(for: key(), lastSend: nil),
+            ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill"))
     }
 
     // MARK: An indeterminate mutation is never re-sent
@@ -265,11 +270,14 @@ final class CodexSendPathTests: XCTestCase {
         // took this and I never heard back" is the *app's* observation, so it
         // lives on the activity beside `notSent` rather than being smuggled into
         // `ComposeResult`.
-        guard case .sentNoAnswer = model.codexControls(for: key()).compose else {
+        guard case .sentNoAnswer(let reason) = model.codexControls(for: key()).compose else {
             return XCTFail(
                 "a sent-but-unanswered compose is its own outcome, got "
                     + "\(model.codexControls(for: key()).compose)")
         }
+        XCTAssertEqual(
+            model.outcomeNote(for: key(), lastSend: nil),
+            ComposeProse.Note(text: reason, tone: .warning, icon: "question-fill"))
 
         _ = await model.composeToCodex(sessionKey: key(), text: "deploy")
         XCTAssertEqual(
@@ -542,6 +550,98 @@ final class CodexSendPathTests: XCTestCase {
             XCTAssertFalse(
                 wire.types.contains("answer"),
                 "minor \(minor) cannot retire a Codex card, so it must not answer one")
+        }
+    }
+
+    // MARK: The line above the composer
+
+    /// A Codex run's own outcome outranks the last Claude send: on a Codex run
+    /// the Claude sentences describe machinery that is not there. A stop and a
+    /// message share the one slot, the later act's outcome in it.
+    func testTheComposerLineShowsCodexsOwnOutcomeOverAClaudeSend() async {
+        let (model, wire) = model(link: "subscribed")
+        let typed = ComposeAttempt.sent(matched: "cc-1")
+        XCTAssertEqual(
+            model.outcomeNote(for: key(), lastSend: typed), ComposeProse.note(typed), "nothing from Codex yet")
+
+        wire.composeResult = .steered(turnID: "turn-9")
+        _ = await model.composeToCodex(sessionKey: key(), text: "hello")
+        let steered = CodexProse.compose(.steered(turnID: "turn-9"))
+        let message = model.outcomeNote(for: key(), lastSend: typed)
+        XCTAssertEqual(message?.text, steered.oneLine)
+        XCTAssertEqual(message?.icon, steered.icon)
+
+        wire.interruptResult = .rejected(reason: "the turn already ended.")
+        _ = await model.stopCodexTurn(sessionKey: key())
+        let refused = CodexProse.interrupt(.rejected(reason: "the turn already ended."))
+        let stop = model.outcomeNote(for: key(), lastSend: typed)
+        XCTAssertEqual(stop?.text, refused.oneLine)
+        XCTAssertEqual(stop?.icon, refused.icon)
+    }
+
+    /// Why a Codex run cannot be sent to: the draft's own ceiling first, then
+    /// the run's availability. With neither, a run that can only be observed
+    /// says so and offers "Why?".
+    func testWhySendingToACodexRunCannotWork() async throws {
+        let (model, _) = model(link: "subscribed")
+        XCTAssertNil(model.sendBlockedReason(for: key(), draft: "hello"))
+        XCTAssertNil(model.standingNote(for: key(), draft: "hello"))
+
+        let long = String(repeating: "a", count: 8193)
+        XCTAssertTrue(ComposeDraft(text: long).isOverCeiling)
+        let ceiling = try XCTUnwrap(ComposeDraft(text: long).blockedReason)
+        XCTAssertEqual(
+            model.standingNote(for: key(), draft: long),
+            ComposeProse.Note(text: ceiling, tone: .warning, icon: "warning-circle-fill"))
+
+        let (offline, _) = self.model(link: "offline")
+        let unavailable = try XCTUnwrap(offline.composeUnavailable(for: key()))
+        XCTAssertEqual(offline.sendBlockedReason(for: key(), draft: "hello"), unavailable)
+        XCTAssertEqual(
+            offline.sendBlockedReason(for: key(), draft: long), ceiling, "the draft's own ceiling comes first")
+
+        model.adoptSummariesForTesting([
+            Self.summary(uid: key(), agent: "codex", link: "subscribed", runLink: "detached")
+        ])
+        XCTAssertNil(model.sendBlockedReason(for: key(), draft: "hello"))
+        XCTAssertEqual(
+            model.standingNote(for: key(), draft: "hello"),
+            ComposeProse.Note(
+                text: "Observe only - answers are given at the computer.", tone: .neutral, icon: nil,
+                offersWhy: true))
+    }
+
+    /// Why a Claude run cannot be typed into: the link first, then a computer
+    /// that takes no typed text, then the run itself. A run that cannot be
+    /// answered says why, not merely "observe only".
+    func testWhySendingToAClaudeRunCannotWork() throws {
+        let (model, _) = model(link: "none", agent: "claude")
+        XCTAssertNil(model.sendBlockedReason(for: key(), draft: "hello"))
+        let detached = Self.summary(uid: key(), agent: "claude", link: "none", runLink: "detached")
+        model.adoptSummariesForTesting([detached])
+        let runReason = try XCTUnwrap(
+            FleetStatusRule.capability(summary: detached, capabilities: model.connection.capabilities).reason)
+        XCTAssertEqual(
+            model.standingNote(for: key(), draft: "hello"),
+            ComposeProse.Note(text: runReason, tone: .warning, icon: "warning-circle-fill"))
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(canApproveReliably: true, sendText: false, extra: [:]), minor: 19)
+        XCTAssertEqual(
+            model.sendBlockedReason(for: key(), draft: "hello"), "The computer's CodeConnect can't take typed text.")
+        model.connection.setPhaseForTesting(.connecting)
+        let link = try XCTUnwrap(model.linkHealth.disabledReason)
+        XCTAssertEqual(model.sendBlockedReason(for: key(), draft: "hello"), link, "the link's reason comes first")
+    }
+
+    /// A Codex run takes every draft as a message, a leading slash included;
+    /// a Claude run answers its own commands before anything is typed.
+    func testACodexRunTakesEveryDraftAsAMessageAndClaudeAnswersItsCommands() {
+        let (codex, _) = model(link: "subscribed")
+        XCTAssertEqual(codex.submission(of: "/model opus", to: key()), .codex)
+        let (claude, _) = model(link: "none", agent: "claude")
+        XCTAssertEqual(claude.submission(of: "hello", to: key()), .claude)
+        guard case .command(.nativeModel) = claude.submission(of: "/model opus", to: key()) else {
+            return XCTFail("/model opens the model control on a Claude run")
         }
     }
 

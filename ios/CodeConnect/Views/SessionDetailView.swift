@@ -1104,6 +1104,7 @@ struct SessionDetailView: View {
                         CommandPalette(content: palette, onAction: route)
                     }
                     SessionComposeBar(
+                        key: key,
                         text: $composeText,
                         result: composeResult,
                         sending: sending,
@@ -1117,10 +1118,7 @@ struct SessionDetailView: View {
                     unansweredSend = nil
                     // Editing is the user's next act; a standing failure
                     // note has been read. Success notes retire themselves.
-                    switch composeResult {
-                    case .refused, .failed, .indeterminate: composeResult = nil
-                    default: break
-                    }
+                    if composeResult?.clearsOnEdit == true { composeResult = nil }
                 }
             }
         }
@@ -1512,15 +1510,12 @@ struct SessionDetailView: View {
     private func noteComposeResult(_ result: ComposeAttempt) {
         composeResult = result
         composeResultClearTask?.cancel()
-        switch result {
-        case .sent, .alreadyApplied, .composerRecovered:
+        if result.landed {
             composeResultClearTask = Task {
                 try? await Task.sleep(for: .seconds(4))
                 guard !Task.isCancelled else { return }
                 composeResult = nil
             }
-        case .refused, .failed, .indeterminate, .composerLost:
-            break
         }
     }
 
@@ -1563,8 +1558,6 @@ struct SessionDetailView: View {
 
     // MARK: - Codex
 
-    private var isCodexSession: Bool { model.shownSummary(for: key)?.isCodex == true }
-
     /// **Say something to a Codex session.**
     ///
     /// The draft is consumed on `started`, `steered` and `duplicate` — every arm
@@ -1580,17 +1573,14 @@ struct SessionDetailView: View {
         Task {
             let result = await model.composeToCodex(sessionKey: key, text: text)
             sending = false
-            switch result {
-            case .started, .steered, .duplicate:
+            // Otherwise the draft is kept. On a refusal it can be retried as-is;
+            // on an outcome nobody can account for the send path now refuses an
+            // unchanged retry outright, so keeping the words is what lets the
+            // reader edit them into a different message rather than losing what
+            // they wrote.
+            if result?.landed == true {
                 composeText = ""
                 tailWatch.arrive()
-            case .rejected, .indeterminate, .unknown, nil:
-                // The draft is kept. On a refusal it can be retried as-is; on
-                // an outcome nobody can account for the send path now refuses
-                // an unchanged retry outright, so keeping the words is what
-                // lets the reader edit them into a different message rather
-                // than losing what they wrote.
-                break
             }
         }
     }
@@ -1617,12 +1607,9 @@ struct SessionDetailView: View {
         Task {
             let result = await model.sendClearCommand(to: key)
             sending = false
-            switch result {
-            case .sent, .alreadyApplied, .composerRecovered:
+            if result.landed {
                 consumeDraft()
                 tailWatch.arrive()
-            case .refused, .failed, .indeterminate, .composerLost:
-                break
             }
             noteComposeResult(result)
         }
@@ -1632,32 +1619,20 @@ struct SessionDetailView: View {
         let text = composeText
         let again = askingAgain
         askingAgain = false
-        // **A Codex session takes a different road entirely.** `send_text` is
-        // Claude's TTY takeover and a Codex session refuses it by name; `compose`
-        // is the message the app-server actually accepts, and it is not a
-        // keystroke — there is no composer at the Mac to find, nothing to type
-        // into, and no prompt-presence needle to satisfy.
-        if isCodexSession {
+        // A Codex session's message, a native command's own control (measured:
+        // the Mac-side picker forms lock the composer), or typed text. Claude
+        // Code's slash vocabulary is never applied to a Codex session: the app
+        // would open a Claude sheet for a command that session has never heard
+        // of, and the Mac would refuse the injection anyway.
+        switch model.submission(of: text, to: key) {
+        case .codex:
             sendToCodex(text)
             return
-        }
-        // Slash commands answer to the policy before anything reaches the
-        // Mac: native commands open their controls (measured: the Mac-side
-        // picker forms lock the composer), dialog built-ins get the honest
-        // refusal, and everything else — prose, custom skills — passes
-        // through untouched.
-        //
-        // **Claude Code's vocabulary only.** `/model`, `/effort`, `/compact`,
-        // `/clear`, `/diff` are that binary's built-ins; applied to a Codex
-        // session they are wrong in both directions — the app would open a
-        // Claude sheet for a session that has no such command, and the Mac
-        // would refuse the injection anyway. The branch above is the gate.
-        let action = ClaudeCommandPolicy.action(
-            for: text,
-            recoversComposer: model.connection.capabilities?.recoversComposer == true)
-        guard case .passThrough = action else {
+        case .command(let action):
             route(action)
             return
+        case .claude:
+            break
         }
         sending = true
         composeResult = nil
@@ -1674,8 +1649,12 @@ struct SessionDetailView: View {
                 // The link may have come back while this send waited.
                 if model.connection.generation != generation { askUnansweredAgain() }
             }
-            switch result {
-            case .sent, .alreadyApplied, .composerRecovered:
+            // Otherwise the text stays — and so does the note. Four seconds is
+            // too short for actionable failure information; it clears when the
+            // text changes or another attempt begins. For `.indeterminate`, the
+            // model kept the identity, so pressing send again is a recognisable
+            // retry, not a second typing.
+            if result.landed {
                 // Never optimistic: the field clears only on a landed
                 // mutation — and an earlier attempt's landing is a landing.
                 // Speaking is following: the reply lands at the tail.
@@ -1687,34 +1666,19 @@ struct SessionDetailView: View {
                     guard !Task.isCancelled else { return }
                     composeResult = nil
                 }
-            case .refused, .failed, .indeterminate, .composerLost:
-                // The text stays — and so does the note. Four seconds is too
-                // short for actionable failure information; it clears when
-                // the text changes or another attempt begins. For
-                // `.indeterminate`, the model kept the identity, so pressing
-                // send again is a recognisable retry, not a second typing.
-                break
             }
         }
     }
 
     /// Ask the unanswered send once more (see `unansweredSend`), through `send`.
     private func askUnansweredAgain() {
-        guard let unanswered = unansweredSend, !sending, model.connection.phase.isConnected,
-            composeText == unanswered.text,
-            Date().timeIntervalSince(unanswered.sentAt) < 60,
-            model.holdsSendIdentity(text: unanswered.text, to: key)
+        guard let unanswered = unansweredSend,
+            model.asksAgain(unanswered, to: key, draft: composeText, sending: sending)
         else { return }
         unansweredSend = nil
         askingAgain = true
         send()
     }
-}
-
-/// A composer send whose answer never came: what it said, and when it was sent.
-private struct UnansweredSend {
-    let text: String
-    let sentAt: Date
 }
 
 /// The session's timeline: its own view, so what the rest of the screen holds
@@ -2162,6 +2126,7 @@ private struct SessionBanner: View {
 /// The text and the send result stay bound to `SessionDetailView`, so a half
 /// typed message still survives a trip to the Terminal surface and back.
 private struct SessionComposeBar: View {
+    let key: String
     @Binding var text: String
     let result: ComposeAttempt?
     let sending: Bool
@@ -2279,7 +2244,7 @@ private struct SessionComposeBar: View {
                 if dictation.isRecording {
                     cancelButton
                 }
-                CCVoiceButton(phase: phase, blockedReason: sendBlockedReason) { act() }
+                CCVoiceButton(phase: phase, blockedReason: model.sendBlockedReason(for: key, draft: text)) { act() }
             }
             // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
             // pill's bottom and trailing edges.
@@ -2432,77 +2397,28 @@ private struct SessionComposeBar: View {
 
     // MARK: The line above
 
+    /// The outcome of the last thing sent, then the microphone's own failure
+    /// (dictation is the iPhone's), then why sending cannot work or "observe
+    /// only". **One outcome slot, both Codex mutations:** a stop's result used
+    /// to live under the header's Stop button, and at AX5 that made the header
+    /// tall enough to push the pending card's own controls off screen.
     @ViewBuilder
     private var standingNote: some View {
-        // A Codex outcome outranks the Claude ladder below, because on a Codex
-        // session the ladder's vocabulary — "typed into the session", "the
-        // composer did not come back" — describes machinery that is not there.
-        if summary?.isCodex == true, case .settled(let result) = codexStop {
-            // **One outcome slot, both mutations.** The stop's result used to
-            // live under the header's Stop button; at AX5 that made the header
-            // tall enough to push the pending card's own controls off screen.
-            // It belongs here, where the compose result already goes and where
-            // the reader is looking after they act.
-            codexStopNote(result)
-        } else if summary?.isCodex == true, case .notSent(let reason) = codexStop {
-            ComposeNote(text: reason, tone: .warning, glyph: "warning-circle-fill")
-        } else if summary?.isCodex == true, case .sentNoAnswer(let reason) = codexStop {
-            ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
-        } else if summary?.isCodex == true, case .settled(let result) = codexControls?.compose {
-            codexComposeNote(result)
-        } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.compose {
-            ComposeNote(
-                text: reason, tone: .warning, glyph: "warning-circle-fill")
-        } else if summary?.isCodex == true,
-            case .sentNoAnswer(let reason) = codexControls?.compose
-        {
-            ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
-        } else if let result {
-            feedbackLine(result)
+        if let note = model.outcomeNote(for: key, lastSend: result) {
+            composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
-        } else if let reason = sendBlockedReason {
-            ComposeNote(
-                text: reason, tone: .warning, glyph: "warning-circle-fill")
-        } else if isObserveOnly {
-            ComposeNote(
-                text: "Observe only - answers are given at the computer.",
-                tone: .neutral, glyph: nil, action: ("Why?", onWhy))
+        } else if let note = model.standingNote(for: key, draft: text) {
+            composeNote(note)
         }
     }
 
-    private var codexControls: CodexControls? {
-        guard let key = summary?.sessionKey else { return nil }
-        return model.codexControls(for: key)
-    }
-
-    /// The last stop's outcome while it answers the turn running now: the
-    /// fleet row's rule, so a turn started since is not handed an old answer.
-    private var codexStop: CodexControls.Activity<InterruptResult>? {
-        guard let key = summary?.sessionKey else { return nil }
-        return model.codexStop(for: key)
-    }
-
-    /// What became of a Codex message, in Codex's own five arms.
-    ///
-    /// **`started` and `steered` are two different sentences**, and a duplicate
-    /// reads with the verb the original earned — see `CodexProse`, where the
-    /// rule lives and is tested.
-    private func codexComposeNote(_ result: ComposeResult) -> some View {
-        let banner = CodexProse.compose(result)
-        return ComposeNote(
-            text: banner.oneLine,
-            tone: banner.tone.ccTone,
-            glyph: banner.icon)
-    }
-
-    /// What became of a stop, in the daemon's own four arms — refusals verbatim.
-    private func codexStopNote(_ result: InterruptResult) -> some View {
-        let banner = CodexProse.interrupt(result)
-        return ComposeNote(
-            text: banner.oneLine,
-            tone: banner.tone.ccTone,
-            glyph: banner.icon)
+    /// Built outside the `@ViewBuilder`, like `micFailureNote`, so the optional
+    /// action tuple is typed here once.
+    private func composeNote(_ note: ComposeProse.Note) -> ComposeNote {
+        ComposeNote(
+            text: note.text, tone: note.tone.ccTone, glyph: note.icon,
+            action: note.offersWhy ? (title: "Why?", perform: onWhy) : nil)
     }
 
     /// **The byte counter**, appearing only as the 8192-byte ceiling comes into
@@ -2542,93 +2458,6 @@ private struct SessionComposeBar: View {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         openURL(url)
     }
-
-    @ViewBuilder
-    private func feedbackLine(_ result: ComposeAttempt) -> some View {
-        switch result {
-        case .sent:
-            ComposeNote(
-                text: "Typed into the session.",
-                tone: .success, glyph: "check")
-        case .refused(let reason):
-            ComposeNote(
-                text: "Not typed: \(reason)", tone: .warning,
-                glyph: "warning-fill")
-        case .failed(let reason):
-            ComposeNote(
-                text: "Couldn’t type the message: \(reason)", tone: .danger,
-                glyph: "x-circle-fill")
-        case .alreadyApplied:
-            ComposeNote(
-                text: "Already typed earlier — not repeated.",
-                tone: .success, glyph: "check")
-        case .indeterminate(let reason):
-            ComposeNote(
-                text: "Not confirmed: \(reason) "
-                    + "Retry is safe; the message won’t be typed twice.",
-                tone: .warning, glyph: "question-fill")
-        case .composerRecovered(let command, _, _):
-            // **Not a success.** The same daemon result on the Model and Effort
-            // sheets reports that no change was confirmed, and a typed command
-            // reaches this note by the identical path — `/effort high` routes
-            // through here, and on a cache-warm conversation it opens a
-            // confirmation that the daemon's one Esc then cancels. A green tick
-            // over that is the claim this app exists not to make.
-            ComposeNote(
-                text: "After \(command) was typed, the computer's composer disappeared. "
-                    + "CodeConnect pressed Esc and confirmed it returned. "
-                    + "The command's outcome was not confirmed.",
-                tone: .warning, glyph: "question-fill")
-        case .composerLost(let command):
-            ComposeNote(
-                text: "\(command) was typed, but the computer's composer did not come back. "
-                    + "Open Terminal to recover.",
-                tone: .danger, glyph: "warning-fill")
-        }
-    }
-
-    private var isObserveOnly: Bool {
-        guard let summary else { return false }
-        return !FleetStatusRule.capability(
-            summary: summary, capabilities: model.connection.capabilities
-        ).canAct
-    }
-
-    /// Text only lands if the composer is actually on screen at the Mac, so the
-    /// reasons a send cannot work are the same reasons an answer cannot.
-    ///
-    /// **Except for Codex**, where none of that applies: there is no composer at
-    /// the Mac, no keystrokes and no `send_text`. Its reasons are its own, and
-    /// they are asked first so a Codex session is never refused with a sentence
-    /// about a TTY it does not have.
-    private var sendBlockedReason: String? {
-        // The sample fleet's reason, not the link's: "Not paired with a computer."
-        // beside a card that answers in sample vocabulary would be two different
-        // accounts of the same absence on one screen.
-        if model.sampleFleetActive {
-            return "These agents are not real. Pair with your computer to talk to your own."
-        }
-        if let reason = model.linkHealth.disabledReason { return reason }
-        if let summary, summary.isCodex {
-            // The draft's own ceiling comes first: it is the one the reader can
-            // fix without anything changing at the Mac, and it names the number
-            // they have to cut. Only the *oversize* refusal is shown here — an
-            // empty draft is not a problem to announce, it is a message nobody
-            // has written yet.
-            let draft = ComposeDraft(text: text)
-            if draft.isOverCeiling { return draft.blockedReason }
-            return model.composeUnavailable(for: summary.sessionKey)
-        }
-        if model.connection.capabilities?.sendText == false {
-            return "The computer's CodeConnect can't take typed text."
-        }
-        if let summary, let reason = FleetStatusRule.capability(
-            summary: summary, capabilities: model.connection.capabilities).reason
-        {
-            return reason
-        }
-        return nil
-    }
 }
 
 // MARK: - Compose note
@@ -2636,9 +2465,9 @@ private struct SessionComposeBar: View {
 /// The one-line statement above the compose field: a blocked reason, a send
 /// result, or the observe-only standing notice.
 ///
-/// Three call sites in one file, all the same shape, all driven by `CCTone` —
-/// the kit's own semantic axis — so a refusal and a failure can never end up as
-/// two different oranges.
+/// Every note above the composer is drawn here, driven by `CCTone` — the kit's
+/// own semantic axis — so a refusal and a failure can never end up as two
+/// different oranges.
 private struct ComposeNote: View {
     let text: String
     var tone: CCTone = .warning
@@ -2668,3 +2497,14 @@ private struct ComposeNote: View {
     }
 }
 
+extension ComposeProse.Tone {
+    var ccTone: CCTone {
+        switch self {
+        case .neutral: return .neutral
+        case .info: return .info
+        case .success: return .success
+        case .warning: return .warning
+        case .danger: return .danger
+        }
+    }
+}
