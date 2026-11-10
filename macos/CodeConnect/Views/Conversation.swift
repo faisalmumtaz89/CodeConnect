@@ -198,6 +198,7 @@ private struct ToolLine: View {
             if let output = tool.output, !output.isEmpty {
                 Button { open.toggle() } label: { line(opens: true) }
                     .buttonStyle(.hover(outset: 4, id: "session.tool.\(id)"))
+                    .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")
                 if open {
@@ -209,10 +210,16 @@ private struct ToolLine: View {
             } else {
                 // One element either way, found by the same id; its name starts with how the call stands.
                 line(opens: false)
-                    .accessibilityElement(children: .combine)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
             }
         }
+    }
+
+    /// How the call reads aloud: how it stands, then the tool and what it was given.
+    private var spoken: String {
+        [tool.status.label, tool.name, tool.argument ?? ""].filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     private func line(opens: Bool) -> some View {
@@ -221,7 +228,8 @@ private struct ToolLine: View {
                 .font(.system(size: 11))
                 .foregroundStyle(tool.status == .failed ? Theme.red : Theme.text3)
                 .frame(width: 14)
-                .accessibilityLabel(tool.status.label)
+                // Hidden: a checkmark symbol in a button's label marks the button selected; the name carries the word.
+                .accessibilityHidden(true)
             Text(tool.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
             if let argument = tool.argument, !argument.isEmpty {
                 Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
