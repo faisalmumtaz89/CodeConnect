@@ -2,10 +2,11 @@ import CodeConnectKit
 import SwiftUI
 
 /// A run's changes as its computer read them (`git diff HEAD` and the untracked names), opened at the top. Kit asks
-/// for them when the tab is shown and nothing has been read yet, and again only on "Check again": a diff is read when
-/// you are about to read it, and says how old it is rather than passing for live. Who said what decides the state:
-/// the computer's own words are quoted as they came, the app's account of its link is never passed off as them, and
-/// an empty diff is called clean only when the computer added no note saying why it is empty.
+/// for them when the tab is shown and nothing has been read yet, again on "Check again", and again when the link comes
+/// back after it failed them: a diff is read when you are about to read it, and says how old it is rather than passing
+/// for live. Who said what decides the state: the computer's own words are quoted as they came, the app's account of
+/// its link is never passed off as them, and an empty diff is called clean only when the computer added no note saying
+/// why it is empty.
 struct ChangesTab: View {
     let model: AppModel
     let key: String
@@ -59,6 +60,17 @@ struct ChangesTab: View {
         .accessibilityIdentifier("changes.pane")
         .task(id: key) {
             if case .idle = model.diffState(for: key) { model.loadDiff(key: key) }
+        }
+        // Asked again the moment the link is back, as the iPhone does: only after the app's own link failure, never
+        // after a refusal the computer made.
+        .onChange(of: model.daemonProfile.isConnected) { _, connected in
+            guard connected else { return }
+            let state = model.diffState(for: key)
+            if case .idle = state {
+                model.loadDiff(key: key)
+            } else if state.failedOnTheLink {
+                model.loadDiff(key: key, force: true)
+            }
         }
     }
 
@@ -154,10 +166,11 @@ private struct Document: View {
                 if !extra.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
+                        // Not selectable: a selectable text is dropped from the combined element, so the names would
+                        // be drawn but never read.
                         Text(verbatim: extra.joined(separator: "\n"))
                             .font(Theme.mono(11.5))
                             .foregroundStyle(Theme.text3)
-                            .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .accessibilityElement(children: .combine)
