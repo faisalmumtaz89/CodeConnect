@@ -1447,6 +1447,7 @@ mod tests {
                 card["payload_hash"].as_str().unwrap(),
                 protocol::ws::AnswerDecision::Allow,
                 Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await
         {

@@ -157,6 +157,12 @@ public enum ResolvedBy: String, Codable, Sendable, Hashable {
     }
 }
 
+/// The kind of paired device an answer came from (`answered_on`, minor 34), by
+/// the name its app says hello with. Attribution only: it chooses words.
+public enum AnsweredOn: String, Codable, Sendable, Hashable {
+    case iphone, mac
+}
+
 /// Which agent is running in a session.
 ///
 /// `protocol/src/agent.rs`: `#[derive(Default)] Claude` plus
@@ -1151,6 +1157,10 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
     let sessionID: String
     public let decision: AnswerDecision
     public let resolvedBy: ResolvedBy
+    /// Which kind of device sent an answer from a paired device (minor 34). `nil`
+    /// on every other outcome, from an older daemon, on an answer a restart
+    /// settled, and for a kind this build does not know.
+    public let answeredOn: AnsweredOn?
     public let appliedVia: AnswerPath
     public let resolvedAt: String
     public let detail: String?
@@ -1169,6 +1179,7 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         case sessionID = "session_id"
         case decision
         case resolvedBy = "resolved_by"
+        case answeredOn = "answered_on"
         case appliedVia = "applied_via"
         case resolvedAt = "resolved_at"
         case detail
@@ -1178,13 +1189,14 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
 
     public init(
         requestID: String, sessionID: String, decision: AnswerDecision, resolvedBy: ResolvedBy,
-        appliedVia: AnswerPath, resolvedAt: String, detail: String?, inferred: Bool,
-        indeterminate: Bool = false
+        answeredOn: AnsweredOn? = nil, appliedVia: AnswerPath, resolvedAt: String, detail: String?,
+        inferred: Bool, indeterminate: Bool = false
     ) {
         self.requestID = requestID
         self.sessionID = sessionID
         self.decision = decision
         self.resolvedBy = resolvedBy
+        self.answeredOn = answeredOn
         self.appliedVia = appliedVia
         self.resolvedAt = resolvedAt
         self.detail = detail
@@ -1198,6 +1210,7 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         sessionID = try c.decode(String.self, forKey: .sessionID)
         decision = try c.decode(AnswerDecision.self, forKey: .decision)
         resolvedBy = try c.decode(ResolvedBy.self, forKey: .resolvedBy)
+        answeredOn = try c.decodeIfPresent(String.self, forKey: .answeredOn).flatMap(AnsweredOn.init(rawValue:))
         appliedVia = try c.decode(AnswerPath.self, forKey: .appliedVia)
         resolvedAt = try c.decode(String.self, forKey: .resolvedAt)
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
@@ -1221,7 +1234,8 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
     public var wasSentToClaude: Bool { indeterminate && detail?.hasPrefix(Self.sentToClaude) == true }
 
     /// The daemon's own words for that record (`SENT_TO_CLAUDE` in ccd), which
-    /// it follows with a note when the record could not be written.
+    /// it follows with a note when the record could not be written. The same
+    /// whichever device sent the answer: `answeredOn` says which.
     public static let sentToClaude = "Sent to Claude from a phone"
 
     /// The daemon's words (`RUN_ENDED` in ccd) for a card closed because the

@@ -18886,6 +18886,7 @@ mod tests {
                         option_id: option_id.into(),
                     },
                     Some(&self.session.uid),
+                    protocol::ws::AnsweredOn::Iphone,
                 )
                 .await
         }
@@ -18909,6 +18910,7 @@ mod tests {
                         &payload_hash,
                         protocol::ws::AnswerDecision::OptionId { option_id },
                         Some(&uid),
+                        protocol::ws::AnsweredOn::Iphone,
                     )
                     .await
             })
@@ -20132,7 +20134,13 @@ mod tests {
                 .to_string();
             let reason = rejected(
                 daemon
-                    .answer("req-a", "h", answer.clone(), Some(&session.uid))
+                    .answer(
+                        "req-a",
+                        "h",
+                        answer.clone(),
+                        Some(&session.uid),
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
                     .await,
             );
             tells_the_phone_nothing_local("answer session lookup", &reason, &err);
@@ -20150,7 +20158,13 @@ mod tests {
                 .to_string();
             let reason = rejected(
                 daemon
-                    .answer("req-b", "h", answer.clone(), Some(&session.uid))
+                    .answer(
+                        "req-b",
+                        "h",
+                        answer.clone(),
+                        Some(&session.uid),
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
                     .await,
             );
             tells_the_phone_nothing_local("answer ledger read", &reason, &err);
@@ -20168,7 +20182,13 @@ mod tests {
                 .to_string();
             let reason = rejected(
                 daemon
-                    .answer("req-c", "h", answer.clone(), Some(&session.uid))
+                    .answer(
+                        "req-c",
+                        "h",
+                        answer.clone(),
+                        Some(&session.uid),
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
                     .await,
             );
             tells_the_phone_nothing_local("answer card read", &reason, &err);
@@ -20184,7 +20204,17 @@ mod tests {
                 .await
                 .expect_err("the stored outcome does not decode")
                 .to_string();
-            let reason = rejected(daemon.answer("req-d", "h", answer.clone(), None).await);
+            let reason = rejected(
+                daemon
+                    .answer(
+                        "req-d",
+                        "h",
+                        answer.clone(),
+                        None,
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
+                    .await,
+            );
             tells_the_phone_nothing_local("answer replay read", &reason, &err);
         }
 
@@ -20197,6 +20227,7 @@ mod tests {
                 session_id: session.name.clone(),
                 decision: answer.clone(),
                 resolved_by: protocol::ws::ResolvedBy::Phone,
+                answered_on: None,
                 applied_via: protocol::ws::AnswerPath::CodexResponse,
                 resolved_at: "2026-01-01T00:00:00.000Z".into(),
                 detail: None,
@@ -20212,7 +20243,17 @@ mod tests {
                 .await
                 .expect_err("the fleet view is gone")
                 .to_string();
-            let reason = rejected(daemon.answer("req-e", "h", answer.clone(), None).await);
+            let reason = rejected(
+                daemon
+                    .answer(
+                        "req-e",
+                        "h",
+                        answer.clone(),
+                        None,
+                        protocol::ws::AnsweredOn::Iphone,
+                    )
+                    .await,
+            );
             tells_the_phone_nothing_local("answer agent gate", &reason, &err);
         }
     }
@@ -20305,6 +20346,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(&session.uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         let turn = "01a0-t";
@@ -24535,6 +24577,7 @@ mod tests {
                     option_id: "accept".into(),
                 },
                 Some(&session.uid),
+                protocol::ws::AnsweredOn::Iphone,
             )
             .await;
         match &result {

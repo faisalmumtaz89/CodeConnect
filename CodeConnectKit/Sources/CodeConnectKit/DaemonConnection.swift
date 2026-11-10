@@ -1541,7 +1541,10 @@ public final class DaemonConnection {
     /// One device is one identity wherever it shows up on the Mac.
     private static var installationID: String { DeviceIdentity.installationID }
 
-    private static let clientName = "CodeConnect \(HostDevice.current.name)"
+    /// The name this app says hello with. The daemon records the Mac app's,
+    /// "CodeConnect Mac", as where its answers came from (`AnsweredOn` in ccd's
+    /// protocol), so it is not renamed lightly.
+    static let clientName = "CodeConnect \(HostDevice.current.name)"
 }
 
 /// Just the discriminator, for a frame whose *body* would not decode.

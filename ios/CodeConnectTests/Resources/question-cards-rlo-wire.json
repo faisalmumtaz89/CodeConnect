@@ -186,6 +186,7 @@
   "unchecked_answered": {
     "kind": "approval_resolved",
     "payload": {
+      "answered_on": "iphone",
       "applied_via": "hook_return",
       "decision": {
         "answers": [

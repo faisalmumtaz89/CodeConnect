@@ -32,7 +32,7 @@ use protocol::event::{Event, EventKind, Source};
 use protocol::peer::PeerRequest;
 use protocol::secret::Redacted;
 use protocol::ws::{
-    AnswerPath, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
+    AnswerPath, AnsweredOn, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -483,6 +483,9 @@ where
     // keep answering approvals and typing into the session's TTY, which is the
     // opposite of what the operator just asked for.
     let mut device_id: Option<String> = None;
+    // Which kind of device it is, as its hello named it: what its answers are
+    // recorded as coming from.
+    let mut answered_on = AnsweredOn::Iphone;
     // The connection's live terminal, split into three locals on purpose: the
     // control/credit side and the two receivers. Each select arm borrows only
     // its own receiver; the incoming arm's body borrows only `terminal`, so no
@@ -653,6 +656,7 @@ where
                                 AuthOutcome::Paired { device_id, .. } => Some(device_id.clone()),
                                 _ => None,
                             };
+                            answered_on = AnsweredOn::from_client_name(client_name.as_deref());
                             crate::log_info!(
                                 "ws: client {:?} connected over {} as {}",
                                 client_name.as_deref().unwrap_or("unnamed"),
@@ -797,6 +801,7 @@ where
                     &mut backlog,
                     &mut history,
                     device_id.as_deref(),
+                    answered_on,
                     parsed,
                 )
                 .await?;
@@ -1155,6 +1160,7 @@ fn live_delivery(seq: u64, watermark: u64) -> Live {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_message<S>(
     daemon: &Arc<Daemon>,
     sink: &mut S,
@@ -1170,6 +1176,8 @@ async fn handle_message<S>(
     // bootstrap token has no device row, so it has nowhere to register a push
     // token — see `RegisterPush`.
     device_id: Option<&str>,
+    // What its answers are recorded as coming from.
+    answered_on: AnsweredOn,
     message: ClientMessage,
 ) -> Result<()>
 where
@@ -1436,7 +1444,13 @@ where
             session_id,
         } => {
             let result = daemon
-                .answer(&request_id, &payload_hash, decision, session_id.as_deref())
+                .answer(
+                    &request_id,
+                    &payload_hash,
+                    decision,
+                    session_id.as_deref(),
+                    answered_on,
+                )
                 .await;
             send(sink, &ServerMessage::AnswerResult { request_id, result }).await?;
         }
@@ -3624,6 +3638,94 @@ mod tests {
         }
     }
 
+    /// **An answer says which kind of device sent it**, by what its connection's
+    /// hello called itself: the Mac app's is recorded as a Mac's, an iPhone's as
+    /// before, with the iPhone's sentence byte for byte what every app reads.
+    #[tokio::test]
+    async fn an_answer_names_the_kind_of_device_it_came_from() {
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
+        for (client_name, answered_on, detail) in [
+            ("CodeConnect Mac", "mac", "Sent to Claude from a phone"),
+            (
+                "CodeConnect iPhone",
+                "iphone",
+                "Sent to Claude from a phone",
+            ),
+        ] {
+            let (server, _device) = live_server(protocol::config::Config::default()).await;
+            let uid = protocol::uid::new().unwrap();
+            let call = "toolu_answered_on";
+            let tool_input = serde_json::json!({ "command": "touch held.txt" });
+            let hook = |event: &str, wait: bool| protocol::ipc::HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.clone()),
+                event: event.into(),
+                payload: serde_json::json!({
+                    "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p1",
+                    "tool_name": "Bash", "tool_input": tool_input, "tool_use_id": call,
+                }),
+                wait,
+                holds_questions: wait,
+                holds_approvals: wait,
+            };
+            server.daemon.handle_hook(hook("PreToolUse", false)).await;
+            let held = {
+                let daemon = Arc::clone(&server.daemon);
+                let request = hook("PermissionRequest", true);
+                tokio::spawn(async move { daemon.handle_hook(request).await })
+            };
+            for _ in 0..200 {
+                let filed = server.daemon.store.list_pending_approvals().unwrap().len() == 1;
+                if filed || held.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let stream = TcpStream::connect(server.addr).await.unwrap();
+            let url = format!("ws://{}/", server.addr);
+            let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
+            let hello = serde_json::json!({
+                "type": "hello",
+                "protocol_version": protocol::PROTOCOL_VERSION,
+                "token": "device-token-for-tests",
+                "client_name": client_name,
+            });
+            socket.send(Message::Text(hello.to_string())).await.unwrap();
+            let ack = next_json(&mut socket).await.expect("a reply to hello");
+            assert_eq!(ack["type"], "hello_ack", "{ack}");
+            let answer = serde_json::json!({
+                "type": "answer",
+                "request_id": call,
+                "payload_hash": protocol::hash::approval_payload_hash("Bash", &tool_input),
+                "decision": { "type": "allow" },
+                "session_id": uid,
+            });
+            socket
+                .send(Message::Text(answer.to_string()))
+                .await
+                .unwrap();
+            let result = loop {
+                let message = next_json(&mut socket).await.expect("an answer_result");
+                if message["type"] == "answer_result" {
+                    break message;
+                }
+            };
+            let outcome = &result["result"]["outcome"];
+            assert_eq!(
+                result["result"]["status"], "applied",
+                "{client_name}: {result}"
+            );
+            assert_eq!(outcome["resolved_by"], "phone", "{client_name}: {result}");
+            assert_eq!(
+                outcome["answered_on"], answered_on,
+                "{client_name}: {result}"
+            );
+            assert_eq!(outcome["detail"], detail, "{client_name}: {result}");
+            let _ = tokio::time::timeout(Duration::from_secs(5), held).await;
+        }
+    }
+
     /// A `hello` at the current protocol, on the device token these tests pair with,
     /// carrying the `features` key no build reads any more. Used for both the
     /// handshake hello and the second one sent down an already-authenticated socket
@@ -5676,6 +5778,7 @@ mod tests {
                 &mut backlog,
                 &mut history,
                 None,
+                AnsweredOn::Iphone,
                 ask(request_id),
             )
             .await
@@ -5692,6 +5795,7 @@ mod tests {
             &mut backlog,
             &mut history,
             None,
+            AnsweredOn::Iphone,
             ClientMessage::DeleteSession {
                 session_uid: uid.clone(),
             },
@@ -5756,6 +5860,7 @@ mod tests {
                 &mut backlog,
                 &mut history,
                 None,
+                AnsweredOn::Iphone,
                 ClientMessage::History {
                     session_id: uid.clone(),
                     before_seq: 11,
@@ -5775,6 +5880,7 @@ mod tests {
                 &mut other_backlog,
                 &mut other_history,
                 None,
+                AnsweredOn::Iphone,
                 ClientMessage::DeleteSession {
                     session_uid: uid.clone(),
                 },

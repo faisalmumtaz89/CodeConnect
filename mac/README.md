@@ -1297,8 +1297,12 @@ means an incompatible peer cannot use the handshake to probe credentials.
   reached the agent is not: the daemon stopped between claiming it and
   recording what became of it, or (from minor 22) it is a phone answer to a
   Claude approval, sent to the call's hook (detail "Sent to Claude from a
-  phone"), which Claude may not use. Distinct from `inferred`, which is
-  uncertainty about the *decision*. Never retried.
+  phone", whichever device sent it), which Claude may not use. Distinct from
+  `inferred`, which is uncertainty about the *decision*. Never retried.
+* **`AnswerOutcome.answered_on`** (minor 34) — `iphone` or `mac` on an answer
+  from a paired device: the Mac app's when its connection said hello as
+  "CodeConnect Mac", an iPhone's otherwise. Absent on every other outcome, from
+  an older daemon, and on an answer a restart settled. It chooses words only.
 * **`ApprovalCard.question_hold` / `identity_bound`** — see
   [Card identity](#card-identity). Before minor 22, `identity_bound` meant the
   prompt on screen had been fingerprinted for typing, announced by an
