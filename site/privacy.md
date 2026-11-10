@@ -66,7 +66,7 @@ There are no other endpoints. If you choose to reach your computer through a VPN
 
 ## How the connection is protected
 
-The link between your phone and your computer is TLS (`wss://`), your machine's loopback, or your own private tailnet address. A cleartext local-network mode exists but only behind an explicit configuration flag you set yourself — nothing falls back to it silently. Each device holds its own revocable token, high-risk approvals additionally require Face ID or your passcode, and releases are signed — the Mac binaries with Developer ID, a Linux release's checksums with CodeConnect's release key — with the signature verified by the installer and by `codeconnect update` before anything is installed.
+The link between your phone and your computer is TLS (`wss://`), your machine's loopback, or your own private tailnet address. A cleartext local-network mode exists but only behind an explicit configuration flag you set yourself — nothing falls back to it silently. Each device holds its own revocable token, high-risk approvals on the iPhone additionally require Face ID or your passcode, and releases are signed — the Mac binaries with Developer ID, a Linux release's checksums with CodeConnect's release key — with the signature verified by the installer and by `codeconnect update` before anything is installed.
 
 ## Deleting your data, and your rights
 
