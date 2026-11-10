@@ -29,16 +29,18 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 - An iPhone with iOS 17 or later.
 - A Mac with macOS 13 or later (Apple silicon or Intel), or a Linux computer (x86_64 or arm64) with OpenSSL 3.
 - [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://github.com/openai/codex) already working in your terminal. CodeConnect runs the `claude` and `codex` your shell runs.
-- [Tailscale](https://tailscale.com/download) on both, signed in to the same tailnet. This is the default; your local network also works, without encryption or the live terminal ([how](https://codeconnect.sh/support)).
+- [Tailscale](https://tailscale.com/download) on both, signed in to the same Tailscale account; a computer on another account pairs with a code. Tailscale is the default; your local network also works, without encryption or the live terminal ([how](https://codeconnect.sh/support)).
 
 ## Install
 
-1. On your iPhone, install [CodeConnect Remote](https://apps.apple.com/app/codeconnect-remote/id6797021894) from the App Store, and Tailscale on the same tailnet as your computer.
-2. On your computer, as your own user:
+1. On your iPhone, install [CodeConnect Remote](https://apps.apple.com/app/codeconnect-remote/id6797021894) from the App Store, and Tailscale, signed in to the same Tailscale account as your computer.
+2. On your computer:
+   - **Mac:** on macOS 26 or later, download `CodeConnect-<version>.dmg` from the [latest release](https://github.com/faisalmumtaz89/CodeConnect/releases/latest) or [codeconnect.sh/mac](https://codeconnect.sh/mac), drag CodeConnect to Applications and open it. It installs CodeConnect, starts its daemon and keeps both up to date. Its window shows the agents on all your computers: open one to read its conversation, answer its approvals and questions, reply to it, see what it has changed and, for Claude Code, use its live terminal. To pair your iPhone, choose File › Add iPhone… and scan the QR code with your iPhone's camera, or type the address and code shown under it into the iPhone app. On an older Mac, run the Linux command instead.
+   - **Linux:** as your own user, run
 
-   ```sh
-   curl -fsSL https://codeconnect.sh | sh
-   ```
+     ```sh
+     curl -fsSL https://codeconnect.sh | sh
+     ```
 
 The installer checks the release's signature before installing anything, installs to `~/.codeconnect/bin` with its own tmux, and asks before adding that folder to your `PATH`. Then it asks "Set up CodeConnect now?" and does whatever is still missing, in order:
 
@@ -47,11 +49,9 @@ The installer checks the release's signature before installing anything, install
 3. Shows a QR code: scan it with the app.
 4. Signs in Claude Code and Codex, if they are installed and signed out.
 
-Run again, it picks up where it stopped. It uses sudo only on Linux, for `tailscale up --qr` and, where systemd needs it, `loginctl enable-linger`. To read it first: `curl -fsSL https://codeconnect.sh -o codeconnect-install.sh`, `less codeconnect-install.sh`, then `sh codeconnect-install.sh`. On a Linux machine where you have only root, or in a container, read [On Linux](site/support.md#on-linux) first.
+Run again, it picks up where it stopped. It uses sudo only on Linux, for `tailscale up --qr` and, where systemd needs it, `loginctl enable-linger`. To read it first: `curl -fsSL https://codeconnect.sh -o codeconnect-install.sh`, `less codeconnect-install.sh`, then `sh codeconnect-install.sh`. On a Linux computer where you have only root, or in a container, read [On Linux](site/support.md#on-linux) first.
 
-To add another computer, run the same command there, then in the app go to Settings → Computers → Add a computer.
-
-On a Mac with macOS 26 or later you can use the Mac app instead of step 2: download `CodeConnect-<version>.dmg` from the [latest release](https://github.com/faisalmumtaz89/CodeConnect/releases/latest) or [codeconnect.sh/mac](https://codeconnect.sh/mac), drag CodeConnect to Applications and open it. It installs CodeConnect, starts its daemon and keeps both up to date.
+Once your iPhone uses one of your computers, every other computer running CodeConnect and signed in to Tailscale with the same account as your iPhone appears on it by itself, with no code, unless it runs Tailscale in userspace mode, as most containers do. A computer on another Tailscale account, or with a Tailscale tag, needs its code: in the app, go to Settings → Computers → Add a computer and scan the code that computer's Mac app shows under File › Add iPhone…, or the one `codeconnect pair` prints there.
 
 ## Use
 
@@ -67,7 +67,7 @@ The agent works as before, and the session appears on your phone. Other commands
 ```sh
 codeconnect ls                # your sessions
 codeconnect attach cc-1       # reopen a session in a new tab
-codeconnect pair              # a new pairing code (single use, 5 minutes)
+codeconnect pair              # a pairing code, for an iPhone that doesn't add this computer by itself (single use, 5 minutes)
 codeconnect devices           # paired phones
 codeconnect revoke <device>   # cut a phone off, open connections included
 codeconnect daemon status     # is the daemon running?
@@ -78,7 +78,7 @@ codeconnect mail-trust on     # let your agents act on each other's messages (of
 
 `codeconnect update` installs the latest signed release, unless the Mac app installed CodeConnect, which updates it itself; your sessions keep running. The iPhone app updates from the App Store. Coming from an older release, read [Upgrading](mac/README.md#upgrading).
 
-To uninstall, follow [Uninstalling](site/support.md#uninstalling): end your sessions, remove the daemon, delete `~/.codeconnect`, and remove what the installer added to your shell's startup files.
+To uninstall, follow [Uninstalling](site/support.md#uninstalling): on a Mac with the app, quit it and move it to the Trash first; then end your sessions, remove the daemon, delete `~/.codeconnect`, and remove what CodeConnect added to your shell's startup files.
 
 ## How it works
 
