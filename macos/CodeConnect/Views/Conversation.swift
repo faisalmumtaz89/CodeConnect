@@ -3,27 +3,28 @@ import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it happened, and the run's
-/// notices. A List, so a run thousands of rows long draws only what is on screen. Reaching the top pages back on its
-/// own, as the iPhone does.
+/// notices. Lazy, so a run thousands of rows long builds only what is near the screen, and anchored at the bottom, so
+/// it opens at the newest row and a page of earlier history arriving above leaves what is on screen where it was.
+/// Reaching the top pages back on its own, as the iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
-        List {
-            Earlier(model: model, key: key).reading()
-            ForEach(items) { item in
-                ConversationRow(item: item)
-                    .reading()
-                    // One element per row: an identifier on a row of several texts otherwise lands on each of them.
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("session.row.\(item.id)")
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                Earlier(model: model, key: key)
+                ForEach(items) { item in
+                    ConversationRow(item: item)
+                        // One element per row: an identifier on a row of several texts otherwise lands on each of them.
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("session.row.\(item.id)")
+                }
             }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 18)
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, 0)
         .defaultScrollAnchor(.bottom)
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
@@ -31,20 +32,12 @@ struct Conversation: View {
     }
 }
 
-extension View {
-    /// A row of the reading column: no separator, no fill, the column's margins.
-    fileprivate func reading() -> some View {
-        listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 7, leading: 28, bottom: 7, trailing: 28))
-    }
-}
-
-/// The row above the first: while it is on screen and Kit can page, it asks for the page before; while that page is
-/// on its way it says so. Kit decides whether there is anything earlier and guards a page already in flight.
+/// The row above the first: once it is really on screen and Kit can page, it asks for the page before; while that
+/// page is on its way it says so. Kit decides whether there is anything earlier and guards a page already in flight.
 private struct Earlier: View {
     let model: AppModel
     let key: String
+    @State private var onScreen = false
 
     var body: some View {
         Group {
@@ -58,8 +51,9 @@ private struct Earlier: View {
             }
         }
         .accessibilityIdentifier("session.earlier")
-        .task(id: model.isReadyToPage(key)) {
-            if model.isReadyToPage(key) { model.reachedTop(key: key) }
+        .onScrollVisibilityChange { onScreen = $0 }
+        .task(id: [onScreen, model.isReadyToPage(key)]) {
+            if onScreen, model.isReadyToPage(key) { model.reachedTop(key: key) }
         }
     }
 }
@@ -206,7 +200,10 @@ private struct ToolLine: View {
                     }
                 }
             } else {
+                // One element either way, found by the same id; its name starts with how the call stands.
                 line(opens: false)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("session.tool.\(id)")
             }
         }
     }
