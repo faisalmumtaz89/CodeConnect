@@ -236,4 +236,33 @@ final class SendIdempotencyTests: XCTestCase {
             return XCTFail("a send that never left is a failure")
         }
     }
+
+    /// The unanswered send is asked once more only while every condition holds:
+    /// the link is back, nothing else is sending, the draft is still exactly
+    /// that text, a minute has not passed, and the computer still holds its
+    /// identity for that run.
+    func testAnUnansweredSendIsAskedAgainOnlyWhileEveryConditionHolds() async {
+        let model = connectedModel { _, _ in throw ConnectionError.sentButUnanswered }
+        let sentAt = Date()
+        guard case .indeterminate = await model.send(text: "deploy", to: "u-1") else {
+            return XCTFail("an unanswered send is indeterminate")
+        }
+        let unanswered = UnansweredSend(text: "deploy", sentAt: sentAt)
+        let soon = sentAt.addingTimeInterval(30)
+        XCTAssertTrue(model.asksAgain(unanswered, to: "u-1", draft: "deploy", sending: false, now: soon))
+        XCTAssertFalse(
+            model.asksAgain(unanswered, to: "u-1", draft: "deploy", sending: true, now: soon), "already sending")
+        XCTAssertFalse(
+            model.asksAgain(unanswered, to: "u-1", draft: "deploy now", sending: false, now: soon), "edited")
+        XCTAssertFalse(
+            model.asksAgain(
+                unanswered, to: "u-1", draft: "deploy", sending: false, now: sentAt.addingTimeInterval(60)),
+            "a minute has passed")
+        XCTAssertFalse(
+            model.asksAgain(unanswered, to: "u-2", draft: "deploy", sending: false, now: soon),
+            "no identity is held for another run")
+        model.connection.setPhaseForTesting(.connecting)
+        XCTAssertFalse(
+            model.asksAgain(unanswered, to: "u-1", draft: "deploy", sending: false, now: soon), "the link is not back")
+    }
 }

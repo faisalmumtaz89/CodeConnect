@@ -677,7 +677,7 @@ The card is answerable only from a daemon that advertises `hook_only_approvals`
 (protocol minor 22, `DaemonProfile.answersApprovalsByHook`) and only while its
 `question_hold` is `held` (`DecisionCard.answerSurface`); the send path refuses
 the same cases (`AppModel.decisionMismatch`). Otherwise the card is read-only and
-says why (`DecisionCardView.claudeUnanswerableReason`): the Mac's CodeConnect is too
+says why (`DecisionCard.claudeUnanswerableReason`): the Mac's CodeConnect is too
 old, Claude is asking at the Mac, or the phone can no longer answer it.
 
 A held card offers **Allow**, **Deny** and **Deny with a reason**. Deny with a

@@ -54,7 +54,7 @@ struct QuestionCardView: View {
 
     private var status: QuestionCardStatus {
         QuestionCardStatus.resolve(
-            outcome: DecisionCardView.effectiveOutcome(
+            outcome: DecisionCard.effectiveOutcome(
                 live: live?.outcome, snapshot: approval.outcome),
             attempt: attempt, isBacked: live != nil,
             hold: (live ?? approval).questionHold,
@@ -79,7 +79,7 @@ struct QuestionCardView: View {
     /// Everything that stops every control on this card — the decision card's
     /// own list.
     private var blockedReason: String? {
-        DecisionCardView.blockedReason(model: model, approval: approval, inFlight: inFlight)
+        model.answerBlockedReason(for: approval, inFlight: inFlight)
     }
 
     /// Whether this step's forward control is Submit.
@@ -561,8 +561,7 @@ struct QuestionCardView: View {
         spinningControl = key
         // A HIGH card's affirmative answer takes a face, as Allow does on the
         // decision card. Declining never does.
-        var needsFace = false
-        if risk == .high, case .answers = decision { needsFace = true }
+        let needsFace = DecisionCard.needsSecondFactor(risk: risk, decision: decision)
         Task {
             let sent = await DecisionCardView.send(
                 decision, for: approval, model: model, needsFace: needsFace)

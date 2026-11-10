@@ -94,7 +94,7 @@ final class UnknownComputerTests: XCTestCase {
     /// old daemon, and not that the card came without its options.
     func testACodexCardOnAComputerThatIsNotConnectedSaysTheLink() {
         let unknown = DaemonProfile.unknown
-        let reason = DecisionCardView.codexUnanswerableReason(
+        let reason = DecisionCard.codexUnanswerableReason(
             isKnown: unknown.isConnected, caveat: unknown.codexAnswerCaveat, isVerified: true,
             linkReason: link)
 
@@ -113,7 +113,7 @@ final class UnknownComputerTests: XCTestCase {
         XCTAssertEqual(question, .macTooOld)
         XCTAssertTrue(
             question.banner?.message.contains("This computer's CodeConnect is too old") ?? false)
-        let codex = DecisionCardView.codexUnanswerableReason(
+        let codex = DecisionCard.codexUnanswerableReason(
             isKnown: old.isConnected, caveat: old.codexAnswerCaveat, isVerified: true,
             linkReason: nil)
         XCTAssertTrue(codex.hasPrefix("This computer's CodeConnect is too old"), codex)

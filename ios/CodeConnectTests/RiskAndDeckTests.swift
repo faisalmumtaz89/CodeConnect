@@ -241,6 +241,142 @@ final class RiskAndDeckTests: XCTestCase {
         XCTAssertEqual(pass.settledCount, 0, "postponing decides nothing")
     }
 
+    // MARK: One approval policy, read by every card
+
+    /// The decision card asks a face for Allow and a Codex option that says yes,
+    /// the question card for its answers; neither for a refusal, and a Codex
+    /// card's "No" (`cancel`) is one. One rule answers both cards. The option ids
+    /// are every one the daemon puts on a Codex card.
+    func testASecondFactorIsAskedOnlyForAnAffirmativeAnswerAtHigh() {
+        let affirmative: [AnswerDecision] = [
+            .allow, .option(index: 1), .optionId("accept"), .optionId("acceptForSession"),
+            .optionId("acceptWithExecpolicyAmendment"), .answers([QuestionAnswer()]), .unrecognised("x"),
+        ]
+        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline, .optionId("cancel")]
+        for risk in [RiskClass.low, .medium] {
+            for decision in affirmative + refusals {
+                XCTAssertFalse(DecisionCard.needsSecondFactor(risk: risk, decision: decision), "\(risk) \(decision)")
+            }
+        }
+        for decision in affirmative {
+            XCTAssertTrue(DecisionCard.needsSecondFactor(risk: .high, decision: decision), "\(decision)")
+        }
+        for decision in refusals {
+            XCTAssertFalse(DecisionCard.needsSecondFactor(risk: .high, decision: decision), "\(decision)")
+        }
+    }
+
+    /// The wait while an answer is on the way names the computer the agents
+    /// run on, in each device's words.
+    func testTheWaitNamesTheAgentsComputerInEachDevicesWords() {
+        XCTAssertEqual(DecisionCard.waitingSentence(on: .iPhone), "Waiting for your computer to confirm…")
+        XCTAssertEqual(DecisionCard.waitingSentence(on: .mac), "Waiting for the agent's computer to confirm…")
+    }
+
+    /// Why a card offers nothing to tap, and the wait for an unconfirmed
+    /// answer, in each device's words. The iPhone keeps "the phone" and "the
+    /// computer"; a Mac names the computer when it knows it, and says "the
+    /// agent's computer" when it does not.
+    func testTheNothingToTapReasonsNameTheComputerInEachDevicesWords() {
+        let studio = "Jordan’s Mac Studio"
+        func reasons(_ host: HostDevice, _ computer: String?) -> [String] {
+            [
+                DecisionCard.codexUnanswerableReason(
+                    isKnown: false, caveat: nil, isVerified: true, linkReason: nil, computer: computer, on: host),
+                DecisionCard.codexUnanswerableReason(
+                    isKnown: true, caveat: nil, isVerified: true, linkReason: nil, computer: computer, on: host),
+                DecisionCard.claudeUnanswerableReason(
+                    isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: nil, computer: computer,
+                    on: host),
+                DecisionCard.claudeUnanswerableReason(
+                    isQuestion: false, hookOnlyApprovals: true, linkReason: nil, hold: .atMac, computer: computer,
+                    on: host),
+                DecisionCard.unsupportedAgentReason("aider", computer: computer, on: host),
+                DecisionCard.stillWaiting(after: 120, computer: computer, on: host),
+                DecisionCard.stillWaiting(after: 120, spoken: true, computer: computer, on: host),
+            ]
+        }
+        let age = Format.age(120)
+        let spoken = Format.spokenDuration(120)
+        let iPhone = [
+            "The phone can no longer answer this. Answer it at the computer.",
+            "This card arrived without the options Codex answers by, so it can only be answered at the computer.",
+            "This computer's CodeConnect is too old to answer Claude's approvals from the phone. "
+                + "Update it, or answer at the computer.",
+            "Claude is asking this at the computer, so answer it there.",
+            "This app does not know how to answer a aider session. Answer it at the computer.",
+            "Still waiting on the computer - \(age).",
+            "Still waiting on the computer, \(spoken).",
+        ]
+        XCTAssertEqual(reasons(.iPhone, nil), iPhone)
+        XCTAssertEqual(reasons(.iPhone, studio), iPhone, "the iPhone keeps its words whatever the name")
+        XCTAssertEqual(
+            reasons(.mac, nil),
+            [
+                "The Mac can no longer answer this. Answer it at the agent's computer.",
+                "This card arrived without the options Codex answers by, so it can only be answered at the "
+                    + "agent's computer.",
+                "The agent's computer's CodeConnect is too old to answer Claude's approvals from the Mac. "
+                    + "Update it, or answer at the agent's computer.",
+                "Claude is asking this at the agent's computer, so answer it there.",
+                "This app does not know how to answer a aider session. Answer it at the agent's computer.",
+                "Still waiting on the agent's computer - \(age).",
+                "Still waiting on the agent's computer, \(spoken).",
+            ])
+        XCTAssertEqual(
+            reasons(.mac, studio),
+            [
+                "The Mac can no longer answer this. Answer it at Jordan’s Mac Studio.",
+                "This card arrived without the options Codex answers by, so it can only be answered at "
+                    + "Jordan’s Mac Studio.",
+                "Jordan’s Mac Studio's CodeConnect is too old to answer Claude's approvals from the Mac. "
+                    + "Update it, or answer at Jordan’s Mac Studio.",
+                "Claude is asking this at Jordan’s Mac Studio, so answer it there.",
+                "This app does not know how to answer a aider session. Answer it at Jordan’s Mac Studio.",
+                "Still waiting on Jordan’s Mac Studio - \(age).",
+                "Still waiting on Jordan’s Mac Studio, \(spoken).",
+            ])
+        XCTAssertEqual(
+            DecisionCard.notOnTheFleetReason,
+            "This run is no longer on the fleet, so this card cannot be answered from here.")
+    }
+
+    /// Why a card's controls cannot act, in the order that matters: a send in
+    /// flight, then the link, then the run, then a card whose text does not
+    /// match its hash.
+    @MainActor
+    func testAnAnswerIsBlockedWhileInFlightThenByTheLinkThenTheRunThenTheHash() throws {
+        let model = AppModel()
+        let run = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data(
+                """
+                {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
+                 "tmux_session":"cc-1","cwd":"/tmp/x","lifecycle":"live",
+                 "link":"attached","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
+                 "updated_at":"2026-08-02T10:00:00Z","blocked_on":[]}
+                """.utf8))
+        model.adoptSummariesForTesting([run])
+        let mismatched = item(session: run.sessionKey, request: "r1", ageSeconds: 0)
+        XCTAssertFalse(mismatched.card.verification.hashMatchesDisplayText, "the helper's card does not match its hash")
+        XCTAssertEqual(
+            model.answerBlockedReason(for: mismatched, inFlight: true), "Waiting for your computer to confirm…")
+        let link = try XCTUnwrap(model.actionsBlockedReason, "a model with no link has the link's reason")
+        XCTAssertEqual(model.answerBlockedReason(for: mismatched, inFlight: false), link)
+        model.connection.simulateConnectedForTesting()
+        XCTAssertNil(model.actionsBlockedReason, "connected, the link has nothing to say")
+        let runReason = try XCTUnwrap(
+            FleetStatusRule.capability(summary: run, capabilities: model.connection.capabilities).reason,
+            "a run on a computer that has not said what it can do has a reason")
+        XCTAssertEqual(model.answerBlockedReason(for: mismatched, inFlight: false), runReason)
+        model.adoptSummariesForTesting([])
+        XCTAssertEqual(
+            model.answerBlockedReason(for: mismatched, inFlight: false), DecisionCard.hashMismatchSentence)
+        XCTAssertEqual(
+            DecisionCard.hashMismatchSentence,
+            "The text on this card does not match its hash. It cannot be answered safely.")
+    }
+
     // MARK: The read-before-you-decide gate
 
     /// Nothing in either test target referenced `hasSeenCommand`, `armGate` or
@@ -266,7 +402,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// all. It only bites where the product would otherwise be approving
     /// something it had not shown.
     func testUnreadCommandBlocksEveryTier() {
-        let gate = ReadGate()
+        let gate = DecisionCard.ReadGate()
         for risk in [RiskClass.low, .medium, .high] {
             XCTAssertFalse(
                 gate.isOpen(at: risk),
@@ -286,7 +422,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// tap. LOW and MEDIUM open on the same single fact; only HIGH asks for the
     /// second.
     func testLowGateCostsNothingWhenTheCommandFits() {
-        var gate = ReadGate()
+        var gate = DecisionCard.ReadGate()
         gate = advance(gate, commandBottom: 400, provenanceBottom: 900, visibleBottom: 600)
         XCTAssertTrue(gate.isOpen(at: .low), "a command that fits opens the gate on sight")
         XCTAssertNil(gate.blockedReason(at: .low))
@@ -298,7 +434,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// carrying `/Users/dev/app/README.md` runs from above the fold to y=830
     /// against an action bar whose top edge is y=636.
     func testLowCardWithTheCommandBehindTheBarIsShut() {
-        var gate = ReadGate()
+        var gate = DecisionCard.ReadGate()
         gate = advance(gate, commandBottom: 830, provenanceBottom: 1_100, visibleBottom: 636)
         XCTAssertFalse(
             gate.isOpen(at: .low),
@@ -316,7 +452,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// to authorise this, and that the one is drawn above the other is not
     /// evidence that both were seen.
     func testHighAlsoRequiresTheProvenance() {
-        var gate = ReadGate()
+        var gate = DecisionCard.ReadGate()
         gate.hasSeenCommand = true
         XCTAssertTrue(gate.isOpen(at: .medium), "MEDIUM asks for the command and nothing else")
         XCTAssertFalse(gate.isOpen(at: .high))
@@ -337,18 +473,18 @@ final class RiskAndDeckTests: XCTestCase {
     /// and the gate was armed anyway.
     func testVisibilityIsAViewportTest() {
         // Bottom edge above the fold: read.
-        XCTAssertTrue(ReadGate.isVisible(bottom: 400, visibleBottom: 600))
+        XCTAssertTrue(DecisionCard.ReadGate.isVisible(bottom: 400, visibleBottom: 600))
         // Exactly on the fold: read.
-        XCTAssertTrue(ReadGate.isVisible(bottom: 600, visibleBottom: 600))
+        XCTAssertTrue(DecisionCard.ReadGate.isVisible(bottom: 600, visibleBottom: 600))
         // One point under the action bar: not read.
         XCTAssertFalse(
-            ReadGate.isVisible(bottom: 601, visibleBottom: 600),
+            DecisionCard.ReadGate.isVisible(bottom: 601, visibleBottom: 600),
             "a command the action bar is covering has not been seen")
         // The AX5 case: the block runs far past the bar.
-        XCTAssertFalse(ReadGate.isVisible(bottom: 1_400, visibleBottom: 600))
+        XCTAssertFalse(DecisionCard.ReadGate.isVisible(bottom: 1_400, visibleBottom: 600))
         // Scrolled off the top: not a fresh arming, and the flag that matters
         // is sticky anyway.
-        XCTAssertFalse(ReadGate.isVisible(bottom: -20, visibleBottom: 600))
+        XCTAssertFalse(DecisionCard.ReadGate.isVisible(bottom: -20, visibleBottom: 600))
     }
 
     /// **The first render, before any geometry has arrived.**
@@ -387,9 +523,9 @@ final class RiskAndDeckTests: XCTestCase {
             probe.visibleBottom,
             "the bar has not reported yet, so how much of the viewport is readable is unknown")
 
-        var gate = ReadGate()
+        var gate = DecisionCard.ReadGate()
         if let visible = probe.visibleBottom,
-            ReadGate.isVisible(bottom: 760, visibleBottom: visible) {
+            DecisionCard.ReadGate.isVisible(bottom: 760, visibleBottom: visible) {
             gate.hasSeenCommand = true
         }
         XCTAssertFalse(
@@ -401,7 +537,7 @@ final class RiskAndDeckTests: XCTestCase {
         probe.actionBarHeight = 140
         XCTAssertEqual(probe.visibleBottom, 660)
         XCTAssertFalse(
-            ReadGate.isVisible(bottom: 760, visibleBottom: 660),
+            DecisionCard.ReadGate.isVisible(bottom: 760, visibleBottom: 660),
             "760 is behind the bar; nobody has read it")
         XCTAssertFalse(gate.isOpen(at: .low))
         XCTAssertFalse(gate.isOpen(at: .medium))
@@ -424,7 +560,7 @@ final class RiskAndDeckTests: XCTestCase {
         settled.actionBarHeight = 168
         XCTAssertEqual(settled.visibleBottom, 685)
         XCTAssertFalse(
-            ReadGate.isVisible(bottom: 848, visibleBottom: 685),
+            DecisionCard.ReadGate.isVisible(bottom: 848, visibleBottom: 685),
             "the command the device showed ends behind the bar")
     }
 
@@ -442,7 +578,7 @@ final class RiskAndDeckTests: XCTestCase {
 
         XCTAssertEqual(probe.visibleBottom ?? 0, 286.7, accuracy: 0.001)
         XCTAssertTrue(
-            ReadGate.isVisible(bottom: 250, visibleBottom: 286.7),
+            DecisionCard.ReadGate.isVisible(bottom: 250, visibleBottom: 286.7),
             "a command ending above the bar has been read")
     }
 
@@ -467,7 +603,7 @@ final class RiskAndDeckTests: XCTestCase {
         arriving.actionBarHeight = 231.3
         XCTAssertEqual(arriving.visibleBottom ?? 0, 468.7, accuracy: 0.001)
         XCTAssertFalse(
-            ReadGate.isVisible(bottom: 600, visibleBottom: arriving.visibleBottom ?? 0),
+            DecisionCard.ReadGate.isVisible(bottom: 600, visibleBottom: arriving.visibleBottom ?? 0),
             "600 is behind the bar on this pass; nobody has read it")
 
         let settled = ReadGateProbe()
@@ -476,7 +612,7 @@ final class RiskAndDeckTests: XCTestCase {
         settled.actionBarHeight = 120
         XCTAssertEqual(settled.visibleBottom, 580)
         XCTAssertTrue(
-            ReadGate.isVisible(bottom: 186, visibleBottom: settled.visibleBottom ?? 0),
+            DecisionCard.ReadGate.isVisible(bottom: 186, visibleBottom: settled.visibleBottom ?? 0),
             "the command is above the bar; the card arms")
 
         let stuck = ReadGateProbe()
@@ -485,27 +621,27 @@ final class RiskAndDeckTests: XCTestCase {
         stuck.actionBarHeight = 120
         XCTAssertEqual(stuck.visibleBottom, 460)
         XCTAssertTrue(
-            ReadGate.isVisible(bottom: 186, visibleBottom: stuck.visibleBottom ?? 0),
+            DecisionCard.ReadGate.isVisible(bottom: 186, visibleBottom: stuck.visibleBottom ?? 0),
             "a card height that never caught up still lets the command be read")
     }
 
     func testUnmeasuredGeometryLeavesTheGateShut() {
         XCTAssertFalse(
-            ReadGate.isVisible(bottom: nil, visibleBottom: 600),
+            DecisionCard.ReadGate.isVisible(bottom: nil, visibleBottom: 600),
             "nobody measured the block, so nobody has read it")
         XCTAssertFalse(
-            ReadGate.isVisible(bottom: 400, visibleBottom: 0),
+            DecisionCard.ReadGate.isVisible(bottom: 400, visibleBottom: 0),
             "a layout that has not happened cannot have shown anything")
-        XCTAssertFalse(ReadGate.isVisible(bottom: .infinity, visibleBottom: 600))
-        XCTAssertFalse(ReadGate.isVisible(bottom: 400, visibleBottom: .infinity))
-        XCTAssertFalse(ReadGate.isVisible(bottom: .nan, visibleBottom: 600))
-        XCTAssertFalse(ReadGate.isVisible(bottom: 400, visibleBottom: .nan))
+        XCTAssertFalse(DecisionCard.ReadGate.isVisible(bottom: .infinity, visibleBottom: 600))
+        XCTAssertFalse(DecisionCard.ReadGate.isVisible(bottom: 400, visibleBottom: .infinity))
+        XCTAssertFalse(DecisionCard.ReadGate.isVisible(bottom: .nan, visibleBottom: 600))
+        XCTAssertFalse(DecisionCard.ReadGate.isVisible(bottom: 400, visibleBottom: .nan))
 
         // …and a card whose geometry never arrives is a card that cannot be
         // approved **at all**, which is the safe direction. LOW used to be the
         // exception here, which meant an unmeasured card was approvable at the
         // one tier where a single tap is the whole interaction.
-        let gate = ReadGate()
+        let gate = DecisionCard.ReadGate()
         XCTAssertFalse(gate.isOpen(at: .low))
         XCTAssertFalse(gate.isOpen(at: .medium))
         XCTAssertFalse(gate.isOpen(at: .high))
@@ -515,7 +651,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// opens. Modelled as the view does it — sticky flags fed by successive
     /// geometry reports.
     func testGateArmsAfterScrollingToTheCommand() {
-        var gate = ReadGate()
+        var gate = DecisionCard.ReadGate()
         let visibleBottom: CGFloat = 600
 
         // First layout at a large type size: the command block starts below the
@@ -547,21 +683,21 @@ final class RiskAndDeckTests: XCTestCase {
 
     /// The view's `updateGate`, as a function.
     private func advance(
-        _ gate: ReadGate, commandBottom: CGFloat?, provenanceBottom: CGFloat?,
+        _ gate: DecisionCard.ReadGate, commandBottom: CGFloat?, provenanceBottom: CGFloat?,
         visibleBottom: CGFloat
-    ) -> ReadGate {
+    ) -> DecisionCard.ReadGate {
         advance(gate, commandBottom, provenanceBottom, visibleBottom)
     }
 
     private func advance(
-        _ gate: ReadGate, _ commandBottom: CGFloat?, _ provenanceBottom: CGFloat?,
+        _ gate: DecisionCard.ReadGate, _ commandBottom: CGFloat?, _ provenanceBottom: CGFloat?,
         _ visibleBottom: CGFloat
-    ) -> ReadGate {
+    ) -> DecisionCard.ReadGate {
         var next = gate
-        if ReadGate.isVisible(bottom: commandBottom, visibleBottom: visibleBottom) {
+        if DecisionCard.ReadGate.isVisible(bottom: commandBottom, visibleBottom: visibleBottom) {
             next.hasSeenCommand = true
         }
-        if ReadGate.isVisible(bottom: provenanceBottom, visibleBottom: visibleBottom) {
+        if DecisionCard.ReadGate.isVisible(bottom: provenanceBottom, visibleBottom: visibleBottom) {
             next.hasSeenProvenance = true
         }
         return next

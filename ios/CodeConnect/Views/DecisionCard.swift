@@ -52,7 +52,7 @@ struct DecisionCardView: View {
 
     /// The read-before-you-decide gate. A geometry test, never a lifecycle one —
     /// see `ReadGate`.
-    @State private var gate = ReadGate()
+    @State private var gate = DecisionCard.ReadGate()
     /// Where the gate's five measurements live — **deliberately outside the
     /// view's own state.**
     ///
@@ -505,10 +505,10 @@ struct DecisionCardView: View {
         // fallback, not a sentinel: no measurement means no arming.
         guard let visibleBottom = probe.visibleBottom else { return }
         var next = gate
-        if ReadGate.isVisible(bottom: probe.commandBottom, visibleBottom: visibleBottom) {
+        if DecisionCard.ReadGate.isVisible(bottom: probe.commandBottom, visibleBottom: visibleBottom) {
             next.hasSeenCommand = true
         }
-        if ReadGate.isVisible(bottom: probe.provenanceBottom, visibleBottom: visibleBottom) {
+        if DecisionCard.ReadGate.isVisible(bottom: probe.provenanceBottom, visibleBottom: visibleBottom) {
             next.hasSeenProvenance = true
         }
         guard next != gate else { return }
@@ -1011,17 +1011,7 @@ struct DecisionCardView: View {
     /// A genuinely *pending* card whose backing vanished still has `nil` from both
     /// sources, so the `isBacked` gate below still renders it `.unavailable`.
     private var effectiveOutcome: AnswerOutcome? {
-        Self.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome)
-    }
-
-    /// The governing outcome, from the live lookup OR the opened snapshot. Static
-    /// and pure so the regression it closes is testable off the real resolver: a
-    /// recorded outcome from either source makes the card non-actionable, so a
-    /// resolved card can never revert to actionable when a replay re-supplies its
-    /// id as pending. A card pending in both sources is `nil`, and the `isBacked`
-    /// gate decides whether it is live-pending or `.unavailable`.
-    static func effectiveOutcome(live: AnswerOutcome?, snapshot: AnswerOutcome?) -> AnswerOutcome? {
-        live ?? snapshot
+        DecisionCard.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome)
     }
 
     private var statusBanner: StatusBanner? {
@@ -1033,7 +1023,7 @@ struct DecisionCardView: View {
         // computer, or its log was reset"), which is the wrong sentence for a question that
         // was answered at the keyboard thirty seconds ago.
         if let resolution = effectiveCodexResolution { return .codex(resolution) }
-        switch Self.resolvedBanner(attempt: attempt, persisted: effectiveOutcome, isBacked: live != nil) {
+        switch DecisionCard.resolvedBanner(attempt: attempt, persisted: effectiveOutcome, isBacked: live != nil) {
         case .attempt(let attempt): return .resolution(attempt)
         case .persisted(let outcome): return .alreadyResolved(outcome)
         case .unavailable: return .unavailable
@@ -1042,48 +1032,6 @@ struct DecisionCardView: View {
         if let authNotice { return .authRefused(authNotice) }
         if let sampleNotice { return .sample(sampleNotice) }
         return nil
-    }
-
-    /// Which resolved banner a card shows, given this session's own answer
-    /// `attempt`, any authoritative outcome the LIVE card carries (`persisted`),
-    /// and whether live state still backs the card at all (`isBacked`). Pure and
-    /// static so the whole precedence is testable off the real resolver.
-    ///
-    /// The rules, in order:
-    ///   * a **terminal** local attempt (`.applied`, `.indeterminate`,
-    ///     `.duplicate`, `.answeredAtKeyboard`) is this session's own observation
-    ///     and keeps its richer receipt, even if the backing was later dropped;
-    ///   * an authoritative persisted outcome outranks a *stale, non-terminal*
-    ///     local attempt — the crash/recovery false-negative, where a dead-socket
-    ///     `.failed` would otherwise mask the recovered `approval_resolved`;
-    ///   * **no live backing** and no terminal receipt ⇒ `.unavailable`: a
-    ///     departed/reset/left-the-log card is neither actionable nor an outcome
-    ///     we can claim, so it must never fall back to a frozen actionable
-    ///     snapshot or a stale local failure the user could retry;
-    ///   * a live pending card with a non-terminal attempt still shows that
-    ///     attempt (a genuine failure the user may retry); with none, `.none`
-    ///     (the ordinary pending path, action bar available).
-    enum ResolvedBanner {
-        case attempt(AnswerAttempt)
-        case persisted(AnswerOutcome)
-        /// No live state backs this card, and this session holds no terminal
-        /// receipt for it. Non-actionable by construction.
-        case unavailable
-        case none
-    }
-
-    static func resolvedBanner(
-        attempt: AnswerAttempt?, persisted: AnswerOutcome?, isBacked: Bool
-    ) -> ResolvedBanner {
-        if let attempt {
-            if attempt.isTerminal { return .attempt(attempt) }
-            if let persisted { return .persisted(persisted) }
-            if !isBacked { return .unavailable }
-            return .attempt(attempt)
-        }
-        if let persisted { return .persisted(persisted) }
-        if !isBacked { return .unavailable }
-        return .none
     }
 
     /// The card's one banner slot, by case.
@@ -1107,31 +1055,21 @@ struct DecisionCardView: View {
         case .hashMismatch:
             CCBanner(
                 "Hash mismatch",
-                message:
-                    "The text on this card does not match its hash. It cannot be answered safely.",
+                message: DecisionCard.hashMismatchSentence,
                 tone: .danger, icon: "shield-warning-fill")
         case .resolution(let attempt):
             ResolutionBanner(attempt: attempt)
         case .alreadyResolved(let outcome):
-            CCBanner(
-                Self.alreadyResolvedTitle(for: outcome),
-                message: Self.alreadyResolvedMessage(for: outcome, now: model.now),
-                tone: outcome.indeterminate ? .warning : .info,
-                icon: Self.alreadyResolvedIcon(for: outcome))
+            let banner = DecisionCard.alreadyResolvedBanner(for: outcome, now: model.now)
+            CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
         case .codex(let resolution):
             let banner = CodexProse.resolution(resolution)
             CCBanner(
                 banner.title, message: banner.message, tone: banner.tone.ccTone,
                 icon: banner.icon)
         case .unavailable:
-            // No live state backs this card: the session left the fleet, the log
-            // was reset, or the card left the timeline. Non-actionable, and it
-            // says so rather than presenting a frozen card the reader could act on.
-            CCBanner(
-                "No longer available",
-                message:
-                    "This decision can't be acted on here — the run is no longer on your computer, or its log was reset.",
-                tone: .warning, icon: "question")
+            let banner = DecisionCard.unavailableBanner()
+            CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
         case .authRefused(let notice):
             // The gate's own words in the message, never a paraphrase, and never
             // swallowed: a biometric check that failed silently is
@@ -1142,34 +1080,6 @@ struct DecisionCardView: View {
             // arriving where the reader is looking.
             CCBanner("Sample fleet", message: notice, tone: .info, icon: "eye")
         }
-    }
-
-    /// The already-resolved banner's copy, extracted so the honesty rule is
-    /// unit-testable without rendering the card: a **recorded** outcome carrying
-    /// `indeterminate: true` — the shape the daemon replays for a
-    /// locally-resolved, never-confirmed answer — is "Unconfirmed", never
-    /// "Already resolved", and never wears the confirming seal.
-    static func alreadyResolvedTitle(for outcome: AnswerOutcome) -> String {
-        if outcome.wasSentToClaude { return "Sent" }
-        return outcome.indeterminate ? "Unconfirmed" : "Already resolved"
-    }
-
-    static func alreadyResolvedMessage(for outcome: AnswerOutcome, now: Date) -> String {
-        let age = Format.ago(since: outcome.resolvedDate, now: now)
-        if outcome.wasSentToClaude {
-            return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude) · \(age)"
-        }
-        let ending = "\(outcome.decisionLabel) \(outcome.provenance)"
-        if outcome.indeterminate {
-            return "\(ending) · \(age), but your computer couldn’t confirm it reached the agent"
-        }
-        return "\(ending) · \(age)"
-    }
-
-    /// Never a checkmark for an unconfirmed outcome — the seal *is* the visual
-    /// "confirmed" claim this rule exists to prevent.
-    static func alreadyResolvedIcon(for outcome: AnswerOutcome) -> String {
-        outcome.indeterminate ? "question" : "seal-check"
     }
 
     // MARK: Actions
@@ -1232,31 +1142,13 @@ struct DecisionCardView: View {
         .ccAnimation(CC.motion.small, value: statusBanner != nil)
     }
 
-    /// Whether the answer controls should be offered. Requires **live backing**
-    /// (`isBacked`) and withdraws the moment the card carries an authoritative
-    /// outcome or the local attempt is terminal. Static and pure so the whole
-    /// guard is testable off the real resolver: a card with no live state behind
-    /// it can never present an action bar, closing the "act on a departed/reset
-    /// card" half of the class, and a resolved card disables it even while a
-    /// stale non-terminal `.failed` is still stored locally.
-    /// `codex` is the second authoritative ending, and it is checked here rather
-    /// than mapped onto `outcome`: a Codex resolution says things `AnswerOutcome`
-    /// cannot express — cleared because the turn was aborted, answered at the Mac
-    /// with no decision recorded, retired because the item finished — and every
-    /// one of them means the same thing about this bar, which is that it must go.
-    static func actionBarAvailable(
-        outcome: AnswerOutcome?, codex: CodexResolution?, attempt: AnswerAttempt?, isBacked: Bool
-    ) -> Bool {
-        isBacked && outcome == nil && codex == nil && attempt?.isTerminal != true
-    }
-
     /// The single actionability verdict for this card — the one computed the
     /// action bar, the in-body option rows and `submit` all read, so no answer
     /// surface can be offered (or acted on) that the others withhold. False the
     /// moment the card carries an outcome, the local attempt is terminal, or —
     /// the class this closes — no live state backs it at all.
     private var isActionable: Bool {
-        Self.actionBarAvailable(
+        DecisionCard.actionBarAvailable(
             outcome: effectiveOutcome, codex: effectiveCodexResolution, attempt: attempt,
             isBacked: live != nil)
     }
@@ -1398,65 +1290,22 @@ struct DecisionCardView: View {
     private var unanswerableReason: String {
         // Unknown agent: the run is gone or has not been described yet, and
         // there is no vocabulary to offer. Never Claude's sentence by default.
-        guard let agent = sessionAgent else {
-            return "This run is no longer on the fleet, so this card cannot be answered from here."
-        }
+        guard let agent = sessionAgent else { return DecisionCard.notOnTheFleetReason }
         switch agent {
         case .codex:
-            return Self.codexUnanswerableReason(
+            return DecisionCard.codexUnanswerableReason(
                 isKnown: model.daemonProfile.isConnected,
                 caveat: model.daemonProfile.codexAnswerCaveat,
                 isVerified: verification.renderMatchesDisplayText,
                 linkReason: model.actionsBlockedReason)
         case .unsupported(let raw):
-            return "This app does not know how to answer a \(raw) session. Answer it at the "
-                + "computer."
+            return DecisionCard.unsupportedAgentReason(raw)
         case .claude:
-            return Self.claudeUnanswerableReason(
+            return DecisionCard.claudeUnanswerableReason(
                 isQuestion: approval.card.toolName == QuestionCard.toolName,
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
                 linkReason: model.actionsBlockedReason, hold: hold)
         }
-    }
-
-    /// Why a Codex card offers nothing to tap. Static so the words can be
-    /// asserted without a `View`.
-    ///
-    /// Unknown is not old: while nothing is known of the Mac (`isKnown` false,
-    /// its link down) the card says what is known, which is the link — never the
-    /// caveat, and never that the card came without its options.
-    static func codexUnanswerableReason(
-        isKnown: Bool, caveat: String?, isVerified: Bool, linkReason: String?
-    ) -> String {
-        guard isKnown else {
-            return linkReason ?? "The phone can no longer answer this. Answer it at the computer."
-        }
-        if let caveat { return caveat }
-        guard isVerified else { return ApprovalCard.unverifiableCodexLine }
-        return "This card arrived without the options Codex answers by, so it can only be "
-            + "answered at the computer."
-    }
-
-    /// Why a Claude card offers nothing to tap: the Mac's CodeConnect would type
-    /// the answer, or the card is not held for the phone. Static so the words can
-    /// be asserted without a `View`.
-    ///
-    /// `hookOnlyApprovals` is nil while nothing is known of the Mac — its link
-    /// is down and took its capabilities with it. Unknown is not old: the card
-    /// then says what is known, which is the link.
-    static func claudeUnanswerableReason(
-        isQuestion: Bool, hookOnlyApprovals: Bool?, linkReason: String?, hold: QuestionHold?
-    ) -> String {
-        if isQuestion { return "This card cannot be answered from here." }
-        guard let hookOnlyApprovals else {
-            return linkReason ?? "The phone can no longer answer this. Answer it at the computer."
-        }
-        guard hookOnlyApprovals else {
-            return "This computer's CodeConnect is too old to answer Claude's approvals from the "
-                + "phone. Update it, or answer at the computer."
-        }
-        if hold == .atMac { return "Claude is asking this at the computer, so answer it there." }
-        return "The phone can no longer answer this. Answer it at the computer."
     }
 
     private var codexBarNote: String {
@@ -1475,12 +1324,11 @@ struct DecisionCardView: View {
                 )
                 .foregroundStyle(CC.color.warning)
                 .ccMark(beside: CC.type.footnote)
-                Text("Still waiting on the computer - \(Format.age(elapsed)).")
+                Text(DecisionCard.stillWaiting(after: elapsed))
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel(
-                        "Still waiting on the computer, \(Format.spokenDuration(elapsed)).")
+                    .accessibilityLabel(DecisionCard.stillWaiting(after: elapsed, spoken: true))
             }
             if elapsed >= 20 {
                 CCButton("Check link", variant: .ghost, size: .sm) {
@@ -1676,25 +1524,7 @@ struct DecisionCardView: View {
     private var denyBlockedReason: String? { sharedBlockedReason }
 
     private var sharedBlockedReason: String? {
-        Self.blockedReason(model: model, approval: approval, inFlight: inFlight != nil)
-    }
-
-    /// Why no control on `approval` can act now, in the order that matters —
-    /// the same for every surface that answers a card.
-    static func blockedReason(model: AppModel, approval: ApprovalItem, inFlight: Bool) -> String? {
-        // A second tap while the first is in flight would be a silent no-op;
-        // saying "waiting" is the honest version of the same refusal.
-        if inFlight { return "Waiting for your computer to confirm…" }
-        if let reason = model.actionsBlockedReason { return reason }
-        if let summary = model.shownSummary(for: approval.sessionKey) {
-            let badge = FleetStatusRule.capability(
-                summary: summary, capabilities: model.connection.capabilities)
-            if let reason = badge.reason { return reason }
-        }
-        if !approval.card.verification.hashMatchesDisplayText {
-            return "The text on this card does not match its hash. It cannot be answered safely."
-        }
-        return nil
+        model.answerBlockedReason(for: approval, inFlight: inFlight != nil)
     }
 
     /// What became of a send: refused at the face check, or answered.
@@ -1722,15 +1552,6 @@ struct DecisionCardView: View {
     }
 
     // MARK: Submission
-
-    /// HIGH-risk *approvals* need a second factor. Denials never do.
-    private func requiresBiometrics(for decision: AnswerDecision) -> Bool {
-        guard risk == .high else { return false }
-        switch decision {
-        case .deny, .text: return false
-        default: return true
-        }
-    }
 
     /// What a decision would have been called on the wire, in the words the
     /// control the reader just pressed uses.
@@ -1771,7 +1592,8 @@ struct DecisionCardView: View {
         sentAt = Date()
         Task {
             let sent = await Self.send(
-                decision, for: approval, model: model, needsFace: requiresBiometrics(for: decision))
+                decision, for: approval, model: model,
+                needsFace: DecisionCard.needsSecondFactor(risk: risk, decision: decision))
             spinningControl = nil
             switch sent {
             case .faceRefused(let message):
@@ -1802,90 +1624,6 @@ struct DecisionCardView: View {
 }
 
 // MARK: - The read gate
-
-/// The read-before-you-decide gate, as a value.
-///
-/// **This is a viewport test, and it was not one.** The previous implementation
-/// armed on `onAppear` of a 1pt marker nested inside a `LazyVStack` child, on
-/// the premise that laziness would make the callback mean "scrolled into view".
-/// Laziness operates on a stack's *direct children*; `commandBlock` was the
-/// second one, so it was materialised at first layout and the marker inside it
-/// fired then. `onAppear` is a lifecycle callback and never a visibility test.
-///
-/// What that cost, read off the AX5 renders rather than off the code:
-///
-///  * A MEDIUM `Write` outside the worktree, with thirteen characters of the
-///    path on screen and `Allow` drawn as the enabled white primary. At MEDIUM
-///    there is no hold and no Face ID, so this gate is the *only* thing between
-///    one tap and a write to an arbitrary path.
-///  * A HIGH `git push --force origin main` with **zero characters of the
-///    command rendered** and `Hold to allow` fully armed: a face authenticating
-///    a command the product never showed.
-///
-/// The rule lives here, apart from the view, so it can be tested without a
-/// viewport — and the geometry test lives here too, so it can be tested without
-/// a rule.
-struct ReadGate: Equatable {
-    /// The bottom edge of the block carrying the command has been inside
-    /// the visible region at least once.
-    var hasSeenCommand = false
-    /// …and so has the bottom edge of the risk class and its provenance.
-    var hasSeenProvenance = false
-
-    /// Both edges are measured in the scroll view's own space. `visibleBottom`
-    /// is where the readable part of the scroll view ends: its own bottom, or
-    /// the pinned action bar's top where that is higher.
-    ///
-    /// Every way of not knowing answers **no**: an unmeasured edge (`nil`), a
-    /// layout that has not happened (`visibleBottom <= 0`), a non-finite value
-    /// from a degenerate proposal, or a block that has scrolled off the top.
-    /// Only a real measurement can open a gate.
-    static func isVisible(bottom: CGFloat?, visibleBottom: CGFloat) -> Bool {
-        guard let bottom, bottom.isFinite, visibleBottom.isFinite else { return false }
-        guard visibleBottom > 0, bottom > 0 else { return false }
-        return bottom <= visibleBottom
-    }
-
-    /// Whether this class may be answered yet.
-    ///
-    /// **The gate applies at every tier**, and the reason is that risk governs
-    /// *friction* — tap, hold, Face ID — and never whether the command has to be
-    /// visible. LOW used to return `true` unconditionally on the argument that
-    /// "a `Read` that costs a scroll is a gate people learn to defeat". The
-    /// argument is sound and the implementation did not follow from it: at
-    /// reading sizes a LOW command fits above the bar on the first frame, so the
-    /// gate is already open by the time the card is drawn and costs the reader
-    /// nothing at all. It is only when the command does *not* fit that the two
-    /// behaviours differ, and that is precisely the case an AX5 render of a LOW
-    /// card measured: `Allow` enabled, in the thumb zone, over **13 of the 24
-    /// characters** of `/Users/dev/app/README.md` — the 11 that were missing
-    /// being the ones that tell a README from `~/.aws/credentials`.
-    ///
-    /// A tier-shaped exception here is not "less friction for a small risk", it
-    /// is "the product will let you approve something it never showed you", and
-    /// that is not a property any tier gets.
-    func isOpen(at risk: RiskClass) -> Bool {
-        switch risk {
-        case .low:
-            return hasSeenCommand
-        case .medium:
-            return hasSeenCommand
-        // Stated separately rather than left to fall out of the layout: at HIGH
-        // a face is about to authorise this, and the two facts that say what it
-        // authorises are the command and the class it was given. That the one
-        // is drawn above the other is not evidence that both were seen.
-        case .high:
-            return hasSeenCommand && hasSeenProvenance
-        }
-    }
-
-    /// What a closed gate says. Drawn by `ccDisabled`, never only hinted.
-    func blockedReason(at risk: RiskClass) -> String? {
-        guard !isOpen(at: risk) else { return nil }
-        guard hasSeenCommand else { return "Scroll the command into view before deciding." }
-        return "Scroll to the end of the command block before deciding."
-    }
-}
 
 /// The five numbers the read gate is decided from.
 ///
