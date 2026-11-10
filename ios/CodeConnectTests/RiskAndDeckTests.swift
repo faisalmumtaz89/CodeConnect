@@ -243,13 +243,16 @@ final class RiskAndDeckTests: XCTestCase {
 
     // MARK: One approval policy, read by every card
 
-    /// The decision card asks a face for Allow and an option, the question card
-    /// for its answers; neither for a refusal. One rule answers both.
+    /// The decision card asks a face for Allow and a Codex option that says yes,
+    /// the question card for its answers; neither for a refusal, and a Codex
+    /// card's "No" (`cancel`) is one. One rule answers both cards. The option ids
+    /// are every one the daemon puts on a Codex card.
     func testASecondFactorIsAskedOnlyForAnAffirmativeAnswerAtHigh() {
         let affirmative: [AnswerDecision] = [
-            .allow, .option(index: 1), .optionId("accept"), .answers([QuestionAnswer()]), .unrecognised("x"),
+            .allow, .option(index: 1), .optionId("accept"), .optionId("acceptForSession"),
+            .optionId("acceptWithExecpolicyAmendment"), .answers([QuestionAnswer()]), .unrecognised("x"),
         ]
-        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline]
+        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline, .optionId("cancel")]
         for risk in [RiskClass.low, .medium] {
             for decision in affirmative + refusals {
                 XCTAssertFalse(DecisionCard.needsSecondFactor(risk: risk, decision: decision), "\(risk) \(decision)")

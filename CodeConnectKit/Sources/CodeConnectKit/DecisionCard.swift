@@ -127,15 +127,16 @@ public enum DecisionCard {
         isBacked && outcome == nil && codex == nil && attempt?.isTerminal != true
     }
 
-    /// **At HIGH, every answer but deny, deny with a reason and decline takes a second factor.** Allowing, choosing
-    /// any option (a Codex card's "No" option included) or submitting a question's answers at HIGH waits for the
-    /// device's own check (Face ID on the iPhone, the Mac's own); denying, denying with a reason and declining are the
-    /// safe direction, and a product that promises silence never decides anything cannot put friction in front of
-    /// them.
+    /// **At HIGH, every answer but a refusal takes a second factor.** Allowing, choosing an option or submitting a
+    /// question's answers at HIGH waits for the device's own check (Face ID on the iPhone, the Mac's own). Denying,
+    /// denying with a reason, declining and a Codex card's `cancel` option ("No, and tell Codex what to do
+    /// differently", the one refusal among the options the daemon offers) are the safe direction, and a product that
+    /// promises silence never decides anything cannot put friction in front of them.
     public static func needsSecondFactor(risk: RiskClass, decision: AnswerDecision) -> Bool {
         guard risk == .high else { return false }
         switch decision {
         case .deny, .text, .decline: return false
+        case .optionId(let id): return id != "cancel"
         default: return true
         }
     }
