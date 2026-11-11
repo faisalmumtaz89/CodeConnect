@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Choose any folder for a new agent on this Mac
+
+- Start an agent listed only folders an agent had already run in, so on a new Mac there was nothing
+  to pick and the first agent had to be started from Terminal. On this Mac, "Choose a folder…" beside
+  Folder now opens the standard folder window. Other computers keep their recent folders.
+
 ## A Codex run that ends closes its waiting request
 
 - When a Codex run ended while one of its requests waited for an answer, the request stayed open:

@@ -62,6 +62,9 @@
         }
         /// `-CC_RENDER_FOLDER <folder>`: Start an agent chooses that recent folder once listed, and starts nothing.
         static var chosenFolder: String? { UserDefaults.standard.string(forKey: "CC_RENDER_FOLDER") }
+        /// `-CC_PICK_FOLDER <path>`: Start an agent's Choose a folder… takes that path in place of the folder panel, a
+        /// window a test launch never opens.
+        static var pickedFolder: String? { UserDefaults.standard.string(forKey: "CC_PICK_FOLDER") }
         /// `-CC_MODEL_MENU YES`: Start an agent opens with its model menu open.
         static var opensModelMenu: Bool { UserDefaults.standard.bool(forKey: "CC_MODEL_MENU") }
 

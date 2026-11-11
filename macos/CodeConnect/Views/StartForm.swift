@@ -1,14 +1,15 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Start an agent on one of the computers that can start one: a recent folder there, an optional first message,
-/// and, under it, the model, whose menu holds Claude Code's and Codex's: choosing a model chooses the agent. What
-/// each choice offers and says is Kit's (`StartContext`), as on the iPhone; the Mac shows it as one form. The
-/// computer defaults to the one used last, the model to the Default of the agent last used in the folder, else of
-/// the first one there. Once sent, the form gives way to the start's progress, and the sheet closes when the run is
-/// in the list.
+/// Start an agent on one of the computers that can start one: a recent folder there (on this Mac, any folder, from
+/// the standard folder panel), an optional first message, and, under it, the model, whose menu holds Claude Code's
+/// and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
+/// the iPhone; the Mac shows it as one form. The computer defaults to the one used last, the model to the Default of
+/// the agent last used in the folder, else of the first one there. Once sent, the form gives way to the start's
+/// progress, and the sheet closes when the run is in the list.
 struct StartForm: View {
     @Environment(Machines.self) private var machines
+    @Environment(Setup.self) private var setup
     @Environment(\.dismiss) private var dismiss
     /// The run is in the list: the list shows Active.
     let started: () -> Void
@@ -20,6 +21,9 @@ struct StartForm: View {
     @State private var menuOpen = false
     @State private var message = ""
     @State private var requestID: String?
+    /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
+    /// this Mac. Nil without one, as in a test launch with no rig of its own.
+    @State private var thisMac: String?
 
     private var contexts: [StartContext] { machines.startContexts }
 
@@ -29,9 +33,14 @@ struct StartForm: View {
             ?? contexts.max { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }
     }
 
+    /// The selected folder: on this Mac any folder (a recent one when it is one), elsewhere a recent one.
     private var folder: StartProject? {
-        guard let folderPath else { return nil }
-        return context?.projects.first { $0.path == folderPath }
+        guard let folderPath, let context else { return nil }
+        return isThisMac(context) ? context.project(at: folderPath) : context.projects.first { $0.path == folderPath }
+    }
+
+    private func isThisMac(_ context: StartContext) -> Bool {
+        thisMac != nil && machines.model(for: context.id)?.connection.helloAck?.machineID == thisMac
     }
 
     /// The chosen model while the computer still offers it, else Kit's Default for the folder.
@@ -66,6 +75,7 @@ struct StartForm: View {
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
+        .task { thisMac = setup.installer.flatMap { LocalDaemon.machineID(root: $0.root) } }
         #if DEBUG
             .task {
                 menuOpen = RenderWindow.opensModelMenu
@@ -82,7 +92,9 @@ struct StartForm: View {
                 }
             }
         #endif
-        .onChange(of: computerID) {
+        // A selection is the computer's it was made on: it goes when the form's computer changes, whether chosen or,
+        // with none chosen, the one used last changing under it.
+        .onChange(of: context?.id) {
             query = ""
             folderPath = nil
             chosen = nil
@@ -164,7 +176,11 @@ struct StartForm: View {
 
     @ViewBuilder private func folderRows(_ context: StartContext) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            label("Folder")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                label("Folder")
+                Spacer(minLength: 8)
+                if isThisMac(context) { chooseButton }
+            }
             if context.starter.projects == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -172,6 +188,7 @@ struct StartForm: View {
                 }
             } else if context.projects.isEmpty {
                 Text("No recent folders on \(context.machineName) yet.").font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                if let picked = picked(context) { pickedRow(picked) }
             } else {
                 TextField("", text: $query, prompt: Text("Search recent folders").foregroundStyle(Theme.text3))
                     .accessibilityLabel("Search recent folders")
@@ -185,6 +202,7 @@ struct StartForm: View {
                 ScrollView {
                     // Not lazy: every folder is in the accessibility tree, scrolled to or not.
                     VStack(spacing: 0) {
+                        if let picked = picked(context) { pickedRow(picked) }
                         ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
                     }
                 }
@@ -221,6 +239,58 @@ struct StartForm: View {
         .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
+    }
+
+    /// Any folder on this Mac, from the standard folder panel.
+    private var chooseButton: some View {
+        Button(action: chooseFolder) {
+            Text("Choose a folder\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(outset: 4, id: "start.choose"))
+        .accessibilityIdentifier("start.choose")
+    }
+
+    private func chooseFolder() {
+        #if DEBUG
+            if let path = RenderWindow.pickedFolder {
+                choose(path)
+                return
+            }
+        #endif
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        choose(url.path)
+    }
+
+    /// A chosen folder is the selected one, as a recent row is; the search goes, so a recent one chosen is in view.
+    private func choose(_ path: String) {
+        query = ""
+        folderPath = path
+    }
+
+    /// The selected folder when it was chosen and is not a recent one.
+    private func picked(_ context: StartContext) -> StartProject? {
+        guard let folder, !context.projects.contains(where: { $0.path == folder.path }) else { return nil }
+        return folder
+    }
+
+    /// A chosen folder that is not a recent one: its name and its path as chosen, selected. It has no history to show.
+    private func pickedRow(_ project: StartProject) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+            Text(project.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.selected)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("start.picked")
+        .accessibilityAddTraits(.isSelected)
     }
 
     // MARK: First message and model
