@@ -168,7 +168,7 @@ private struct Document: View {
                         Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
                         // Not selectable: a selectable text is dropped from the combined element, so the names would
                         // be drawn but never read.
-                        Text(verbatim: extra.joined(separator: "\n"))
+                        Text(verbatim: extra.joined(separator: "\n").displaySafe)
                             .font(Theme.mono(11.5))
                             .foregroundStyle(Theme.text3)
                             .fixedSize(horizontal: false, vertical: true)
@@ -208,7 +208,8 @@ private struct FileBlock: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
-            Text(verbatim: "\(file.displayPath), \(file.status.label), +\(file.additions) −\(file.deletions)"))
+            Text(verbatim: "\(file.displayPath.displaySafe), \(file.status.label), "
+                + "+\(file.additions) −\(file.deletions)"))
         .accessibilityIdentifier("changes.file.\(file.id)")
     }
 }

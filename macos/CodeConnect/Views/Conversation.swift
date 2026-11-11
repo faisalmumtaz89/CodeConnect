@@ -195,12 +195,13 @@ private struct Prose: View {
     }
 }
 
-/// Text that must keep its lines: code, a command's output.
+/// Text that must keep its lines: code, a command's output. Drawn `displaySafe`, as the prose around it is: the
+/// characters that reorder a line would otherwise draw different code from what the bytes say.
 private struct CodeBlock: View {
     let text: String
 
     var body: some View {
-        Text(text)
+        Text(text.displaySafe)
             .font(Theme.mono(12))
             .foregroundStyle(Theme.text)
             .lineSpacing(2)

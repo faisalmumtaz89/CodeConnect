@@ -3,7 +3,8 @@ import SwiftUI
 
 /// One file's diff as Kit parses it (`UnifiedDiff.FileDiff`): its path and what happened to it, its lines added and
 /// removed, then each hunk with added lines on green and removed ones on red. Unchanged stretches Kit folds are one
-/// line saying how many.
+/// line saying how many. What it draws and speaks from the diff is `displaySafe`: a file's name, lines and hunk headers
+/// come from the repository, and the characters that reorder a line would draw different code from what the bytes say.
 struct FileDiffView: View {
     let file: UnifiedDiff.FileDiff
     /// The file as the wire named it, when that differs from the parsed header (a Codex card's change).
@@ -48,7 +49,7 @@ struct FileDiffView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "doc.text").font(.system(size: 10)).accessibilityHidden(true)
-                Text(path ?? file.displayPath).font(Theme.mono(11.5)).lineLimit(1).truncationMode(.head)
+                Text((path ?? file.displayPath).displaySafe).font(Theme.mono(11.5)).lineLimit(1).truncationMode(.head)
                 Text((status ?? file.status).label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
                 Spacer(minLength: 8)
                 LineDelta(added: UInt64(file.additions), removed: UInt64(file.deletions))
@@ -75,7 +76,7 @@ struct FileDiffView: View {
     }
 
     private func quiet(_ text: String, mono: Bool) -> some View {
-        Text(text).font(mono ? Theme.mono(11) : Theme.ui(11)).foregroundStyle(Theme.text3)
+        Text(text.displaySafe).font(mono ? Theme.mono(11) : Theme.ui(11)).foregroundStyle(Theme.text3)
             .padding(.horizontal, 12)
             .padding(.vertical, 3)
     }
@@ -87,7 +88,7 @@ private struct DiffLine: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(mark).foregroundStyle(color).frame(width: 8, alignment: .leading).accessibilityHidden(true)
-            Text(line.text.isEmpty ? " " : line.text).foregroundStyle(color)
+            Text(shown.isEmpty ? " " : shown).foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .font(Theme.mono(12))
@@ -99,12 +100,14 @@ private struct DiffLine: View {
         .accessibilityLabel(spoken)
     }
 
+    private var shown: String { line.text.displaySafe }
+
     /// The line as a screen reader says it: whether it was added or removed, then its text.
     private var spoken: String {
         switch line.kind {
-        case .addition: "Added: \(line.text)"
-        case .deletion: "Removed: \(line.text)"
-        case .context, .note: line.text
+        case .addition: "Added: \(shown)"
+        case .deletion: "Removed: \(shown)"
+        case .context, .note: shown
         }
     }
 
