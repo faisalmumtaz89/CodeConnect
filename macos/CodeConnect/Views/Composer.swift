@@ -6,29 +6,21 @@ import SwiftUI
 /// message, Claude's typed text, or a slash command this box answers with its own control.
 struct ComposerBar: View {
     let key: String
-    /// The run's words, kept by its pane: they outlive a trip to the Terminal tab and back.
-    let kept: ComposerDraft
     @Environment(Machines.self) private var machines
 
     var body: some View {
-        if let model = machines.model(forSession: key) {
+        if let model = machines.model(forSession: key), let kept = model.drafts(for: key) {
             Composer(model: model, key: key, kept: kept)
         }
     }
 }
 
-/// What a run's composer keeps while its tab is not shown, owned by the run's pane: the words being written, and the
-/// send whose answer never came. The rest of the box (the last outcome, a command's watch) starts again.
-@Observable
-final class ComposerDraft {
-    var text = ""
-    var unanswered: UnansweredSend?
-}
-
 private struct Composer: View {
     let model: AppModel
     let key: String
-    @Bindable var kept: ComposerDraft
+    /// The run's words and the send whose answer never came, kept by the run (`RunDrafts`): they outlive this box.
+    /// The rest of the box (the last outcome, a command's watch) starts again.
+    @Bindable var kept: RunDrafts
 
     /// What became of the last Claude send or refused command; Kit words it.
     @State private var result: ComposeAttempt?
@@ -57,12 +49,12 @@ private struct Composer: View {
 
     private var summary: SessionSummary? { model.shownSummary(for: key) }
     private var isCodex: Bool { summary?.isCodex == true }
-    private var blocked: String? { model.sendBlockedReason(for: key, draft: kept.text) }
+    private var blocked: String? { model.sendBlockedReason(for: key, draft: kept.reply) }
     private var computer: String { HostDevice.current.computer("the computer", named: model.machineName) }
     private var busy: Bool { sending || running?.phase.busy == true }
 
     private var canSend: Bool {
-        blocked == nil && !sending && !kept.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        blocked == nil && !sending && !kept.reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -73,7 +65,7 @@ private struct Composer: View {
         .padding(.horizontal, 20)
         .padding(.top, 4)
         .padding(.bottom, 16)
-        .onChange(of: kept.text) { _, new in
+        .onChange(of: kept.reply) { _, new in
             kept.unanswered = nil
             // Editing is the reader's next act, so a standing failure or kept value has been read. The draft a landed
             // command consumes is not an edit.
@@ -81,8 +73,8 @@ private struct Composer: View {
             if !new.isEmpty, case .failed = running?.phase { running = nil }
             if !new.isEmpty, case .neutral = running?.phase { running = nil }
         }
-        // A new handshake is the link back, and so is coming back from the Terminal tab: the unanswered send is asked
-        // again, if Kit's rule still allows it.
+        // A new handshake is the link back, and so is the box coming back, from another tab or another run: the
+        // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .onAppear { askUnansweredAgain() }
         // Esc closes the list, then leaves the field, before the window's Esc closes the run. Published to the whole
@@ -119,7 +111,7 @@ private struct Composer: View {
         let agent = summary?.agent.displayName ?? "the agent"
         return VStack(alignment: .leading, spacing: 10) {
             TextField(
-                "", text: $kept.text, prompt: Text("Reply to \(agent)…").foregroundStyle(Theme.text3), axis: .vertical
+                "", text: $kept.reply, prompt: Text("Reply to \(agent)…").foregroundStyle(Theme.text3), axis: .vertical
             )
                 .textFieldStyle(.plain)
                 .font(Theme.ui(13))
@@ -131,10 +123,10 @@ private struct Composer: View {
                 .accessibilityLabel("Reply to \(agent)…")
                 .accessibilityIdentifier("session.composer.field")
             HStack(spacing: 10) {
-                if isCodex, let counter = ComposeDraft(text: kept.text).counterText {
+                if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
                     Text(counter)
                         .font(Theme.mono(11))
-                        .foregroundStyle(ComposeDraft(text: kept.text).isOverCeiling ? Theme.red : Theme.text3)
+                        .foregroundStyle(ComposeDraft(text: kept.reply).isOverCeiling ? Theme.red : Theme.text3)
                         .accessibilityIdentifier("session.composer.count")
                 }
                 Spacer()
@@ -182,7 +174,7 @@ private struct Composer: View {
         if blocked == nil, let running, let status = model.commandStatus(running.command, running.phase) {
             return Line(text: status.text, tone: status.tone)
         }
-        if let kit = model.outcomeNote(for: key, lastSend: result) ?? model.standingNote(for: key, draft: kept.text) {
+        if let kit = model.outcomeNote(for: key, lastSend: result) ?? model.standingNote(for: key, draft: kept.reply) {
             return Line(text: kit.text, tone: kit.tone)
         }
         return nil
@@ -204,7 +196,7 @@ private struct Composer: View {
 
     private func submit() {
         guard canSend else { return }
-        let draft = kept.text
+        let draft = kept.reply
         let again = askingAgain
         askingAgain = false
         switch model.submission(of: draft, to: key) {
@@ -233,7 +225,7 @@ private struct Composer: View {
                 if model.connection.generation != generation { askUnansweredAgain() }
             }
             // Words typed while the send was out are the next message, not this one.
-            if attempt.landed, kept.text == draft { kept.text = "" }
+            if attempt.landed, kept.reply == draft { kept.reply = "" }
             noteResult(attempt)
         }
     }
@@ -248,13 +240,13 @@ private struct Composer: View {
         Task {
             let outcome = await model.composeToCodex(sessionKey: key, text: draft)
             sending = false
-            if outcome?.landed == true, kept.text == draft { kept.text = "" }
+            if outcome?.landed == true, kept.reply == draft { kept.reply = "" }
         }
     }
 
     private func askUnansweredAgain() {
         guard let unanswered = kept.unanswered,
-            model.asksAgain(unanswered, to: key, draft: kept.text, sending: sending)
+            model.asksAgain(unanswered, to: key, draft: kept.reply, sending: sending)
         else { return }
         kept.unanswered = nil
         askingAgain = true
@@ -330,7 +322,7 @@ private struct Composer: View {
                 attempt = await model.sendCompactCommand(instructions: instructions, to: key)
             }
             sending = false
-            if attempt.landed, let draft, kept.text == draft { kept.text = "" }
+            if attempt.landed, let draft, kept.reply == draft { kept.reply = "" }
             // Claude Code's receipt may already have landed while typing.
             let phase =
                 command.phase(after: attempt)
@@ -383,7 +375,7 @@ private struct Composer: View {
         Task {
             let attempt = await model.sendClearCommand(to: key)
             sending = false
-            if attempt.landed, let draft, kept.text == draft { kept.text = "" }
+            if attempt.landed, let draft, kept.reply == draft { kept.reply = "" }
             noteResult(attempt)
         }
     }

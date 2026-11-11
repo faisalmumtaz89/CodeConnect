@@ -14,8 +14,6 @@ struct DecisionBlock: View {
     /// The control whose answer is on its way, so a second click waits for the first.
     @State private var sending: String?
     @State private var sentAt: Date?
-    /// The reason a Deny carries, typed in the box.
-    @State private var reason = ""
     @FocusState private var reasonFocused: Bool
     @State private var showAllChanges = false
     @State private var showInput = false
@@ -67,6 +65,11 @@ struct DecisionBlock: View {
     private var keyed: Bool { boxed && slot?.sheetUp != true }
     private var agentName: String { summary?.agent.displayName ?? "The agent" }
     private var placeholder: String { "What should \(agentName) do instead?" }
+    /// The reason a Deny carries, typed in the box: the run's (`RunDrafts`), so it outlives this view.
+    private var reason: String {
+        get { model.drafts(for: approval.sessionKey)?.reasons[approval.id] ?? "" }
+        nonmutating set { model.drafts(for: approval.sessionKey)?.reasons[approval.id] = newValue }
+    }
     private var reasonTyped: Bool { !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
@@ -321,7 +324,10 @@ struct DecisionBlock: View {
         switch surface {
         case .allowDeny:
             if boxed {
-                TextField("", text: $reason, prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical)
+                TextField(
+                    "", text: Binding { reason } set: { reason = $0 },
+                    prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical
+                )
                     .textFieldStyle(.plain)
                     .font(Theme.ui(13))
                     .foregroundStyle(Theme.text)

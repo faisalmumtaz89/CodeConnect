@@ -15,9 +15,6 @@ struct SessionPane: View {
     /// behind the conversation: the emulator holds the run's screen and scrollback, and Kit keeps only the stream's
     /// tail, so a terminal rebuilt from it draws a wrong screen once the run has printed more than that.
     @State private var terminalShown = false
-    /// The run's draft, kept here above the tabs: the conversation and its composer are built again on each return
-    /// from the terminal, and the words being written must not go with them.
-    @State private var composerDraft = ComposerDraft()
     @State private var height: CGFloat = 0
     /// A request holds the reply box's place.
     @State private var boxTaken = false
@@ -57,7 +54,7 @@ struct SessionPane: View {
                         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
                         // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
                         // Not clipped: its command list opens above it.
-                        ComposerBar(key: row.id, kept: composerDraft)
+                        ComposerBar(key: row.id)
                             .frame(height: boxTaken ? 0 : nil, alignment: .top)
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
                             .opacity(boxTaken ? 0 : 1)
