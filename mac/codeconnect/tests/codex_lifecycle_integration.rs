@@ -1702,9 +1702,10 @@ fn a_record_without_server_a_never_claims_the_remain_on_exit_premise() {
     // What makes that safe is an ORDERING, and this is now the test of it: the
     // coordinator persists server A **immediately after resolving the session**,
     // before it asserts anything. So a record can never carry the remain bit without
-    // also carrying A — the combination the fallback fed on cannot occur — and a
-    // record with no A is one where no session was ever resolved, leaving nothing to
-    // infer the death of.
+    // also carrying A — the combination the fallback fed on cannot occur. A created
+    // session has no A on record only until A's write lands after tmux returns (or for
+    // good, if the launch fails or is lost first), and there cleanup stays armed
+    // rather than infer a death.
     //
     // `--test-newsession hang` holds the coordinator in the genuine in-flight window:
     // tmux created the session, and nothing has been pinned yet.
@@ -1729,7 +1730,7 @@ fn a_record_without_server_a_never_claims_the_remain_on_exit_premise() {
         sb.record_text(uid)
     );
 
-    // THE GATE. In this window — the only one that produces a record with no A —
+    // THE GATE. In this window — the only one in which a created session has no A —
     // the remain-on-exit assertion has not run and must not be claimed. Held for a
     // while, because the claim is that it NEVER becomes true here, not that it
     // happens not to be true on the first poll.

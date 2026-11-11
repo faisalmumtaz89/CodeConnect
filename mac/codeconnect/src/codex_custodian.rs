@@ -625,11 +625,14 @@ fn birth_matches(identity: &ProcessIdentity) -> GroupWarrant {
 /// regression. The branch existed for exactly one window — a coordinator that died
 /// after creating a session and before persisting A — and the coordinator now
 /// persists A **immediately after resolving it**, before the assertion and before
-/// anything else that can fail. A record with no A is therefore one where no session
-/// was ever resolved, and there is no session death to infer. Fail-closed is the
-/// honest answer: with nothing to bind to, this reports no evidence, and cleanup
-/// settles through the paths that rest on an observation rather than an inference —
-/// a positive `Absent`/`Killed` from tmux, or the boot-change escape.
+/// anything else that can fail. That narrows the window to the span between tmux
+/// returning and A's write; it does not close it. A session created in that span can
+/// exist, and its host can run, while the record has no A. Fail-closed is the honest
+/// answer: with nothing to bind to, this reports no evidence, and cleanup settles
+/// through the paths that rest on an observation rather than an inference — tmux
+/// showing the session killed or absent (a later server on the same socket can show
+/// it absent), or its server gone or replaced, or the boot-change escape. Until one
+/// of them, the custodian stays armed.
 fn server_gone_evidence(record: &LaunchRecord) -> bool {
     match &record.server_a {
         Some(a) => {
@@ -777,7 +780,8 @@ impl CustodianDeps for RealDeps {
         // identity from the record and pass it as the pin, so absent/killed/gone
         // is proven against the exact server the launch created — a different
         // server B rebinding the socket cannot fake a proven absence. When A was
-        // never persisted (an indeterminate new-session created nothing yet), we
+        // never persisted (an indeterminate new-session, which may have created a
+        // session that was never pinned), we
         // pass None and the destroy establishes A from the resolve as before (the
         // "late UID" case). An unreadable/unparseable record must
         // NOT collapse to the no-A path — that would do UNPINNED cleanup on
@@ -1962,9 +1966,10 @@ pub(crate) mod tests {
         // hook can add a pane afterwards and the options stay mutable. A historical
         // fact cannot license a present-tense claim about a session's death.
         //
-        // So the inference is gone rather than better-gated, and it costs nothing:
-        // the coordinator persists A immediately after resolving the session, so a
-        // record with no A is one where no session was ever resolved. This asserts
+        // So the inference is gone rather than better-gated: the coordinator persists A
+        // immediately after resolving the session, so a created session has no A only
+        // until that write lands (or for good, if it never does), and there cleanup
+        // stays armed. This asserts
         // the strong form — no combination of host death and recorded premise
         // produces "gone" without A.
         let mut record = base_record(fail(), CleanupState::Pending, false);

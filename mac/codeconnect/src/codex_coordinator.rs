@@ -267,16 +267,17 @@ pub fn coordinate<D: CoordinatorDeps>(
 /// raised before tmux was ever touched (a failed custodian spawn, a record
 /// re-load, the pre-mutation lock/record_run_dir/mark_new_session_starting block).
 /// That would write `Failed{Pending}` on a record with no session, no server A, and no
-/// host — and the sweep would then rearm a custodian for it forever: an unpinned
-/// `destroy()` returns `Unavailable`, and the retry path's escapes need either
-/// server-gone evidence (there is no server to be gone) or a boot change. Armed
-/// until reboot, for a session that never existed.
+/// host — and the sweep would then rearm a custodian for it: while no tmux server
+/// answers on the socket an unpinned `destroy()` returns `Unavailable`, and the retry
+/// path's escapes need server-gone evidence (there is no server to be gone), an
+/// `Absent` from a server that does answer, or a boot change. Armed until one of
+/// them, for a session that never existed.
 ///
 /// The rule is **total**, because the two fields it reads partition every durable
-/// record this path can observe: `server_a.is_some()` is exactly "a
-/// session was created" (A is persisted in the *same* write that records the
-/// creation, so there is no window where one holds without the other), and
-/// `new_session_indeterminate` is exactly "a mutation may be in flight". Neither
+/// record this path can observe: `server_a.is_some()` is "a session was created and
+/// pinned", and `new_session_indeterminate` is "a mutation may be in flight" — set
+/// durably before `tmux new-session`, so a session created but not yet pinned
+/// already carries it. Neither
 /// set means no session can exist ⇒ `NotRequired`; either set means one may ⇒
 /// `Pending`. A record we cannot read falls to the conservative `Pending`.
 fn terminalize(uid: &str, reason: &str) -> Result<()> {
@@ -922,7 +923,9 @@ impl RealCoordinatorDeps {
     ///
     /// The difference between a custodian that can bind cleanup to a proven server
     /// identity and one that cannot bind it to anything — a record with no A is the
-    /// shape that stays armed until the next reboot.
+    /// shape that stays armed until tmux shows the session absent once a late session
+    /// is ruled out (a later server on the same socket can show it), or the machine
+    /// reboots.
     fn persist_created_session(
         &self,
         resolved: &protocol::tmux::OwnedSession,
@@ -979,8 +982,10 @@ impl RealCoordinatorDeps {
     /// `remain_on_exit_asserted` being a LASTING property, which it is not: the
     /// assertion covers the targeted window and pane at one moment, config hooks can
     /// add panes afterwards, and the options stay mutable. Persisting A at the
-    /// earliest moment there is an A to persist deletes the window, and with it the
-    /// need for the inference at all.
+    /// earliest moment there is an A to persist narrows the window to the span
+    /// between tmux returning and this write, and the inference is not needed for
+    /// what is left: a coordinator lost inside it leaves a record with no A, whose
+    /// cleanup stays armed rather than guess.
     fn finish_new_session(&mut self, resolved: OwnedSession) -> NewSessionOutcome {
         if let Err(why) = self.persist_created_session(&resolved, false) {
             eprintln!(
@@ -2739,9 +2744,10 @@ mod tests {
         // spawn failed BEFORE any tmux mutation, so no session can
         // exist — A is unrecorded and the in-flight flag was never set. A
         // `Failed{Pending}` here is the wedge: the sweep rearms a custodian, whose
-        // unpinned `destroy()` returns Unavailable forever, with no server-gone
-        // evidence and no boot change to escape on. Armed until reboot for a
-        // session that never existed.
+        // unpinned `destroy()` returns Unavailable while no tmux server answers on
+        // the socket, with no server-gone evidence to escape on. Armed until a
+        // server answers `Absent` or the machine reboots, for a session that never
+        // existed.
         assert!(rec.server_a.is_none() && !rec.new_session_indeterminate);
         assert_eq!(rec.cleanup, CleanupState::NotRequired);
     }
