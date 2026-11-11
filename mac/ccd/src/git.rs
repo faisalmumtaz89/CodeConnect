@@ -16,13 +16,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// launchd gives the daemon no PATH. `/usr/bin/git` is the Command Line Tools
-/// shim and is present on any Mac that has ever built anything.
-const GIT_CANDIDATES: &[&str] = &[
-    "/usr/bin/git",
-    "/opt/homebrew/bin/git",
-    "/usr/local/bin/git",
-];
+/// launchd gives the daemon no PATH, so git is looked for where it lives.
+const GIT_CANDIDATES: &[&str] = &[SHIM_GIT, "/opt/homebrew/bin/git", "/usr/local/bin/git"];
+
+/// On every Mac, but on one without Apple's developer tools it is their
+/// installer's stub: running it opens the dialog offering to install them. It
+/// counts only when the tools are there with a git for it to run.
+const SHIM_GIT: &str = "/usr/bin/git";
 
 /// Ceiling for a `rev-parse` probe. Its answer is one word.
 const PROBE_CAP: usize = 4 * 1024;
@@ -45,7 +45,35 @@ pub fn git_bin(configured: Option<&str>) -> Option<PathBuf> {
     GIT_CANDIDATES
         .iter()
         .map(PathBuf::from)
-        .find(|path| path.is_file())
+        .find(|path| path.is_file() && (path != Path::new(SHIM_GIT) || shim_has_git()))
+}
+
+/// Whether Apple's developer tools are installed with a git for `/usr/bin/git`
+/// to run. Asked once per daemon: `xcode-select -p` names their folder, and
+/// without them it fails and opens nothing.
+#[cfg(target_os = "macos")]
+fn shim_has_git() -> bool {
+    static HAS_GIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS_GIT.get_or_init(|| {
+        std::process::Command::new("/usr/bin/xcode-select")
+            .arg("-p")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .is_some_and(|out| {
+                Path::new(String::from_utf8_lossy(&out.stdout).trim())
+                    .join("usr/bin/git")
+                    .is_file()
+            })
+    })
+}
+
+/// Elsewhere `/usr/bin/git` is git itself.
+#[cfg(not(target_os = "macos"))]
+fn shim_has_git() -> bool {
+    true
 }
 
 /// Collect `git diff HEAD` plus the untracked files, capped at `max_bytes`.

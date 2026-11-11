@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## No developer-tools dialog on a Mac without them
+
+- On a Mac without Apple's command line developer tools, starting a session or opening New agent
+  showed macOS's dialog offering to install them, and it came back after Cancel. It no longer
+  appears: without git, a run shows no branch or changes, as in a folder that isn't a repository.
+
 ## A request waiting at the computer stays open
 
 - A permission request that only the computer could answer closed after 15 minutes as "Closed by
