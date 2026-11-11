@@ -423,8 +423,9 @@ pub struct LaunchRecord {
     /// had a no-server-A fallback that inferred "the session is gone" from "the host
     /// is proven dead", gated on this bit — a lasting conclusion drawn from a
     /// historical fact. That fallback is retired: the coordinator now persists server
-    /// A immediately after resolving the session, so the window the fallback existed
-    /// for no longer exists, and nothing infers session death from this bit any more.
+    /// A immediately after resolving the session, which narrows the window the fallback
+    /// existed for to the span before that write, cleanup stays armed in what is left of
+    /// it, and nothing infers session death from this bit any more.
     /// It is kept because it is a true and cheap thing to know about a launch, and it
     /// is what an operator reads to tell "the assertion held" from "it never ran".
     #[serde(default)]
