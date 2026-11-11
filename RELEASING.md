@@ -8,8 +8,8 @@ comparison truthful. A test (`the_workspace_version_is_parseable` in
 `mac/codeconnect/src/update_check.rs`) fails CI if the workspace version
 ever stops being a plain `X.Y.Z`.
 
-The iOS app is a separate track: it is built from source in Xcode and is
-not distributed, and nothing here touches it. Within a protocol major, the app
+The iPhone app is a separate track: it ships through the App Store, and
+nothing here touches it. Within a protocol major, the app
 tolerates an older daemon per surface — newer features hide or say what to
 update; a protocol-*major* mismatch is refused outright, on both sides.
 
@@ -56,6 +56,14 @@ Each block starts from the repository root.
      -only-testing:CodeConnectUITests CODE_SIGNING_ALLOWED=NO)
    ```
 
+   CI does not build the Mac app, so build it once here; the release builds it
+   again for Release and checks the `.dmg` (step 4):
+
+   ```sh
+   xcodebuild -project macos/CodeConnect.xcodeproj -scheme CodeConnect -configuration Debug \
+     -destination 'platform=macOS' build
+   ```
+
    CI's hygiene job runs on push; do not tag until the release commit is
    green there too.
 
@@ -93,7 +101,8 @@ Each block starts from the repository root.
    binaries, and CodeConnect's own tmux from the pinned sources in
    `mac/tmux/SOURCES` — signs and notarizes them, attaches the two archives
    (binaries, and tmux beside them) to a **draft**, downloads those exact
-   assets back and re-verifies them — and stops there. A draft is
+   assets back and re-verifies them with `.github/workflows/release-verify.sh`
+   — the check step 5 repeats before publishing — and stops there. A draft is
    visible only to people who can see the repository's drafts, so nothing a
    user can reach has changed yet. Do not create the release yourself: a
    version that is not strictly newer than the current `releases/latest` is
@@ -143,17 +152,28 @@ Each block starts from the repository root.
    gh run watch                                   # ends at "verified draft"
    ```
 
-5. **Publish, as its own deliberate act.** Run the same workflow with
-   publishing enabled. It refuses outright if step 4's draft does not exist —
-   a publish run never quietly becomes a create-and-publish run. It rebuilds
-   and re-verifies everything from the same tag — publication publishes
-   exactly the bytes the publishing run itself proved — and then, only after
-   rechecking that the draft is still a draft with exactly the verified
-   assets, that the version is still newer than the published latest, and
-   that the tag still names the pinned commit, flips it live. This is the
-   moment `codeconnect update` on every machine can see it. `--ref` runs the
-   workflow as it is at the tag; without it, `main`'s copy runs, and an older
-   workflow checks an older set of assets.
+5. **Publish, as its own deliberate act: the draft is promoted unchanged.**
+   Run the same workflow with publishing enabled. Its `promote` job builds,
+   signs and notarizes nothing and reads no repository secret. It refuses
+   outright if step 4's draft does not exist — a publish run never quietly
+   becomes a create-and-publish run. It downloads the draft's nineteen assets
+   by id and checks them with the same `release-verify.sh` step 4 ran.
+   Every asset is bound to the tag: each checksum is its own file's, the Linux
+   ones signed with `RELEASE_KEY`; each Mac binary, in the archives and inside
+   the app, is signed by the pinned team's Developer ID with a secure timestamp
+   and carries both architectures; CodeConnect's own binaries carry the tag's
+   commit in every slice, and each archive's cc-tmux the tmux bundle
+   `mac/tmux/SOURCES` names; the Mac archives' binaries are notarized (asked of
+   Apple online); every archive holds only regular files and is within the
+   size its downloaders accept, and each core archive holds the pinned
+   licence; the app carries the tag's version and the project's Sparkle key;
+   and the `.dmg` is checked as Sparkle and Gatekeeper will check it. Then, only after rechecking that the draft is still a draft
+   holding exactly those assets, that the version is still newer than the
+   published latest, and that the tag still names the pinned commit, it flips
+   the draft live: the bytes people download are the bytes step 4 built and
+   anyone tested. This is the moment `codeconnect update` on every machine can
+   see it. `--ref` runs the workflow as it is at the tag; without it, `main`'s
+   copy runs, and an older workflow checks an older set of assets.
 
    ```sh
    gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z -f publish=true
@@ -161,8 +181,9 @@ Each block starts from the repository root.
    ```
 
    The first time the signing secrets are exercised, do step 4 alone and
-   inspect the draft before running this — that is the whole rehearsal
-   procedure. A rehearsal draft that should be discarded:
+   inspect the draft before running this — what you inspect is what step 5
+   publishes, and that is the whole rehearsal procedure. A rehearsal draft
+   that should be discarded:
    `gh release delete vX.Y.Z --yes` (the tag itself stays).
 
 6. **Verify the claim on the server, not just locally** — this is what the
@@ -173,7 +194,10 @@ Each block starts from the repository root.
    gh api 'repos/{owner}/{repo}/releases/latest' --jq .tag_name   # must print vX.Y.Z
    ```
 
-7. **Update this machine**, so your own launches stay quiet:
+7. **Update this machine**, so your own launches stay quiet. Where
+   CodeConnect.app installed CodeConnect, update the app (CodeConnect › Check
+   for Updates…): it installs the new binaries when it next opens, and
+   `codeconnect update` refuses there. Elsewhere:
 
    ```sh
    codeconnect update             # installs the release, restarts the daemon

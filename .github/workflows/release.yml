@@ -2,13 +2,15 @@
 # carries them, for a release. The Linux archives are built by linux-build.yml,
 # which this calls, and attached beside them.
 #
-# **Every run proves a draft end to end; publication is a separate, explicit
-# act.** `codeconnect update` installs whatever `releases/latest` points at, so
-# the moment of publication is the moment every machine can be handed these
-# bytes. A tag push builds and verifies a draft and stops. Publishing requires
-# a person to run the workflow with publishing enabled *against a draft that
-# already exists* — that run re-proves everything and promotes exactly the
-# bytes it proved.
+# **Every run proves a draft end to end; publication promotes it unchanged.**
+# `codeconnect update` installs whatever `releases/latest` points at, so the
+# moment of publication is the moment every machine can be handed these bytes.
+# A tag push builds, signs, notarizes and verifies a draft and stops.
+# Publishing requires a person to run the workflow with publishing enabled
+# *against a draft that already exists*: that run builds, signs and notarizes
+# nothing and reads no repository secret. It downloads the draft's nineteen
+# assets, checks them with the same `release-verify.sh` the draft run used, and
+# publishes exactly those bytes, so what was tested is what people download.
 #
 # **One commit, pinned once.** The `pin` job resolves the tag to a commit SHA
 # and every other job checks out that SHA — never the tag, which is mutable.
@@ -157,6 +159,7 @@ jobs:
   build:
     name: Build ${{ matrix.arch }}
     needs: pin
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish) }}
     strategy:
       fail-fast: true
       matrix:
@@ -273,6 +276,7 @@ jobs:
   linux:
     name: Linux
     needs: pin
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish) }}
     uses: ./.github/workflows/linux-build.yml
     with:
       ref: ${{ needs.pin.outputs.sha }}
@@ -283,6 +287,7 @@ jobs:
   linux-sign:
     name: Sign the Linux checksums
     needs: [pin, linux]
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -315,28 +320,15 @@ jobs:
             linux/*.tar.gz.sha256.sig
           if-no-files-found: error
 
-  publish:
-    name: Sign, notarize, verify${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && ', publish' || '' }}
+  draft:
+    name: Sign, notarize, verify the draft
     needs: [pin, build, linux-sign]
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish) }}
     # The image that carries Xcode 27.1, the one the Mac app is built and
     # tested with (macos-15 has 26.3 at most). It is a preview, so "Build the
     # Mac app" pins Xcode by path and fails loudly if that path is gone. The
     # steps before it use only lipo, codesign and notarytool.
     runs-on: xcode-27
-    # Promotions run one at a time across ALL tags: the monotonic decision
-    # compares against `releases/latest`, and two promotions in parallel
-    # could each be newer than the latest they saw and publish out of order.
-    # Draft-only runs get a group of their own per run, so they never
-    # contend with a promotion. GitHub holds at most one *pending* run per
-    # group — a third promotion cancels the waiting second, visibly, and a
-    # cancelled promotion has published nothing. (`queue: max` would let
-    # them all wait, but no released actionlint accepts the key yet, and
-    # weakening the workflow lint costs more than a re-run.) The refusals
-    # inside the publish step — draft state, assets, monotonicity, tag→SHA —
-    # are what make ordering safe; this group only removes the interleaving.
-    concurrency:
-      group: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && 'release-publish-serial' || format('release-verify-{0}', github.run_id) }}
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -661,9 +653,8 @@ jobs:
             echo "tmux_archive=$tmux_archive"
           } >> "$GITHUB_OUTPUT"
 
-      # A draft is invisible to the get-release-by-tag endpoint, so the draft
-      # is found in the authenticated listing — which does include drafts —
-      # or created, and its numeric id is what every later step addresses.
+      # Found in the authenticated listing, or created; its numeric id is what
+      # every later step addresses (release-draft.sh).
       - name: Find or create the draft
         id: draft
         env:
@@ -671,66 +662,10 @@ jobs:
           TAG: ${{ needs.pin.outputs.tag }}
           SHA: ${{ needs.pin.outputs.sha }}
           VERSION: ${{ needs.pin.outputs.version }}
-          PROMOTING: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && 'true' || 'false' }}
-        run: |
-          # Before anything is created, adopted, or mutated: the tag must
-          # still name the pinned commit. Adoption deletes and replaces a
-          # draft's assets, and destroying a valid draft over a moved tag is
-          # damage even when the final publish check would have refused it.
-          git fetch --no-tags --depth=1 origin "refs/tags/$TAG"
-          at="$(git rev-parse "FETCH_HEAD^{commit}")"
-          if [ "$at" != "$SHA" ]; then
-            echo "::error::$TAG now resolves to $at, not the pinned $SHA; refusing"
-            exit 1
-          fi
-
-          # `gh api` exits non-zero on any API failure, which fails this step:
-          # an unreadable listing is not permission to create anything. A
-          # fresh draft takes a few seconds to appear in the listing, so an
-          # empty answer is re-asked before it is believed — otherwise an
-          # immediate rerun would try to recreate a draft that exists and die
-          # on the collision.
-          find_matches() {
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq "[.[] | select(.tag_name == \"$TAG\")]" | jq -s 'add'
-          }
-          matches="$(find_matches)"
-          for _ in 1 2 3; do
-            [ "$(jq 'length' <<<"$matches")" != "0" ] && break
-            sleep 5
-            matches="$(find_matches)"
-          done
-          count="$(jq 'length' <<<"$matches")"
-          case "$count" in
-            0)
-              # Publication promotes a draft a previous run proved; a publish
-              # run that finds nothing to promote must not quietly become a
-              # create-and-publish run.
-              if [ "$PROMOTING" = "true" ]; then
-                echo "::error::no draft holds $TAG; run the workflow without publish first"
-                exit 1
-              fi
-              id="$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
-                -f tag_name="$TAG" -F draft=true -F generate_release_notes=true \
-                -f name="CodeConnect $VERSION" --jq .id)"
-              ;;
-            1)
-              if [ "$(jq -r '.[0].draft' <<<"$matches")" != "true" ]; then
-                echo "::error::$TAG is already published; this workflow will not modify a live release"
-                exit 1
-              fi
-              id="$(jq -r '.[0].id' <<<"$matches")"
-              ;;
-            *)
-              echo "::error::$count releases carry the tag $TAG; refusing to guess which"
-              exit 1
-              ;;
-          esac
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-          echo "draft id $id holds $TAG"
+          PROMOTING: "false"
+        run: .github/workflows/release-draft.sh
 
       - name: Attach the assets
-        id: assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.draft.outputs.id }}
@@ -756,8 +691,7 @@ jobs:
               "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$file" \
               > /dev/null
           done
-          # Read back what the draft now holds; these exact asset ids are what
-          # the verification step downloads and what publication rechecks.
+          # Read back what the draft now holds: every upload must have landed.
           asset_id() {
             gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --jq ".assets[] | select(.name == \"$1\") | .id"
@@ -775,15 +709,6 @@ jobs:
             echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
             exit 1
           fi
-          {
-            echo "archive_id=$archive_id"
-            echo "checksum_id=$checksum_id"
-            echo "tmux_archive_id=$tmux_archive_id"
-            echo "tmux_checksum_id=$tmux_checksum_id"
-            echo "dmg_id=$dmg_id"
-            echo "dmg_checksum_id=$dmg_checksum_id"
-            echo "appcast_item_id=$appcast_item_id"
-          } >> "$GITHUB_OUTPUT"
 
           # The Linux files exactly as `linux-sign` signed them, the same way.
           linux_assets='[]'
@@ -810,112 +735,81 @@ jobs:
             echo "::error::expected the 12 signed Linux files, attached $(jq 'length' <<<"$linux_assets")"
             exit 1
           fi
-          echo "linux_assets=$linux_assets" >> "$GITHUB_OUTPUT"
 
       # Downloaded back from the draft rather than checked in place: this is
       # the first moment the bytes a user would actually receive have existed.
+      # The promote job runs this same check on this draft before publishing it.
       - name: Verify the assets a user would receive
         env:
           GH_TOKEN: ${{ github.token }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          ARCHIVE_ID: ${{ steps.assets.outputs.archive_id }}
-          CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
-          TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
-          TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
-          TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
-          DMG: ${{ steps.app.outputs.dmg }}
-          DMG_ID: ${{ steps.assets.outputs.dmg_id }}
-          DMG_CHECKSUM_ID: ${{ steps.assets.outputs.dmg_checksum_id }}
-          APPCAST_ITEM_ID: ${{ steps.assets.outputs.appcast_item_id }}
-          LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
-          DIR: ${{ needs.pin.outputs.dir }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          VERSION: ${{ needs.pin.outputs.version }}
+          SHA: ${{ needs.pin.outputs.sha }}
         run: |
-          mkdir -p roundtrip && cd roundtrip
-          # By asset id, with the octet-stream accept header — the only form
-          # in which a draft's assets can be fetched at all.
-          fetch() {
-            gh api -H "Accept: application/octet-stream" \
-              "repos/$GITHUB_REPOSITORY/releases/assets/$1" > "$2"
-          }
-          # The rule the updater applies, applied here: exactly these
-          # members, nothing else, no directory entry. Extracting and hoping
-          # would not have caught a directory member the product refuses.
-          holds_exactly() {
-            local archive="$1" expected actual
-            shift
-            expected="$(printf '%s\n' "$@" | sort)"
-            actual="$(tar -tzf "$archive" | sort)"
-            if [ "$expected" != "$actual" ]; then
-              echo "::error::$archive does not hold exactly the expected members"
-              diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
-              exit 1
-            fi
-          }
-          fetch "$ARCHIVE_ID" "$ARCHIVE"
-          fetch "$CHECKSUM_ID" "$ARCHIVE.sha256"
-          fetch "$TMUX_ARCHIVE_ID" "$TMUX_ARCHIVE"
-          fetch "$TMUX_CHECKSUM_ID" "$TMUX_ARCHIVE.sha256"
-          shasum -a 256 -c "$ARCHIVE.sha256"
-          shasum -a 256 -c "$TMUX_ARCHIVE.sha256"
-          holds_exactly "$ARCHIVE" \
-            "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
-          holds_exactly "$TMUX_ARCHIVE" "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
-          tar -xzf "$ARCHIVE"
-          tar -xzf "$TMUX_ARCHIVE"
-          req="anchor apple generic \
-            and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
-            and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
-            and certificate leaf[subject.OU] = \"$TEAM_ID\""
-          for binary in codeconnect ccd cc-hook cc-tmux; do
-            codesign --verify --strict --all-architectures -R="identifier \"$binary\" and $req" "$DIR/$binary"
-          done
-          # The pair a user receives agrees: the downloaded tmux is the one
-          # the downloaded codeconnect requires. Asked as assignments, so a
-          # binary that does not run fails the step rather than answering
-          # with the same empty string as its partner.
-          expected="$("$DIR/codeconnect" --tmux-version)"
-          said="$("$DIR/cc-tmux" -V)"
-          if [ -z "$expected" ] || [ "$said" != "$expected" ]; then
-            echo "::error::the released cc-tmux reports '$said', the released codeconnect requires '$expected'"
-            exit 1
-          fi
+          .github/workflows/release-verify.sh fetch "$RELEASE_ID" roundtrip
+          OPENSSL="$(brew --prefix openssl)/bin/openssl" .github/workflows/release-verify.sh check roundtrip
 
-          # The Linux files a user would receive are the bytes `linux-sign`
-          # signed and checked against RELEASE_KEY, each archive still matches
-          # its checksum, and each holds exactly what the updater allows.
-          mkdir linux
-          while read -r id name; do
-            fetch "$id" "linux/$name"
-            if ! cmp -s "linux/$name" "../slices/linux-signed/$name"; then
-              echo "::error::$name on the draft is not the file linux-sign signed"
-              exit 1
-            fi
-          done < <(jq -r '.[] | "\(.id) \(.name)"' <<<"$LINUX_ASSETS")
-          for arch in aarch64 x86_64; do
-            core="codeconnect-${DIR#codeconnect-}-linux-$arch.tar.gz"
-            tmux="codeconnect-${DIR#codeconnect-}-tmux-linux-$arch.tar.gz"
-            for archive in "$core" "$tmux"; do
-              (cd linux && shasum -a 256 -c "$archive.sha256")
-              [ -s "linux/$archive.sha256.sig" ] || { echo "::error::$archive.sha256.sig is missing"; exit 1; }
-            done
-            holds_exactly "linux/$core" \
-              "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
-            holds_exactly "linux/$tmux" "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
-          done
+      # A draft run ends here, on purpose: publication is the promote job.
+      - name: Leave it as a verified draft
+        env:
+          TAG: ${{ needs.pin.outputs.tag }}
+        run: |
+          echo "$TAG is a verified draft. To publish it:"
+          echo "  gh workflow run release.yml --ref $TAG -f tag=$TAG -f publish=true"
 
-          # The Mac app a user would receive, from /mac or from Sparkle: the
-          # .dmg, its checksum and the appcast's signature line, checked again
-          # as Sparkle and Gatekeeper will check them.
-          fetch "$DMG_ID" "$DMG"
-          fetch "$DMG_CHECKSUM_ID" "$DMG.sha256"
-          fetch "$APPCAST_ITEM_ID" appcast-item.xml
-          shasum -a 256 -c "$DMG.sha256"
-          OPENSSL="$(brew --prefix openssl)/bin/openssl" \
-            bash ../.github/workflows/mac-app-verify.sh "$DMG" appcast-item.xml notarized
+  # Publication: the draft a draft run built and verified, promoted unchanged.
+  # Nothing is built, signed or notarized here and no repository secret is
+  # read — the Apple team the check enforces is the one the pinned updater
+  # source pins. The draft's assets are downloaded by id, checked by the same
+  # release-verify.sh the draft run used, and published by the Publish step
+  # only after it rechecks what the draft holds.
+  promote:
+    name: Verify and publish the draft
+    needs: pin
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    # The image the draft job verifies on, so both checks run on the same tools.
+    runs-on: xcode-27
+    # Promotions run one at a time across ALL tags: the monotonic decision
+    # compares against `releases/latest`, and two promotions in parallel
+    # could each be newer than the latest they saw and publish out of order.
+    # GitHub holds at most one *pending* run per group — a third promotion
+    # cancels the waiting second, visibly, and a cancelled promotion has
+    # published nothing. (`queue: max` would let them all wait, but no
+    # released actionlint accepts the key yet, and weakening the workflow lint
+    # costs more than a re-run.) The refusals inside the Publish step — draft
+    # state, assets, monotonicity, tag→SHA — are what make ordering safe; this
+    # group only removes the interleaving.
+    concurrency:
+      group: release-publish-serial
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pin.outputs.sha }}
+
+      # Only found, never created: publication promotes a draft a draft run made.
+      - name: Find the draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.pin.outputs.tag }}
+          SHA: ${{ needs.pin.outputs.sha }}
+          VERSION: ${{ needs.pin.outputs.version }}
+          PROMOTING: "true"
+        run: .github/workflows/release-draft.sh
+
+      - name: Verify the assets a user would receive
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          VERSION: ${{ needs.pin.outputs.version }}
+          SHA: ${{ needs.pin.outputs.sha }}
+        run: |
+          .github/workflows/release-verify.sh fetch "$RELEASE_ID" roundtrip
+          OPENSSL="$(brew --prefix openssl)/bin/openssl" .github/workflows/release-verify.sh check roundtrip
 
       - name: Publish
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.draft.outputs.id }}
@@ -927,9 +821,9 @@ jobs:
           DMG_CHECKSUM_ID: ${{ steps.assets.outputs.dmg_checksum_id }}
           APPCAST_ITEM_ID: ${{ steps.assets.outputs.appcast_item_id }}
           LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
-          DMG: ${{ steps.app.outputs.dmg }}
+          ARCHIVE: ${{ steps.assets.outputs.archive }}
+          TMUX_ARCHIVE: ${{ steps.assets.outputs.tmux_archive }}
+          DMG: ${{ steps.assets.outputs.dmg }}
           TAG: ${{ needs.pin.outputs.tag }}
           SHA: ${{ needs.pin.outputs.sha }}
           VERSION: ${{ needs.pin.outputs.version }}
@@ -1005,12 +899,3 @@ jobs:
           # `releases/latest` — the only thing the updater reads.
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -F draft=false -F prerelease=false -f make_latest=true --jq .html_url
-
-      # Every run that is not an explicit publication ends here, on purpose.
-      - name: Leave it as a verified draft
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.publish }}
-        env:
-          TAG: ${{ needs.pin.outputs.tag }}
-        run: |
-          echo "$TAG is a verified draft. To publish it:"
-          echo "  gh workflow run release.yml --ref $TAG -f tag=$TAG -f publish=true"
