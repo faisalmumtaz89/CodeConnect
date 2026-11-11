@@ -8,6 +8,8 @@ This directory holds the App Store–required web pages. The website team deploy
 |---|---|---|
 | `https://codeconnect.sh/privacy` | `privacy.md` | Deploy content **verbatim** — its statements are privacy claims that must match app behavior; do not edit wording without checking with the app side |
 | `https://codeconnect.sh/support` | `support.md` | All CLI commands in it are verified against the shipped `codeconnect` binary |
+| `https://codeconnect.sh/mac/appcast.xml` | the release's `appcast.xml` asset | The Mac app's update feed. Every copy of the app asks this address (its `SUFeedURL`), so it can never move. A static file, copied byte for byte from the published release; never edited |
+| `https://codeconnect.sh/mac` | — | A temporary redirect (307) to the published release's versioned `CodeConnect-X.Y.Z.dmg`, set per release |
 
 ## Requirements
 

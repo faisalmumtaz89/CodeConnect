@@ -68,8 +68,10 @@ Each block starts from the repository root.
    green there too.
 
 2. **Bump.** Set the new version in one place — `mac/Cargo.toml`
-   (`[workspace.package] version`) — then build the shipped binary and read
-   the version back:
+   (`[workspace.package] version`) — and write the release's notes for the
+   Mac app's update window in `macos/release-notes.txt`, one plain paragraph
+   (the GitHub release's own notes are separate). Then build the shipped
+   binary and read the version back:
 
    ```sh
    (cd mac && cargo build --release --bin codeconnect && ./target/release/codeconnect --version)
@@ -121,7 +123,7 @@ Each block starts from the repository root.
    `.sha256`, signs each `.sha256`, and verifies every signature against the
    pinned half before handing the files on. The draft then holds the seven
    macOS assets (the two archives and their checksums, and the app's `.dmg`,
-   its checksum and `appcast-item.xml`) and twelve Linux ones, each downloaded
+   its checksum and the update feed `appcast.xml`) and twelve Linux ones, each downloaded
    back and checked, and publication requires exactly those nineteen: a Linux
    build that fails stops the release. The key's private half lives only in that secret and the
    owner's offline backup. Losing it means a new key and a new `RELEASE_KEY`,
@@ -135,8 +137,14 @@ Each block starts from the repository root.
    image with Xcode 27.1 pinned by path — the Xcode the app is built and
    tested with. The app is exported for Developer ID and packed as
    `CodeConnect-X.Y.Z.dmg`, which is notarized, stapled, and signed for Sparkle
-   with the secret `SPARKLE_ED_PRIVATE_KEY`; that signature line is
-   `appcast-item.xml`. `.github/workflows/mac-app-verify.sh` checks the `.dmg`
+   with the secret `SPARKLE_ED_PRIVATE_KEY`. That signature goes into the
+   update feed, `appcast.xml`, which `.github/workflows/appcast.sh` writes
+   whole from the release's own values: one item, this release's (older ones
+   are not kept), with the notes from `macos/release-notes.txt` and the
+   `.dmg`'s versioned URL, and no link but that and the feed's own address.
+   `release-verify.sh` writes it again from the pinned source and requires
+   the same bytes.
+   `.github/workflows/mac-app-verify.sh` checks the `.dmg`
    the way Sparkle and Gatekeeper will — the public key baked into the app must
    verify its signature, Gatekeeper must accept the app as notarized
    Developer ID, and every library the app loads must be found inside it —
@@ -144,8 +152,10 @@ Each block starts from the repository root.
    private half lives only in that secret and the owner's offline backup.
    Installed apps accept only updates signed with it, so losing
    it means their next version is a manual download. After publishing,
-   codeconnect.sh moves its `/mac` link and its appcast (`/mac/appcast.xml`,
-   given the release's `appcast-item.xml`) together, in one deploy.
+   codeconnect.sh copies the release's `appcast.xml`, unchanged, to
+   `/mac/appcast.xml` — the address every copy of the app asks — and points
+   `/mac` at the release's `.dmg`, in one deploy (codeconnect-web's
+   `scripts/release-day.sh`).
 
    ```sh
    git tag vX.Y.Z && git push origin vX.Y.Z

@@ -1,0 +1,1 @@
+CodeConnect now has a Mac app. Its window lists the agents on your computers: click one to read its conversation, answer what it asks, reply to it, see what it has changed and, for Claude Code, use its live terminal.

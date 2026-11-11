@@ -2,10 +2,10 @@
 # The Mac app's .dmg, checked as Sparkle and Gatekeeper will check it, each check beside the must-fail that shows it
 # can fail: a check that passes everything certifies nothing.
 #
-#   mac-app-verify.sh <CodeConnect-X.Y.Z.dmg> <appcast-item.xml> [notarized]
+#   mac-app-verify.sh <CodeConnect-X.Y.Z.dmg> <appcast.xml> [notarized]
 #
-# S1: the SUPublicEDKey baked into the app inside the .dmg verifies the .dmg's Sparkle signature (appcast-item.xml,
-#     from sign_update). A wrong key here would strand every install, so it is checked against the built app, never
+# S1: the SUPublicEDKey baked into the app inside the .dmg verifies the .dmg's Sparkle signature (sign_update's,
+#     in the feed's enclosure). A wrong key here would strand every install, so it is checked against the built app, never
 #     against the secret. Must-fail: a copy of the .dmg with one byte changed, and a throwaway key, are refused.
 # S2: the app passes `codesign --verify --deep --strict`; with `notarized` (the release job), Gatekeeper says
 #     "Notarized Developer ID" and the .dmg's staple validates. Must-fail: a copy of the app with one byte of its
