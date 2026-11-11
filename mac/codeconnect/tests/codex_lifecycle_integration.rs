@@ -1618,17 +1618,25 @@ fn the_last_session_on_a_server_still_reaches_terminal_cleanup() {
     let run = sb.expected_run_dir(uid);
     let mut coord = sb.spawn_coordinator_opts(uid, &["--test-bringup", "hang"]);
 
-    // The real host comes up, so the record carries server A and a host lease.
+    // The real host comes up in the pane.
     let up = wait_until(Duration::from_secs(30), || broker_legs_bound(&run));
     assert!(
         up,
         "the pane's host should have bound both broker legs: {:?}",
         sb.record_text(uid)
     );
-    let record = sb.record_text(uid).expect("record");
+    // Server A is written by the coordinator once tmux has returned and the session is
+    // resolved, which races the host's bring-up: on a slow machine the host's legs bind
+    // first. So the kills below wait for A itself, not for the host.
+    let pinned = wait_until(Duration::from_secs(30), || {
+        sb.record_text(uid)
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v.get("server_a").is_some_and(|a| !a.is_null()))
+    });
     assert!(
-        record.contains("\"server_a\""),
-        "server A must be recorded — it is the identity the escape is bound to: {record}"
+        pinned,
+        "server A must be recorded — it is the identity the escape is bound to: {:?}",
+        sb.record_text(uid)
     );
 
     // Kill the host: the pane dies, it was the server's only session, so the tmux
