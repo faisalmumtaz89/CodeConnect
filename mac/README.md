@@ -466,9 +466,15 @@ Three things behave differently on a Mac that has been running for a while.
   interface this listener is not on — or `"ws_allow_plaintext": true`, and
   [TLS](#tls) has the addresses each covers. Failing closed is the point: the
   credential a paired phone holds is a bearer token, and an address nobody can
-  vouch for is not a place to put one by default. A daemon with no `ws_bind` set
-  is unaffected — it binds this node's tailnet address, where WireGuard has
-  already encrypted the path.
+  vouch for is not a place to put one by default. One case falls short of that.
+  The iPhone and Mac apps, paired with a computer by name, retry without
+  encryption (`ws://`) after two failed encrypted attempts. A computer set up
+  this way refuses that retry. But on a network you don't trust, something
+  answering in the computer's place could receive what the app sends: its token,
+  or the code while pairing. A fix is planned for the next update. A pairing over
+  Tailscale is not affected, because the tailnet carries the encryption. A daemon
+  with no `ws_bind` set is unaffected — it binds this node's tailnet address,
+  where WireGuard has already encrypted the path.
 * **SSH is retired.** The Terminal tab rides the same paired connection as the
   rest of the app, so CodeConnect never installs a key. Taking one back is what
   it does do: the daemon sweeps `~/.ssh/authorized_keys` before it serves
