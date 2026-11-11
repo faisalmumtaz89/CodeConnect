@@ -8,14 +8,14 @@
 #                                                go to $GITHUB_OUTPUT for the Publish step
 #   release-verify.sh check <dir>                the nineteen files in <dir>, checked
 #
-# Both take VERSION and SHA (the pinned commit) from the environment, `check` also OPENSSL (OpenSSL 3 or later, for
-# Ed25519 with -rawin). Every asset is bound to that commit, by what it carries or by what the pinned source says:
+# Both take VERSION, SHA (the pinned commit) and GITHUB_REPOSITORY from the environment, `check` also OPENSSL
+# (OpenSSL 3 or later, for Ed25519 with -rawin). Every asset is bound to that commit, by what it carries or by what the pinned source says:
 # the Apple team and the Linux release key every installed updater enforces (mac/codeconnect/src/update_install.rs),
 # the Sparkle key the app is built with (macos/CodeConnect.xcodeproj), the tmux bundle (mac/tmux/SOURCES) and the
 # licence.
 set -euo pipefail
 
-: "${VERSION:?}" "${SHA:?}"
+: "${VERSION:?}" "${SHA:?}" "${GITHUB_REPOSITORY:?}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 source_file="$root/mac/codeconnect/src/update_install.rs"
 dir_name="codeconnect-$VERSION"
@@ -30,7 +30,7 @@ for arch in aarch64 x86_64; do
   done
 done
 nineteen="$(printf '%s\n' "$archive" "$archive.sha256" "$tmux_archive" "$tmux_archive.sha256" \
-  "$dmg" "$dmg.sha256" appcast-item.xml "${linux[@]}" | sort)"
+  "$dmg" "$dmg.sha256" appcast.xml "${linux[@]}" | sort)"
 
 # Exactly the nineteen names, each once: an extra or a missing asset is a release the updater or the Publish step
 # would treat differently from the one verified.
@@ -66,7 +66,7 @@ fetch() {
     echo "tmux_checksum_id=$(id_of "$tmux_archive.sha256")"
     echo "dmg_id=$(id_of "$dmg")"
     echo "dmg_checksum_id=$(id_of "$dmg.sha256")"
-    echo "appcast_item_id=$(id_of appcast-item.xml)"
+    echo "appcast_id=$(id_of appcast.xml)"
     echo "linux_assets=$(jq -c '[.[] | select(.name | test("-linux-")) | {id, name}]' <<<"$listing")"
   } >> "$GITHUB_OUTPUT"
 }
@@ -168,7 +168,7 @@ shipped_binary() {
 }
 
 check() {
-  local dir="$1" team key sparkle_key bundle ceiling public verdict expected said app value slice signature file
+  local dir="$1" team key sparkle_key bundle ceiling public verdict expected said app value slice signature pub_date file
   cd "$dir"
   same_names "$(find . -mindepth 1 -maxdepth 1 | sed 's|^\./||' | sort)" "$dir"
   # Unpacked beside, never into, the downloaded files; global, so the trap still names it after `check` returns.
@@ -263,14 +263,21 @@ check() {
     of_the_bundle "$work/linux-$arch/$dir_name/THIRD_PARTY_NOTICES" "$work/linux-$arch/$dir_name/cc-tmux"
   done
 
-  # The Mac app a user receives, from /mac or from Sparkle: the .dmg, its checksum and the appcast's signature line,
-  # checked as Sparkle and Gatekeeper will check them.
+  # The Mac app a user receives, from /mac or from Sparkle: the .dmg, its checksum and the update feed, checked as
+  # Sparkle and Gatekeeper will check them.
   own_checksum "$dmg"
-  OPENSSL="$OPENSSL" bash "$root/.github/workflows/mac-app-verify.sh" "$dmg" appcast-item.xml notarized
-  # The item is exactly what sign_update writes — the signature S1 proved, and the .dmg's length — and nothing else.
-  signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' appcast-item.xml)"
-  if [ "$(cat appcast-item.xml)" != "sparkle:edSignature=\"$signature\" length=\"$(stat -f %z "$dmg")\"" ]; then
-    echo "::error::appcast-item.xml is not exactly the .dmg's signature and length: $(head -c 300 appcast-item.xml)"
+  OPENSSL="$OPENSSL" bash "$root/.github/workflows/mac-app-verify.sh" "$dmg" appcast.xml notarized
+  # The feed is exactly the one appcast.sh writes for this release from the pinned notes, the tag's version, this
+  # repository, the .dmg's size and the signature S1 just proved: written again here and compared byte for byte (as
+  # files, so not even a trailing byte differs), so its url, versions, length and every other byte are this release's.
+  # Its date is the one value taken from the feed itself, and appcast.sh takes only text in an RFC 822 date's shape.
+  xmllint --noout appcast.xml
+  signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' appcast.xml)"
+  pub_date="$(sed -n 's|^ *<pubDate>\(.*\)</pubDate>$|\1|p' appcast.xml)"
+  "$root/.github/workflows/appcast.sh" "$VERSION" "$GITHUB_REPOSITORY" "$root/macos/release-notes.txt" \
+    "$pub_date" "$signature" "$(stat -f %z "$dmg")" > "$work/appcast.xml"
+  if ! cmp -s appcast.xml "$work/appcast.xml"; then
+    echo "::error::appcast.xml is not the feed this release writes"
     exit 1
   fi
   # The app is this release's: the tag's version, the pinned team, the Sparkle key the pinned project builds in — so

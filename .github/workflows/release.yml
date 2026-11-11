@@ -570,8 +570,9 @@ jobs:
 
       # The .dmg is the one download, for /mac and for Sparkle alike: notarized
       # and stapled, then signed for Sparkle (the staple changes its bytes, so
-      # that comes after), then checked as Sparkle and Gatekeeper will check
-      # it, each check beside its must-fail (mac-app-verify.sh).
+      # that comes after), its update feed written from that signature
+      # (appcast.sh), then checked as Sparkle and Gatekeeper will check it,
+      # each check beside its must-fail (mac-app-verify.sh).
       - name: Package and notarize the Mac app
         id: app
         env:
@@ -620,11 +621,16 @@ jobs:
           fi
           key="$RUNNER_TEMP/sparkle.key"
           ( umask 077; printf '%s' "$SPARKLE_KEY" > "$key" )
-          "$sign_update" --ed-key-file "$key" "$dmg" > appcast-item.xml
+          signed="$("$sign_update" --ed-key-file "$key" "$dmg")"
           rm -f "$key"
-          cat appcast-item.xml
+          signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' <<<"$signed")"
+          length="$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' <<<"$signed")"
+          # The whole feed, for this release alone; codeconnect.sh serves it unchanged.
+          .github/workflows/appcast.sh "$VERSION" "$GITHUB_REPOSITORY" macos/release-notes.txt \
+            "$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')" "$signature" "$length" > appcast.xml
+          cat appcast.xml
           OPENSSL="$(brew --prefix openssl)/bin/openssl" \
-            bash .github/workflows/mac-app-verify.sh "$dmg" appcast-item.xml notarized
+            bash .github/workflows/mac-app-verify.sh "$dmg" appcast.xml notarized
           echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
 
       - name: Package
@@ -678,7 +684,7 @@ jobs:
           # because two assets cannot share a name and the bytes being
           # attached are the ones this run verified.
           for file in "$ARCHIVE" "$ARCHIVE.sha256" "$TMUX_ARCHIVE" "$TMUX_ARCHIVE.sha256" \
-              "$DMG" "$DMG.sha256" appcast-item.xml; do
+              "$DMG" "$DMG.sha256" appcast.xml; do
             existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --jq ".assets[] | select(.name == \"$file\") | .id")"
             for asset in $existing; do
@@ -702,10 +708,10 @@ jobs:
           tmux_checksum_id="$(asset_id "$TMUX_ARCHIVE.sha256")"
           dmg_id="$(asset_id "$DMG")"
           dmg_checksum_id="$(asset_id "$DMG.sha256")"
-          appcast_item_id="$(asset_id appcast-item.xml)"
+          appcast_id="$(asset_id appcast.xml)"
           if [ -z "$archive_id" ] || [ -z "$checksum_id" ] \
               || [ -z "$tmux_archive_id" ] || [ -z "$tmux_checksum_id" ] \
-              || [ -z "$dmg_id" ] || [ -z "$dmg_checksum_id" ] || [ -z "$appcast_item_id" ]; then
+              || [ -z "$dmg_id" ] || [ -z "$dmg_checksum_id" ] || [ -z "$appcast_id" ]; then
             echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
             exit 1
           fi
@@ -819,7 +825,7 @@ jobs:
           TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
           DMG_ID: ${{ steps.assets.outputs.dmg_id }}
           DMG_CHECKSUM_ID: ${{ steps.assets.outputs.dmg_checksum_id }}
-          APPCAST_ITEM_ID: ${{ steps.assets.outputs.appcast_item_id }}
+          APPCAST_ID: ${{ steps.assets.outputs.appcast_id }}
           LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           ARCHIVE: ${{ steps.assets.outputs.archive }}
           TMUX_ARCHIVE: ${{ steps.assets.outputs.tmux_archive }}
@@ -845,7 +851,7 @@ jobs:
           held="$(jq -r '[.assets[] | {id, name, state}] | sort_by(.id) | tojson' <<<"$state")"
           expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
             --argjson taid "$TMUX_ARCHIVE_ID" --argjson tcid "$TMUX_CHECKSUM_ID" \
-            --argjson did "$DMG_ID" --argjson dcid "$DMG_CHECKSUM_ID" --argjson iid "$APPCAST_ITEM_ID" \
+            --argjson did "$DMG_ID" --argjson dcid "$DMG_CHECKSUM_ID" --argjson iid "$APPCAST_ID" \
             --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" --arg dmg "$DMG" \
             --argjson linux "$LINUX_ASSETS" \
             '[{id: $aid, name: $archive, state: "uploaded"},
@@ -854,7 +860,7 @@ jobs:
               {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"},
               {id: $did, name: $dmg, state: "uploaded"},
               {id: $dcid, name: ($dmg + ".sha256"), state: "uploaded"},
-              {id: $iid, name: "appcast-item.xml", state: "uploaded"}]
+              {id: $iid, name: "appcast.xml", state: "uploaded"}]
               + [$linux[] | {id, name, state: "uploaded"}] | sort_by(.id) | tojson')"
           if [ "$held" != "$(jq -r . <<<"$expected")" ]; then
             echo "::error::draft $RELEASE_ID does not hold exactly the verified assets; refusing"
