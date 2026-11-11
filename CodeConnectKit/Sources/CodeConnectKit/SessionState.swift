@@ -428,6 +428,9 @@ public final class SessionState {
 
     /// What is on screen for this run.
     private(set) var shown = Shown()
+    /// What the reader has typed on this run and not sent. A request's words go when the screen stops showing it
+    /// waiting, at publication: a held catch-up drops none mid-replay.
+    let drafts = RunDrafts()
     /// While set, the truth changes and `shown` does not, except for the
     /// reader's own acts. `AppModel` holds a session for a catch-up.
     @ObservationIgnored var holdsPresentation = false
@@ -479,6 +482,9 @@ public final class SessionState {
             onCatchUpLanding?(shown, next)
         }
         guard next != shown else { return }
+        if next.pendingApprovals != shown.pendingApprovals {
+            drafts.keep(waiting: Set(next.pendingApprovals.map(\.id)))
+        }
         shown = next
         #if DEBUG
             publications.append(asCatchUp ? .release : publishing ?? .live)

@@ -1879,6 +1879,11 @@ public final class AppModel {
         shownSessions[key]?.shown
     }
 
+    /// What the reader has typed on this run and not sent, or nil when the screen has no such run. See `RunDrafts`.
+    public func drafts(for key: String) -> RunDrafts? {
+        shownSessions[key]?.drafts
+    }
+
     /// The reader has seen this run through what is drawn.
     public func markReviewed(_ key: String) {
         shownSessions[key]?.markReviewed()

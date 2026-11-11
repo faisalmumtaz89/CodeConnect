@@ -9,7 +9,6 @@ struct QuestionBlock: View {
     let approval: ApprovalItem
     let questions: QuestionCard
     let model: AppModel
-    @State private var draft: QuestionDraft
     @State private var sending: String?
     /// How tall the questions are, for their own scroll at the foot.
     @State private var askedHeight: CGFloat = 0
@@ -17,11 +16,10 @@ struct QuestionBlock: View {
     @State private var answersHeight: CGFloat = 0
     @Environment(\.pendingSlot) private var slot
 
-    init(approval: ApprovalItem, questions: QuestionCard, model: AppModel) {
-        self.approval = approval
-        self.questions = questions
-        self.model = model
-        _draft = State(initialValue: QuestionDraft(card: questions))
+    /// The picks and words so far: the run's (`RunDrafts`), so they outlive this view.
+    private var draft: QuestionDraft {
+        get { model.drafts(for: approval.sessionKey)?.answers[approval.id] ?? QuestionDraft(card: questions) }
+        nonmutating set { model.drafts(for: approval.sessionKey)?.answers[approval.id] = newValue }
     }
 
     private var live: ApprovalItem? { model.shownApproval(sessionKey: approval.sessionKey, id: approval.id) }
@@ -148,11 +146,17 @@ struct QuestionBlock: View {
                 .accessibilityIdentifier("\(id).q\(index).other")
                 .accessibilityAddTraits(entry.otherChosen ? .isSelected : [])
                 if entry.otherChosen {
-                    field("Your answer", text: $draft.entries[index].otherText, id: "\(id).q\(index).other.text")
+                    field(
+                        "Your answer",
+                        text: Binding { draft.entries[index].otherText } set: { draft.entries[index].otherText = $0 },
+                        id: "\(id).q\(index).other.text")
                 }
             }
             if question.takesNotes {
-                field("Notes for Claude (optional)", text: $draft.entries[index].notes, id: "\(id).q\(index).notes")
+                field(
+                    "Notes for Claude (optional)",
+                    text: Binding { draft.entries[index].notes } set: { draft.entries[index].notes = $0 },
+                    id: "\(id).q\(index).notes")
             }
         }
     }
