@@ -1428,7 +1428,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `local_resolve_poll_ms` | `2000` | How often to re-check the pane while an approval is open. |
 | `diff_max_bytes` | `524288` | `get_diff` cap; larger diffs come back with `truncated: true`. |
 | `diff_timeout_ms` | `10000` | Per-`git`-subcommand ceiling. |
-| `git_bin` | auto | Explicit path to `git` (launchd has no shell PATH). |
+| `git_bin` | auto | Explicit path to `git` (launchd has no shell PATH). Auto is `/usr/bin/git` when Apple's developer tools are installed, else Homebrew's or `/usr/local/bin/git`; with none, branches and changes are absent. |
 | `fsevents` | `true` | Watch transcript directories with FSEvents. The poll below keeps running either way. |
 | `log_max_bytes` | `8388608` | Cap on each launchd log; one `.1` generation is kept, so the ceiling is twice this per stream. |
 | `log_rotate_secs` | `300` | How often the cap is checked. |
