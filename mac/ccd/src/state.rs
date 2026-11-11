@@ -2160,6 +2160,9 @@ impl Daemon {
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
         }
 
+        // Cards of runs that had already ended, left by a daemon that did not close
+        // them. Closed last, once any answer in flight on one has been settled.
+        let mut of_ended_runs: Vec<(SessionKey, String)> = Vec::new();
         // **Whether the cards are back, which is what the answer recovery below depends
         // on.** A read failure is not information: see the comment at the end of this
         // function.
@@ -2175,6 +2178,7 @@ impl Daemon {
                 // be a doorbell authorized to devices that cannot open it, which
                 // is the failure the agent-scoped count exists to prevent.
                 let mut agents: HashMap<String, protocol::agent::AgentKind> = HashMap::new();
+                let mut ended: HashSet<String> = HashSet::new();
                 for row in &rows {
                     if !labels.contains_key(&row.session_uid) {
                         let label = self.effective_project_label(&row.session_uid).await;
@@ -2184,6 +2188,9 @@ impl Daemon {
                         if let Ok(Some(session)) =
                             self.db.get_session(row.session_uid.clone()).await
                         {
+                            if session.lifecycle == Lifecycle::Exited {
+                                ended.insert(row.session_uid.clone());
+                            }
                             agents.insert(row.session_uid.clone(), session.agent);
                         }
                     }
@@ -2217,6 +2224,12 @@ impl Daemon {
                     }
                     let question = (card.tool_name == protocol::hook::ASK_USER_QUESTION)
                         .then(QuestionState::default);
+                    if ended.contains(&row.session_uid) {
+                        of_ended_runs.push((
+                            SessionKey::new(&row.session_uid, &row.session_id),
+                            row.request_id.clone(),
+                        ));
+                    }
                     inner.pending.insert(
                         (row.session_uid.clone(), row.request_id.clone()),
                         PendingApproval {
@@ -2282,6 +2295,11 @@ impl Daemon {
         // the whole job in one piece.
         if cards_are_back {
             self.recover_codex_answers().await;
+            // Nobody is left to answer these; an answer that was in flight on one
+            // has just been given its own terminal, which already closed the card.
+            for (session, request_id) in of_ended_runs {
+                self.close_card_of_ended_run(&session, &request_id).await;
+            }
         } else {
             crate::log_warn!(
                 "recovery: the pending cards could not be read, so no in-flight answer was \
@@ -3729,17 +3747,31 @@ impl Daemon {
     /// under (a shell prefix that does not `exec`, or one orphaned before it read
     /// its parent), and the card closes. An answer already in flight on it
     /// finishes first.
+    ///
+    /// Either agent's card: a Codex card is retired in its own store, the way the
+    /// frames that settle it retire it, as a turn that went away.
     async fn close_card_of_ended_run(&self, session: &SessionKey, request_id: &str) {
         let id: ApprovalId = (session.uid.clone(), request_id.to_string());
         let gate = self.answer_gate(&id).await;
         let _serialised = gate.lock().await;
-        let question = match self.inner.lock().await.pending.get_mut(&id) {
+        let (claude, question) = match self.inner.lock().await.pending.get_mut(&id) {
             Some(entry) => {
                 entry.responder = None;
-                entry.question.is_some()
+                (entry.agent.is_claude(), entry.question.is_some())
             }
             None => return,
         };
+        if !claude {
+            self.retire_codex_approval(
+                session,
+                request_id,
+                protocol::ws::CodexResolution::Cleared {
+                    cause: protocol::ws::ClearCause::TurnAborted,
+                },
+            )
+            .await;
+            return;
+        }
         let decision = if question {
             AnswerDecision::Decline
         } else {
@@ -9026,17 +9058,18 @@ impl Daemon {
         let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
             session_uid: session.uid.clone(),
         });
-        // Nobody is left to answer this run's cards. They are read under the gate
-        // the end was recorded under, and closed after it is released: an answer
-        // in flight on one finishes first, and a registration does not wait on it.
+        // Nobody is left to answer this run's cards, whichever agent asked them.
+        // They are read under the gate the end was recorded under, and closed
+        // after it is released: an answer in flight on one finishes first, and a
+        // registration does not wait on it.
         let open: Vec<String> = self
             .inner
             .lock()
             .await
             .pending
-            .iter()
-            .filter(|((uid, _), entry)| *uid == session.uid && entry.agent.is_claude())
-            .map(|((_, request_id), _)| request_id.clone())
+            .keys()
+            .filter(|(uid, _)| *uid == session.uid)
+            .map(|(_, request_id)| request_id.clone())
             .collect();
         drop(_commit);
         for request_id in open {
@@ -24478,13 +24511,12 @@ mod tests {
 
     /// The guard the store cannot hold, and the reason it is here.
     ///
-    /// `mark_exited` writes the lifecycle, stops the tail and closes Claude's
-    /// cards; a Codex card is retired only by the frames that settle it. So one
-    /// raised before the run ended is still in `inner.pending` afterwards, while
-    /// the row it belongs to reads `Exited` and the phone will happily offer a
-    /// swipe on it. Delete the rows underneath that approval and whatever
-    /// resolves it later writes events for a session that no longer exists —
-    /// there is no foreign key to stop it.
+    /// `mark_exited` writes the lifecycle first and closes the run's cards after
+    /// its gate is released, so for that moment a card is still in
+    /// `inner.pending` while the row it belongs to reads `Exited` and the phone
+    /// will happily offer a swipe on it. Delete the rows underneath that approval
+    /// and whatever resolves it then writes events for a session that no longer
+    /// exists — there is no foreign key to stop it.
     ///
     /// `prune_ended_sessions` has refused exactly this since it was written. A
     /// swipe must not be the way around it.
@@ -24498,18 +24530,8 @@ mod tests {
         seed_codex_session(&daemon, uid, "cc-1");
         assert!(raise_codex_card(&daemon, uid, "req-open", "item-open").await);
 
-        assert!(
-            daemon
-                .mark_exited(
-                    &test_key(),
-                    Some(0),
-                    Some("test"),
-                    observed_now(&daemon, uid).await
-                )
-                .await,
-            "the premise: the end is recorded — this test is about what a recorded end \
-             does NOT make deletable"
-        );
+        // The end's own write, without the closing that follows it.
+        daemon.store.set_lifecycle(uid, Lifecycle::Exited).unwrap();
         assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
         {
             let inner = daemon.inner.lock().await;
@@ -24520,7 +24542,7 @@ mod tests {
             assert_eq!(
                 inner.pending.len(),
                 1,
-                "the premise: ending a run does not retire its open Codex approval"
+                "the premise: the card is still open while the row reads Exited"
             );
         }
 
@@ -35521,6 +35543,62 @@ mod tests {
             }
         }
         drop(question.end_hook);
+    }
+
+    /// The Codex card a run leaves when it ends, retired in Codex's own store.
+    fn assert_retired_as_ended(daemon: &Daemon, uid: &str, request_id: &str) {
+        assert!(daemon.inner.try_lock().unwrap().pending.is_empty());
+        assert!(daemon
+            .store
+            .codex_pending_approvals(uid)
+            .unwrap()
+            .is_empty());
+        assert!(daemon.store.list_pending_approvals().unwrap().is_empty());
+        let resolved = approval_events(daemon, uid, EventKind::ApprovalResolved);
+        assert_eq!(resolved.len(), 1, "one terminal for the card");
+        assert_eq!(resolved[0].payload["request_id"], request_id);
+        assert_eq!(resolved[0].payload["status"], "cleared");
+        assert_eq!(resolved[0].payload["cause"], "turn_aborted");
+    }
+
+    /// A Codex run's open card closes when the run ends, as Claude's do: nobody
+    /// is left to answer it.
+    ///
+    /// **Mutation:** keep `mark_exited` to Claude's cards and the card stays
+    /// open, its run listed as blocked, for as long as the row exists.
+    #[tokio::test]
+    async fn a_codex_runs_open_card_closes_when_it_ends() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        seed_codex_session(&daemon, uid, "cc-1");
+        assert!(raise_codex_card(&daemon, uid, "req-ended", "item-ended").await);
+
+        daemon
+            .session_exited("cc-1", Some(uid), Some(0), None, None)
+            .await;
+
+        assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
+        assert_retired_as_ended(&daemon, uid, "req-ended");
+    }
+
+    /// A card an ended run left open, as a daemon before this one left it, is
+    /// closed at the next start.
+    ///
+    /// **Mutation:** drop the closing at the end of `recover` and the card is
+    /// restored for ever: the run is never seen ending again.
+    #[tokio::test]
+    async fn a_card_an_ended_run_left_open_is_closed_at_the_next_start() {
+        let store = shared_store();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        seed_codex_session(&daemon, uid, "cc-1");
+        assert!(raise_codex_card(&daemon, uid, "req-left", "item-left").await);
+        store.set_lifecycle(uid, Lifecycle::Exited).unwrap();
+
+        let restarted = daemon_on(store, Config::default());
+        restarted.recover().await;
+
+        assert_retired_as_ended(&restarted, uid, "req-left");
     }
 
     /// **What a phone reads for Claude's questions, as this build emits it.**

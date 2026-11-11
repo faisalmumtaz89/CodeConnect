@@ -1445,7 +1445,7 @@ pub enum ResolutionActor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClearCause {
-    /// A `turn/interrupt` retired the pending.
+    /// A `turn/interrupt` retired the pending, or the run ended with it still open.
     TurnAborted,
     /// The turn completed and took the pending with it.
     TurnCompleted,
