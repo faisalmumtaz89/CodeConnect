@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A Codex run that ends closes its waiting request
+
+- When a Codex run ended while one of its requests waited for an answer, the request stayed open:
+  the run kept showing as blocked and was counted among those waiting, even after restarts. Ending
+  a run now closes its waiting requests, as it already did for Claude Code, and a request left
+  open this way is closed the next time CodeConnect starts.
+
 ## No developer-tools dialog on a Mac without them
 
 - On a Mac without Apple's command line developer tools, starting a session or opening New agent
