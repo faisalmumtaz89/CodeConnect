@@ -5,7 +5,7 @@ import Foundation
 /// This Mac's own daemon, asked over its local socket (`ccd.sock` under the CodeConnect folder): one JSON
 /// line out, one back, the way `codeconnect` asks it (mac/codeconnect/src/daemon.rs): where it answers now, a
 /// fresh pairing code (for this app or an iPhone), and the devices it has paired, which it can block and allow
-/// again (Kit's `DeviceRequest`).
+/// again (Kit's `DeviceRequest`). Which daemon it is, it keeps in its folder.
 enum LocalDaemon {
     struct Address: Equatable {
         let host: String
@@ -48,6 +48,17 @@ enum LocalDaemon {
 
     /// Whether the daemon answers its socket at all.
     static func answers(root: URL) -> Bool { address(root: root) != nil }
+
+    /// Which daemon this Mac's is: the id it minted once in its folder (`machine_id`) and sends in every
+    /// `hello_ack`, so a computer in the list is this Mac by that id, whatever address reached it. Nil before the
+    /// daemon has first run.
+    static func machineID(root: URL) -> String? {
+        guard let text = try? String(contentsOf: root.appendingPathComponent("machine_id"), encoding: .utf8) else {
+            return nil
+        }
+        let id = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return id.isEmpty ? nil : id
+    }
 
     private static func request(_ line: String, root: URL) -> [String: Any]? {
         guard let reply = exchange(line, root: root) else { return nil }
