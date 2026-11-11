@@ -48,7 +48,8 @@ Each block starts from the repository root.
    (cd mac && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
    (cd ios && xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
      -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
-     -only-testing:CodeConnectTests CODE_SIGNING_ALLOWED=NO)
+     -only-testing:CodeConnectTests \
+     CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
    (cd ios && rm -rf .artifacts/uitest-deriveddata && xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
      -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
      -derivedDataPath .artifacts/uitest-deriveddata \
