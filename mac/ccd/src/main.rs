@@ -59,8 +59,15 @@ use crate::store::Store;
 use protocol::config::Config;
 
 /// Approvals nobody answers are released after this, so `blocked_on` never
-/// accumulates ghosts that would keep pushing.
+/// accumulates ghosts. One whose run's screen still shows its prompt is no
+/// ghost, and stays.
 const APPROVAL_MAX_AGE_MS: i64 = 15 * 60 * 1000;
+
+/// How often the expiry sweep runs. Its first run waits a full period: the
+/// cards are restored before any run's supervisor is back (each retries at most
+/// ten seconds apart), and a screen not yet readable would let age close a card
+/// whose prompt is still up.
+const APPROVAL_SWEEP: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -203,7 +210,8 @@ async fn main() -> Result<()> {
     let sweeper = {
         let daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(30));
+            let first = tokio::time::Instant::now() + APPROVAL_SWEEP;
+            let mut ticker = tokio::time::interval_at(first, APPROVAL_SWEEP);
             loop {
                 ticker.tick().await;
                 daemon.expire_stale_approvals(APPROVAL_MAX_AGE_MS).await;

@@ -10174,7 +10174,14 @@ impl Daemon {
         Ok(removed)
     }
 
-    /// Expire approvals nobody answered, so `blocked_on` reflects reality.
+    /// Expire approvals nobody answered, so `blocked_on` reflects reality: a
+    /// Claude approval no hook holds, older than `max_age_ms`.
+    ///
+    /// **Age speaks only for a card nobody can see.** One whose run's screen
+    /// shows a permission prompt is still waiting at the computer, however old
+    /// it is, and stays: the prompt leaving the screen, the call's own result or
+    /// the run ending closes it. A screen that cannot be read, or that shows no
+    /// prompt, says nothing, and age closes that card.
     pub async fn expire_stale_approvals(&self, max_age_ms: i64) {
         let now = protocol::time::now_unix_ms();
         let expired: Vec<(String, SessionKey)> = {
@@ -10211,6 +10218,12 @@ impl Daemon {
                 .collect()
         };
         for (request_id, session) in expired {
+            // Read outside the lock, as the pane sweep reads it.
+            if matches!(self.capture_visible(&session.uid).await,
+                Ok(ref pane) if self.read_screen(pane) == Some(false))
+            {
+                continue;
+            }
             self.resolve_without_phone(
                 &request_id,
                 &session,
@@ -35034,6 +35047,137 @@ mod tests {
         assert_eq!(expired.resolved_by, ResolvedBy::Timeout);
         assert_eq!(expired.decision, AnswerDecision::Deny);
         assert!(expired.inferred);
+    }
+
+    /// Make every open card older than the fifteen-minute expiry.
+    async fn age_past_the_expiry(daemon: &Arc<Daemon>) {
+        for entry in daemon.inner.lock().await.pending.values_mut() {
+            entry.created_ms -= 16 * 60 * 1000;
+        }
+    }
+
+    fn approval_hold(daemon: &Daemon, uid: &str, request_id: &str) -> Option<QuestionHold> {
+        daemon
+            .inner
+            .try_lock()
+            .unwrap()
+            .pending
+            .get(&(uid.to_string(), request_id.to_string()))
+            .and_then(|entry| entry.card.question_hold)
+    }
+
+    /// Whether the run's card is still open, still blocking its run, and has no
+    /// recorded ending.
+    async fn still_waiting(daemon: &Arc<Daemon>, uid: &str, request_id: &str) -> bool {
+        daemon.store.get_answer(uid, request_id).unwrap().is_none()
+            && daemon
+                .sessions()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.session_uid == uid && s.blocked_on == [request_id.to_string()])
+    }
+
+    /// A card restored after a restart can be answered only at the computer, and
+    /// while its prompt is on the run's screen it is waiting there: the expiry
+    /// leaves it however old it is, and the prompt leaving the screen closes it
+    /// as answered at the keyboard.
+    ///
+    /// **Mutation:** drop the screen check from `expire_stale_approvals` and the
+    /// card is closed by timeout with its prompt still up.
+    #[tokio::test]
+    async fn a_restored_approval_on_the_screen_outlasts_the_expiry() {
+        let store = shared_store();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let _hook = raise_held(&daemon, uid, "touch a.txt", "toolu_kept", None).await;
+        let restarted = daemon_on(
+            store,
+            Config {
+                local_resolve_grace_ms: 1,
+                ..Config::default()
+            },
+        );
+        restarted.recover().await;
+        let supervisor = attach(&restarted, "cc-1", uid, &permission_pane("touch a.txt"), "").await;
+        assert_eq!(
+            approval_hold(&restarted, uid, "toolu_kept"),
+            Some(QuestionHold::Ended)
+        );
+        age_past_the_expiry(&restarted).await;
+
+        restarted.expire_stale_approvals(15 * 60 * 1000).await;
+        assert!(still_waiting(&restarted, uid, "toolu_kept").await);
+
+        supervisor.show(COMPOSER_PANE);
+        for _ in 0..LOCAL_RESOLVE_MISSES {
+            restarted.sweep_local_resolutions().await;
+        }
+        let (_, closed) = restarted
+            .store
+            .get_answer(uid, "toolu_kept")
+            .unwrap()
+            .expect("closed once the prompt left the screen");
+        assert_eq!(closed.resolved_by, ResolvedBy::Local);
+        assert!(closed.inferred);
+    }
+
+    /// The same for a card shown at the Mac from the start, with no restart.
+    ///
+    /// **Mutation:** as above.
+    #[tokio::test]
+    async fn an_approval_at_the_mac_on_the_screen_outlasts_the_expiry() {
+        let daemon = daemon_with(Config {
+            local_resolve_grace_ms: 1,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        let supervisor = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/x"), "").await;
+        let request_id = approve_at_the_keyboard(&daemon).await;
+        assert_eq!(
+            approval_hold(&daemon, uid, &request_id),
+            Some(QuestionHold::AtMac)
+        );
+        age_past_the_expiry(&daemon).await;
+
+        daemon.expire_stale_approvals(15 * 60 * 1000).await;
+        assert!(still_waiting(&daemon, uid, &request_id).await);
+
+        supervisor.show(COMPOSER_PANE);
+        for _ in 0..LOCAL_RESOLVE_MISSES {
+            daemon.sweep_local_resolutions().await;
+        }
+        let (_, closed) = daemon
+            .store
+            .get_answer(uid, &request_id)
+            .unwrap()
+            .expect("closed once the prompt left the screen");
+        assert_eq!(closed.resolved_by, ResolvedBy::Local);
+    }
+
+    /// Age still closes a card whose screen says nothing: one that shows neither
+    /// a prompt nor the composer (the detailed transcript view), and one that
+    /// cannot be read at all (no supervisor).
+    #[tokio::test]
+    async fn the_expiry_still_closes_a_card_whose_screen_says_nothing() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, TRANSCRIPT_VIEW_PANE, "").await;
+        let shown = approve_at_the_keyboard(&daemon).await;
+        let unread = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        let blind = raise_prompt_in(&daemon, "cc-2", unread, "p-b", "git status").await;
+        age_past_the_expiry(&daemon).await;
+
+        daemon.expire_stale_approvals(15 * 60 * 1000).await;
+
+        for (uid, request_id) in [(uid, shown.as_str()), (unread, blind.as_str())] {
+            let (_, closed) = daemon
+                .store
+                .get_answer(uid, request_id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{request_id} is closed by age"));
+            assert_eq!(closed.resolved_by, ResolvedBy::Timeout);
+        }
     }
 
     /// A newer prompt in the run does not retire a question still open at the
