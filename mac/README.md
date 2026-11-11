@@ -219,7 +219,8 @@ before its request is not held: its card closes from that result.
 hold on approvals. A card no hook holds — from an older `cc-hook`, joined to no
 single call, whose hold has ended, or recovered after a daemon restart — is
 answered at the Mac, and nothing is typed for it. A held card is not retired by
-the 15-minute expiry: it lasts as long as Claude waits on it.
+the 15-minute expiry: it lasts as long as Claude waits on it. Nor is a card
+while the daemon still reads its permission prompt on its run's screen.
 
 Known gap: Claude keeps a main-thread call's hook held until the call's result,
 even after the Mac answers, so a phone No after the Mac's Yes on the same
@@ -1293,7 +1294,8 @@ means an incompatible peer cannot use the handshake to probe credentials.
   arrives the decision is observed; if the prompt merely left the screen the
   decision is a guess and is flagged `inferred: true`.
 * **`ResolvedBy::Timeout`** — closed with nobody's answer: an approval not held
-  for the phone that waited 15 minutes, or any open card of a run that ended
+  for the phone that waited 15 minutes with no permission prompt seen on its
+  run's screen, or any open card of a run that ended
   (detail "the session ended before anyone answered"; a held hook is let go).
   The decision is `inferred`.
 * **`ResolvedBy::Superseded`** — recorded by daemons before minor 22, when a

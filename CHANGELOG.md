@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A request waiting at the computer stays open
+
+- A permission request that only the computer could answer closed after 15 minutes as "Closed by
+  timeout - nobody answered", and the run showed as running while the agent still waited. This
+  happened after the daemon restarted, as an update does, or when the request was made while you
+  were at the Mac. It now stays open for as long as the request is on the computer's screen.
+
 ## Sending says nothing when it works
 
 - A message you send no longer puts "Typed into the session." above the message box, on the iPhone
