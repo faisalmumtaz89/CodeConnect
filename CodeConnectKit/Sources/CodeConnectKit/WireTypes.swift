@@ -90,6 +90,9 @@ public enum EventSource: Sendable, Hashable {
     /// rendered as one this build cannot account for, which a Codex session's
     /// entire timeline is not.
     case codex
+    /// A Claude run driven through the Agent SDK: the messages its agent host
+    /// forwards (`Source::Sdk`, `event.rs`). Named for the same reason as `.codex`.
+    case sdk
     /// A source a newer daemon knows about and this build does not. Retained
     /// rather than coerced, so nothing reads it as the trusted `.daemon`.
     case unknown(String)
@@ -101,9 +104,23 @@ public enum EventSource: Sendable, Hashable {
         case .daemon: return "daemon"
         case .pty: return "pty"
         case .codex: return "codex"
+        case .sdk: return "sdk"
         case .unknown(let raw): return raw
         }
     }
+}
+
+/// The `notification_type` values of the notifications the engine files itself
+/// (`protocol::event::notice`), beside the ones Claude's own notifications carry.
+public enum EngineNotice {
+    /// `/clear` reset the conversation; the run's Claude session id changes.
+    public static let conversationCleared = "conversation_cleared"
+    /// The content-free line that wakes an idle agent to read its mail.
+    public static let mailNudge = "mail_nudge"
+    /// The agent host confirmed a model change.
+    public static let modelSet = "model_set"
+    /// The agent host confirmed a permission-mode change.
+    public static let modeSet = "mode_set"
 }
 
 extension EventSource: Codable {
@@ -114,6 +131,7 @@ extension EventSource: Codable {
         case "daemon": self = .daemon
         case "pty": self = .pty
         case "codex": self = .codex
+        case "sdk": self = .sdk
         case let other: self = .unknown(other)
         }
     }
