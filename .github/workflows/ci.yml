@@ -220,6 +220,33 @@ jobs:
             -only-testing:CodeConnectTests \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
 
+  # **The Mac app, compiled on every change.** Without this job only the
+  # release's draft job builds macos/, so a change could break the app with
+  # every check here green. Debug and ad hoc, as the project configures Debug;
+  # without the helpers, which a Debug build may lack (embed-helpers.sh), since
+  # the release builds the shipping configuration with them. Built twice: as
+  # Debug, and again without the DEBUG condition, so the code only Release
+  # compiles (`#if !DEBUG`: Sparkle's updater, the app's own setup, the Kit's
+  # keychain) is compiled too. Xcode 27.1, the one the app is built and tested
+  # with, pinned by path on the image that carries it, as the release pins it:
+  # a missing path fails here.
+  mac-app:
+    name: Mac app (build)
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+        run: |
+          xcodebuild -version
+          xcodebuild build -project macos/CodeConnect.xcodeproj -scheme CodeConnect \
+            -configuration Debug -destination "generic/platform=macOS"
+          xcodebuild build -project macos/CodeConnect.xcodeproj -scheme CodeConnect \
+            -configuration Debug -destination "generic/platform=macOS" \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS=
+
   workflows:
     name: Workflow lint
     runs-on: ubuntu-latest
