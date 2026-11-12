@@ -31,7 +31,7 @@ final class SessionStartTests: XCTestCase {
 
         var starts: [(requestID: String, path: String, agent: String, prompt: String?)] {
             sent.compactMap {
-                guard case .startSession(let id, let path, let agent, let prompt, _, _) = $0 else { return nil }
+                guard case .startSession(let id, let path, let agent, let prompt, _, _, _) = $0 else { return nil }
                 return (id, path, agent, prompt)
             }
         }
@@ -160,7 +160,8 @@ final class SessionStartTests: XCTestCase {
         let start = SessionStart(
             requestID: "r1",
             project: StartProject(path: "/x", name: "x", lastUsed: Date(), lastAgent: nil, gitBranch: nil, exists: true),
-            place: .folder, agent: .claude, model: nil, prompt: nil, machineName: "Jordan’s Mac Studio", sentAt: Date(),
+            place: .folder, agent: .claude, model: nil, prompt: nil, trust: nil, machineName: "Jordan’s Mac Studio",
+            sentAt: Date(),
             outcome: .failed(.launchFailed, detail: "no more sessions today"))
         let words = StartFailure.launchFailed.words(for: start)
         XCTAssertEqual(words.title, "Claude Code didn’t start on Jordan’s Mac Studio.")
