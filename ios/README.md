@@ -380,7 +380,7 @@ is enforced.
   timeline before the fleet is first shown, so the reveal is not followed a beat
   later by its rows filling in.
 * **A chat holds the newest 500 events, with no hole down to its tail**, on a
-  Mac that serves pages (minor 23, `DaemonProfile.pagesHistory`). At launch and
+  Mac that serves pages (the `history_pages` capability, `DaemonProfile.pagesHistory`). At launch and
   on return to the foreground `SessionState.applyWindow` keeps what is held only
   if it covers those 500 contiguously, and otherwise drops it and subscribes
   from there; a reconnect while open keeps earlier pages unless it missed more

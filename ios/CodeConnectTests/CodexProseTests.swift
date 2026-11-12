@@ -498,8 +498,8 @@ final class CodexProseTests: XCTestCase {
 }
 
 
-/// **The read-only card's prose** — the card a daemon below minor 19 puts a
-/// reader in front of, and the one card state no render reached until now.
+/// **The read-only card's prose** — a card the reader can see and cannot answer
+/// here.
 ///
 /// A card that cannot be answered from the phone was saying two things at once:
 /// the pending card's standing promise, *"Nothing decides this but you. There is

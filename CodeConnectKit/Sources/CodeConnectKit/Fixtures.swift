@@ -995,20 +995,6 @@ enum CodexFixtures {
         /// Mac's own bounds allow. Nothing smaller exercises what a valid card
         /// can actually cost the decision surface.
         case cardCeiling = "card-ceiling"
-        /// **The card that may be read and must not be answered.**
-        ///
-        /// Below minor 19 a Codex `approval_resolved` carries no `request_id`,
-        /// so an answered card can never be retired — `DaemonProfile
-        /// .resolvesCodexCards` is false and `DecisionCard` returns
-        /// `.noneAnswerable`. That is a real shipping state on any Mac a user
-        /// has not updated, and it was the one card state no render reached:
-        /// `daemon-minor16` and `daemon-minor17` stage a dead **composer**, not
-        /// a card, so the caveat above an unanswerable option list had never
-        /// been photographed at any type size.
-        ///
-        /// Same card as `card-two-options`, on a minor-17 daemon — so what the
-        /// render isolates is the read-only treatment and nothing else.
-        case cardReadOnly = "card-read-only"
         // Resolutions (R-series)
         case resolvedAccepted = "resolved-accepted"
         case resolvedDeclined = "resolved-declined"
@@ -1072,7 +1058,7 @@ enum CodexFixtures {
         var protocolMinor: UInt32 {
             switch self {
             case .daemonMinor16: return 16
-            case .daemonMinor17, .cardReadOnly: return 17
+            case .daemonMinor17: return 17
             default: return 19
             }
         }
@@ -1081,10 +1067,7 @@ enum CodexFixtures {
         var capabilities: (interrupt: Bool, compose: Bool) {
             switch self {
             // Minor 17 honours a stop and cannot decode a compose at all.
-            // `card-read-only` is the same Mac, so it advertises the same thing:
-            // a fixture that is old enough to refuse the card but modern enough
-            // to compose would be a daemon that does not exist.
-            case .daemonMinor17, .cardReadOnly: return (true, false)
+            case .daemonMinor17: return (true, false)
             // Minor 16 does neither. The composer is dead **with a sentence**,
             // which is the state the verification bar warns reads as scolding
             // if it is not looked at on first open.
@@ -1137,7 +1120,7 @@ enum CodexFixtures {
             case .retiredItemCompleted: return true
             // A pending card is a running turn's own question.
             case .cardCommandWorst, .cardTwoOptions, .cardFileChangeWide, .cardMinimal,
-                .cardCeiling, .cardReadOnly,
+                .cardCeiling,
                 .stopOffered, .stopAborted, .stopLinkDown, .stopRefusedLate, .stopIndeterminate:
                 return true
             // An answer, a timeout or an unconfirmed write says nothing about
@@ -1422,11 +1405,7 @@ enum CodexFixtures {
         // label it cannot shorten honestly. This card must stay answerable:
         // Claude's `> 2` rule would suppress its option list and leave only
         // Allow and Deny, the two decisions a Codex card refuses.
-        //
-        // `card-read-only` is deliberately the SAME bytes on an older daemon:
-        // the only difference between the two renders is the read-only
-        // treatment, so the photograph isolates it.
-        case .cardTwoOptions, .cardReadOnly:
+        case .cardTwoOptions:
             return card(
                 toolName: "command",
                 input: """
@@ -1711,7 +1690,7 @@ extension CodexFixtures {
     fileprivate static func isUnresolved(_ state: State) -> Bool {
         switch state {
         case .cardCommandWorst, .cardTwoOptions, .cardFileChangeWide, .cardMinimal,
-            .cardCeiling, .cardReadOnly,
+            .cardCeiling,
             .stopOffered, .stopAborted, .stopLinkDown, .stopRefusedLate, .stopIndeterminate:
             return true
         default: return false

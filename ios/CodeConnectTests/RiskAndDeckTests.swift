@@ -77,9 +77,9 @@ final class RiskAndDeckTests: XCTestCase {
         XCTAssertEqual(assessment.effective, .high)
     }
 
-    /// An older daemon never offered a class, so nothing is "absent" and the
-    /// original behaviour is preserved — a `Read` stays a single tap.
-    func testOldDaemonKeepsTheLocalReading() {
+    /// While nothing is known of the daemon it has offered no class, so nothing is
+    /// "absent" and the local reading stands — a `Read` stays a single tap.
+    func testAnUnknownDaemonKeepsTheLocalReading() {
         let assessment = assess(
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]), risk: nil,
             profile: unknownDaemon)
@@ -177,12 +177,12 @@ final class RiskAndDeckTests: XCTestCase {
 
     /// The tier has to be the same class the *card* gates on, or a card would
     /// be ranked in a tier its own badge disagrees with. On a classifying
-    /// daemon an absent class means MEDIUM; on an older one a `Read` is LOW.
+    /// daemon an absent class means MEDIUM; while nothing is known, a `Read` is LOW.
     func testDeckRanksOnTheSameClassTheCardGatesOn() {
         let cards = [low("read", ageSeconds: 600), medium("write", ageSeconds: 30)]
         XCTAssertEqual(
             DeckOrdering.sort(cards, profile: unknownDaemon).map(\.card.requestID), ["write", "read"],
-            "on an older daemon the Read really is LOW and sorts below the Write")
+            "while nothing is known of the daemon the Read really is LOW and sorts below the Write")
         XCTAssertEqual(
             DeckOrdering.sort(cards, profile: connectedDaemon).map(\.card.requestID), ["read", "write"],
             "on a classifying daemon both float to the medium floor, so age decides")

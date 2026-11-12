@@ -52,18 +52,13 @@ public struct DaemonProfile: Sendable, Hashable {
         }
     }
 
-    /// The daemon files the end of a turn as `EventKind::TurnComplete`, so the
-    /// `session_end` + `hook_event_name: "Stop"` workaround is not used. Every
-    /// daemon this app connects to does; only an unknown one gets the workaround.
-    var trustsTurnCompleteKind: Bool { isConnected }
-
     /// The daemon puts a `risk` block on approval cards, which makes an *absent*
     /// class meaningful (contract: treat it as medium). Every connected daemon does.
     public var classifiesRisk: Bool { isConnected }
 
     /// The daemon accepts `delete_session` (minor 7).
     ///
-    /// A **soft gate**, like `servesDiff`: an older Mac simply does not offer the
+    /// A **soft gate**: an older Mac simply does not offer the
     /// swipe. Unknown is false, so this can only ever hide the action, never
     /// invent one — and a swipe that appeared and then failed would be worse than
     /// no swipe, because the row would stay and the user would not know why.
@@ -85,7 +80,7 @@ public struct DaemonProfile: Sendable, Hashable {
 
     /// **This daemon honours a stop for a Codex session** (minor 17).
     ///
-    /// A **hard gate**, unlike `servesDiff`, and the reason is not a hang: a
+    /// A **hard gate**, and the reason is not a hang: a
     /// minor-15/16 daemon decodes `interrupt` perfectly well and answers a
     /// well-formed refusal to *every* ask. So an unflagged daemon would give the
     /// reader a button that is offered and guaranteed broken — a control whose
@@ -149,16 +144,9 @@ public struct DaemonProfile: Sendable, Hashable {
         }
     }
 
-    /// Why the diff button might not work, or nil when it should.
-    ///
-    /// Deliberately not a hard gate. A capability key named differently on the
-    /// Mac side would otherwise hide a feature that is really there, and a
-    /// diff request costs one frame — so the app asks, and says plainly that it
-    /// is asking a daemon which never advertised the ability.
+    /// Why the diff button might not work, or nil when it should: it works on every
+    /// connected daemon.
     public var diffCaveat: String? {
-        guard isConnected else { return "Not connected. \(HostDevice.current.computer("The computer")) can't be asked for a diff." }
-        return servesDiff
-            ? nil
-            : "\(HostDevice.current.computer("The computer"))'s CodeConnect hasn't said it can show diffs. Asking anyway; if it cannot answer, this will say so."
+        isConnected ? nil : "Not connected. \(HostDevice.current.computer("The computer")) can't be asked for a diff."
     }
 }

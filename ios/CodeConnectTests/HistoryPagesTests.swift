@@ -140,8 +140,6 @@ final class HistoryPagesTests: XCTestCase {
     private let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
     private let outbox = Outbox()
 
-    /// The captured minor-23 `hello_ack`'s capabilities, so the model is set up
-    /// against what a daemon really advertises.
     /// The fixture daemon's capabilities, less one it advertises.
     private func daemonCapabilities(without name: String) throws -> Capabilities {
         let url = try XCTUnwrap(
@@ -154,6 +152,8 @@ final class HistoryPagesTests: XCTestCase {
             Capabilities.self, from: Data(JSONValue.object(advertised).canonicalJSONString.utf8))
     }
 
+    /// The captured minor-23 `hello_ack`'s capabilities, so the model is set up
+    /// against what a daemon really advertises.
     private func daemonCapabilities() throws -> Capabilities {
         let url = try XCTUnwrap(
             Bundle(for: type(of: self)).url(forResource: "minor-23-wire", withExtension: "json"))
