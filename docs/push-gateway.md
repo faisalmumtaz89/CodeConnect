@@ -7,7 +7,7 @@
 
 ## Implementation status
 
-Recorded 2026-08-17. This section is the empirical status of the plan below; the numbered sections describe the design and remain the specification. The wire protocol is major 1, minor **14** (`mac/protocol/src/lib.rs`).
+Recorded 2026-08-17. This section is the empirical status of the plan below; the numbered sections describe the design and remain the specification. When this was recorded, the wire protocol was major 1, minor **14** (`mac/protocol/src/lib.rs`).
 
 **Phases 0–3 — complete.**
 
@@ -424,7 +424,7 @@ Rules:
 
 ## 5. CodeConnect protocol impact
 
-Increment `PROTOCOL_MINOR` from 13 to **14**. Protocol major remains 1.
+Increment `PROTOCOL_MINOR` from 13 to **14**; the major did not change.
 
 Add:
 

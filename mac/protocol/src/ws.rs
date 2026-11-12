@@ -2144,7 +2144,10 @@ mod tests {
             crate::PROTOCOL_MINOR >= 34,
             "which kind of device sent an answer (`answered_on`) is minor 34"
         );
-        const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
+        const _: () = assert!(
+            crate::PROTOCOL_VERSION == 2,
+            "major 2 is the one engine's protocol"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
         assert_eq!(crate::PROTOCOL_MINOR, 34);

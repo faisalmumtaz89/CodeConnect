@@ -109,11 +109,7 @@ where
                             if *protocol_version != protocol::PROTOCOL_VERSION {
                                 send(&mut sink, &ServerMessage::Error {
                                     code: "protocol_mismatch".into(),
-                                    message: format!(
-                                        "this daemon speaks protocol {}.{}; upgrade the client",
-                                        protocol::PROTOCOL_VERSION,
-                                        protocol::PROTOCOL_MINOR,
-                                    ),
+                                    message: protocol::PROTOCOL_MISMATCH.into(),
                                 }).await?;
                                 return Ok(());
                             }
@@ -950,7 +946,7 @@ mod tests {
         let mut ws = connect(addr).await;
         say(
             &mut ws,
-            json!({"type": "hello", "protocol_version": 1, "token": TOKEN}),
+            json!({"type": "hello", "protocol_version": protocol::PROTOCOL_VERSION, "token": TOKEN}),
         )
         .await;
         let ack = hear(&mut ws).await;
@@ -997,13 +993,13 @@ mod tests {
     async fn a_wrong_token_is_refused_in_the_shape_the_phone_maps_to_a_terminal_failure() {
         let (_fleet, addr) = start().await;
         for credential in [
-            json!({"type": "hello", "protocol_version": 1, "token": "not-the-review-token"}),
+            json!({"type": "hello", "protocol_version": protocol::PROTOCOL_VERSION, "token": "not-the-review-token"}),
             // No credential at all.
-            json!({"type": "hello", "protocol_version": 1}),
+            json!({"type": "hello", "protocol_version": protocol::PROTOCOL_VERSION}),
             // A pairing code, which this server has no way to honour. One opaque
             // answer for all three: a peer that cannot authenticate learns
             // nothing about which credential was wrong.
-            json!({"type": "hello", "protocol_version": 1, "pairing_code": "ABCD2345"}),
+            json!({"type": "hello", "protocol_version": protocol::PROTOCOL_VERSION, "pairing_code": "ABCD2345"}),
         ] {
             let mut ws = connect(addr).await;
             say(&mut ws, credential.clone()).await;
@@ -1049,12 +1045,8 @@ mod tests {
         assert_eq!(frame["code"], "protocol_mismatch");
         assert_eq!(
             frame["message"],
-            format!(
-                "this daemon speaks protocol {}.{}; upgrade the client",
-                protocol::PROTOCOL_VERSION,
-                protocol::PROTOCOL_MINOR
-            ),
-            "the phone shows this sentence to the reviewer verbatim"
+            protocol::PROTOCOL_MISMATCH,
+            "the refusal carries the one shared sentence"
         );
         assert!(closed(&mut ws).await);
     }
@@ -1272,7 +1264,7 @@ mod tests {
         let mut ws = connect(addr).await;
         say(
             &mut ws,
-            json!({"type": "hello", "protocol_version": 1, "token": TOKEN}),
+            json!({"type": "hello", "protocol_version": protocol::PROTOCOL_VERSION, "token": TOKEN}),
         )
         .await;
         let ack = hear(&mut ws).await;

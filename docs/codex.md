@@ -449,7 +449,7 @@ writes to `~/.codeconnect/logs/codex-custodian-<uid>.log`.
 
 ### What the phone shows, by daemon version
 
-`codeconnect daemon status` prints `protocol 1.<minor>`. The phone hides what the daemon
+`codeconnect daemon status` prints `protocol <major>.<minor>`. The phone hides what the daemon
 has not advertised rather than failing when you tap.
 
 | Daemon | Approval cards | Stop | Say something | Link state on the fleet list |

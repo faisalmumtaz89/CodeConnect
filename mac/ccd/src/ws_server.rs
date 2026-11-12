@@ -611,11 +611,7 @@ where
                                 );
                                 send(&mut sink, &ServerMessage::Error {
                                     code: "protocol_mismatch".into(),
-                                    message: format!(
-                                        "this daemon speaks protocol {}.{}; upgrade the client",
-                                        protocol::PROTOCOL_VERSION,
-                                        protocol::PROTOCOL_MINOR,
-                                    ),
+                                    message: protocol::PROTOCOL_MISMATCH.into(),
                                 }).await?;
                                 return Ok(());
                             }
@@ -4691,6 +4687,23 @@ mod tests {
         let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
         assert_eq!(reply["type"], "hello_ack");
         assert_eq!(reply["protocol_version"], protocol::PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn the_engine_speaks_major_two_and_refuses_major_one_in_plain_words() {
+        // Literal numbers on purpose: this pins the break itself, which the
+        // relative tests above cannot see.
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (_socket, reply) = server.hello(2, None).await;
+        assert_eq!(reply["type"], "hello_ack");
+        assert_eq!(reply["protocol_version"], 2);
+        let (_socket, reply) = server.hello(1, None).await;
+        assert_eq!(reply["type"], "error");
+        assert_eq!(reply["code"], "protocol_mismatch");
+        assert_eq!(
+            reply["message"],
+            "This computer runs a different version of CodeConnect. Update CodeConnect on both, then try again."
+        );
     }
 
     #[cfg(target_os = "macos")]
