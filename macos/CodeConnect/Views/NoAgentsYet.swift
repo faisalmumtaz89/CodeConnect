@@ -27,9 +27,11 @@ struct NoAgentsYet: View {
 }
 
 /// A computer's list while that computer runs a different version of CodeConnect: what the sidebar's "Different
-/// version" means and what cures it, in the refusal's own sentence.
+/// version" means and what cures it, in the refusal's own sentence, and Try Again once it is cured: a refused
+/// connection does not dial again by itself.
 struct DifferentVersion: View {
     let sentence: String
+    let tryAgain: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
@@ -46,6 +48,8 @@ struct DifferentVersion: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("fleet.differentVersion.sentence")
+            ActionButton(title: "Try Again", key: nil, prominent: false, id: "fleet.differentVersion.tryAgain", action: tryAgain)
+                .padding(.top, 6)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("fleet.differentVersion")
