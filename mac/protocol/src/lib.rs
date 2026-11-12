@@ -43,7 +43,12 @@ pub mod uid;
 pub mod ws;
 
 /// Bumped only on breaking changes; negotiated in `hello`/`hello_ack`.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// What a client on another major is told, before any credential is read. The Mac app, the iPhone app and the
+/// service ship together, so the sentence names no side.
+pub const PROTOCOL_MISMATCH: &str =
+    "This computer runs a different version of CodeConnect. Update CodeConnect on both, then try again.";
 
 /// Bumped on every *additive* change, and reported in `hello_ack`.
 ///

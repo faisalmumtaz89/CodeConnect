@@ -57,6 +57,13 @@ final class UpdateCompatibilityTests: XCTestCase {
                 + "they do not disconnect")
     }
 
+    /// The one engine is protocol major 2 on both sides. Literal numbers pin the break itself, which the relative
+    /// test above cannot see.
+    func testTheEngineSpeaksMajorTwo() {
+        XCTAssertNil(DaemonConnection.incompatibility(of: ack(version: 2)), "a major-2 computer is accepted")
+        XCTAssertNotNil(DaemonConnection.incompatibility(of: ack(version: 1)), "a major-1 computer is refused")
+    }
+
     /// `enablePush` against a daemon that does not advertise push used to ask
     /// the user to authorise notifications nothing could ever send, then post
     /// a `register_push` the daemon does not understand. The capability is

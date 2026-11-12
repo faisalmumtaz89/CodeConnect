@@ -1186,9 +1186,10 @@ Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
 refused with `error{code: "protocol_mismatch"}` and disconnected, before its
 credential is even looked at. It used to be logged as a warning and then handed
 the full event log and the approval path — a peer that by the definition of the
-number has a different idea of what these messages mean. The majors have not
-moved, so nothing that works today stops working; checking before the token also
-means an incompatible peer cannot use the handshake to probe credentials.
+number has a different idea of what these messages mean. The major is 2, and the
+refusal's message is `protocol::PROTOCOL_MISMATCH`; the apps show their own
+sentence for that code. Checking before the token also means an incompatible peer cannot use the handshake
+to probe credentials.
 
 * **`send_text{session_id, text, request_id?, payload_hash?, submit}`** is a
   durable idempotent mutation from minor 3. `payload_hash` is

@@ -9,7 +9,7 @@ import Foundation
 ///     `[String: JSONValue]`, which would silently mangle every event payload —
 ///     so every key is spelled out instead.
 public enum Wire {
-    public static let protocolVersion: UInt32 = 1
+    public static let protocolVersion: UInt32 = 2
     /// Matches `MAX_CLIENT_MESSAGE_BYTES`; the daemon closes anything larger.
     public static let maxClientMessageBytes = 1024 * 1024
     /// `MAX_COMPOSE_BYTES` (`ws.rs`), enforced at the Mac on `text.len()` —
@@ -2196,9 +2196,9 @@ extension ClientMessage: Encodable {
 public struct HelloAck: Sendable, Hashable {
     public var protocolVersion: UInt32
     /// Additive feature level. `1` advertises `turn_complete`, `get_diff`,
-    /// pairing codes and daemon-side risk classification; `protocolVersion`
-    /// stays at 1 because those additions break nothing, so this is the field
-    /// that actually distinguishes a newer daemon from an older one.
+    /// pairing codes and daemon-side risk classification. Additions that break
+    /// nothing leave `protocolVersion` alone, so this is the field that actually
+    /// distinguishes a newer daemon from an older one.
     public var protocolMinor: UInt32
     public var serverTime: String
     public var capabilities: Capabilities

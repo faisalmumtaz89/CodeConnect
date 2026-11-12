@@ -799,8 +799,8 @@ public final class DaemonConnection {
                     // Terminal, and it used to be neither: it fell through to the
                     // generic reconnect, so an app and a Mac helper that could
                     // never speak to each other retried forever instead of saying
-                    // so once. Said in plain words: the daemon's own names its
-                    // protocol, and the frame does not say which side is older.
+                    // so once. Said in plain words, the app's own: the frame does
+                    // not say which side is older.
                     throw ConnectionError.incompatible(
                         "\(HostDevice.current.pairingComputer("This computer")) runs a different version of CodeConnect. Update CodeConnect on it and on this \(HostDevice.current.name), then try again.")
                 default:
