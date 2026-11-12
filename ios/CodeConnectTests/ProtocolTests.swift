@@ -49,6 +49,12 @@ final class ProtocolTests: XCTestCase {
 
     // MARK: hello_ack
 
+    func testTheSdkSourceIsNamed() throws {
+        let source = try JSONDecoder().decode(EventSource.self, from: Data(#""sdk""#.utf8))
+        XCTAssertNotEqual(source, .unknown("sdk"), "the engine's source is one this build names")
+        XCTAssertEqual(source.rawValue, "sdk")
+    }
+
     func testHelloAckCarriesTheAdditiveFields() throws {
         let message = try decodeServer(
             """
