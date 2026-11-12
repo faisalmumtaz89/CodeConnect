@@ -73,7 +73,9 @@ struct FleetList: View {
             .frame(height: 52)
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
-            if rows.isEmpty {
+            // A computer refused for a different version shows why in place of its list: rows it listed before are
+            // the last it said, and none can be acted on until it is reached again.
+            if rows.isEmpty || shownComputerRefusal != nil {
                 Group {
                     if let refused = shownComputerRefusal {
                         DifferentVersion(sentence: refused.linkHealth.detail) { refused.connection.retryNow() }
