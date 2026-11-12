@@ -131,6 +131,14 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
+  # The release's macOS agent host slices, each built and run on its own
+  # architecture, on every change; see agent-host-mac.yml.
+  agent-host-mac:
+    name: Agent host (macOS)
+    uses: ./.github/workflows/agent-host-mac.yml
+    with:
+      ref: ${{ github.sha }}
+
   msrv:
     name: Rust MSRV floor
     runs-on: macos-15

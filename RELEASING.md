@@ -100,9 +100,13 @@ Each block starts from the repository root.
 
    Pushing the tag starts `.github/workflows/release.yml`, which pins the
    tag to one commit, builds both architectures from that commit — the
-   binaries, and CodeConnect's own tmux from the pinned sources in
-   `mac/tmux/SOURCES` — signs and notarizes them, attaches the two archives
-   (binaries, and tmux beside them) to a **draft**, downloads those exact
+   binaries, CodeConnect's own tmux from the pinned sources in
+   `mac/tmux/SOURCES`, and the agent host from the Bun `mac/agent-host/SOURCES`
+   pins and the packages its `bun.lock` pins, each slice run on its own
+   runner under the hardened runtime with allow-jit alone, and refused
+   there if it runs without it — signs and notarizes them, attaches the
+   three archives (binaries, and tmux and the agent host beside them) to a
+   **draft**, downloads those exact
    assets back and re-verifies them with `.github/workflows/release-verify.sh`
    — the check step 5 repeats before publishing — and stops there. A draft is
    visible only to people who can see the repository's drafts, so nothing a
@@ -116,15 +120,16 @@ Each block starts from the repository root.
    already exists from being installed.
 
    The same run builds the Linux archives (`linux-build.yml`: static x86_64
-   and aarch64 binaries and tmux). Job `linux-sign` — the only job given the
+   and aarch64 binaries and tmux, and the agent host, Bun's glibc build, run
+   on each runner). Job `linux-sign` — the only job given the
    secret `LINUX_RELEASE_SIGNING_KEY` — refuses unless that key's public half
    is `RELEASE_KEY` in the tagged source
    (`mac/codeconnect/src/update_install.rs`), checks each archive against its
    `.sha256`, signs each `.sha256`, and verifies every signature against the
-   pinned half before handing the files on. The draft then holds the seven
-   macOS assets (the two archives and their checksums, and the app's `.dmg`,
-   its checksum and the update feed `appcast.xml`) and twelve Linux ones, each downloaded
-   back and checked, and publication requires exactly those nineteen: a Linux
+   pinned half before handing the files on. The draft then holds the nine
+   macOS assets (the three archives and their checksums, and the app's `.dmg`,
+   its checksum and the update feed `appcast.xml`) and eighteen Linux ones, each downloaded
+   back and checked, and publication requires exactly those twenty-seven: a Linux
    build that fails stops the release. The key's private half lives only in that secret and the
    owner's offline backup. Losing it means a new key and a new `RELEASE_KEY`,
    and every installed Linux updater refuses releases signed with the new key
@@ -166,14 +171,15 @@ Each block starts from the repository root.
    Run the same workflow with publishing enabled. Its `promote` job builds,
    signs and notarizes nothing and reads no repository secret. It refuses
    outright if step 4's draft does not exist — a publish run never quietly
-   becomes a create-and-publish run. It downloads the draft's nineteen assets
+   becomes a create-and-publish run. It downloads the draft's twenty-seven assets
    by id and checks them with the same `release-verify.sh` step 4 ran.
    Every asset is bound to the tag: each checksum is its own file's, the Linux
    ones signed with `RELEASE_KEY`; each Mac binary, in the archives and inside
    the app, is signed by the pinned team's Developer ID with a secure timestamp
    and carries both architectures; CodeConnect's own binaries carry the tag's
-   commit in every slice, and each archive's cc-tmux the tmux bundle
-   `mac/tmux/SOURCES` names; the Mac archives' binaries are notarized (asked of
+   commit in every slice, each archive's cc-tmux the tmux bundle
+   `mac/tmux/SOURCES` names, and the agent host exactly the entitlements
+   `mac/agent-host/entitlements.plist` names; the Mac archives' binaries are notarized (asked of
    Apple online); every archive holds only regular files and is within the
    size its downloaders accept, and each core archive holds the pinned
    licence; the app carries the tag's version and the project's Sparkle key;

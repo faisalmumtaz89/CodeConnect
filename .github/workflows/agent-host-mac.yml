@@ -1,0 +1,65 @@
+# Builds the agent host (`cc-agent-host`, mac/agent-host) for macOS, one
+# architecture on each native runner, and runs each slice where it is built:
+# the x86_64 runner is the only machine that ever runs the Intel half before it
+# ships.
+#
+# **One place, two callers.** The release calls this with its pinned commit and
+# joins the two slices with `lipo`, as it does the other binaries; CI calls it
+# with every change's, so a pull request runs exactly the checks a release does.
+# It publishes nothing: the slices leave as workflow artifacts.
+name: Agent host (macOS)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit to build"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Agent host ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Into the runner's temp directory, so the tree stays exactly the commit.
+      - name: Build
+        run: mac/agent-host/build.sh "$RUNNER_TEMP/agent-host"
+
+      # Signed with the hardened runtime and allow-jit alone, it must start here
+      # and start a child, and the same executable signed without allow-jit
+      # must not (check.sh): JavaScriptCore needs the entitlement to JIT.
+      - name: Check the slice runs under its signature
+        run: |
+          host="$RUNNER_TEMP/agent-host/cc-agent-host-darwin-${{ matrix.arch }}"
+          mac/agent-host/entitled.sh "$host"
+          mac/agent-host/check.sh "$host"
+          cp "$host" "$RUNNER_TEMP/unentitled"
+          codesign --force --options runtime --sign - "$RUNNER_TEMP/unentitled"
+          if mac/agent-host/check.sh "$RUNNER_TEMP/unentitled"; then
+            echo "::error::the agent host ran without allow-jit, so the check proves nothing"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-host-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/agent-host/cc-agent-host-darwin-${{ matrix.arch }}
+            ${{ runner.temp }}/agent-host/AGENT_HOST_NOTICES
+          if-no-files-found: error

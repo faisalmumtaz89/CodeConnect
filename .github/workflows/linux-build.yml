@@ -1,6 +1,6 @@
 # Builds and packages CodeConnect for Linux: static musl `codeconnect`, `ccd`
-# and `cc-hook`, and the static `cc-tmux`, for x86_64 and aarch64, each on a
-# native runner.
+# and `cc-hook`, the static `cc-tmux`, and the agent host `cc-agent-host`
+# (Bun's glibc build), for x86_64 and aarch64, each on a native runner.
 #
 # **One place, two callers.** The release calls this with its pinned commit, and
 # CI calls it with every change's, so a pull request runs exactly the steps a
@@ -11,7 +11,8 @@
 # `codeconnect-<version>-linux-<arch>.tar.gz` holds the three binaries and the
 # licence, named one by one so it has no directory member, and
 # `codeconnect-<version>-tmux-linux-<arch>.tar.gz` holds cc-tmux and its
-# notices; each beside its `.sha256`.
+# notices, and `codeconnect-<version>-agent-host-linux-<arch>.tar.gz` the
+# agent host and its notices; each beside its `.sha256`.
 name: Linux build
 
 on:
@@ -102,6 +103,14 @@ jobs:
             exit 1
           fi
 
+      # On the runner itself: Bun's glibc build runs on the distributions
+      # people use, and here it must start and start a child (check.sh).
+      - name: Build the agent host
+        run: mac/agent-host/build.sh "$RUNNER_TEMP/agent-host"
+
+      - name: Check the agent host runs here
+        run: mac/agent-host/check.sh "$RUNNER_TEMP/agent-host/cc-agent-host-linux-${{ matrix.arch }}"
+
       - name: Package
         run: |
           version="$(awk -F'"' '/^version = /{print $2; exit}' mac/Cargo.toml)"
@@ -122,6 +131,11 @@ jobs:
           tmux_archive="codeconnect-$version-tmux-linux-${{ matrix.arch }}.tar.gz"
           tar -czf "$tmux_archive" "$dir/cc-tmux" "$dir/THIRD_PARTY_NOTICES"
           sha256sum "$tmux_archive" > "$tmux_archive.sha256"
+          install -m 0755 "$RUNNER_TEMP/agent-host/cc-agent-host-linux-${{ matrix.arch }}" "$dir/cc-agent-host"
+          install -m 0644 "$RUNNER_TEMP/agent-host/AGENT_HOST_NOTICES" "$dir/AGENT_HOST_NOTICES"
+          host_archive="codeconnect-$version-agent-host-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$host_archive" "$dir/cc-agent-host" "$dir/AGENT_HOST_NOTICES"
+          sha256sum "$host_archive" > "$host_archive.sha256"
           # The rule the updater applies to an archive: exactly these members,
           # nothing else, no directory entry.
           holds_exactly() {
@@ -137,6 +151,7 @@ jobs:
           }
           holds_exactly "$archive" "$dir/codeconnect" "$dir/ccd" "$dir/cc-hook" "$dir/LICENSE"
           holds_exactly "$tmux_archive" "$dir/cc-tmux" "$dir/THIRD_PARTY_NOTICES"
+          holds_exactly "$host_archive" "$dir/cc-agent-host" "$dir/AGENT_HOST_NOTICES"
 
       - uses: actions/upload-artifact@v4
         with:
