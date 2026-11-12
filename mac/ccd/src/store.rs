@@ -7002,6 +7002,7 @@ fn parse_source(value: &str) -> Source {
         "transcript" => Source::Transcript,
         "daemon" => Source::Daemon,
         "codex" => Source::Codex,
+        "sdk" => Source::Sdk,
         "pty" => Source::Pty,
         // An unrecognised persisted source — a fact written by a newer daemon,
         // read back after a rollback — is the lowest trust there is, never the
@@ -7780,6 +7781,62 @@ mod tests {
             AgentKind::Claude,
             "a legacy write backfills to Claude, never NULL/unknown"
         );
+    }
+
+    /// One SDK message files several events: a `result` files `turn_complete`
+    /// and `usage`. Under the message's uuid alone the dedup key keeps only the
+    /// first; under `sdk_event_id` both are kept, and a replay of the same
+    /// message files nothing new.
+    #[test]
+    fn both_events_of_one_sdk_result_are_kept_and_a_replay_files_none() {
+        use protocol::event::sdk_event_id;
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let filed = |kind: EventKind, id: String| {
+            let mut event = PendingEvent::new(&session, kind, json!({"x": 1}), Source::Sdk);
+            event.source_event_id = Some(id);
+            event
+        };
+        let raw = store
+            .append_batch(&[
+                filed(EventKind::TurnComplete, "raw-uuid".into()),
+                filed(EventKind::Usage, "raw-uuid".into()),
+            ])
+            .unwrap();
+        assert_eq!(
+            raw.len(),
+            1,
+            "the message's uuid alone keeps one of the two"
+        );
+
+        let result = || {
+            [
+                filed(
+                    EventKind::TurnComplete,
+                    sdk_event_id("msg-1", &EventKind::TurnComplete, 0),
+                ),
+                filed(
+                    EventKind::Usage,
+                    sdk_event_id("msg-1", &EventKind::Usage, 0),
+                ),
+            ]
+        };
+        let kept = store.append_batch(&result()).unwrap();
+        assert_eq!(kept.len(), 2, "both events of one result are kept");
+        assert!(
+            store.append_batch(&result()).unwrap().is_empty(),
+            "a replay of the same message files nothing new"
+        );
+    }
+
+    #[test]
+    fn a_persisted_sdk_source_is_read_back_as_itself() {
+        assert_eq!(parse_source("sdk").as_str(), "sdk");
+        assert_eq!(parse_source("sdk").trust(), 3);
     }
 
     /// An unrecognised persisted source never decodes to the trusted `Daemon`

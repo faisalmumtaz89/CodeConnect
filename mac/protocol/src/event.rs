@@ -28,6 +28,11 @@ pub enum Source {
     /// `source_event_id`s are thread-namespaced so a thread switch inside one
     /// session cannot alias two threads' item ids.
     Codex,
+    /// A Claude run driven through the Agent SDK: the messages its agent host
+    /// forwards, first-hand and structured, so trusted as [`Source::Hook`] and
+    /// [`Source::Codex`] are. Its `source_event_id`s come from
+    /// [`sdk_event_id`].
+    Sdk,
     /// tmux capture-pane snapshot. Presence checks only, never semantics.
     Pty,
     /// A persisted source string this build does not recognise — a fact written
@@ -57,6 +62,7 @@ impl Source {
             // only ever guards against a corrupt/unknown source (trust 0) losing
             // to the real one; it never competes with a Claude source.
             Source::Codex => 3,
+            Source::Sdk => 3,
             Source::Transcript => 2,
             Source::Pty => 1,
             Source::Unknown => 0,
@@ -69,10 +75,34 @@ impl Source {
             Source::Transcript => "transcript",
             Source::Daemon => "daemon",
             Source::Codex => "codex",
+            Source::Sdk => "sdk",
             Source::Pty => "pty",
             Source::Unknown => "unknown",
         }
     }
+}
+
+/// The `source_event_id` of one event filed from an SDK message: the message's
+/// `uuid`, the event's kind and its block position. One message can file several
+/// events (a `result` files `turn_complete` and `usage`; an assistant message one
+/// event per content block), and the dedup key keeps only the first of a
+/// repeated id, so the message's uuid alone would drop the rest. The same inputs
+/// give the same id, so a replayed message dedups against its first filing.
+pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> String {
+    format!("{message_uuid}/{}/{block}", kind.as_str())
+}
+
+/// The `notification_type` values of the [`EventKind::Notification`] events the
+/// engine files itself, beside the ones Claude's own notifications carry.
+pub mod notice {
+    /// `/clear` reset the conversation; the run's Claude session id changes.
+    pub const CONVERSATION_CLEARED: &str = "conversation_cleared";
+    /// The content-free line that wakes an idle agent to read its mail.
+    pub const MAIL_NUDGE: &str = "mail_nudge";
+    /// The agent host confirmed a model change.
+    pub const MODEL_SET: &str = "model_set";
+    /// The agent host confirmed a permission-mode change.
+    pub const MODE_SET: &str = "mode_set";
 }
 
 /// Item kinds, following the thread -> turn -> item model.
@@ -691,6 +721,15 @@ mod tests {
     fn trust_ranks_hook_above_transcript_above_pty() {
         assert!(Source::Hook.trust() > Source::Transcript.trust());
         assert!(Source::Transcript.trust() > Source::Pty.trust());
+    }
+
+    #[test]
+    fn the_sdk_source_is_first_hand_and_round_trips() {
+        let source: Source =
+            serde_json::from_str("\"sdk\"").expect("\"sdk\" is a source this build knows");
+        assert_eq!(source.as_str(), "sdk");
+        assert_eq!(source.trust(), 3);
+        assert_eq!(serde_json::to_string(&source).unwrap(), "\"sdk\"");
     }
 
     #[test]
