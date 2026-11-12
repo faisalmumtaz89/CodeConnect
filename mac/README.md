@@ -1074,9 +1074,10 @@ folder by its real path (symlinks resolved) in the store's own `folder_trust`
 table, so removing a run keeps it. The first start in a folder with no answer
 kept, sent without one, is answered `needs_trust {path}` with that real path,
 and nothing runs: the app asks, then sends a new start, with a new
-`request_id`, carrying the answer. `list_folder_trust`, `set_folder_trust {path,
-trust}` and `forget_folder_trust {path}` are each answered with `folder_trust
-{folders: [{path, trust, answered_at}]}`, every answer kept, newest first, once
+`request_id`, carrying the answer. `list_folder_trust {request_id}`,
+`set_folder_trust {request_id, path, trust}` and `forget_folder_trust {request_id,
+path}` are each answered with `folder_trust {request_id, folders: [{path, trust,
+answered_at}]}`, every answer kept, newest first, once
 the change is made; a forgotten folder is asked about again. They are served to
 the connections `start_session` is. A start that goes on runs `codeconnect <agent> --no-attach -- <prompt>` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
