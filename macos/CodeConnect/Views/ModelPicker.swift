@@ -44,27 +44,17 @@ struct ModelButton: View {
 
     /// As tall as its entries, up to what fits above the composer; longer, it scrolls.
     private var menu: some View {
-        let agentOnly = StartAgent.allCases.allSatisfy { context.models($0) == .agentOnly }
-        return ScrollView {
+        ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(StartAgent.allCases.enumerated()), id: \.element) { index, agent in
-                    if index > 0, !agentOnly { divider }
-                    if !agentOnly { header(agent.displayName) }
+                    if index > 0 { divider }
+                    header(agent.displayName)
                     switch context.models(agent) {
                     case .checking: note(StartContext.checkingTitle)
                     case .missing(let reason), .signedOut(let reason): note(reason)
-                    case .choices, .agentOnly:
+                    case .choices:
                         ForEach(context.modelChoices.filter { $0.agent == agent }, id: \.self) { row($0) }
                     }
-                }
-                if agentOnly {
-                    divider
-                    Text(StartContext.updateForModels)
-                        .font(Theme.ui(11))
-                        .foregroundStyle(Theme.text3)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 4)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.vertical, 5)

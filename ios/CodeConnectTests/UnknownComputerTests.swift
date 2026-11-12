@@ -95,17 +95,17 @@ final class UnknownComputerTests: XCTestCase {
     func testACodexCardOnAComputerThatIsNotConnectedSaysTheLink() {
         let unknown = DaemonProfile.unknown
         let reason = DecisionCard.codexUnanswerableReason(
-            isKnown: unknown.isConnected, caveat: unknown.codexAnswerCaveat, isVerified: true,
+            isKnown: unknown.isConnected, isVerified: true,
             linkReason: link)
 
         XCTAssertEqual(reason, link)
     }
 
-    /// A computer that is known and really too old still says so, in the
+    /// A computer that is known and lacks a capability still says so, in the
     /// computer's words.
     func testAComputerThatIsTooOldStillSaysSo() {
         let old = DaemonProfile(
-            protocolVersion: Wire.protocolVersion, protocolMinor: 18, capabilities: Capabilities())
+            protocolVersion: Wire.protocolVersion, protocolMinor: 34, capabilities: Capabilities())
         XCTAssertEqual(old.knownAnswersQuestions, false)
         let question = QuestionCardStatus.resolve(
             outcome: nil, attempt: nil, isBacked: true, hold: .held,
@@ -113,14 +113,10 @@ final class UnknownComputerTests: XCTestCase {
         XCTAssertEqual(question, .macTooOld)
         XCTAssertTrue(
             question.banner?.message.contains("This computer's CodeConnect is too old") ?? false)
-        let codex = DecisionCard.codexUnanswerableReason(
-            isKnown: old.isConnected, caveat: old.codexAnswerCaveat, isVerified: true,
-            linkReason: nil)
-        XCTAssertTrue(codex.hasPrefix("This computer's CodeConnect is too old"), codex)
 
         let model = AppModel(pairing: PairingStore(ephemeral: true), cache: EventCache())
         model.connection.simulateConnectedForTesting()
-        model.connection.simulateCapabilitiesForTesting(Capabilities(), minor: 16)
+        model.connection.simulateCapabilitiesForTesting(Capabilities(), minor: 34)
         model.adoptSummariesForTesting([codexSummary()])
         XCTAssertEqual(
             model.stopUnavailable(for: uid),

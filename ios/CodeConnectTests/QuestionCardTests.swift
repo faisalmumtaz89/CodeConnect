@@ -314,9 +314,9 @@ final class QuestionCardTests: XCTestCase {
         XCTAssertNil(DecisionCard.questionCard(card: card, agent: nil), "unknown agent")
         XCTAssertNil(DecisionCard.questionCard(card: card, agent: .codex))
 
-        for (minor, capable) in [(20, false), (20, true), (21, false), (21, true)] {
-            let answers = profile(minor: UInt32(minor), questionCard: capable).answersQuestions
-            XCTAssertEqual(answers, minor >= 21 && capable, "minor \(minor), question_card \(capable)")
+        for capable in [false, true] {
+            let answers = profile(minor: 34, questionCard: capable).answersQuestions
+            XCTAssertEqual(answers, capable, "question_card \(capable)")
             for decision: AnswerDecision in [
                 .allow, .deny, .option(index: 1), .optionId("accept"), .text("yes"),
             ] {
@@ -324,7 +324,7 @@ final class QuestionCardTests: XCTestCase {
                     AppModel.decisionMismatch(
                         decision: decision, agent: .claude, isQuestion: true,
                         answersQuestions: answers),
-                    "\(decision) refused on a question, minor \(minor), question_card \(capable)")
+                    "\(decision) refused on a question, question_card \(capable)")
             }
             for decision: AnswerDecision in [.answers([]), .decline] {
                 XCTAssertEqual(

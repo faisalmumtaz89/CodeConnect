@@ -52,23 +52,14 @@ public struct DaemonProfile: Sendable, Hashable {
         }
     }
 
-    /// The daemon reports protocol minor 1 or newer, which is where
-    /// `turn_complete`, `get_diff`, pairing codes, per-device tokens, `risk`
-    /// and `ResolvedBy::Local` arrived. A newer major implies all of them.
-    var speaksMinor1OrLater: Bool { protocolVersion > Wire.protocolVersion || protocolMinor >= 1 }
-
     /// The daemon files the end of a turn as `EventKind::TurnComplete`, so the
-    /// `session_end` + `hook_event_name: "Stop"` workaround is no longer needed.
-    ///
-    /// There is no separate capability flag for this — `protocol_minor` is the
-    /// contract's own answer, and the workaround is inert against such a daemon
-    /// anyway, since one that emits `turn_complete` for `Stop` never emits a
-    /// `session_end` carrying that hook name.
-    var trustsTurnCompleteKind: Bool { speaksMinor1OrLater }
+    /// `session_end` + `hook_event_name: "Stop"` workaround is not used. Every
+    /// daemon this app connects to does; only an unknown one gets the workaround.
+    var trustsTurnCompleteKind: Bool { isConnected }
 
     /// The daemon puts a `risk` block on approval cards, which makes an *absent*
-    /// class meaningful (contract: treat it as medium) rather than merely old.
-    public var classifiesRisk: Bool { capabilities?.classifiesRisk == true || speaksMinor1OrLater }
+    /// class meaningful (contract: treat it as medium). Every connected daemon does.
+    public var classifiesRisk: Bool { isConnected }
 
     /// The daemon accepts `delete_session` (minor 7).
     ///
@@ -78,24 +69,15 @@ public struct DaemonProfile: Sendable, Hashable {
     /// no swipe, because the row would stay and the user would not know why.
     public var removesSessions: Bool { capabilities?.deletesSessions == true }
 
-    /// The daemon answers `get_diff`.
-    public var servesDiff: Bool { capabilities?.servesDiff == true || speaksMinor1OrLater }
+    /// The daemon answers `get_diff`: every connected daemon does.
+    public var servesDiff: Bool { isConnected }
 
     /// The daemon mints a `session_uid` per run, puts it on every session and
     /// every event, and accepts one anywhere a session is named.
     ///
-    /// Unlike `servesDiff` this is a **hard gate**, and deliberately so: the
-    /// consequence of guessing wrong is not a missing affordance but a
-    /// mis-attributed timeline, or an answer typed into a different agent's TTY.
-    /// Either the daemon has said it does this — by the capability flag or by
-    /// its own feature level — or the app keeps treating the tmux name as the
-    /// identity, which is what a pre-minor-2 daemon means by sending no uid.
-    public var scopesSessionsByUID: Bool {
-        capabilities?.scopesSessionsByUID == true || protocolMinor >= 2
-    }
-
-    /// The daemon takes `hello{pairing_code}` and hands back a device token.
-    var supportsPairingCode: Bool { speaksMinor1OrLater }
+    /// Every connected daemon does; while nothing is known of it, the app keeps the
+    /// tmux name as the identity, which is all a list it cannot ask carries.
+    public var scopesSessionsByUID: Bool { isConnected }
 
     /// This connection is actually encrypted — not merely "the daemon holds a
     /// certificate", which is what `capabilities.tls` says.
@@ -119,30 +101,16 @@ public struct DaemonProfile: Sendable, Hashable {
     /// and sit on it until the request timeout — every tap.
     public var composesToCodex: Bool { capabilities?.codexCompose == true }
 
-    /// **The minimum daemon for an ANSWERABLE Codex card** (minor 19).
-    ///
-    /// Minor 19 is where `request_id` arrived on the Codex `approval_resolved`
-    /// payload. Below it a resolution cannot be correlated at all — the phone
-    /// never prefix-parses `source_event_id`, and there is nothing else to key on —
-    /// so a card answered at the Mac stays live and tappable on the phone for
-    /// ever, with nothing on screen to explain it.
-    ///
-    /// A card that can be *shown* but never *retired* must not be answerable:
-    /// the reader would tap a decision the daemon has already made. So on an
-    /// older daemon the Codex card is read-only and says why, the same shape the
-    /// compose bar already uses for a minor-16 Mac.
-    public var resolvesCodexCards: Bool {
-        protocolVersion > Wire.protocolVersion || protocolMinor >= 19
-    }
+    /// **A Codex card can be answered here**: the daemon puts `request_id` on the
+    /// Codex `approval_resolved` payload, so a card answered elsewhere is retired
+    /// here. Every connected daemon does; a card is never answerable while nothing
+    /// is known of the daemon.
+    public var resolvesCodexCards: Bool { isConnected }
 
-    /// **The daemon answers Claude's questions from the phone** — minor 21 *and*
-    /// the `question_card` capability. Below it the question is read-only here:
-    /// such a daemon files it as an ordinary approval, and nothing this phone
-    /// could send it chooses an answer.
-    public var answersQuestions: Bool {
-        (protocolVersion > Wire.protocolVersion || protocolMinor >= 21)
-            && capabilities?.questionCard == true
-    }
+    /// **The daemon answers Claude's questions from the phone**: the `question_card`
+    /// capability. Without it the question is read-only here: such a daemon files it
+    /// as an ordinary approval, and nothing this phone could send it chooses an answer.
+    public var answersQuestions: Bool { capabilities?.questionCard == true }
 
     /// `answersQuestions`, or nil while nothing is known of the daemon — its
     /// link is down and took its capabilities with it. Unknown is not old.
@@ -155,30 +123,10 @@ public struct DaemonProfile: Sendable, Hashable {
     /// agent's.
     public var answersApprovalsByHook: Bool { capabilities?.hookOnlyApprovals == true }
 
-    /// **The daemon serves a run's log a page at a time** — minor 23 *and* the
-    /// `history_pages` capability. With it a chat holds the newest 500 events
-    /// and asks for earlier ones; without it the app backfills and loads the
-    /// whole log as it always has, because an older daemon cannot answer
-    /// `history` at all.
-    public var pagesHistory: Bool {
-        (protocolVersion > Wire.protocolVersion || protocolMinor >= 23)
-            && capabilities?.historyPages == true
-    }
-
-    /// Why a Codex card cannot be answered from this phone, or nil when it can.
-    ///
-    /// **What is wrong, what to do now, what to do about it** — in that order,
-    /// because the reader's next action is at the Mac and the update is the fix
-    /// rather than the workaround. It replaces a longer sentence that explained
-    /// the daemon's bookkeeping ("too old to report when a Codex question has
-    /// been answered") and then left the reader with nowhere to go; measured at
-    /// AX5 on a 6.9" phone, that one ran to four lines in the pinned action bar
-    /// and clipped its own last two words off the bottom of the screen.
-    public var codexAnswerCaveat: String? {
-        guard !resolvesCodexCards else { return nil }
-        return "\(HostDevice.current.computer("This computer", named: machineName))'s CodeConnect is too old for answers from the \(HostDevice.current.noun); answer it at "
-            + "\(HostDevice.current.computer("the computer", named: machineName)). Update it to answer here."
-    }
+    /// **The daemon serves a run's log a page at a time**: the `history_pages`
+    /// capability. With it a chat holds the newest 500 events and asks for earlier
+    /// ones; without it the app backfills and loads the whole log.
+    public var pagesHistory: Bool { capabilities?.historyPages == true }
 
     /// Why Codex's controls are absent on a daemon that is otherwise working,
     /// or nil when they are not. One sentence, so the two flags cannot produce

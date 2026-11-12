@@ -83,8 +83,6 @@ public struct StartContext {
 
     // MARK: Models
 
-    /// Under a menu whose computer lists no models.
-    public static let updateForModels = "Update CodeConnect on this computer to choose a model."
     /// The model button while the computer hasn't answered, and when no agent can start.
     public static let checkingTitle = "Checking…"
     public static let noAgentTitle = "No agent can start here"
@@ -98,8 +96,7 @@ public struct StartContext {
     /// its order and words, with Default first: Claude Code's own `default`
     /// entry, or, for an agent that lists none (Codex), a Default that names no
     /// model. A signed-out agent offers nothing but how to sign in. With no
-    /// models listed, a computer below minor 33 offers the agent alone, and a
-    /// newer one, whose agent couldn't be asked, Default alone.
+    /// models listed, because the agent couldn't be asked, Default alone.
     public func models(_ agent: StartAgent) -> StartModels {
         guard starter.projects != nil else { return .checking }
         if let reason = missingReason(agent) { return .missing(reason) }
@@ -108,7 +105,6 @@ public struct StartContext {
         let offered = (status?.models ?? []).map {
             StartModelChoice(agent: agent, model: $0.value, label: $0.label, detail: $0.detail)
         }
-        if offered.isEmpty, model.daemonProfile.protocolMinor < 33 { return .agentOnly }
         if offered.contains(where: \.isDefault) { return .choices(offered) }
         return .choices([StartModelChoice(agent: agent, model: nil, label: "Default", detail: nil)] + offered)
     }
@@ -118,7 +114,6 @@ public struct StartContext {
         StartAgent.allCases.flatMap { agent -> [StartModelChoice] in
             switch models(agent) {
             case .choices(let choices): return choices
-            case .agentOnly: return [StartModelChoice(agent: agent, model: nil, label: agent.displayName, detail: nil)]
             case .checking, .missing, .signedOut: return []
             }
         }
@@ -131,10 +126,8 @@ public struct StartContext {
         return defaults.first { $0.agent == folder?.lastAgent } ?? defaults.first
     }
 
-    /// The model button's words: `Claude Code · Default`, `Codex · GPT-6-Astra`,
-    /// or the agent alone where its computer lists no models.
+    /// The model button's words: `Claude Code · Default`, `Codex · GPT-6-Astra`.
     public func title(_ choice: StartModelChoice) -> String {
-        if case .agentOnly = models(choice.agent) { return choice.agent.displayName }
         return "\(choice.agent.displayName) · \(choice.isDefault ? "Default" : choice.label)"
     }
 
@@ -154,8 +147,6 @@ public enum StartModels: Hashable, Sendable {
     /// It isn't signed in: how to sign in, and nothing to choose.
     case signedOut(String)
     case choices([StartModelChoice])
-    /// The computer lists no models: the agent alone, on its default.
-    case agentOnly
 }
 
 /// One entry of the model menu: an agent and the model a start names.

@@ -442,11 +442,10 @@ extension DecisionCard {
     /// Unknown is not old: while nothing is known of the computer (`isKnown` false, its link down) the card says what
     /// is known, which is the link — never the caveat, and never that the card came without its options.
     public static func codexUnanswerableReason(
-        isKnown: Bool, caveat: String?, isVerified: Bool, linkReason: String?, computer: String? = nil,
+        isKnown: Bool, isVerified: Bool, linkReason: String?, computer: String? = nil,
         on host: HostDevice = .current
     ) -> String {
         guard isKnown else { return linkReason ?? cannotAnswerHere(computer: computer, on: host) }
-        if let caveat { return caveat }
         guard isVerified else { return ApprovalCard.unverifiableCodexLine }
         return "This card arrived without the options Codex answers by, so it can only be answered at "
             + "\(host.computer("the computer", named: computer))."

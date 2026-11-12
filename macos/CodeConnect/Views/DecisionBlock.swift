@@ -246,7 +246,7 @@ struct DecisionBlock: View {
             words = DecisionCard.notOnTheFleetReason
         case .codex:
             words = DecisionCard.codexUnanswerableReason(
-                isKnown: model.daemonProfile.isConnected, caveat: model.daemonProfile.codexAnswerCaveat,
+                isKnown: model.daemonProfile.isConnected,
                 isVerified: approval.card.verification.renderMatchesDisplayText,
                 linkReason: model.actionsBlockedReason, computer: model.machineName)
         case .unsupported(let raw):
