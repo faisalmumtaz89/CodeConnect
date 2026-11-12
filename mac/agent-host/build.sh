@@ -17,7 +17,8 @@
 # in, and the host starts in people's projects. Each macOS executable is signed with the hardened runtime and exactly
 # entitlements.plist: allow-jit, without which JavaScriptCore cannot JIT and the SDK does not start. Ad hoc here; the
 # release signs the universal one with its Developer ID. The same sources give the same bytes. It needs bash, curl
-# and unzip, and for macOS targets lipo and codesign.
+# and unzip, and for macOS targets lipo and codesign. Outside <out-dir> and a temporary folder it writes only Bun's
+# package cache, ~/.bun/install/cache.
 #
 # To change a package: edit package.json, run the pinned Bun's `bun install --lockfile-only` here, commit bun.lock.
 set -euo pipefail
