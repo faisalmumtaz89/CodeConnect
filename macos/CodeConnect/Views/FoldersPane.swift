@@ -62,8 +62,8 @@ struct FoldersPane: View {
         }
         .frame(width: 560, height: 460)
         .background(Theme.sheet)
+        .onAppear { refusal = nil }
         .task(id: contexts.map(\.id)) {
-            refusal = nil
             while !Task.isCancelled {
                 for context in contexts { await send(context) }
                 try? await Task.sleep(for: .seconds(5))
