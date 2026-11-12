@@ -1687,7 +1687,7 @@ public final class AppModel {
     public var linkHealth: LinkHealth {
         LinkHealth.evaluate(
             phase: connection.phase, lastContactAt: connection.lastContactAt,
-            dialFailure: connection.dialFailure, isRedial: connection.isRedial, now: now)
+            dialFailure: connection.dialFailure, refusal: connection.refusal, isRedial: connection.isRedial, now: now)
     }
 
     /// Why a decision cannot be answered from here, or nil when it can.

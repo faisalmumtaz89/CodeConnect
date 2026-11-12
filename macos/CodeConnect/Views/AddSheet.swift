@@ -159,16 +159,26 @@ private struct AgentSide: View {
                 .padding(.horizontal, 18)
                 .padding(.top, 18)
                 Spacer(minLength: 0)
-                SheetBar(action: nil, actionID: "", blocked: true, perform: {}, cancel: { dismiss() }, cancelID: "agent.cancel") {
+                SheetBar(
+                    action: refused == nil ? nil : "Try Again", actionID: "agent.tryAgain", blocked: false,
+                    perform: { refused?.connection.retryNow() }, cancel: { dismiss() }, cancelID: "agent.cancel"
+                ) {
                     EmptyView()
                 }
             }
         }
     }
 
+    /// A computer refused for running a different version of CodeConnect: what keeps it from starting agents, cured
+    /// only by updating, then trying again.
+    private var refused: AppModel? { machines.models.first { $0.linkHealth.cause == .refused(.differentVersion) } }
+
     private var why: String {
         guard machines.showsFleet else {
             return "An agent runs on one of your computers, in a project there. Add a computer first, then start one here."
+        }
+        if let refused {
+            return "\(refused.machineName ?? "A computer") isn’t connected. \(refused.linkHealth.detail)"
         }
         guard let old = machines.models.first(where: { $0.connection.phase.isConnected }) else {
             return "None of your computers is connected right now. You can start an agent once one is."

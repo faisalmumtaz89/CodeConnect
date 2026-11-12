@@ -73,9 +73,13 @@ struct FleetList: View {
             .frame(height: 52)
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
-            if rows.isEmpty {
+            // A computer refused for a different version shows why in place of its list: rows it listed before are
+            // the last it said, and none can be acted on until it is reached again.
+            if rows.isEmpty || shownComputerRefusal != nil {
                 Group {
-                    if scope == .active {
+                    if let refused = shownComputerRefusal {
+                        DifferentVersion(sentence: refused.linkHealth.detail) { refused.connection.retryNow() }
+                    } else if scope == .active {
                         NoAgentsYet(newAgent: newAgent)
                     } else {
                         Text("No finished agents.").font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
@@ -146,6 +150,16 @@ struct FleetList: View {
             .frame(height: 34)
         }
         .background(Theme.window)
+    }
+
+    /// The computer the list is narrowed to, when it was refused for running a different version of CodeConnect,
+    /// which the sidebar's "Different version" stands for.
+    private var shownComputerRefusal: AppModel? {
+        guard case .computer(let id) = filter,
+            let model = machines.models.first(where: { ($0.machineID ?? "") == id }),
+            model.linkHealth.cause == .refused(.differentVersion)
+        else { return nil }
+        return model
     }
 
     /// These rows as the sidebar's filter leaves them.
