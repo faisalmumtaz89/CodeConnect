@@ -105,7 +105,7 @@ if [ "$notarized" = notarized ]; then
       and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
       and certificate leaf[subject.OU] = \"$team\"" "$2"
   }
-  for name in ccd codeconnect cc-tmux cc-agent-host; do
+  for name in ccd codeconnect cc-agent-host; do
     signed_as "$name" "$app/Contents/Helpers/$name" || { echo "::error::S2: the app's $name is not signed as $name by team $team"; exit 1; }
   done
   if signed_as ccd "$app/Contents/Helpers/codeconnect" 2>/dev/null; then echo "::error::S2 must-fail: codeconnect passed as ccd"; exit 1; fi

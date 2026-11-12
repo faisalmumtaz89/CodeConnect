@@ -1,6 +1,6 @@
 # Builds and packages CodeConnect for Linux: static musl `codeconnect` and
-# `ccd`, the static `cc-tmux`, and the agent host `cc-agent-host`
-# (Bun's glibc build), for x86_64 and aarch64, each on a native runner.
+# `ccd`, and the agent host `cc-agent-host` (Bun's glibc build), for x86_64
+# and aarch64, each on a native runner.
 #
 # **One place, two callers.** The release calls this with its pinned commit, and
 # CI calls it with every change's, so a pull request runs exactly the steps a
@@ -10,9 +10,8 @@
 # Each architecture gets the archives the macOS release ships, named for it:
 # `codeconnect-<version>-linux-<arch>.tar.gz` holds the two binaries and the
 # licence, named one by one so it has no directory member, and
-# `codeconnect-<version>-tmux-linux-<arch>.tar.gz` holds cc-tmux and its
-# notices, and `codeconnect-<version>-agent-host-linux-<arch>.tar.gz` the
-# agent host and its notices; each beside its `.sha256`.
+# `codeconnect-<version>-agent-host-linux-<arch>.tar.gz` the agent host and
+# its notices; each beside its `.sha256`.
 name: Linux build
 
 on:
@@ -85,24 +84,6 @@ jobs:
             fi
           done
 
-      # On Alpine, the musl system build.sh requires, pinned by digest for both
-      # architectures; the binary it writes runs on this runner as it is.
-      - name: Build tmux
-        run: |
-          mkdir -p "$RUNNER_TEMP/tmux"
-          docker run --rm -v "$PWD/mac/tmux:/build:ro" -v "$RUNNER_TEMP/tmux:/out" \
-            alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f \
-            sh -c 'apk add --no-cache bash build-base curl pkgconf linux-headers bison && bash /build/build.sh /out'
-
-      - name: Check the tmux is the one codeconnect requires
-        run: |
-          expected="$("mac/target/${{ matrix.arch }}-unknown-linux-musl/release/codeconnect" --tmux-version)"
-          said="$("$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" -V)"
-          if [ -z "$expected" ] || [ "$said" != "$expected" ]; then
-            echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
-            exit 1
-          fi
-
       # On the runner itself: Bun's glibc build runs on the distributions
       # people use, and here it must start and start a child (check.sh).
       - name: Build the agent host
@@ -128,14 +109,9 @@ jobs:
           # The licence travels with the binaries because the licence says it
           # must: a binaries-only archive is a distribution without its notice.
           install -m 0644 "$GITHUB_WORKSPACE/LICENSE" "$dir/LICENSE"
-          install -m 0755 "$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" "$dir/cc-tmux"
-          install -m 0644 "$RUNNER_TEMP/tmux/THIRD_PARTY_NOTICES" "$dir/THIRD_PARTY_NOTICES"
           archive="codeconnect-$version-linux-${{ matrix.arch }}.tar.gz"
           tar -czf "$archive" "$dir/codeconnect" "$dir/ccd" "$dir/LICENSE"
           sha256sum "$archive" > "$archive.sha256"
-          tmux_archive="codeconnect-$version-tmux-linux-${{ matrix.arch }}.tar.gz"
-          tar -czf "$tmux_archive" "$dir/cc-tmux" "$dir/THIRD_PARTY_NOTICES"
-          sha256sum "$tmux_archive" > "$tmux_archive.sha256"
           install -m 0755 "$RUNNER_TEMP/agent-host/cc-agent-host-linux-${{ matrix.arch }}" "$dir/cc-agent-host"
           install -m 0644 "$RUNNER_TEMP/agent-host/AGENT_HOST_NOTICES" "$dir/AGENT_HOST_NOTICES"
           host_archive="codeconnect-$version-agent-host-linux-${{ matrix.arch }}.tar.gz"
@@ -155,7 +131,6 @@ jobs:
             fi
           }
           holds_exactly "$archive" "$dir/codeconnect" "$dir/ccd" "$dir/LICENSE"
-          holds_exactly "$tmux_archive" "$dir/cc-tmux" "$dir/THIRD_PARTY_NOTICES"
           holds_exactly "$host_archive" "$dir/cc-agent-host" "$dir/AGENT_HOST_NOTICES"
 
       - uses: actions/upload-artifact@v4

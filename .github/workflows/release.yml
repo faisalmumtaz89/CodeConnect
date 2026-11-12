@@ -8,7 +8,7 @@
 # A tag push builds, signs, notarizes and verifies a draft and stops.
 # Publishing requires a person to run the workflow with publishing enabled
 # *against a draft that already exists*: that run builds, signs and notarizes
-# nothing and reads no repository secret. It downloads the draft's twenty-seven
+# nothing and reads no repository secret. It downloads the draft's nineteen
 # assets, checks them with the same `release-verify.sh` the draft run used, and
 # publishes exactly those bytes, so what was tested is what people download.
 #
@@ -236,32 +236,6 @@ jobs:
             fi
           done
 
-      # Into the runner's temp directory, so the tree stays exactly the pinned
-      # commit. The script itself refuses a binary that reports anything but
-      # its bundle, links a library outside the system, or targets another
-      # macOS minimum.
-      - name: Build tmux
-        run: mac/tmux/build.sh "$RUNNER_TEMP/tmux"
-
-      # The tmux this slice's `codeconnect` will require, asked of that
-      # `codeconnect`: the one comparison that holds whatever SOURCES says.
-      - name: Check the tmux slice is the one codeconnect requires
-        run: |
-          expected="$("mac/target/${{ matrix.target }}/release/codeconnect" --tmux-version)"
-          said="$("$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" -V)"
-          if [ "$said" != "$expected" ]; then
-            echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
-            exit 1
-          fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tmux-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/tmux/cc-tmux-${{ matrix.arch }}
-            ${{ runner.temp }}/tmux/THIRD_PARTY_NOTICES
-          if-no-files-found: error
-
       - uses: actions/upload-artifact@v4
         with:
           name: slice-${{ matrix.arch }}
@@ -371,27 +345,10 @@ jobs:
           # The licence travels with the binaries because the licence says it
           # must: a binaries-only archive is a distribution without its notice.
           cp LICENSE "$DIR/LICENSE"
-          # tmux goes into the same directory so it is signed, notarized and
-          # verified with the others; it is packaged into an archive of its
-          # own, and the core archive names its members one by one.
-          lipo -create -output "$DIR/cc-tmux" \
-            slices/tmux-arm64/cc-tmux-arm64 slices/tmux-x86_64/cc-tmux-x86_64
-          chmod 0755 "$DIR/cc-tmux"
-          archs="$(lipo -archs "$DIR/cc-tmux")"
-          case "$archs" in
-            *arm64*x86_64*|*x86_64*arm64*) ;;
-            *) echo "::error::cc-tmux is not universal: $archs"; exit 1 ;;
-          esac
-          # Both builds read the same pinned sources, so their notices match;
-          # a difference means the two slices were not built from one bundle.
-          if ! cmp -s slices/tmux-arm64/THIRD_PARTY_NOTICES slices/tmux-x86_64/THIRD_PARTY_NOTICES; then
-            echo "::error::the two tmux slices carry different notices"
-            exit 1
-          fi
-          cp slices/tmux-arm64/THIRD_PARTY_NOTICES "$DIR/THIRD_PARTY_NOTICES"
-          # The agent host, from the slices its build jobs ran, the same way:
-          # signed, notarized and verified here with the others, packaged into
-          # an archive of its own.
+          # The agent host goes into the same directory, from the slices its
+          # build jobs ran, so it is signed, notarized and verified with the
+          # others; it is packaged into an archive of its own, and the core
+          # archive names its members one by one.
           lipo -create -output "$DIR/cc-agent-host" \
             slices/agent-host-arm64/cc-agent-host-darwin-arm64 \
             slices/agent-host-x86_64/cc-agent-host-darwin-x86_64
@@ -460,7 +417,7 @@ jobs:
             security find-identity -p codesigning || true
             exit 1
           fi
-          for binary in codeconnect ccd cc-tmux; do
+          for binary in codeconnect ccd; do
             codesign --force --options runtime --timestamp \
               --sign "$identity" "$DIR/$binary"
           done
@@ -524,7 +481,7 @@ jobs:
             and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
             and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
-          for binary in codeconnect ccd cc-tmux cc-agent-host; do
+          for binary in codeconnect ccd cc-agent-host; do
             path="$DIR/$binary"
             codesign --verify --strict --all-architectures -R="identifier \"$binary\" and $req" "$path"
             # Captured, then searched — not piped into `grep -q`. `grep -q`
@@ -554,12 +511,6 @@ jobs:
               exit 1
             fi
           done
-          expected="$("$DIR/codeconnect" --tmux-version)"
-          said="$("$DIR/cc-tmux" -V)"
-          if [ "$said" != "$expected" ]; then
-            echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
-            exit 1
-          fi
           # The agent host that ships, under its Developer ID signature: the
           # entitlements its slices ran with, in both halves, and the half this
           # runner can run still starts.
@@ -568,7 +519,7 @@ jobs:
 
       # The Mac app, built in every run beside the archives and promoted with
       # them: it carries exactly the binaries this job just signed, notarized
-      # and checked ($DIR, with cc-tmux's notices), so the app and the archives
+      # and checked ($DIR, with the agent host's notices), so the app and the archives
       # can never disagree. Its version is the tag's, for Sparkle to compare.
       # The Xcode is the one the app is built and tested with, pinned by path on
       # a preview image, so a missing one fails here instead of building with
@@ -683,20 +634,12 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$archive" \
             "$DIR/codeconnect" "$DIR/ccd" "$DIR/LICENSE"
           shasum -a 256 "$archive" > "$archive.sha256"
-          # tmux in an archive of its own: every released updater takes the
-          # core archive by its exact name and must keep finding exactly the
-          # three members it allows there.
-          tmux_archive="codeconnect-$VERSION-tmux-macos-universal.tar.gz"
-          COPYFILE_DISABLE=1 tar -czf "$tmux_archive" \
-            "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
-          shasum -a 256 "$tmux_archive" > "$tmux_archive.sha256"
           host_archive="codeconnect-$VERSION-agent-host-macos-universal.tar.gz"
           COPYFILE_DISABLE=1 tar -czf "$host_archive" \
             "$DIR/cc-agent-host" "$DIR/AGENT_HOST_NOTICES"
           shasum -a 256 "$host_archive" > "$host_archive.sha256"
           {
             echo "archive=$archive"
-            echo "tmux_archive=$tmux_archive"
             echo "host_archive=$host_archive"
           } >> "$GITHUB_OUTPUT"
 
@@ -717,7 +660,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.draft.outputs.id }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
-          TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
           HOST_ARCHIVE: ${{ steps.package.outputs.host_archive }}
           DMG: ${{ steps.app.outputs.dmg }}
         run: |
@@ -725,7 +667,7 @@ jobs:
           # earlier upload under the same name; that asset is deleted first,
           # because two assets cannot share a name and the bytes being
           # attached are the ones this run verified.
-          for file in "$ARCHIVE" "$ARCHIVE.sha256" "$TMUX_ARCHIVE" "$TMUX_ARCHIVE.sha256" \
+          for file in "$ARCHIVE" "$ARCHIVE.sha256" \
               "$HOST_ARCHIVE" "$HOST_ARCHIVE.sha256" "$DMG" "$DMG.sha256" appcast.xml; do
             existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --jq ".assets[] | select(.name == \"$file\") | .id")"
@@ -746,15 +688,12 @@ jobs:
           }
           archive_id="$(asset_id "$ARCHIVE")"
           checksum_id="$(asset_id "$ARCHIVE.sha256")"
-          tmux_archive_id="$(asset_id "$TMUX_ARCHIVE")"
-          tmux_checksum_id="$(asset_id "$TMUX_ARCHIVE.sha256")"
           host_archive_id="$(asset_id "$HOST_ARCHIVE")"
           host_checksum_id="$(asset_id "$HOST_ARCHIVE.sha256")"
           dmg_id="$(asset_id "$DMG")"
           dmg_checksum_id="$(asset_id "$DMG.sha256")"
           appcast_id="$(asset_id appcast.xml)"
           if [ -z "$archive_id" ] || [ -z "$checksum_id" ] \
-              || [ -z "$tmux_archive_id" ] || [ -z "$tmux_checksum_id" ] \
               || [ -z "$host_archive_id" ] || [ -z "$host_checksum_id" ] \
               || [ -z "$dmg_id" ] || [ -z "$dmg_checksum_id" ] || [ -z "$appcast_id" ]; then
             echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
@@ -782,8 +721,8 @@ jobs:
             fi
             linux_assets="$(jq -c --argjson id "$id" --arg name "$file" '. + [{id: $id, name: $name}]' <<<"$linux_assets")"
           done
-          if [ "$(jq 'length' <<<"$linux_assets")" != 18 ]; then
-            echo "::error::expected the 18 signed Linux files, attached $(jq 'length' <<<"$linux_assets")"
+          if [ "$(jq 'length' <<<"$linux_assets")" != 12 ]; then
+            echo "::error::expected the 12 signed Linux files, attached $(jq 'length' <<<"$linux_assets")"
             exit 1
           fi
 
@@ -866,8 +805,6 @@ jobs:
           RELEASE_ID: ${{ steps.draft.outputs.id }}
           ARCHIVE_ID: ${{ steps.assets.outputs.archive_id }}
           CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
-          TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
-          TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
           HOST_ARCHIVE_ID: ${{ steps.assets.outputs.host_archive_id }}
           HOST_CHECKSUM_ID: ${{ steps.assets.outputs.host_checksum_id }}
           DMG_ID: ${{ steps.assets.outputs.dmg_id }}
@@ -875,7 +812,6 @@ jobs:
           APPCAST_ID: ${{ steps.assets.outputs.appcast_id }}
           LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           ARCHIVE: ${{ steps.assets.outputs.archive }}
-          TMUX_ARCHIVE: ${{ steps.assets.outputs.tmux_archive }}
           HOST_ARCHIVE: ${{ steps.assets.outputs.host_archive }}
           DMG: ${{ steps.assets.outputs.dmg }}
           TAG: ${{ needs.pin.outputs.tag }}
@@ -884,7 +820,7 @@ jobs:
         run: |
           # Publication is a PATCH on the id this run adopted, made only after
           # re-reading what that id holds *now*: still a draft, still this
-          # tag, and exactly the twenty-seven assets the verification step downloaded —
+          # tag, and exactly the nineteen assets the verification step downloaded —
           # by id, name, and state, because an id survives a rename and the
           # updater selects by name — not whatever a concurrent writer left.
           state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
@@ -898,15 +834,12 @@ jobs:
           fi
           held="$(jq -r '[.assets[] | {id, name, state}] | sort_by(.id) | tojson' <<<"$state")"
           expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
-            --argjson taid "$TMUX_ARCHIVE_ID" --argjson tcid "$TMUX_CHECKSUM_ID" \
             --argjson haid "$HOST_ARCHIVE_ID" --argjson hcid "$HOST_CHECKSUM_ID" \
             --argjson did "$DMG_ID" --argjson dcid "$DMG_CHECKSUM_ID" --argjson iid "$APPCAST_ID" \
-            --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" --arg host "$HOST_ARCHIVE" --arg dmg "$DMG" \
+            --arg archive "$ARCHIVE" --arg host "$HOST_ARCHIVE" --arg dmg "$DMG" \
             --argjson linux "$LINUX_ASSETS" \
             '[{id: $aid, name: $archive, state: "uploaded"},
               {id: $cid, name: ($archive + ".sha256"), state: "uploaded"},
-              {id: $taid, name: $tmux, state: "uploaded"},
-              {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"},
               {id: $haid, name: $host, state: "uploaded"},
               {id: $hcid, name: ($host + ".sha256"), state: "uploaded"},
               {id: $did, name: $dmg, state: "uploaded"},

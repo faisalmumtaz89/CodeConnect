@@ -7,8 +7,8 @@ import os
 /// are copied again and the daemon reinstalled; sessions survive it (each run's agent host outlives the
 /// daemon). Their notices go beside them, as every release archive carries them (`Contents/Resources`).
 struct Installer {
-    static let binaries = ["ccd", "codeconnect", "cc-tmux", "cc-agent-host"]
-    static let notices = ["LICENSE", "THIRD_PARTY_NOTICES", "AGENT_HOST_NOTICES"]
+    static let binaries = ["ccd", "codeconnect", "cc-agent-host"]
+    static let notices = ["LICENSE", "AGENT_HOST_NOTICES"]
     /// A copy or a `daemon install` that failed, as the checklist says it. The system's own words go to the log.
     static let failed = "CodeConnect couldn't set up its background service. Choose Try Again."
     static let log = Logger(subsystem: "com.codeconnect.mac", category: "setup")

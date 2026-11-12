@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# A release's twenty-seven assets as a user receives them, checked the way the product and the platform will check
+# A release's nineteen assets as a user receives them, checked the way the product and the platform will check
 # them. release.yml's draft job runs it on the draft it has just filled, and its promote job on the draft it is about to
 # publish: one check, so a draft is promoted only after passing the same proof that made it.
 #
-#   release-verify.sh fetch <release id> <dir>   the release must hold exactly the twenty-seven expected assets, each
+#   release-verify.sh fetch <release id> <dir>   the release must hold exactly the nineteen expected assets, each
 #                                                uploaded; each is downloaded by id into <dir>, and the ids and names
 #                                                go to $GITHUB_OUTPUT for the Publish step
-#   release-verify.sh check <dir>                the twenty-seven files in <dir>, checked
+#   release-verify.sh check <dir>                the nineteen files in <dir>, checked
 #
 # Both take VERSION, SHA (the pinned commit) and GITHUB_REPOSITORY from the environment, `check` also OPENSSL
 # (OpenSSL 3 or later, for Ed25519 with -rawin). Every asset is bound to that commit, by what it carries or by what the pinned source says:
 # the Apple team and the Linux release key every installed updater enforces (mac/codeconnect/src/update_install.rs),
-# the Sparkle key the app is built with (macos/CodeConnect.xcodeproj), the tmux bundle (mac/tmux/SOURCES), the agent
-# host's entitlements (mac/agent-host/entitlements.plist) and the licence.
+# the Sparkle key the app is built with (macos/CodeConnect.xcodeproj), the agent host's entitlements
+# (mac/agent-host/entitlements.plist) and the licence.
 set -euo pipefail
 
 : "${VERSION:?}" "${SHA:?}" "${GITHUB_REPOSITORY:?}"
@@ -20,24 +20,23 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 source_file="$root/mac/codeconnect/src/update_install.rs"
 dir_name="codeconnect-$VERSION"
 archive="codeconnect-$VERSION-macos-universal.tar.gz"
-tmux_archive="codeconnect-$VERSION-tmux-macos-universal.tar.gz"
 host_archive="codeconnect-$VERSION-agent-host-macos-universal.tar.gz"
 dmg="CodeConnect-$VERSION.dmg"
 linux=()
 for arch in aarch64 x86_64; do
-  for kind in "" "tmux-" "agent-host-"; do
+  for kind in "" "agent-host-"; do
     a="codeconnect-$VERSION-${kind}linux-$arch.tar.gz"
     linux+=("$a" "$a.sha256" "$a.sha256.sig")
   done
 done
-assets="$(printf '%s\n' "$archive" "$archive.sha256" "$tmux_archive" "$tmux_archive.sha256" \
+assets="$(printf '%s\n' "$archive" "$archive.sha256" \
   "$host_archive" "$host_archive.sha256" "$dmg" "$dmg.sha256" appcast.xml "${linux[@]}" | sort)"
 
-# Exactly the twenty-seven names, each once: an extra or a missing asset is a release the updater or the Publish step
+# Exactly the nineteen names, each once: an extra or a missing asset is a release the updater or the Publish step
 # would treat differently from the one verified.
 same_names() {
   if [ "$1" != "$assets" ]; then
-    echo "::error::$2 does not hold exactly the twenty-seven release assets"
+    echo "::error::$2 does not hold exactly the nineteen release assets"
     diff <(printf '%s\n' "$assets") <(printf '%s\n' "$1") || true
     exit 1
   fi
@@ -59,13 +58,10 @@ fetch() {
   id_of() { jq -r --arg name "$1" '.[] | select(.name == $name) | .id' <<<"$listing"; }
   {
     echo "archive=$archive"
-    echo "tmux_archive=$tmux_archive"
     echo "host_archive=$host_archive"
     echo "dmg=$dmg"
     echo "archive_id=$(id_of "$archive")"
     echo "checksum_id=$(id_of "$archive.sha256")"
-    echo "tmux_archive_id=$(id_of "$tmux_archive")"
-    echo "tmux_checksum_id=$(id_of "$tmux_archive.sha256")"
     echo "host_archive_id=$(id_of "$host_archive")"
     echo "host_checksum_id=$(id_of "$host_archive.sha256")"
     echo "dmg_id=$(id_of "$dmg")"
@@ -123,21 +119,6 @@ from_source() {
   fi
 }
 
-# A tmux archive holds the bundle the pinned mac/tmux/SOURCES names — what `cc-tmux -V` reports and `codeconnect`
-# requires, bumped whenever a source changes: the notices say they are that bundle's (mac/tmux/build.sh writes the
-# line), and the binary carries it, in every slice.
-of_the_bundle() {
-  local notices="$1" binary="$2"
-  if [ "$(head -1 "$notices")" != "CodeConnect's tmux ($bundle) is built from the following sources." ]; then
-    echo "::error::$notices does not name the bundle $bundle"
-    exit 1
-  fi
-  if ! LC_ALL=C grep -a -q -F "$bundle" "$binary"; then
-    echo "::error::$binary is not the tmux bundle $bundle"
-    exit 1
-  fi
-}
-
 # One Mac binary that ships, in an archive or inside the app, held to what `codeconnect update` enforces: signed as
 # itself by the pinned team's Developer ID, and carrying both architectures a release ships (update_install.rs,
 # is_universal) — a slice extracted alone keeps a valid signature, and every updater refuses it. Then a secure
@@ -158,7 +139,7 @@ shipped_binary() {
     echo "::error::$path has no secure timestamp"
     exit 1
   fi
-  case "$binary" in cc-tmux | cc-agent-host) return 0 ;; esac
+  [ "$binary" = cc-agent-host ] && return 0
   expected="$binary $VERSION (${SHA:0:12})"
   said="$("$path" --version)"
   if [ "$said" != "$expected" ]; then
@@ -172,7 +153,7 @@ shipped_binary() {
 }
 
 check() {
-  local dir="$1" team key sparkle_key bundle ceiling public verdict expected said app value slice signature pub_date file
+  local dir="$1" team key sparkle_key ceiling public verdict expected said app value slice signature pub_date file
   cd "$dir"
   same_names "$(find . -mindepth 1 -maxdepth 1 | sed 's|^\./||' | sort)" "$dir"
   # Unpacked beside, never into, the downloaded files; global, so the trap still names it after `check` returns.
@@ -180,11 +161,10 @@ check() {
   trap 'hdiutil detach -quiet "$work/dmg" 2>/dev/null || true; rm -rf "$work"' EXIT
   team="$(awk -F'"' '/^pub const TEAM_ID/{print $2; exit}' "$source_file")"
   key="$(sed -n '/^pub const RELEASE_KEY/,/^];/p' "$source_file" | grep -o '0x[0-9a-f][0-9a-f]' | sed 's/^0x//' | tr -d '\n')"
-  bundle="$(awk '$1 == "BUNDLE" {print $2; exit}' "$root/mac/tmux/SOURCES")"
   ceiling="$(sed -n 's/^pub const MAX_ARCHIVE_BYTES: u64 = \([0-9 *]*\);$/\1/p' \
     "$root/mac/codeconnect/src/update_release.rs")"
-  if [ -z "$team" ] || [ "${#key}" != 64 ] || [ -z "$bundle" ] || [ -z "$ceiling" ]; then
-    echo "::error::the pinned source names no TEAM_ID, no 32-byte RELEASE_KEY, no tmux BUNDLE, or no MAX_ARCHIVE_BYTES"
+  if [ -z "$team" ] || [ "${#key}" != 64 ] || [ -z "$ceiling" ]; then
+    echo "::error::the pinned source names no TEAM_ID, no 32-byte RELEASE_KEY, or no MAX_ARCHIVE_BYTES"
     exit 1
   fi
 
@@ -194,7 +174,7 @@ check() {
   # add to it unseen.
   ceiling=$(( ceiling ))
   if [ "$ceiling" -gt 104857600 ]; then ceiling=104857600; fi
-  for file in "$archive" "$tmux_archive" "$host_archive" "${linux[@]}"; do
+  for file in "$archive" "$host_archive" "${linux[@]}"; do
     case "$file" in *.tar.gz) ;; *) continue ;; esac
     if [ "$(stat -f %z "$file")" -gt "$ceiling" ]; then
       echo "::error::$file is $(stat -f %z "$file") bytes, past the $ceiling-byte ceiling its downloaders enforce"
@@ -204,14 +184,11 @@ check() {
 
   # macOS: the archives match their checksums and hold exactly their members.
   own_checksum "$archive"
-  own_checksum "$tmux_archive"
   own_checksum "$host_archive"
   holds_exactly "$archive" "$dir_name/codeconnect" "$dir_name/ccd" "$dir_name/LICENSE"
-  holds_exactly "$tmux_archive" "$dir_name/cc-tmux" "$dir_name/THIRD_PARTY_NOTICES"
   holds_exactly "$host_archive" "$dir_name/cc-agent-host" "$dir_name/AGENT_HOST_NOTICES"
   mkdir "$work/mac"
   tar -xzf "$archive" -C "$work/mac"
-  tar -xzf "$tmux_archive" -C "$work/mac"
   tar -xzf "$host_archive" -C "$work/mac"
 
   # The agent host, as far as it can be checked without asking Apple: the Mac executable carries exactly the
@@ -242,7 +219,7 @@ check() {
     and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
     and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
     and certificate leaf[subject.OU] = \"$team\""
-  for binary in codeconnect ccd cc-tmux cc-agent-host; do
+  for binary in codeconnect ccd cc-agent-host; do
     path="$work/mac/$dir_name/$binary"
     shipped_binary "$binary" "$path"
     # Notarized, as Apple's service confirms online: nothing can be stapled to a bare executable.
@@ -252,43 +229,25 @@ check() {
       exit 1
     fi
   done
-  # The pair a user receives agrees: the downloaded tmux is the one the downloaded codeconnect requires. Asked as
-  # assignments, so a binary that does not run fails rather than answering with the same empty string as its partner.
-  expected="$("$work/mac/$dir_name/codeconnect" --tmux-version)"
-  said="$("$work/mac/$dir_name/cc-tmux" -V)"
-  if [ -z "$expected" ] || [ "$said" != "$expected" ]; then
-    echo "::error::the released cc-tmux reports '$said', the released codeconnect requires '$expected'"
-    exit 1
-  fi
   from_source "$work/mac/$dir_name/LICENSE" LICENSE
-  for slice in $(lipo -archs "$work/mac/$dir_name/cc-tmux"); do
-    lipo -thin "$slice" -output "$work/thin.cc-tmux.$slice" "$work/mac/$dir_name/cc-tmux"
-    of_the_bundle "$work/mac/$dir_name/THIRD_PARTY_NOTICES" "$work/thin.cc-tmux.$slice"
-  done
 
   # Linux: each checksum is signed by the key RELEASE_KEY pins — the proof the updater makes — each archive matches
   # its checksum and holds exactly what the updater allows, and each binary carries the pinned commit.
   for arch in aarch64 x86_64; do
     core="codeconnect-$VERSION-linux-$arch.tar.gz"
-    tmux="codeconnect-$VERSION-tmux-linux-$arch.tar.gz"
-    for archive_name in "$core" "$tmux"; do
-      if ! "$OPENSSL" pkeyutl -verify -rawin -pubin -inkey "$public" \
-          -in "$archive_name.sha256" -sigfile "$archive_name.sha256.sig" > /dev/null; then
-        echo "::error::$archive_name.sha256.sig does not verify against RELEASE_KEY"
-        exit 1
-      fi
-      own_checksum "$archive_name"
-    done
+    if ! "$OPENSSL" pkeyutl -verify -rawin -pubin -inkey "$public" \
+        -in "$core.sha256" -sigfile "$core.sha256.sig" > /dev/null; then
+      echo "::error::$core.sha256.sig does not verify against RELEASE_KEY"
+      exit 1
+    fi
+    own_checksum "$core"
     holds_exactly "$core" "$dir_name/codeconnect" "$dir_name/ccd" "$dir_name/LICENSE"
-    holds_exactly "$tmux" "$dir_name/cc-tmux" "$dir_name/THIRD_PARTY_NOTICES"
     mkdir "$work/linux-$arch"
     tar -xzf "$core" -C "$work/linux-$arch"
-    tar -xzf "$tmux" -C "$work/linux-$arch"
     for binary in codeconnect ccd; do
       names_the_commit "$binary (linux $arch)" "$work/linux-$arch/$dir_name/$binary"
     done
     from_source "$work/linux-$arch/$dir_name/LICENSE" LICENSE
-    of_the_bundle "$work/linux-$arch/$dir_name/THIRD_PARTY_NOTICES" "$work/linux-$arch/$dir_name/cc-tmux"
   done
 
   # The Mac app a user receives, from /mac or from Sparkle: the .dmg, its checksum and the update feed, checked as
@@ -331,21 +290,16 @@ check() {
     exit 1
   fi
   codesign --verify --strict -R="$req" "$app"
-  for binary in codeconnect ccd cc-tmux cc-agent-host; do
+  for binary in codeconnect ccd cc-agent-host; do
     shipped_binary "$binary" "$app/Contents/Helpers/$binary"
   done
-  # The Mac tmux and agent host archives' notices are the ones sealed in the signed app, the same build's, byte for
-  # byte; the tmux notices' first line alone was checked above.
-  if ! cmp -s "$work/mac/$dir_name/THIRD_PARTY_NOTICES" "$app/Contents/Resources/THIRD_PARTY_NOTICES"; then
-    echo "::error::the Mac tmux archive's THIRD_PARTY_NOTICES are not the app's"
-    exit 1
-  fi
+  # The Mac agent host archive's notices are the ones sealed in the signed app, the same build's, byte for byte.
   if ! cmp -s "$work/mac/$dir_name/AGENT_HOST_NOTICES" "$app/Contents/Resources/AGENT_HOST_NOTICES"; then
     echo "::error::the Mac agent host archive's AGENT_HOST_NOTICES are not the app's"
     exit 1
   fi
   hdiutil detach -quiet "$work/dmg"
-  echo "the twenty-seven assets of $VERSION ($SHA) verified"
+  echo "the nineteen assets of $VERSION ($SHA) verified"
 }
 
 case "${1:-}" in

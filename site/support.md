@@ -82,7 +82,7 @@ Every key is described in the [configuration reference](https://github.com/faisa
 Claude Code and Codex. For Claude Code: the fleet, approvals, questions and diffs. For Codex: the fleet, approvals, stopping a turn and saying something.
 
 **What exactly is installed on my Mac?**
-CodeConnect's binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, and CodeConnect's own tmux (`cc-tmux`) beside them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
+CodeConnect's binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
 
 ## Contact
 

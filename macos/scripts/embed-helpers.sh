@@ -2,17 +2,17 @@
 # Xcode build phase: copies CodeConnect's own binaries into the app (Contents/Helpers) and signs each with
 # the app's identity, so the app can install them (Installer.swift). They come from $CODECONNECT_HELPERS,
 # by default macos/Helpers, which is not in git: ccd and codeconnect from `cargo build --release`
-# in mac/, cc-tmux and its THIRD_PARTY_NOTICES from mac/tmux/build.sh, cc-agent-host and its AGENT_HOST_NOTICES
-# from mac/agent-host/build.sh. Their notices travel with them, as in every release archive: the repository's
-# LICENSE and the two notices files go into Contents/Resources, and the installer puts them beside the binaries.
+# in mac/, cc-agent-host and its AGENT_HOST_NOTICES from mac/agent-host/build.sh. Their notices travel with them,
+# as in every release archive: the repository's LICENSE and AGENT_HOST_NOTICES go into Contents/Resources, and the
+# installer puts both beside the binaries.
 # A Release build without all of them fails; a Debug build without them carries none, and the app's checklist
 # says so.
 set -eu
 src="${CODECONNECT_HELPERS:-$SRCROOT/Helpers}"
 dst="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
 res="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
-names="ccd codeconnect cc-tmux cc-agent-host"
-notices="THIRD_PARTY_NOTICES AGENT_HOST_NOTICES"
+names="ccd codeconnect cc-agent-host"
+notices="AGENT_HOST_NOTICES"
 missing=""
 for name in $names; do
     [ -x "$src/$name" ] || missing="$missing $name"
@@ -27,7 +27,7 @@ if [ -n "$missing" ]; then
     fi
     echo "warning: $src lacks:$missing; this build carries no background service"
     rm -rf "$dst"
-    rm -f "$res/LICENSE" "$res/THIRD_PARTY_NOTICES" "$res/AGENT_HOST_NOTICES"
+    rm -f "$res/LICENSE" "$res/AGENT_HOST_NOTICES"
     exit 0
 fi
 mkdir -p "$dst" "$res"

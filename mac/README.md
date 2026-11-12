@@ -1106,7 +1106,7 @@ same environment. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
 with its `PATH` (`launchctl setenv`'s, or launchd's default) and `XPC_SERVICE_NAME=0`,
 `XPC_FLAGS=0x0`; on Linux the systemd user manager's, read whole. Either way the
-daemon's own location (`CODECONNECT_HOME`, `CODECONNECT_TMUX`, `TMUX_TMPDIR`)
+daemon's own location (`CODECONNECT_HOME`, `TMUX_TMPDIR`)
 goes with it and `CODECONNECT_LOG` and `CODECONNECT_SERVICE` do not. A daemon
 started by hand has the session's environment already and uses its own; so
 does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
