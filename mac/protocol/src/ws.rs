@@ -465,6 +465,12 @@ pub enum ClientMessage {
     /// agent as `--model=<value>`. Absent, or Claude Code's own `default`, the agent
     /// is given no `--model` and starts with the model its settings name. A daemon
     /// below 33 lists no models, so a client sends it only for one listed.
+    ///
+    /// `trust` is the person's answer to "trust this folder?". The first start in a
+    /// folder this computer keeps no answer for, sent without one, is answered
+    /// [`StartSessionResult::NeedsTrust`] and runs nothing; the app asks, then sends
+    /// a new start, with a new `request_id`, carrying the answer. An answer given is
+    /// kept for the folder, replacing any earlier one.
     StartSession {
         request_id: String,
         path: String,
@@ -475,6 +481,28 @@ pub enum ClientMessage {
         worktree: Option<StartWorktree>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trust: Option<crate::host::Trust>,
+    },
+    /// **Every folder's answer to "trust this folder?"**, answered with one
+    /// [`ServerMessage::FolderTrust`] carrying the same `request_id`.
+    ListFolderTrust {
+        request_id: String,
+    },
+    /// **Changes one folder's answer**, or keeps it if there was none. `path` is
+    /// as [`ServerMessage::FolderTrust`] or [`StartSessionResult::NeedsTrust`] gave
+    /// it. Answered with one [`ServerMessage::FolderTrust`].
+    SetFolderTrust {
+        request_id: String,
+        path: String,
+        trust: crate::host::Trust,
+    },
+    /// **Forgets one folder's answer**, so the next start there asks again. `path`
+    /// is as [`ServerMessage::FolderTrust`] gave it, so a folder that no longer
+    /// exists can still be forgotten. Answered with one [`ServerMessage::FolderTrust`].
+    ForgetFolderTrust {
+        request_id: String,
+        path: String,
     },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
@@ -705,6 +733,13 @@ pub enum ServerMessage {
     StartSessionResult {
         request_id: String,
         result: StartSessionResult,
+    },
+    /// The answer to [`ClientMessage::ListFolderTrust`], [`ClientMessage::SetFolderTrust`]
+    /// and [`ClientMessage::ForgetFolderTrust`]: every answer this computer keeps,
+    /// newest first, once the request's change is made.
+    FolderTrust {
+        request_id: String,
+        folders: Vec<FolderAnswer>,
     },
     /// The answer to [`ClientMessage::GetProjectGit`]; `git` is absent when
     /// `path` is not in a git repository.
@@ -943,6 +978,19 @@ pub enum StartSessionResult {
         reason: StartFailure,
         detail: String,
     },
+    /// Nothing ran: this computer keeps no answer to "trust this folder?" for
+    /// `path`, the folder's real path, and the start gave none.
+    NeedsTrust { path: String },
+}
+
+/// One folder's answer to "trust this folder?", kept by the computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderAnswer {
+    /// The folder's real path, symlinks resolved.
+    pub path: String,
+    pub trust: crate::host::Trust,
+    /// When it was answered, RFC 3339.
+    pub answered_at: String,
 }
 
 /// Why a start failed.
@@ -3128,10 +3176,11 @@ mod tests {
                 prompt: Some("-fix \"it\"; $(x)\nnow;".into()),
                 worktree: None,
                 model: None,
+                trust: Some(crate::host::Trust::NotTrusted),
             },
             serde_json::json!({"type": "start_session", "request_id": "r1",
                 "path": "/Users/me/src/app", "agent": "claude",
-                "prompt": "-fix \"it\"; $(x)\nnow;"}),
+                "prompt": "-fix \"it\"; $(x)\nnow;", "trust": "not_trusted"}),
         );
         round_trip_client(
             ClientMessage::StartSession {
@@ -3141,9 +3190,56 @@ mod tests {
                 prompt: None,
                 worktree: None,
                 model: None,
+                trust: None,
             },
             serde_json::json!({"type": "start_session", "request_id": "r2",
                 "path": "/srv/x", "agent": "codex"}),
+        );
+        round_trip_client(
+            ClientMessage::ListFolderTrust {
+                request_id: "t1".into(),
+            },
+            serde_json::json!({"type": "list_folder_trust", "request_id": "t1"}),
+        );
+        round_trip_client(
+            ClientMessage::SetFolderTrust {
+                request_id: "t2".into(),
+                path: "/Users/me/src/app".into(),
+                trust: crate::host::Trust::Trusted,
+            },
+            serde_json::json!({"type": "set_folder_trust", "request_id": "t2",
+                "path": "/Users/me/src/app", "trust": "trusted"}),
+        );
+        round_trip_client(
+            ClientMessage::ForgetFolderTrust {
+                request_id: "t3".into(),
+                path: "/Users/me/src/gone".into(),
+            },
+            serde_json::json!({"type": "forget_folder_trust", "request_id": "t3",
+                "path": "/Users/me/src/gone"}),
+        );
+        round_trip_server(
+            ServerMessage::StartSessionResult {
+                request_id: "r1".into(),
+                result: StartSessionResult::NeedsTrust {
+                    path: "/Users/me/src/app".into(),
+                },
+            },
+            serde_json::json!({"type": "start_session_result", "request_id": "r1",
+                "result": {"status": "needs_trust", "path": "/Users/me/src/app"}}),
+        );
+        round_trip_server(
+            ServerMessage::FolderTrust {
+                request_id: "t1".into(),
+                folders: vec![FolderAnswer {
+                    path: "/Users/me/src/app".into(),
+                    trust: crate::host::Trust::NotTrusted,
+                    answered_at: "2026-11-12T20:00:00Z".into(),
+                }],
+            },
+            serde_json::json!({"type": "folder_trust", "request_id": "t1",
+                "folders": [{"path": "/Users/me/src/app", "trust": "not_trusted",
+                    "answered_at": "2026-11-12T20:00:00Z"}]}),
         );
 
         round_trip_server(
@@ -3250,6 +3346,7 @@ mod tests {
                 prompt: None,
                 worktree: None,
                 model: Some("claude-fable-5-1[1m]".into()),
+                trust: None,
             },
             serde_json::json!({"type": "start_session", "request_id": "r3",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -3346,6 +3443,7 @@ mod tests {
                     prompt: None,
                     worktree: Some(worktree),
                     model: None,
+                    trust: None,
                 },
                 serde_json::json!({"type": "start_session", "request_id": "r1",
                     "path": "/Users/me/src/app", "agent": "claude", "worktree": expected}),

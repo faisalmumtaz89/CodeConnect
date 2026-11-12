@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use protocol::agent::AgentKind;
+use protocol::host::Trust;
 use protocol::launch_result::{LaunchResult, ENV_LAUNCH_RESULT};
 use protocol::ws::{
     AgentAvailability, AgentModel, ClientMessage, CreateFolderResult, FolderContents, Project,
@@ -55,10 +56,25 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 
 /// The answer to a `list_projects`, `get_project_git`, `list_folder`,
-/// `create_folder` or `start_session`.
+/// `create_folder`, `start_session` or one of the folder-trust frames.
 pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     match message {
         ClientMessage::ListProjects => list_projects(daemon).await,
+        ClientMessage::ListFolderTrust { request_id } => folder_trust(daemon, request_id).await,
+        ClientMessage::SetFolderTrust {
+            request_id,
+            path,
+            trust,
+        } => match daemon.db.set_folder_trust(path, trust).await {
+            Ok(()) => folder_trust(daemon, request_id).await,
+            Err(err) => folder_trust_unavailable("keep the folder's answer", err),
+        },
+        ClientMessage::ForgetFolderTrust { request_id, path } => {
+            match daemon.db.forget_folder_trust(path).await {
+                Ok(_) => folder_trust(daemon, request_id).await,
+                Err(err) => folder_trust_unavailable("forget the folder's answer", err),
+            }
+        }
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
         ClientMessage::ListFolder {
@@ -104,6 +120,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             prompt,
             worktree,
             model,
+            trust,
         } => {
             // A run starts with a first message, so a start without one is
             // refused before anything is looked at or launched.
@@ -130,6 +147,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 prompt.as_deref(),
                 worktree.as_ref(),
                 model.as_deref(),
+                trust,
             );
             ServerMessage::StartSessionResult {
                 result: daemon.starts.once(&request_id, launch).await,
@@ -138,8 +156,27 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
         }
         _ => unreachable!(
             "handle_client passes only list_projects, get_project_git, list_folder, \
-             create_folder and start_session here"
+             create_folder, start_session and the folder-trust frames here"
         ),
+    }
+}
+
+/// Every folder's answer to "trust this folder?", as a `folder_trust` reply.
+async fn folder_trust(daemon: &Arc<Daemon>, request_id: String) -> ServerMessage {
+    match daemon.db.folder_trusts().await {
+        Ok(folders) => ServerMessage::FolderTrust {
+            request_id,
+            folders,
+        },
+        Err(err) => folder_trust_unavailable("read the folders' answers", err),
+    }
+}
+
+fn folder_trust_unavailable(what: &str, err: anyhow::Error) -> ServerMessage {
+    crate::log_error!("could not {what}: {err:#}");
+    ServerMessage::Error {
+        code: "folder_trust_unavailable".into(),
+        message: format!("could not {what}: {err}"),
     }
 }
 
@@ -262,6 +299,7 @@ pub(crate) async fn launch(
     prompt: Option<&str>,
     worktree: Option<&StartWorktree>,
     model: Option<&str>,
+    trust: Option<Trust>,
 ) -> StartSessionResult {
     if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
         return failed(
@@ -293,6 +331,32 @@ pub(crate) async fn launch(
             return failed(
                 StartFailure::FolderMissing,
                 format!("{path} no longer exists"),
+            )
+        }
+    }
+    // The folder question, by the folder's real path: an answer given is kept,
+    // and with none given or kept nothing runs and the app asks.
+    let folder = match std::fs::canonicalize(path) {
+        Ok(folder) => folder.to_string_lossy().into_owned(),
+        Err(err) => return failed(StartFailure::LaunchFailed, format!("{path}: {err}")),
+    };
+    let answered = match trust {
+        Some(trust) => db
+            .set_folder_trust(folder.clone(), trust)
+            .await
+            .map(|()| true),
+        None => db
+            .folder_trust(folder.clone())
+            .await
+            .map(|kept| kept.is_some()),
+    };
+    match answered {
+        Ok(true) => {}
+        Ok(false) => return StartSessionResult::NeedsTrust { path: folder },
+        Err(err) => {
+            return failed(
+                StartFailure::LaunchFailed,
+                format!("the folder's answer could not be read or kept: {err}"),
             )
         }
     }
@@ -1217,6 +1281,25 @@ mod tests {
                 prompt,
                 None,
                 None,
+                Some(protocol::host::Trust::Trusted),
+            )
+            .await
+        }
+
+        /// A start in `path` with a first message, giving `trust` as the folder's
+        /// answer, or none.
+        async fn start_answering(&self, path: &str, trust: Option<Trust>) -> StartSessionResult {
+            launch(
+                &self.db,
+                None,
+                Ok(self.launcher.clone()),
+                &self.root,
+                path,
+                &AgentKind::Claude,
+                Some("fix the tests"),
+                None,
+                None,
+                trust,
             )
             .await
         }
@@ -1247,6 +1330,7 @@ mod tests {
                 prompt,
                 Some(&worktree),
                 None,
+                Some(protocol::host::Trust::Trusted),
             )
             .await
         }
@@ -1451,6 +1535,109 @@ mod tests {
         assert!(matches!(first, StartSessionResult::Started { .. }));
         let runs = std::fs::read_to_string(rig.root.join("codeconnect.runs")).unwrap();
         assert_eq!(runs.lines().count(), 1, "{runs}");
+    }
+
+    /// A stub launcher that counts its runs, then starts.
+    fn counting(tag: &str) -> Rig {
+        Rig::new(tag, &format!("echo run >> \"$0.runs\"; {STARTED}"))
+    }
+
+    /// **A folder is asked about once.** The first start there, with no answer,
+    /// is answered `needs_trust` with the folder's real path, and runs nothing. A
+    /// start that answers runs and keeps the answer; a later one without an answer
+    /// runs on it. Forgetting it asks again.
+    #[tokio::test]
+    async fn a_folder_is_asked_about_once_and_again_once_forgotten() {
+        let rig = counting("trust");
+        let path = rig.project();
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let asked = StartSessionResult::NeedsTrust { path: real.clone() };
+        assert_eq!(rig.start_answering(&path, None).await, asked);
+        assert_eq!(rig.launcher_runs(), 0, "an unanswered start runs nothing");
+
+        let answered = rig.start_answering(&path, Some(Trust::NotTrusted)).await;
+        assert!(
+            matches!(answered, StartSessionResult::Started { .. }),
+            "{answered:?}"
+        );
+        assert_eq!(
+            rig.db.folder_trust(real.clone()).await.unwrap(),
+            Some(Trust::NotTrusted)
+        );
+        let later = rig.start_answering(&path, None).await;
+        assert!(
+            matches!(later, StartSessionResult::Started { .. }),
+            "{later:?}"
+        );
+        assert_eq!(rig.launcher_runs(), 2);
+
+        assert!(rig.db.forget_folder_trust(real.clone()).await.unwrap());
+        assert_eq!(rig.start_answering(&path, None).await, asked);
+        assert_eq!(rig.launcher_runs(), 2, "asked again, and nothing ran");
+    }
+
+    /// **A folder reached through a symlink is the same folder**: the answer given
+    /// through the link is kept under the real path and found from it.
+    #[tokio::test]
+    async fn a_folder_reached_through_a_symlink_has_its_one_answer() {
+        let rig = counting("trust-link");
+        let link = rig.root.join("link to my app");
+        std::os::unix::fs::symlink(&rig.project, &link).unwrap();
+        let through_link = rig
+            .start_answering(&link.display().to_string(), Some(Trust::Trusted))
+            .await;
+        assert!(
+            matches!(through_link, StartSessionResult::Started { .. }),
+            "{through_link:?}"
+        );
+        let direct = rig.start_answering(&rig.project(), None).await;
+        assert!(
+            matches!(direct, StartSessionResult::Started { .. }),
+            "{direct:?}"
+        );
+        let kept = rig.db.folder_trusts().await.unwrap();
+        let real = std::fs::canonicalize(&rig.project).unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].path, real.display().to_string());
+        assert_eq!(kept[0].trust, Trust::Trusted);
+    }
+
+    /// **The answered start is a request of its own.** The asking request keeps its
+    /// `needs_trust`; the answering one starts once, and asked again starts nothing
+    /// new.
+    #[tokio::test]
+    async fn the_answered_start_is_a_request_of_its_own() {
+        let rig = counting("trust-ids");
+        let starts = Starts::default();
+        let path = rig.project();
+        let asked = starts.once("r1", rig.start_answering(&path, None)).await;
+        assert!(
+            matches!(asked, StartSessionResult::NeedsTrust { .. }),
+            "{asked:?}"
+        );
+        let answered = starts
+            .once("r2", rig.start_answering(&path, Some(Trust::Trusted)))
+            .await;
+        assert!(
+            matches!(answered, StartSessionResult::Started { .. }),
+            "{answered:?}"
+        );
+        assert_eq!(
+            starts
+                .once("r1", rig.start_answering(&path, Some(Trust::Trusted)))
+                .await,
+            asked
+        );
+        assert_eq!(
+            starts
+                .once("r2", rig.start_answering(&path, Some(Trust::Trusted)))
+                .await,
+            answered
+        );
+        assert_eq!(rig.launcher_runs(), 1);
     }
 
     /// **Each failure says which one it is**, and none of them runs a launcher
@@ -2027,6 +2214,7 @@ mod tests {
                     Some("x; $(touch PWNED) \"q\""),
                     None,
                     None,
+                    Some(protocol::host::Trust::Trusted),
                 )
                 .await;
                 assert_eq!(
@@ -2546,6 +2734,7 @@ esac"#;
             Some("hi"),
             None,
             Some(&model),
+            Some(protocol::host::Trust::Trusted),
         )
         .await;
         assert!(
@@ -2574,6 +2763,7 @@ esac"#;
             None,
             None,
             Some("default"),
+            Some(protocol::host::Trust::Trusted),
         )
         .await;
         assert_eq!(rig.launcher_argv(), ["claude", "--no-attach"]);
@@ -2592,6 +2782,109 @@ esac"#;
              Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
              regenerate_the_minor_33_wire_fixture"
         );
+    }
+
+    /// **The folder question on the wire, emitted by this build**: a start without
+    /// an answer and the `needs_trust` it gets, the start that answers, and the
+    /// three folder-trust frames with the list they get. It is the contract for
+    /// the apps' readers and writers of these frames.
+    #[tokio::test]
+    async fn the_folder_trust_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/wire/folder-trust-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_folder_trust_wire().await,
+            committed,
+            "the committed folder-trust wire contract no longer matches what this build \
+             emits. Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_folder_trust_wire_fixture"
+        );
+    }
+
+    /// Rewrite `fixtures/wire/folder-trust-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_folder_trust_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_folder_trust_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/wire/folder-trust-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// From a start in a fresh folder, answered, then listed from the store. The
+    /// folder's path, as asked and as resolved, and the answer's time are replaced
+    /// by fixed values, so the fixture is the same on every machine.
+    async fn derived_folder_trust_wire() -> serde_json::Value {
+        const FOLDER: &str = "/tmp/ccd-folder-trust/my app";
+        let rig = counting("trust-wire");
+        let path = rig.project();
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let start = |request_id: &str, trust: Option<Trust>| {
+            serde_json::to_value(ClientMessage::StartSession {
+                request_id: request_id.into(),
+                path: path.clone(),
+                agent: AgentKind::Claude,
+                prompt: Some("fix the tests".into()),
+                worktree: None,
+                model: None,
+                trust,
+            })
+            .unwrap()
+        };
+        let needs_trust = ServerMessage::StartSessionResult {
+            request_id: "r1".into(),
+            result: rig.start_answering(&path, None).await,
+        };
+        rig.start_answering(&path, Some(Trust::NotTrusted)).await;
+        let folders = rig
+            .db
+            .folder_trusts()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|answer| protocol::ws::FolderAnswer {
+                answered_at: "2026-11-12T20:00:00Z".into(),
+                ..answer
+            })
+            .collect();
+        let frame = |message: ClientMessage| serde_json::to_value(message).unwrap();
+        let wire = serde_json::json!({
+            "start_session_request": start("r1", None),
+            "start_session_needs_trust": serde_json::to_value(needs_trust).unwrap(),
+            "start_session_answered_request": start("r2", Some(Trust::NotTrusted)),
+            "list_folder_trust_request": frame(ClientMessage::ListFolderTrust {
+                request_id: "t1".into(),
+            }),
+            "set_folder_trust_request": frame(ClientMessage::SetFolderTrust {
+                request_id: "t2".into(),
+                path: real.clone(),
+                trust: Trust::Trusted,
+            }),
+            "forget_folder_trust_request": frame(ClientMessage::ForgetFolderTrust {
+                request_id: "t3".into(),
+                path: real.clone(),
+            }),
+            "folder_trust": serde_json::to_value(ServerMessage::FolderTrust {
+                request_id: "t1".into(),
+                folders,
+            })
+            .unwrap(),
+        });
+        serde_json::from_str(
+            &wire
+                .to_string()
+                .replace(&real, FOLDER)
+                .replace(&path, FOLDER),
+        )
+        .unwrap()
     }
 
     /// Rewrite `fixtures/claude/minor-33-wire.json` with what this build emits.
@@ -2647,6 +2940,7 @@ esac"#;
                 prompt: Some("fix the tests".into()),
                 worktree: None,
                 model: Some("haiku".into()),
+                trust: None,
             })
             .unwrap(),
         })

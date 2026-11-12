@@ -1065,10 +1065,20 @@ its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
 agent can start (`codeconnect <agent> --version` through the user's login
 shell) as last checked: the first list after the daemon starts waits for the
-check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt}` takes a listed
+check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt, trust?}` takes a listed
 folder (from `>= 30`, any absolute folder) and a first message, and a start
 without one (`prompt` absent, empty or only white space) is refused with
-`launch_failed` before anything is checked or run. It runs `codeconnect <agent> --no-attach -- <prompt>` there through
+`launch_failed` before anything is checked or run. `trust` is the person's
+answer to "trust this folder?", `trusted` or `not_trusted`, kept for the
+folder by its real path (symlinks resolved) in the store's own `folder_trust`
+table, so removing a run keeps it. The first start in a folder with no answer
+kept, sent without one, is answered `needs_trust {path}` with that real path,
+and nothing runs: the app asks, then sends a new start, with a new
+`request_id`, carrying the answer. `list_folder_trust`, `set_folder_trust {path,
+trust}` and `forget_folder_trust {path}` are each answered with `folder_trust
+{folders: [{path, trust, answered_at}]}`, every answer kept, newest first, once
+the change is made; a forgotten folder is asked about again. They are served to
+the connections `start_session` is. A start that goes on runs `codeconnect <agent> --no-attach -- <prompt>` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise), every value an argument of its own. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,

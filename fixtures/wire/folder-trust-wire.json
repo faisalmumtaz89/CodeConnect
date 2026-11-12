@@ -1,0 +1,51 @@
+{
+  "folder_trust": {
+    "folders": [
+      {
+        "answered_at": "2026-11-12T20:00:00Z",
+        "path": "/tmp/ccd-folder-trust/my app",
+        "trust": "not_trusted"
+      }
+    ],
+    "request_id": "t1",
+    "type": "folder_trust"
+  },
+  "forget_folder_trust_request": {
+    "path": "/tmp/ccd-folder-trust/my app",
+    "request_id": "t3",
+    "type": "forget_folder_trust"
+  },
+  "list_folder_trust_request": {
+    "request_id": "t1",
+    "type": "list_folder_trust"
+  },
+  "set_folder_trust_request": {
+    "path": "/tmp/ccd-folder-trust/my app",
+    "request_id": "t2",
+    "trust": "trusted",
+    "type": "set_folder_trust"
+  },
+  "start_session_answered_request": {
+    "agent": "claude",
+    "path": "/tmp/ccd-folder-trust/my app",
+    "prompt": "fix the tests",
+    "request_id": "r2",
+    "trust": "not_trusted",
+    "type": "start_session"
+  },
+  "start_session_needs_trust": {
+    "request_id": "r1",
+    "result": {
+      "path": "/tmp/ccd-folder-trust/my app",
+      "status": "needs_trust"
+    },
+    "type": "start_session_result"
+  },
+  "start_session_request": {
+    "agent": "claude",
+    "path": "/tmp/ccd-folder-trust/my app",
+    "prompt": "fix the tests",
+    "request_id": "r1",
+    "type": "start_session"
+  }
+}
