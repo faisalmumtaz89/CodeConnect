@@ -2,7 +2,7 @@ import CodeConnectKit
 import SwiftUI
 
 /// Start an agent on one of the computers that can start one: a recent folder there (on this Mac, any folder, from
-/// the standard folder panel), an optional first message, and, under it, the model, whose menu holds Claude Code's
+/// the standard folder panel), the first message, and, under it, the model, whose menu holds Claude Code's
 /// and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
 /// the iPhone; the Mac shows it as one form. The computer defaults to the one used last, the model to the Default of
 /// the agent last used in the folder, else of the first one there. Once sent, the form gives way to the start's
@@ -56,6 +56,7 @@ struct StartForm: View {
         if StartAgent.allCases.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
         guard folder != nil else { return "Choose a folder." }
+        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "Write the first message." }
         return nil
     }
 
@@ -79,13 +80,10 @@ struct StartForm: View {
         #if DEBUG
             .task {
                 menuOpen = RenderWindow.opensModelMenu
-                guard let path = RenderWindow.startFolder ?? RenderWindow.chosenFolder else { return }
+                guard let path = RenderWindow.chosenFolder else { return }
                 for _ in 0..<150 {
                     if context?.projects.contains(where: { $0.path == path }) == true {
                         folderPath = path
-                        guard RenderWindow.startFolder != nil else { return }
-                        chosen = context?.modelChoices.first { $0.agent == RenderWindow.startAgent && $0.isDefault }
-                        start()
                         return
                     }
                     try? await Task.sleep(for: .milliseconds(200))
@@ -298,7 +296,7 @@ struct StartForm: View {
     /// The first message, with the model under it: its menu opens upward, over the folders.
     private func composer(_ context: StartContext) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            TextField("", text: $message, prompt: Text("First message (optional)").foregroundStyle(Theme.text3), axis: .vertical)
+            TextField("", text: $message, prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical)
                 .accessibilityLabel("First message")
                 .accessibilityIdentifier("start.message")
                 .textFieldStyle(.plain)

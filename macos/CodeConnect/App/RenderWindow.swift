@@ -52,14 +52,8 @@
         static var opensOnIPhone: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_IPHONE") }
 
         /// `-CC_ADD_AGENT YES`: the same sheet, on its Agent side.
-        static var opensOnAgent: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_AGENT") || startFolder != nil }
+        static var opensOnAgent: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_AGENT") }
 
-        /// `-CC_RENDER_START <folder>`: Start an agent presses Start once the default computer lists that recent
-        /// folder, with `-CC_RENDER_AGENT <claude|codex>` (else the form's default) and no first message.
-        static var startFolder: String? { UserDefaults.standard.string(forKey: "CC_RENDER_START") }
-        static var startAgent: StartAgent? {
-            UserDefaults.standard.string(forKey: "CC_RENDER_AGENT").flatMap(StartAgent.init(rawValue:))
-        }
         /// `-CC_RENDER_FOLDER <folder>`: Start an agent chooses that recent folder once listed, and starts nothing.
         static var chosenFolder: String? { UserDefaults.standard.string(forKey: "CC_RENDER_FOLDER") }
         /// `-CC_PICK_FOLDER <path>`: Start an agent's Choose a folder… takes that path in place of the folder panel, a
