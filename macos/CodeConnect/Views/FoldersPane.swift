@@ -28,10 +28,12 @@ enum FolderWords {
     }
 }
 
-/// Settings › Folders: the answers to the folder question that each computer able to start an agent keeps, newest
-/// first, with Trust / Don't Trust and Forget. Each computer is read when the pane opens and whenever that set of
-/// computers changes. A computer is sent one request at a time: every reply is its whole list, and the replies to two
-/// requests sent together can arrive in either order. A change that fails says so, then the list is read again.
+/// Settings › Folders: the answers to the folder question that each computer able to start an agent keeps, by path,
+/// so a row stays where it is when its answer changes, with Trust / Don't Trust and Forget. Each computer is read now
+/// and every five seconds while the pane is open, so an answer given in the start sheet meanwhile shows. A computer is
+/// sent one request at a time: every reply is its whole list, and the replies to two requests sent together can arrive
+/// in either order. A change that fails says so, then the list is read again; what it said stays until the pane opens
+/// again or a change succeeds.
 struct FoldersPane: View {
     @Environment(Machines.self) private var machines
     /// Each computer's answers, by its id, once read.
@@ -61,7 +63,11 @@ struct FoldersPane: View {
         .frame(width: 560, height: 460)
         .background(Theme.sheet)
         .task(id: contexts.map(\.id)) {
-            for context in contexts { await send(context) }
+            refusal = nil
+            while !Task.isCancelled {
+                for context in contexts { await send(context) }
+                try? await Task.sleep(for: .seconds(5))
+            }
         }
     }
 
@@ -73,7 +79,7 @@ struct FoldersPane: View {
                     note(FolderWords.empty)
                 } else {
                     VStack(spacing: 0) {
-                        ForEach(Array(list.enumerated()), id: \.element.path) { index, answer in
+                        ForEach(Array(list.sorted { $0.path < $1.path }.enumerated()), id: \.element.path) { index, answer in
                             if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1) }
                             row(answer, context)
                         }
