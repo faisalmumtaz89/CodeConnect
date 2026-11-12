@@ -7,8 +7,8 @@ import os
 /// are copied again and the daemon reinstalled; sessions survive it (they live in tmux). Their notices go
 /// beside them, as every release archive carries them (`Contents/Resources`).
 struct Installer {
-    static let binaries = ["ccd", "codeconnect", "cc-hook", "cc-tmux"]
-    static let notices = ["LICENSE", "THIRD_PARTY_NOTICES"]
+    static let binaries = ["ccd", "codeconnect", "cc-hook", "cc-tmux", "cc-agent-host"]
+    static let notices = ["LICENSE", "THIRD_PARTY_NOTICES", "AGENT_HOST_NOTICES"]
     /// A copy or a `daemon install` that failed, as the checklist says it. The system's own words go to the log.
     static let failed = "CodeConnect couldn't set up its background service. Choose Try Again."
     static let log = Logger(subsystem: "com.codeconnect.mac", category: "setup")
@@ -44,7 +44,7 @@ struct Installer {
             resources: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"))
     }
 
-    /// Whether this build carries all four binaries.
+    /// Whether this build carries all of its binaries.
     var bundled: Bool {
         Self.binaries.allSatisfy { FileManager.default.isExecutableFile(atPath: helpers.appendingPathComponent($0).path) }
     }

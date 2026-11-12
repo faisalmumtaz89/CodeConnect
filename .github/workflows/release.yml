@@ -8,7 +8,7 @@
 # A tag push builds, signs, notarizes and verifies a draft and stops.
 # Publishing requires a person to run the workflow with publishing enabled
 # *against a draft that already exists*: that run builds, signs and notarizes
-# nothing and reads no repository secret. It downloads the draft's nineteen
+# nothing and reads no repository secret. It downloads the draft's twenty-seven
 # assets, checks them with the same `release-verify.sh` the draft run used, and
 # publishes exactly those bytes, so what was tested is what people download.
 #
@@ -273,6 +273,16 @@ jobs:
             mac/target/${{ matrix.target }}/release/cc-hook
           if-no-files-found: error
 
+  # The agent host's two macOS slices, each built and run on its own
+  # architecture's runner; see agent-host-mac.yml.
+  agent-host:
+    name: Agent host
+    needs: pin
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    uses: ./.github/workflows/agent-host-mac.yml
+    with:
+      ref: ${{ needs.pin.outputs.sha }}
+
   linux:
     name: Linux
     needs: pin
@@ -322,7 +332,7 @@ jobs:
 
   draft:
     name: Sign, notarize, verify the draft
-    needs: [pin, build, linux-sign]
+    needs: [pin, build, agent-host, linux-sign]
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish) }}
     # The image that carries Xcode 27.1, the one the Mac app is built and
     # tested with (macos-15 has 26.3 at most). It is a preview, so "Build the
@@ -380,6 +390,23 @@ jobs:
             exit 1
           fi
           cp slices/tmux-arm64/THIRD_PARTY_NOTICES "$DIR/THIRD_PARTY_NOTICES"
+          # The agent host, from the slices its build jobs ran, the same way:
+          # signed, notarized and verified here with the others, packaged into
+          # an archive of its own.
+          lipo -create -output "$DIR/cc-agent-host" \
+            slices/agent-host-arm64/cc-agent-host-darwin-arm64 \
+            slices/agent-host-x86_64/cc-agent-host-darwin-x86_64
+          chmod 0755 "$DIR/cc-agent-host"
+          archs="$(lipo -archs "$DIR/cc-agent-host")"
+          case "$archs" in
+            *arm64*x86_64*|*x86_64*arm64*) ;;
+            *) echo "::error::cc-agent-host is not universal: $archs"; exit 1 ;;
+          esac
+          if ! cmp -s slices/agent-host-arm64/AGENT_HOST_NOTICES slices/agent-host-x86_64/AGENT_HOST_NOTICES; then
+            echo "::error::the two agent host slices carry different notices"
+            exit 1
+          fi
+          cp slices/agent-host-arm64/AGENT_HOST_NOTICES "$DIR/AGENT_HOST_NOTICES"
 
       - name: Import the signing certificate
         env:
@@ -438,6 +465,11 @@ jobs:
             codesign --force --options runtime --timestamp \
               --sign "$identity" "$DIR/$binary"
           done
+          # The one binary with an entitlement: JavaScriptCore needs allow-jit
+          # under the hardened runtime, and nothing else is granted.
+          codesign --force --options runtime --timestamp \
+            --entitlements mac/agent-host/entitlements.plist \
+            --sign "$identity" "$DIR/cc-agent-host"
 
       - name: Notarize
         env:
@@ -493,7 +525,7 @@ jobs:
             and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
             and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
-          for binary in codeconnect ccd cc-hook cc-tmux; do
+          for binary in codeconnect ccd cc-hook cc-tmux cc-agent-host; do
             path="$DIR/$binary"
             codesign --verify --strict --all-architectures -R="identifier \"$binary\" and $req" "$path"
             # Captured, then searched — not piped into `grep -q`. `grep -q`
@@ -529,6 +561,11 @@ jobs:
             echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
             exit 1
           fi
+          # The agent host that ships, under its Developer ID signature: the
+          # entitlements its slices ran with, in both halves, and the half this
+          # runner can run still starts.
+          mac/agent-host/entitled.sh "$DIR/cc-agent-host"
+          mac/agent-host/check.sh "$DIR/cc-agent-host"
 
       # The Mac app, built in every run beside the archives and promoted with
       # them: it carries exactly the binaries this job just signed, notarized
@@ -654,9 +691,14 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$tmux_archive" \
             "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
           shasum -a 256 "$tmux_archive" > "$tmux_archive.sha256"
+          host_archive="codeconnect-$VERSION-agent-host-macos-universal.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$host_archive" \
+            "$DIR/cc-agent-host" "$DIR/AGENT_HOST_NOTICES"
+          shasum -a 256 "$host_archive" > "$host_archive.sha256"
           {
             echo "archive=$archive"
             echo "tmux_archive=$tmux_archive"
+            echo "host_archive=$host_archive"
           } >> "$GITHUB_OUTPUT"
 
       # Found in the authenticated listing, or created; its numeric id is what
@@ -677,6 +719,7 @@ jobs:
           RELEASE_ID: ${{ steps.draft.outputs.id }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
           TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
+          HOST_ARCHIVE: ${{ steps.package.outputs.host_archive }}
           DMG: ${{ steps.app.outputs.dmg }}
         run: |
           # By id, to this draft and no other. A rerun may find its own
@@ -684,7 +727,7 @@ jobs:
           # because two assets cannot share a name and the bytes being
           # attached are the ones this run verified.
           for file in "$ARCHIVE" "$ARCHIVE.sha256" "$TMUX_ARCHIVE" "$TMUX_ARCHIVE.sha256" \
-              "$DMG" "$DMG.sha256" appcast.xml; do
+              "$HOST_ARCHIVE" "$HOST_ARCHIVE.sha256" "$DMG" "$DMG.sha256" appcast.xml; do
             existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --jq ".assets[] | select(.name == \"$file\") | .id")"
             for asset in $existing; do
@@ -706,11 +749,14 @@ jobs:
           checksum_id="$(asset_id "$ARCHIVE.sha256")"
           tmux_archive_id="$(asset_id "$TMUX_ARCHIVE")"
           tmux_checksum_id="$(asset_id "$TMUX_ARCHIVE.sha256")"
+          host_archive_id="$(asset_id "$HOST_ARCHIVE")"
+          host_checksum_id="$(asset_id "$HOST_ARCHIVE.sha256")"
           dmg_id="$(asset_id "$DMG")"
           dmg_checksum_id="$(asset_id "$DMG.sha256")"
           appcast_id="$(asset_id appcast.xml)"
           if [ -z "$archive_id" ] || [ -z "$checksum_id" ] \
               || [ -z "$tmux_archive_id" ] || [ -z "$tmux_checksum_id" ] \
+              || [ -z "$host_archive_id" ] || [ -z "$host_checksum_id" ] \
               || [ -z "$dmg_id" ] || [ -z "$dmg_checksum_id" ] || [ -z "$appcast_id" ]; then
             echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
             exit 1
@@ -737,8 +783,8 @@ jobs:
             fi
             linux_assets="$(jq -c --argjson id "$id" --arg name "$file" '. + [{id: $id, name: $name}]' <<<"$linux_assets")"
           done
-          if [ "$(jq 'length' <<<"$linux_assets")" != 12 ]; then
-            echo "::error::expected the 12 signed Linux files, attached $(jq 'length' <<<"$linux_assets")"
+          if [ "$(jq 'length' <<<"$linux_assets")" != 18 ]; then
+            echo "::error::expected the 18 signed Linux files, attached $(jq 'length' <<<"$linux_assets")"
             exit 1
           fi
 
@@ -823,12 +869,15 @@ jobs:
           CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
           TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
           TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
+          HOST_ARCHIVE_ID: ${{ steps.assets.outputs.host_archive_id }}
+          HOST_CHECKSUM_ID: ${{ steps.assets.outputs.host_checksum_id }}
           DMG_ID: ${{ steps.assets.outputs.dmg_id }}
           DMG_CHECKSUM_ID: ${{ steps.assets.outputs.dmg_checksum_id }}
           APPCAST_ID: ${{ steps.assets.outputs.appcast_id }}
           LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           ARCHIVE: ${{ steps.assets.outputs.archive }}
           TMUX_ARCHIVE: ${{ steps.assets.outputs.tmux_archive }}
+          HOST_ARCHIVE: ${{ steps.assets.outputs.host_archive }}
           DMG: ${{ steps.assets.outputs.dmg }}
           TAG: ${{ needs.pin.outputs.tag }}
           SHA: ${{ needs.pin.outputs.sha }}
@@ -836,7 +885,7 @@ jobs:
         run: |
           # Publication is a PATCH on the id this run adopted, made only after
           # re-reading what that id holds *now*: still a draft, still this
-          # tag, and exactly the nineteen assets the verification step downloaded —
+          # tag, and exactly the twenty-seven assets the verification step downloaded —
           # by id, name, and state, because an id survives a rename and the
           # updater selects by name — not whatever a concurrent writer left.
           state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
@@ -851,13 +900,16 @@ jobs:
           held="$(jq -r '[.assets[] | {id, name, state}] | sort_by(.id) | tojson' <<<"$state")"
           expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
             --argjson taid "$TMUX_ARCHIVE_ID" --argjson tcid "$TMUX_CHECKSUM_ID" \
+            --argjson haid "$HOST_ARCHIVE_ID" --argjson hcid "$HOST_CHECKSUM_ID" \
             --argjson did "$DMG_ID" --argjson dcid "$DMG_CHECKSUM_ID" --argjson iid "$APPCAST_ID" \
-            --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" --arg dmg "$DMG" \
+            --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" --arg host "$HOST_ARCHIVE" --arg dmg "$DMG" \
             --argjson linux "$LINUX_ASSETS" \
             '[{id: $aid, name: $archive, state: "uploaded"},
               {id: $cid, name: ($archive + ".sha256"), state: "uploaded"},
               {id: $taid, name: $tmux, state: "uploaded"},
               {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"},
+              {id: $haid, name: $host, state: "uploaded"},
+              {id: $hcid, name: ($host + ".sha256"), state: "uploaded"},
               {id: $did, name: $dmg, state: "uploaded"},
               {id: $dcid, name: ($dmg + ".sha256"), state: "uploaded"},
               {id: $iid, name: "appcast.xml", state: "uploaded"}]

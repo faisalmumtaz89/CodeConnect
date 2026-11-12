@@ -46,9 +46,9 @@ for sum in "$dir"/*.sha256; do
   openssl pkeyutl -verify -rawin -pubin -inkey "$public" -in "$sum" -sigfile "$sum.sig" > /dev/null
   signed=$((signed + 1))
 done
-# Two architectures, each a core and a tmux archive.
-if [ "$signed" -ne 4 ]; then
-  echo "::error::signed $signed checksum files, expected 4"
+# Two architectures, each a core, a tmux and an agent host archive.
+if [ "$signed" -ne 6 ]; then
+  echo "::error::signed $signed checksum files, expected 6"
   exit 1
 fi
 echo "signed $signed checksum files with the key RELEASE_KEY pins"

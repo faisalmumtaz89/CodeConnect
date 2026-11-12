@@ -15,6 +15,9 @@
 #     Must-fail: the app's codeconnect, checked as ccd, is refused.
 #     The app can start: every @rpath library its executable loads resolves, through the executable's own LC_RPATHs,
 #     to a file inside the app, as dyld resolves it at launch. Must-fail: a copy without that rpath is refused.
+#     The agent host the app installs carries exactly the entitlements mac/agent-host/entitlements.plist names
+#     (allow-jit): without it the host does not start under the hardened runtime, and anything more widens what it may
+#     do. Must-fail: a copy signed without entitlements, and one signed with a second, are refused.
 #
 # OPENSSL names an OpenSSL 3 or later (Ed25519 with -rawin); its version is printed.
 set -euo pipefail
@@ -79,6 +82,18 @@ cp -R "$app" "$work/norpath.app"
 install_name_tool -delete_rpath @executable_path/../Frameworks "$work/norpath.app/Contents/MacOS/CodeConnect"
 if resolves "$work/norpath.app" >/dev/null; then echo "::error::S2 must-fail: an app without its rpath passed"; exit 1; fi
 echo "S2: every library the app loads is inside it; must-fail: a copy without its rpath is refused"
+entitled="$(cd "$(dirname "$0")/../.." && pwd)/mac/agent-host/entitled.sh"
+host="$app/Contents/Helpers/cc-agent-host"
+"$entitled" "$host" || { echo "::error::S2: the app's agent host does not carry exactly its entitlements"; exit 1; }
+cp "$host" "$work/unentitled"
+codesign --force --options runtime --sign - "$work/unentitled"
+if "$entitled" "$work/unentitled" 2>/dev/null; then echo "::error::S2 must-fail: an agent host without entitlements passed"; exit 1; fi
+cp "$(dirname "$entitled")/entitlements.plist" "$work/wider.plist"
+/usr/libexec/PlistBuddy -c 'Add :com.apple.security.cs.allow-unsigned-executable-memory bool true' "$work/wider.plist"
+cp "$host" "$work/wider"
+codesign --force --options runtime --entitlements "$work/wider.plist" --sign - "$work/wider"
+if "$entitled" "$work/wider" 2>/dev/null; then echo "::error::S2 must-fail: an agent host with a second entitlement passed"; exit 1; fi
+echo "S2: the agent host carries exactly its entitlements; must-fail: none, and a second one, are refused"
 if [ "$notarized" = notarized ]; then
   verdict=$(spctl -a -t exec -vv "$app" 2>&1)
   echo "$verdict"
@@ -90,7 +105,7 @@ if [ "$notarized" = notarized ]; then
       and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
       and certificate leaf[subject.OU] = \"$team\"" "$2"
   }
-  for name in ccd codeconnect cc-hook cc-tmux; do
+  for name in ccd codeconnect cc-hook cc-tmux cc-agent-host; do
     signed_as "$name" "$app/Contents/Helpers/$name" || { echo "::error::S2: the app's $name is not signed as $name by team $team"; exit 1; }
   done
   if signed_as ccd "$app/Contents/Helpers/codeconnect" 2>/dev/null; then echo "::error::S2 must-fail: codeconnect passed as ccd"; exit 1; fi
