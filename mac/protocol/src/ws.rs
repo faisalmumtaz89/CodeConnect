@@ -448,9 +448,11 @@ pub enum ClientMessage {
     ///
     /// `path` is an absolute path: one [`ServerMessage::Projects`] listed, or, from
     /// minor 30 (`browse_folders`), any folder; a relative one is refused before
-    /// anything runs. `prompt`, when present, is the agent's own
-    /// first prompt, bounded by [`MAX_COMPOSE_BYTES`] and passed as one argument,
-    /// never through a shell string.
+    /// anything runs. `prompt` is the agent's own first prompt and is required:
+    /// a start without one, or with one of only white space, is refused
+    /// `launch_failed` before anything runs. It is bounded by
+    /// [`MAX_COMPOSE_BYTES`] and passed as one argument, never through a shell
+    /// string.
     ///
     /// `request_id` makes the start idempotent: the same id sent again, on this
     /// connection or a later one, gets the first answer and starts nothing new.

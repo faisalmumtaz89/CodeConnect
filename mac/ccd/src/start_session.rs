@@ -105,6 +105,20 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             worktree,
             model,
         } => {
+            // A run starts with a first message, so a start without one is
+            // refused before anything is looked at or launched.
+            if prompt
+                .as_deref()
+                .is_none_or(|prompt| prompt.trim().is_empty())
+            {
+                return ServerMessage::StartSessionResult {
+                    result: StartSessionResult::Failed {
+                        reason: StartFailure::LaunchFailed,
+                        detail: "A run starts with a first message.".into(),
+                    },
+                    request_id,
+                };
+            }
             let state_dir = protocol::root_dir();
             let launch = launch(
                 &daemon.db,

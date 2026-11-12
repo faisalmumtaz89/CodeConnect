@@ -1057,15 +1057,18 @@ computer by the host it paired with.
 `hello_ack.machine_id`, minted once into `~/.codeconnect/machine_id` and the same
 on every handshake, so a phone that paired this daemon under two addresses (an IP,
 then its MagicDNS name) holds it as one machine.
-`>= 28` starts a session from the phone, offered (`start_session`) to the
-connections a terminal is offered to. `list_projects` is answered with
+`>= 28` starts a session from the phone, offered (`start_session`) to every
+paired device on any connection the daemon admits, and never to the static
+token. `list_projects` is answered with
 `projects`: every folder a session has started in, most recent first, kept in
 its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
 agent can start (`codeconnect <agent> --version` through the user's login
 shell) as last checked: the first list after the daemon starts waits for the
-check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt?}` takes a listed
-folder (from `>= 30`, any absolute folder) and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
+check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt}` takes a listed
+folder (from `>= 30`, any absolute folder) and a first message, and a start
+without one (`prompt` absent, empty or only white space) is refused with
+`launch_failed` before anything is checked or run. It runs `codeconnect <agent> --no-attach -- <prompt>` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise), every value an argument of its own. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
