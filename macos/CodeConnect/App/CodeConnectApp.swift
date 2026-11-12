@@ -58,16 +58,19 @@ struct CodeConnectApp: App {
                 Button("Set Up CodeConnect\u{2026}") { setup.reopen(machines: machines) }
             }
         }
-        // CodeConnect > Settings… (⌘,): this computer's devices.
+        // CodeConnect > Settings… (⌘,): this computer's devices, and the folders' answers to the folder question.
         Settings {
-            DevicesPane()
-                .environment(machines)
-                .environment(setup)
-                .preferredColorScheme(.dark)
-                .tint(CC.color.accent)
-                #if DEBUG
-                    .renderLook()
-                #endif
+            TabView {
+                DevicesPane().tabItem { Label("Devices", systemImage: "iphone") }
+                FoldersPane().tabItem { Label(FolderWords.paneTitle, systemImage: "folder") }
+            }
+            .environment(machines)
+            .environment(setup)
+            .preferredColorScheme(.dark)
+            .tint(CC.color.accent)
+            #if DEBUG
+                .renderLook()
+            #endif
         }
     }
 }

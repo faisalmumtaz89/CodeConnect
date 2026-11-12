@@ -63,14 +63,20 @@ struct StartForm: View {
     var body: some View {
         Group {
             if let context, let requestID, let start = context.starter.starts[requestID] {
-                StartProgress(
-                    start: start,
-                    shown: { uid in machines.models.first { $0.machineID == context.id }?.shown(for: uid) != nil },
-                    again: { self.requestID = nil },
-                    started: {
-                        started()
-                        dismiss()
-                    })
+                if case .needsTrust(let path) = start.outcome {
+                    FolderStep(
+                        start: start, path: path, computer: context.machineName,
+                        answer: { answer(start, $0, in: context) }, back: { self.requestID = nil })
+                } else {
+                    StartProgress(
+                        start: start,
+                        shown: { uid in machines.models.first { $0.machineID == context.id }?.shown(for: uid) != nil },
+                        again: { self.requestID = nil },
+                        started: {
+                            started()
+                            dismiss()
+                        })
+                }
             } else {
                 form
             }
@@ -128,6 +134,15 @@ struct StartForm: View {
         guard blocked == nil, let context, let folder, let pick else { return }
         requestID = context.start(
             folder, agent: pick.agent, model: pick.model, prompt: message.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The folder question's answer: the start that asked, sent again with it. Only the question on screen is
+    /// answered, and only once.
+    private func answer(_ asked: SessionStart, _ trust: FolderTrust, in context: StartContext) {
+        guard requestID == asked.requestID else { return }
+        requestID = context.start(
+            asked.project, place: asked.place, agent: asked.agent, model: asked.model, prompt: asked.prompt ?? "",
+            trust: trust)
     }
 
     // MARK: Computer
@@ -466,5 +481,72 @@ private struct StartProgress: View {
                 EmptyView()
             }
         }
+    }
+}
+
+/// A start the computer answered with the folder question: nothing ran. The question is the sheet's own page; an
+/// answer sends the start again with it, and Back returns to the form.
+private struct FolderStep: View {
+    let start: SessionStart
+    /// The folder's real path, as the computer gave it.
+    let path: String
+    let computer: String
+    let answer: (FolderTrust) -> Void
+    let back: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(FolderWords.title).font(Theme.ui(17, .semibold)).foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(path).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.head)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("folder.path")
+                Text(FolderWords.body(computer)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(spacing: 6) {
+                    choice(.trusted)
+                    choice(.notTrusted)
+                }
+                Text(FolderWords.footnote).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("folder.question")
+            Spacer(minLength: 0)
+            SheetBar(
+                action: nil, actionID: "", blocked: true, perform: {}, cancel: back, cancelID: "start.folder.back",
+                cancelTitle: "Back"
+            ) {
+                Text(FolderWords.then(start.agent.displayName, start.project.name)).font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text3)
+            }
+        }
+    }
+
+    private func choice(_ trust: FolderTrust) -> some View {
+        let trusts = trust == .trusted
+        let id = "folder.\(trusts ? "trust" : "distrust")"
+        return Button {
+            answer(trust)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(trusts ? FolderWords.trust : FolderWords.distrust).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
+                Text(trusts ? FolderWords.trustDetail : FolderWords.distrustDetail).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 7, id: id))
+        .accessibilityIdentifier(id)
     }
 }
