@@ -149,7 +149,7 @@ pub enum PlaintextTrust {
     TrustedPath,
     /// A LAN the operator vouched for with `ws_allow_plaintext`: plaintext is
     /// admitted, on their instruction, and is exactly as private as that
-    /// network. Shell-equivalent authority is not offered over it.
+    /// network. The live terminal is not offered over it.
     OperatorAllowed,
     /// Anything else: plaintext would cross an unknown network in the clear,
     /// credential and all.
@@ -764,8 +764,9 @@ where
                     continue;
                 }
 
-                // Starting an agent carries a terminal's authority, so it is
-                // open to exactly the connections a terminal is.
+                // Starting, and the folder and project frames that choose where:
+                // any paired device, on any transport the listener admits, with
+                // the authority that saying and answering already carry there.
                 if matches!(
                     parsed,
                     ClientMessage::ListProjects
@@ -774,11 +775,10 @@ where
                         | ClientMessage::CreateFolder { .. }
                         | ClientMessage::StartSession { .. }
                 ) {
-                    if device_id.is_none() || !private_transport {
+                    if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
                             code: "not_authorised".into(),
-                            message: "only a paired device on a private connection may \
-                                      start sessions".into(),
+                            message: "only a paired device may start sessions".into(),
                         }).await?;
                         continue;
                     }
@@ -2635,7 +2635,7 @@ async fn hello_ack(
         protocol_version: protocol::PROTOCOL_VERSION,
         protocol_minor: protocol::PROTOCOL_MINOR,
         server_time: protocol::time::now_rfc3339(),
-        capabilities: capabilities(daemon, tls_active, terminal_allowed),
+        capabilities: capabilities(daemon, tls_active, terminal_allowed, device_id.is_some()),
         device_token,
         device_id,
         device_name,
@@ -3110,7 +3110,12 @@ fn validated_registration(
     }
 }
 
-fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) -> Capabilities {
+fn capabilities(
+    daemon: &Arc<Daemon>,
+    tls_active: bool,
+    terminal_allowed: bool,
+    paired: bool,
+) -> Capabilities {
     // **One transport, named once.** `push` and `push_relay` are one-hot and
     // both are read off the mode rather than off a predicate: a phone has to
     // choose between registering a bare token and enrolling for a credential,
@@ -3196,10 +3201,11 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         question_card: true,
         hook_only_approvals: true,
         history_pages: true,
-        // Starting an agent is a terminal's authority, offered where one is.
-        start_session: terminal_allowed,
-        start_worktree: terminal_allowed,
-        browse_folders: terminal_allowed,
+        // Starting and browsing are offered to every paired device the start
+        // handler serves.
+        start_session: paired,
+        start_worktree: paired,
+        browse_folders: paired,
         machine_stats: true,
     }
 }
@@ -3556,6 +3562,15 @@ mod tests {
         config: protocol::config::Config,
         push: Arc<dyn crate::apns::PushSender>,
     ) -> (LiveServer, String) {
+        live_server_on(config, push, PlaintextTrust::TrustedPath).await
+    }
+
+    /// The same listener, classified as `trust` says, as `serve` classifies a real one.
+    async fn live_server_on(
+        config: protocol::config::Config,
+        push: Arc<dyn crate::apns::PushSender>,
+        trust: PlaintextTrust,
+    ) -> (LiveServer, String) {
         let (daemon, device_id, store, _path) = daemon_with_a_device_pushing(config, push);
         // Bound here rather than inside `serve` so the test learns the port.
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -3566,9 +3581,7 @@ mod tests {
         let accepting = {
             let daemon = Arc::clone(&daemon);
             let token = Arc::clone(&token);
-            tokio::spawn(async move {
-                accept_loop(daemon, listener, token, None, PlaintextTrust::TrustedPath).await
-            })
+            tokio::spawn(async move { accept_loop(daemon, listener, token, None, trust).await })
         };
         (
             LiveServer {
@@ -9860,12 +9873,7 @@ esac
                 .await
                 .expect("this device reads cleanly, so the ack builds")
                 {
-                    ServerMessage::HelloAck { capabilities, .. } => {
-                        // Browsing folders and starting in them carries the same
-                        // authority, so it is offered to exactly the same connections.
-                        assert_eq!(capabilities.browse_folders, capabilities.terminal_pty);
-                        capabilities.terminal_pty
-                    }
+                    ServerMessage::HelloAck { capabilities, .. } => capabilities.terminal_pty,
                     other => panic!("hello_ack must answer an ack, got {other:?}"),
                 }
             }
@@ -9888,6 +9896,97 @@ esac
             !offered(true, PlaintextTrust::TrustedPath, AuthOutcome::Static).await,
             "and the static bootstrap token never gets one, encrypted or not"
         );
+    }
+
+    /// On the LAN the operator switched on with `ws_allow_plaintext`, a
+    /// paired device may start sessions and browse folders, as it may read, answer and
+    /// say there. The bootstrap token still may not, and the terminal stays on private
+    /// transports only.
+    #[tokio::test]
+    async fn a_paired_device_on_the_operator_allowed_lan_may_start_and_browse() {
+        let (server, _) = live_server_on(
+            protocol::config::Config::default(),
+            Arc::new(crate::apns::LoggingPushSender::new()),
+            PlaintextTrust::OperatorAllowed,
+        )
+        .await;
+        let list = Message::Text(r#"{"type":"list_projects"}"#.into());
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["start_session"], false, "{ack}");
+        bootstrap.send(list.clone()).await.unwrap();
+        let refused = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(refused["code"], "not_authorised", "{refused}");
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["start_session"], true, "{ack}");
+        assert_eq!(ack["capabilities"]["browse_folders"], true, "{ack}");
+        assert_eq!(ack["capabilities"]["terminal_pty"], false, "{ack}");
+        phone.send(list).await.unwrap();
+        let reply = match next_frame(&mut phone, Duration::from_secs(30)).await {
+            Frame::Json(reply) => reply,
+            _ => panic!("no projects reply within 30 s"),
+        };
+        assert_eq!(reply["type"], "projects", "{reply}");
+    }
+
+    /// A run starts with a first message. A start without one is refused
+    /// before anything is launched, whatever else it names; with one, the same request
+    /// goes on to the ordinary checks.
+    #[tokio::test]
+    async fn a_start_without_a_first_message_is_refused_before_anything_runs() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let start = |request_id: &str, prompt: Option<&str>| {
+            Message::Text(
+                serde_json::to_string(&ClientMessage::StartSession {
+                    request_id: request_id.into(),
+                    path: "/nonexistent-codeconnect-start-folder".into(),
+                    agent: protocol::agent::AgentKind::Claude,
+                    prompt: prompt.map(str::to_string),
+                    worktree: None,
+                    model: None,
+                })
+                .unwrap(),
+            )
+        };
+        let result = |reply: serde_json::Value| reply["result"].clone();
+        for (id, prompt) in [
+            ("r-none", None),
+            ("r-empty", Some("")),
+            ("r-blank", Some(" \n\t")),
+        ] {
+            phone.send(start(id, prompt)).await.unwrap();
+            let reply = loop {
+                let message = next_json(&mut phone).await.expect("a start_session_result");
+                if message["type"] == "start_session_result" {
+                    break message;
+                }
+            };
+            assert_eq!(reply["request_id"], id, "{reply}");
+            assert_eq!(result(reply.clone())["status"], "failed", "{reply}");
+            assert_eq!(result(reply.clone())["reason"], "launch_failed", "{reply}");
+            assert_eq!(
+                result(reply)["detail"],
+                "A run starts with a first message.",
+                "{id}"
+            );
+        }
+        phone
+            .send(start("r-said", Some("fix the tests")))
+            .await
+            .unwrap();
+        let reply = loop {
+            let message = next_json(&mut phone).await.expect("a start_session_result");
+            if message["type"] == "start_session_result" {
+                break message;
+            }
+        };
+        assert_eq!(result(reply.clone())["reason"], "folder_missing", "{reply}");
     }
 
     /// A detach, a resize and an input naming *another* terminal leave the live
