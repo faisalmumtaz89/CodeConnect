@@ -1249,12 +1249,15 @@ public final class AppModel {
     }
 
     /// Start an agent in one of this computer's projects; the answer arrives as
-    /// `start_session_result` under the returned request id.
+    /// `start_session_result` under the returned request id. `trust` is the
+    /// person's answer to "trust this folder?", sent with the start and with every
+    /// resend of it.
     public func startSession(
-        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String
+        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String,
+        trust: FolderTrust? = nil
     ) -> String {
         let requestID = starter.start(
-            project: project, place: place, agent: agent, model: model, prompt: prompt,
+            project: project, place: place, agent: agent, model: model, prompt: prompt, trust: trust,
             machineName: machineName ?? HostDevice.current.computer("this computer"))
         #if DEBUG
             if fixturesActive {
@@ -1274,7 +1277,7 @@ public final class AppModel {
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
-                    prompt: start.prompt, worktree: start.place, model: start.model))
+                    prompt: start.prompt, worktree: start.place, model: start.model, trust: start.trust))
         }
     }
 
@@ -2057,6 +2060,10 @@ public final class AppModel {
             break
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
+            break
+        case .folderTrust:
+            // The same again: `listFolderTrust`, `setFolderTrust` and
+            // `forgetFolderTrust` each await their reply by id.
             break
         case .projects(let projects, let agents):
             starter.receive(projects: projects, agents: agents)

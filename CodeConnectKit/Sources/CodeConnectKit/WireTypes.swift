@@ -1982,10 +1982,20 @@ public enum ClientMessage: Sendable {
     /// `worktree` (minor 29) starts in one of its repository's worktrees, existing
     /// or new; `.folder` sends none, and the folder is never switched. `model`
     /// (minor 33) is the `value` of a model the computer listed for the agent;
-    /// nil names none, and the agent starts on its own default.
+    /// nil names none, and the agent starts on its own default. `trust` is the
+    /// person's answer to "trust this folder?", kept for the folder; nil gives
+    /// none, and a folder with none kept is answered `needsTrust`.
     case startSession(
         requestID: String, path: String, agent: String, prompt: String?, worktree: StartPlace = .folder,
-        model: String? = nil)
+        model: String? = nil, trust: FolderTrust? = nil)
+    /// Every folder's answer to "trust this folder?", answered `folderTrust`.
+    case listFolderTrust(requestID: String)
+    /// Change one folder's answer (`path` as the computer gave it), answered
+    /// `folderTrust`.
+    case setFolderTrust(requestID: String, path: String, trust: FolderTrust)
+    /// Forget one folder's answer, so the next start there asks again; answered
+    /// `folderTrust`.
+    case forgetFolderTrust(requestID: String, path: String)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -2038,6 +2048,7 @@ extension ClientMessage: Encodable {
         case bytes
         case data
         case turnID = "turn_id"
+        case trust
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2170,7 +2181,7 @@ extension ClientMessage: Encodable {
             try c.encode(payloadHash, forKey: .payloadHash)
         case .listProjects:
             try c.encode("list_projects", forKey: .type)
-        case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model):
+        case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model, let trust):
             try c.encode("start_session", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(path, forKey: .path)
@@ -2185,6 +2196,19 @@ extension ClientMessage: Encodable {
                 }
             try c.encodeIfPresent(request, forKey: .worktree)
             try c.encodeIfPresent(model, forKey: .model)
+            try c.encodeIfPresent(trust, forKey: .trust)
+        case .listFolderTrust(let requestID):
+            try c.encode("list_folder_trust", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+        case .setFolderTrust(let requestID, let path, let trust):
+            try c.encode("set_folder_trust", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(path, forKey: .path)
+            try c.encode(trust, forKey: .trust)
+        case .forgetFolderTrust(let requestID, let path):
+            try c.encode("forget_folder_trust", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(path, forKey: .path)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
             try c.encode(path, forKey: .path)
@@ -2477,6 +2501,10 @@ public enum ServerMessage: Sendable {
     /// computer has.
     case projects(projects: [StartProject], agents: [StartAgentStatus])
     case startSessionResult(requestID: String, outcome: StartOutcome)
+    /// The answer to `list_folder_trust`, `set_folder_trust` and
+    /// `forget_folder_trust`: every answer the computer keeps, newest first, once
+    /// the request's change is made.
+    case folderTrust(requestID: String, folders: [FolderAnswer])
     /// The answer to `get_project_git`: nil when the folder is not a repository.
     case projectGit(path: String, git: StartGit?)
     /// The answer to `list_folder`.
@@ -2640,6 +2668,10 @@ extension ServerMessage: Decodable {
             self = .startSessionResult(
                 requestID: try c.decode(String.self, forKey: .requestID),
                 outcome: try c.decode(StartOutcome.self, forKey: .result))
+        case "folder_trust":
+            self = .folderTrust(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                folders: try c.decode([FolderAnswer].self, forKey: .folders))
         case "project_git":
             self = .projectGit(
                 path: try c.decode(String.self, forKey: .path),
