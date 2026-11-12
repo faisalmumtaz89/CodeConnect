@@ -479,6 +479,8 @@ public struct LinkHealth: Sendable, Equatable {
     public enum Cause: Sendable, Equatable {
         case tailnetHostUnresolvable(host: String)
         case hostUnresolvable(host: String)
+        /// The computer refused this device, and why.
+        case refused(ConnectionRefusal)
     }
 
     public var level: Level
@@ -493,6 +495,10 @@ public struct LinkHealth: Sendable, Equatable {
     private static let staleAfter = DaemonConnection.silenceDeadline
 
     public var actionsEnabled: Bool { level == .live || level == .lagging }
+
+    /// Pairing again cures this link: it was refused, and not for a different version, which only updating
+    /// CodeConnect cures.
+    public var pairingCures: Bool { level == .rejected && cause != .refused(.differentVersion) }
 
     public var disabledReason: String? {
         guard !actionsEnabled else { return nil }
@@ -517,7 +523,7 @@ public struct LinkHealth: Sendable, Equatable {
         case .stale: return "Stale"
         case .connecting: return "Connecting"
         case .offline: return "Offline"
-        case .rejected: return "Pair again"
+        case .rejected: return cause == .refused(.differentVersion) ? "Different version" : "Pair again"
         }
     }
 
@@ -576,6 +582,7 @@ public struct LinkHealth: Sendable, Equatable {
         phase: DaemonConnection.Phase,
         lastContactAt: Date?,
         dialFailure: DaemonConnection.DialFailure? = nil,
+        refusal: ConnectionRefusal? = nil,
         isRedial: Bool = false,
         now: Date = Date()
     ) -> LinkHealth {
@@ -593,7 +600,7 @@ public struct LinkHealth: Sendable, Equatable {
             }
             return LinkHealth(level: .connecting, age: nil, detail: "Opening the connection.")
         case .failed(let reason):
-            return LinkHealth(level: .rejected, age: nil, detail: reason)
+            return LinkHealth(level: .rejected, age: nil, detail: reason, cause: refusal.map { .refused($0) })
         case .waiting:
             // `supervise` records a failure before every wait.
             return redialing(

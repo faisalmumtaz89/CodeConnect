@@ -255,7 +255,7 @@ private struct ComputerRow: View {
 
     var body: some View {
         Group {
-            if computer.linkHealth.level == .rejected, let address {
+            if computer.linkHealth.pairingCures, let address {
                 Button { pairAgain(address) } label: { row.contentShape(Rectangle()) }
                     .buttonStyle(.hover(id: "\(id).pairAgain"))
                     .accessibilityIdentifier("\(id).pairAgain")

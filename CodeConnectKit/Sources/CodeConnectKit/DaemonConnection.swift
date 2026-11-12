@@ -64,6 +64,29 @@ public enum ConnectionError: LocalizedError, Sendable {
     }
 }
 
+/// Which refusal ended the dialling for good, because each has its own cure: a credential, a pairing code or an
+/// admission refused is cured by pairing again with a code; a different version only by updating CodeConnect.
+public enum ConnectionRefusal: Sendable, Equatable {
+    /// The computer did not accept this device's credential.
+    case credential
+    /// The computer did not accept the pairing code.
+    case pairingCode
+    /// The computer would not let this device in without a code.
+    case notAdmitted
+    /// The computer speaks a different protocol major: one side runs another version of CodeConnect.
+    case differentVersion
+
+    init?(_ error: ConnectionError) {
+        switch error {
+        case .unauthorized: self = .credential
+        case .rejectedPairingCode: self = .pairingCode
+        case .notAdmitted: self = .notAdmitted
+        case .incompatible: self = .differentVersion
+        default: return nil
+        }
+    }
+}
+
 /// One WebSocket to one `ccd`, kept alive across drops.
 ///
 /// The state machine is deliberately visible: every screen renders link health
@@ -95,6 +118,8 @@ public final class DaemonConnection {
             // future writer of `phase` keeps it true by construction. The
             // earliest entry into `.connecting` is kept: re-entering while
             // already dialling is the same attempt, not a fresh grace.
+            // A refusal belongs to the failed phase that it ended in; no other phase has one.
+            if case .failed = phase {} else { refusal = nil }
             switch phase {
             case .connecting: connectingSince = connectingSince ?? Date()
             default: connectingSince = nil
@@ -211,6 +236,10 @@ public final class DaemonConnection {
         case unreachable
     }
     public private(set) var dialFailure: DialFailure?
+
+    /// Which refusal the failed phase ended in, or nil: in any other phase, and for a failure no refusal caused (an
+    /// address that is not one, a pairing that never reached the computer).
+    public private(set) var refusal: ConnectionRefusal?
     /// Whether this `start` has already completed at least one failed dial —
     /// what separates the launch dial (whose quiet grace is earned) from a
     /// redial (whose blank-out was the flicker).
@@ -434,6 +463,7 @@ public final class DaemonConnection {
                     withoutCredential = true
                     continue
                 case .unauthorized, .rejectedPairingCode, .notAdmitted, .incompatible:
+                    refusal = ConnectionRefusal(error)
                     phase = .failed(reason: error.localizedDescription)
                     return
                 case .hostUnresolvable:

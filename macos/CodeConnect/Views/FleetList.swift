@@ -75,7 +75,9 @@ struct FleetList: View {
 
             if rows.isEmpty {
                 Group {
-                    if scope == .active {
+                    if let refusal = shownComputerRefusal {
+                        DifferentVersion(sentence: refusal)
+                    } else if scope == .active {
                         NoAgentsYet(newAgent: newAgent)
                     } else {
                         Text("No finished agents.").font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
@@ -146,6 +148,16 @@ struct FleetList: View {
             .frame(height: 34)
         }
         .background(Theme.window)
+    }
+
+    /// Why the computer the list is narrowed to can't be reached, when only updating CodeConnect cures it: the
+    /// sentence its refusal gave, which the sidebar's "Different version" stands for.
+    private var shownComputerRefusal: String? {
+        guard case .computer(let id) = filter,
+            let health = machines.models.first(where: { ($0.machineID ?? "") == id })?.linkHealth,
+            health.cause == .refused(.differentVersion)
+        else { return nil }
+        return health.detail
     }
 
     /// These rows as the sidebar's filter leaves them.

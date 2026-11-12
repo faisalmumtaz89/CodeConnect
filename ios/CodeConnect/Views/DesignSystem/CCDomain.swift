@@ -309,7 +309,7 @@ extension LinkHealth {
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: "Settings", action: onSettings)
-            case nil:
+            case nil, .refused:
                 return CCBannerItem(
                     .offline, title: "Offline", message: detail, tone: .neutral,
                     icon: "plugs", actionTitle: "Retry", action: onRetry)

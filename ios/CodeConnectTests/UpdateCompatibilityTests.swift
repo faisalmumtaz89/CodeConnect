@@ -64,6 +64,32 @@ final class UpdateCompatibilityTests: XCTestCase {
         XCTAssertNotNil(DaemonConnection.incompatibility(of: ack(version: 1)), "a major-1 computer is refused")
     }
 
+    /// Each refusal reads as its cure. Pairing again with a code cures a credential, a pairing code or an admission
+    /// refused; a different version only updating CodeConnect cures, so its link neither says nor offers "Pair again",
+    /// and keeps the refusal's own sentence to say why.
+    func testARefusalReadsAsItsCure() {
+        let refusals: [(ConnectionError, ConnectionRefusal)] = [
+            (.unauthorized, .credential), (.rejectedPairingCode, .pairingCode), (.notAdmitted, .notAdmitted),
+            (.incompatible("x"), .differentVersion),
+        ]
+        for (error, refusal) in refusals { XCTAssertEqual(ConnectionRefusal(error), refusal) }
+        XCTAssertNil(ConnectionRefusal(.timedOut), "a failure that is no refusal has none")
+
+        let sentence = "That computer runs a different version of CodeConnect. Update CodeConnect on it and on this Mac, "
+            + "then try again."
+        let version = LinkHealth.evaluate(phase: .failed(reason: sentence), lastContactAt: nil, refusal: .differentVersion)
+        XCTAssertEqual(version.level, .rejected)
+        XCTAssertEqual(version.word, "Different version")
+        XCTAssertFalse(version.pairingCures, "pairing again cannot cure a different version")
+        XCTAssertEqual(version.detail, sentence)
+
+        for refusal in [ConnectionRefusal.credential, .pairingCode, .notAdmitted] {
+            let health = LinkHealth.evaluate(phase: .failed(reason: "refused"), lastContactAt: nil, refusal: refusal)
+            XCTAssertEqual(health.word, "Pair again", "\(refusal)")
+            XCTAssertTrue(health.pairingCures, "\(refusal)")
+        }
+    }
+
     /// `enablePush` against a daemon that does not advertise push used to ask
     /// the user to authorise notifications nothing could ever send, then post
     /// a `register_push` the daemon does not understand. The capability is
