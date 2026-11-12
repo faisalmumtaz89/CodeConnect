@@ -84,9 +84,9 @@ impl Source {
 
 /// The `source_event_id` of one event filed from an SDK message: the message's
 /// `uuid`, the event's kind and its block position. One message can file several
-/// events (a `result` files `turn_complete` and `usage`; an assistant message one
-/// event per content block), and the dedup key keeps only the first of a
-/// repeated id, so the message's uuid alone would drop the rest. The same inputs
+/// events (a `result` files `turn_complete` and `usage`), and the dedup key keeps
+/// only the first of a repeated id, so the message's uuid alone would drop the
+/// rest. The same inputs
 /// give the same id, so a replayed message dedups against its first filing.
 pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> String {
     format!("{message_uuid}/{}/{block}", kind.as_str())
@@ -103,6 +103,8 @@ pub mod notice {
     pub const MODEL_SET: &str = "model_set";
     /// The agent host confirmed a permission-mode change.
     pub const MODE_SET: &str = "mode_set";
+    /// Claude compacted the conversation (`/compact`, or on its own).
+    pub const COMPACTED: &str = "compacted";
 }
 
 /// Item kinds, following the thread -> turn -> item model.

@@ -8,6 +8,7 @@
 //!   * [`ws`]    — the tailnet WebSocket protocol the iPhone speaks.
 //!   * [`host`]  — the lines between `ccd` and the agent host of each Claude
 //!     run.
+//!   * [`sdk_map`] — the Agent SDK's messages as events in the log.
 //!
 //! [`tmux`] is here for the same reason, even though it is not a wire type: two
 //! processes ask tmux whether a session is still alive, and a machine where they
@@ -38,6 +39,7 @@ pub mod peer;
 pub mod proc;
 pub mod proc_identity;
 pub mod risk;
+pub mod sdk_map;
 pub mod secret;
 pub mod tailnet;
 pub mod time;
