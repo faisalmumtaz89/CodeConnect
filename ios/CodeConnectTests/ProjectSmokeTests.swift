@@ -8,6 +8,6 @@ import XCTest
 /// this one tests the build.
 final class ProjectSmokeTests: XCTestCase {
     func testAppModuleIsVisible() {
-        XCTAssertEqual(Wire.protocolVersion, 1)
+        XCTAssertEqual(Wire.protocolVersion, 2)
     }
 }
