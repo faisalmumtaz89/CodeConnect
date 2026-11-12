@@ -56,6 +56,12 @@ jobs:
             exit 1
           fi
 
+      # The host's own tests, on the slice as signed (test.sh): the protocol's
+      # types against the lines ccd's tests emit, and the host's rules over its
+      # socket. The slice is also the Bun that runs them.
+      - name: Test the slice
+        run: mac/agent-host/test.sh "$RUNNER_TEMP/agent-host/cc-agent-host-darwin-${{ matrix.arch }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: agent-host-${{ matrix.arch }}

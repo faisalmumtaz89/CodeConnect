@@ -111,6 +111,11 @@ jobs:
       - name: Check the agent host runs here
         run: mac/agent-host/check.sh "$RUNNER_TEMP/agent-host/cc-agent-host-linux-${{ matrix.arch }}"
 
+      # Its own tests (test.sh): the protocol's types against the lines ccd's
+      # tests emit, and the host's rules over its socket, on this executable.
+      - name: Test the agent host here
+        run: mac/agent-host/test.sh "$RUNNER_TEMP/agent-host/cc-agent-host-linux-${{ matrix.arch }}"
+
       - name: Package
         run: |
           version="$(awk -F'"' '/^version = /{print $2; exit}' mac/Cargo.toml)"

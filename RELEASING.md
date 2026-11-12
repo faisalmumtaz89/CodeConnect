@@ -102,9 +102,10 @@ Each block starts from the repository root.
    tag to one commit, builds both architectures from that commit — the
    binaries, CodeConnect's own tmux from the pinned sources in
    `mac/tmux/SOURCES`, and the agent host from the Bun `mac/agent-host/SOURCES`
-   pins and the packages its `bun.lock` pins, each slice run on its own
-   runner under the hardened runtime with allow-jit alone, and refused
-   there if it runs without it — signs and notarizes them, attaches the
+   pins and the packages its `bun.lock` pins, each slice run and tested
+   (`mac/agent-host/test.sh`) on its own runner under the hardened runtime
+   with allow-jit alone, and refused there if it runs without it — signs
+   and notarizes them, attaches the
    three archives (binaries, and tmux and the agent host beside them) to a
    **draft**, downloads those exact
    assets back and re-verifies them with `.github/workflows/release-verify.sh`
@@ -121,7 +122,7 @@ Each block starts from the repository root.
 
    The same run builds the Linux archives (`linux-build.yml`: static x86_64
    and aarch64 binaries and tmux, and the agent host, Bun's glibc build, run
-   on each runner). Job `linux-sign` — the only job given the
+   and tested on each runner). Job `linux-sign` — the only job given the
    secret `LINUX_RELEASE_SIGNING_KEY` — refuses unless that key's public half
    is `RELEASE_KEY` in the tagged source
    (`mac/codeconnect/src/update_install.rs`), checks each archive against its
