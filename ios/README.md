@@ -32,9 +32,9 @@ Two consequences worth stating:
   sending the uid means that path is never reached. In-flight answer state is
   keyed by `(run, request_id)` for the same reason.
 
-`Capabilities.session_uid` — or `protocol_minor >= 2` — is the gate. A daemon
-that advertises neither is treated exactly as before, name-keyed, and
-`DeckUITests` still exercises that path against a minor-1 fixture.
+`DaemonProfile.scopesSessionsByUID` is the gate: every connected computer mints
+uids, so its runs are keyed by uid. Only while nothing is known of the computer
+does the app keep the tmux name as a run's identity.
 
 The local cache records which of the two regimes wrote it. On the first connect
 to a uid-minting daemon the name-keyed files are **dropped**, not remapped: a
