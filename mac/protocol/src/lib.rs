@@ -6,6 +6,8 @@
 //!     match exactly what the daemon expects to gate on.
 //!   * [`ipc`]   — unix-socket frames (hook posts + supervisor registration).
 //!   * [`ws`]    — the tailnet WebSocket protocol the iPhone speaks.
+//!   * [`host`]  — the lines between `ccd` and the agent host of each Claude
+//!     run.
 //!
 //! [`tmux`] is here for the same reason, even though it is not a wire type: two
 //! processes ask tmux whether a session is still alive, and a machine where they
@@ -28,6 +30,7 @@ pub mod fdlimit;
 pub mod fsperm;
 pub mod hash;
 pub mod hook;
+pub mod host;
 pub mod ipc;
 pub mod launch_result;
 pub mod pairing;
