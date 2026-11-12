@@ -3295,9 +3295,9 @@ public final class AppModel {
             return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer Claude's approvals from the "
                 + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
         case (.codex, _) where !resolvesCodexCards:
-            // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
-            // an answered card can never be retired. A card that cannot be
-            // retired must not be answered from here, by any vocabulary.
+            // **Nothing known of the daemon.** A card is retired by the `request_id`
+            // on its resolution, which every connected daemon sends. A card that
+            // cannot be retired must not be answered from here, by any vocabulary.
             return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
                 + "so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
         case (.codex, .allow), (.codex, .deny), (.codex, .option),

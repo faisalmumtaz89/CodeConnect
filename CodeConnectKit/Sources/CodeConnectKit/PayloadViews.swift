@@ -181,10 +181,7 @@ extension Event {
     ///
     /// The legacy clause is kept for older daemons and is inert against a newer
     /// one by construction — a daemon that emits `turn_complete` for `Stop`
-    /// never emits a `session_end` carrying `hook_event_name: "Stop"`. Which
-    /// build we are talking to is still checked explicitly, in
-    /// `DaemonProfile.trustsTurnCompleteKind`, so the fallback is a fallback and
-    /// not a second source of truth.
+    /// never emits a `session_end` carrying `hook_event_name: "Stop"`.
     public var isTurnComplete: Bool {
         if kind == .turnComplete { return true }
         return kind == .sessionEnd && hookEventName == "Stop"

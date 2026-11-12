@@ -16,8 +16,10 @@ final class RiskAndDeckTests: XCTestCase {
             risk: risk)
     }
 
-    private let newerDaemon = DaemonProfile(protocolVersion: 1, protocolMinor: 1, capabilities: nil)
-    private let olderDaemon = DaemonProfile(protocolVersion: 1, protocolMinor: 0, capabilities: nil)
+    /// A connected daemon classifies risk; one nothing is known of yet does not, so its absent class is not trusted.
+    private let connectedDaemon = DaemonProfile(
+        protocolVersion: Wire.protocolVersion, protocolMinor: 34, capabilities: Capabilities())
+    private let unknownDaemon = DaemonProfile.unknown
 
     private func assess(
         tool: String, input: JSONValue, risk: WireRisk?, profile: DaemonProfile
@@ -30,7 +32,7 @@ final class RiskAndDeckTests: XCTestCase {
     func testDaemonClassIsUsedWhenItAgrees() {
         let assessment = assess(
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]),
-            risk: WireRisk(cls: "low", matchedPattern: nil), profile: newerDaemon)
+            risk: WireRisk(cls: "low", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .low)
         XCTAssertEqual(assessment.source, .daemon)
         XCTAssertFalse(assessment.escalatedLocally)
@@ -41,7 +43,7 @@ final class RiskAndDeckTests: XCTestCase {
         // worktree and says medium. The stricter one wins.
         let assessment = assess(
             tool: "Bash", input: .object(["command": .string("ls /etc")]),
-            risk: WireRisk(cls: "medium", matchedPattern: "outside worktree"), profile: newerDaemon)
+            risk: WireRisk(cls: "medium", matchedPattern: "outside worktree"), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .medium)
         XCTAssertEqual(assessment.matchedPattern, "outside worktree")
     }
@@ -51,7 +53,7 @@ final class RiskAndDeckTests: XCTestCase {
     func testDaemonCannotLoosenTheGate() {
         let assessment = assess(
             tool: "Bash", input: .object(["command": .string("sudo rm -rf /Users/me/work")]),
-            risk: WireRisk(cls: "low", matchedPattern: nil), profile: newerDaemon)
+            risk: WireRisk(cls: "low", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high, "a destructive command cannot become one tap")
         XCTAssertEqual(assessment.declared, .low)
         XCTAssertTrue(assessment.escalatedLocally)
@@ -62,7 +64,7 @@ final class RiskAndDeckTests: XCTestCase {
     func testAbsentClassOnAClassifyingDaemonMeansMedium() {
         let assessment = assess(
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]), risk: nil,
-            profile: newerDaemon)
+            profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .medium)
         XCTAssertEqual(assessment.source, .daemonSilent)
     }
@@ -71,16 +73,16 @@ final class RiskAndDeckTests: XCTestCase {
     func testAbsentClassStillEscalatesADestructiveCommand() {
         let assessment = assess(
             tool: "Bash", input: .object(["command": .string("git push --force")]), risk: nil,
-            profile: newerDaemon)
+            profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high)
     }
 
-    /// An older daemon never offered a class, so nothing is "absent" and the
-    /// original behaviour is preserved — a `Read` stays a single tap.
-    func testOldDaemonKeepsTheLocalReading() {
+    /// While nothing is known of the daemon it has offered no class, so nothing is
+    /// "absent" and the local reading stands — a `Read` stays a single tap.
+    func testAnUnknownDaemonKeepsTheLocalReading() {
         let assessment = assess(
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]), risk: nil,
-            profile: olderDaemon)
+            profile: unknownDaemon)
         XCTAssertEqual(assessment.effective, .low)
         XCTAssertEqual(assessment.source, .local)
     }
@@ -88,7 +90,7 @@ final class RiskAndDeckTests: XCTestCase {
     func testUnparseableClassFallsBackRatherThanTrusting() {
         let assessment = assess(
             tool: "Bash", input: .object(["command": .string("echo hi")]),
-            risk: WireRisk(cls: "catastrophic", matchedPattern: nil), profile: newerDaemon)
+            risk: WireRisk(cls: "catastrophic", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertNil(assessment.declared)
         XCTAssertEqual(assessment.effective, .medium, "unreadable means the medium floor applies")
     }
@@ -100,7 +102,7 @@ final class RiskAndDeckTests: XCTestCase {
                 risk: WireRisk(cls: "high", matchedPattern: "pipe to shell")),
             requestedAt: Date(), sessionKey: "cc-1", outcome: nil,
             paneSnapshot: nil, risk: WireRisk(cls: "high", matchedPattern: "pipe to shell"))
-        let assessment = item.assessment(profile: newerDaemon)
+        let assessment = item.assessment(profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high)
         XCTAssertEqual(assessment.matchedPattern, "pipe to shell")
     }
@@ -156,7 +158,7 @@ final class RiskAndDeckTests: XCTestCase {
             medium("b", ageSeconds: 300),
         ]
         XCTAssertEqual(
-            DeckOrdering.sort(cards, profile: olderDaemon).map(\.card.requestID), ["c", "b", "a"],
+            DeckOrdering.sort(cards, profile: unknownDaemon).map(\.card.requestID), ["c", "b", "a"],
             "HIGH before MEDIUM before LOW, whatever the ages say")
     }
 
@@ -168,21 +170,21 @@ final class RiskAndDeckTests: XCTestCase {
             high("middle", ageSeconds: 300),
         ]
         XCTAssertEqual(
-            DeckOrdering.sort(cards, profile: olderDaemon).map(\.card.requestID),
+            DeckOrdering.sort(cards, profile: unknownDaemon).map(\.card.requestID),
             ["old", "middle", "young"],
             "inside one tier the agent that has waited longest is the one you owe")
     }
 
     /// The tier has to be the same class the *card* gates on, or a card would
     /// be ranked in a tier its own badge disagrees with. On a classifying
-    /// daemon an absent class means MEDIUM; on an older one a `Read` is LOW.
+    /// daemon an absent class means MEDIUM; while nothing is known, a `Read` is LOW.
     func testDeckRanksOnTheSameClassTheCardGatesOn() {
         let cards = [low("read", ageSeconds: 600), medium("write", ageSeconds: 30)]
         XCTAssertEqual(
-            DeckOrdering.sort(cards, profile: olderDaemon).map(\.card.requestID), ["write", "read"],
-            "on an older daemon the Read really is LOW and sorts below the Write")
+            DeckOrdering.sort(cards, profile: unknownDaemon).map(\.card.requestID), ["write", "read"],
+            "while nothing is known of the daemon the Read really is LOW and sorts below the Write")
         XCTAssertEqual(
-            DeckOrdering.sort(cards, profile: newerDaemon).map(\.card.requestID), ["read", "write"],
+            DeckOrdering.sort(cards, profile: connectedDaemon).map(\.card.requestID), ["read", "write"],
             "on a classifying daemon both float to the medium floor, so age decides")
     }
 
@@ -203,9 +205,9 @@ final class RiskAndDeckTests: XCTestCase {
                 outcome: nil, paneSnapshot: nil, risk: nil),
         ]
         XCTAssertEqual(
-            DeckOrdering.sort(cards, profile: newerDaemon).map(\.card.requestID), ["a", "z"])
+            DeckOrdering.sort(cards, profile: connectedDaemon).map(\.card.requestID), ["a", "z"])
         XCTAssertEqual(
-            DeckOrdering.sort(cards.reversed(), profile: newerDaemon).map(\.card.requestID),
+            DeckOrdering.sort(cards.reversed(), profile: connectedDaemon).map(\.card.requestID),
             ["a", "z"],
             "a stack that reshuffles between renders is a stack you cannot tap")
     }
@@ -220,7 +222,7 @@ final class RiskAndDeckTests: XCTestCase {
             item(session: "cc-2", request: "b", ageSeconds: 60),
         ]
         pass.settle(cards[0].id)
-        XCTAssertEqual(pass.arrange(cards, profile: newerDaemon).map(\.card.requestID), ["b"])
+        XCTAssertEqual(pass.arrange(cards, profile: connectedDaemon).map(\.card.requestID), ["b"])
         XCTAssertEqual(pass.settledCount, 1)
     }
 
@@ -234,10 +236,10 @@ final class RiskAndDeckTests: XCTestCase {
         ]
         pass.postpone(cards[0].id)
         XCTAssertEqual(
-            pass.arrange(cards, profile: newerDaemon).map(\.card.requestID), ["b", "c", "a"])
+            pass.arrange(cards, profile: connectedDaemon).map(\.card.requestID), ["b", "c", "a"])
         pass.postpone(cards[1].id)
         XCTAssertEqual(
-            pass.arrange(cards, profile: newerDaemon).map(\.card.requestID), ["c", "a", "b"])
+            pass.arrange(cards, profile: connectedDaemon).map(\.card.requestID), ["c", "a", "b"])
         XCTAssertEqual(pass.settledCount, 0, "postponing decides nothing")
     }
 
@@ -282,9 +284,9 @@ final class RiskAndDeckTests: XCTestCase {
         func reasons(_ host: HostDevice, _ computer: String?) -> [String] {
             [
                 DecisionCard.codexUnanswerableReason(
-                    isKnown: false, caveat: nil, isVerified: true, linkReason: nil, computer: computer, on: host),
+                    isKnown: false, isVerified: true, linkReason: nil, computer: computer, on: host),
                 DecisionCard.codexUnanswerableReason(
-                    isKnown: true, caveat: nil, isVerified: true, linkReason: nil, computer: computer, on: host),
+                    isKnown: true, isVerified: true, linkReason: nil, computer: computer, on: host),
                 DecisionCard.claudeUnanswerableReason(
                     isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: nil, computer: computer,
                     on: host),

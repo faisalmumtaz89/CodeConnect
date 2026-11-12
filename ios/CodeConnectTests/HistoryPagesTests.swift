@@ -38,12 +38,9 @@ final class HistoryPagesWireTests: XCTestCase {
             protocolVersion: ack.protocolVersion, protocolMinor: ack.protocolMinor,
             capabilities: ack.capabilities)
         XCTAssertTrue(profile.pagesHistory)
-        // The flag alone is not enough, and neither is the minor alone.
+        // The flag is what says so.
         XCTAssertFalse(
-            DaemonProfile(protocolVersion: 1, protocolMinor: 22, capabilities: ack.capabilities)
-                .pagesHistory)
-        XCTAssertFalse(
-            DaemonProfile(protocolVersion: 1, protocolMinor: 23, capabilities: Capabilities())
+            DaemonProfile(protocolVersion: Wire.protocolVersion, protocolMinor: 34, capabilities: Capabilities())
                 .pagesHistory)
     }
 
@@ -142,6 +139,18 @@ final class HistoryPagesTests: XCTestCase {
 
     private let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
     private let outbox = Outbox()
+
+    /// The fixture daemon's capabilities, less one it advertises.
+    private func daemonCapabilities(without name: String) throws -> Capabilities {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "minor-23-wire", withExtension: "json"))
+        let wire = try XCTUnwrap(
+            try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue)
+        var advertised = try XCTUnwrap(wire["hello_ack"]?.objectValue?["capabilities"]?.objectValue)
+        XCTAssertNotNil(advertised.removeValue(forKey: name), "the fixture advertises \(name)")
+        return try JSONDecoder().decode(
+            Capabilities.self, from: Data(JSONValue.object(advertised).canonicalJSONString.utf8))
+    }
 
     /// The captured minor-23 `hello_ack`'s capabilities, so the model is set up
     /// against what a daemon really advertises.
@@ -1277,10 +1286,10 @@ final class HistoryPagesTests: XCTestCase {
 
     /// A Mac that does not serve pages: the top asks for nothing; the head row's
     /// "Load all" is the only way to the rest.
-    func testAnOlderMacsTopAsksForNothing() async throws {
+    func testAMacWithoutPagesAsksForNothingAtTheTop() async throws {
         let model = AppModel(cache: EventCache(root: cacheRoot()))
         model.connection.simulateConnectedForTesting()
-        model.connection.simulateCapabilitiesForTesting(try daemonCapabilities(), minor: 22)
+        model.connection.simulateCapabilitiesForTesting(try daemonCapabilities(without: "history_pages"), minor: 34)
         let outbox = self.outbox
         model.connection.sendStub = { message in
             MainActor.assumeIsolated { outbox.messages.append(message) }

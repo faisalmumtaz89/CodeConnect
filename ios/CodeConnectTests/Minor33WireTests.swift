@@ -129,16 +129,11 @@ final class Minor33WireTests: XCTestCase {
         XCTAssertNil(opening.model)
     }
 
-    /// No models listed: an older computer offers the agent alone, with the line that says why; a newer one,
-    /// whose agent couldn't be asked, offers Default alone.
-    func testNoModelsListedOffersTheAgentAloneOnAnOlderComputerAndDefaultOnANewerOne() throws {
+    /// No models listed, because the agent couldn't be asked: Default alone.
+    func testNoModelsListedOffersDefaultAlone() throws {
         let unasked = try projects(claudeSignedIn: true, claudeModels: [])
-        let (older, _) = try context(unasked, minor: 32)
-        XCTAssertEqual(older.models(.claude), .agentOnly)
-        XCTAssertEqual(older.title(try XCTUnwrap(older.modelChoices.first { $0.agent == .claude })), "Claude Code")
-        XCTAssertEqual(StartContext.updateForModels, "Update CodeConnect on this computer to choose a model.")
-        let (newer, _) = try context(unasked, minor: 33)
-        guard case .choices(let claude) = newer.models(.claude) else { return XCTFail("no Default") }
+        let (computer, _) = try context(unasked)
+        guard case .choices(let claude) = computer.models(.claude) else { return XCTFail("no Default") }
         XCTAssertEqual(claude.map(\.label), ["Default"])
         XCTAssertNil(claude[0].model)
     }

@@ -1272,8 +1272,8 @@ public final class DaemonConnection {
 
     /// Why this `hello_ack` cannot be accepted, or `nil` when it can. Pure,
     /// so the rule is pinned by tests: the *major* version is the breaking
-    /// axis and must match exactly; minors are feature-gated per surface and
-    /// never refused.
+    /// axis and must match exactly; the minor is never refused, and what a
+    /// surface offers comes from the ack's capabilities.
     static func incompatibility(of ack: HelloAck) -> String? {
         guard ack.protocolVersion != Wire.protocolVersion else { return nil }
         let computer = HostDevice.current.computer("This computer", named: ack.machineName)

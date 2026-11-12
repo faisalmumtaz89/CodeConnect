@@ -498,8 +498,8 @@ final class CodexProseTests: XCTestCase {
 }
 
 
-/// **The read-only card's prose** — the card a daemon below minor 19 puts a
-/// reader in front of, and the one card state no render reached until now.
+/// **The read-only card's prose** — a card the reader can see and cannot answer
+/// here.
 ///
 /// A card that cannot be answered from the phone was saying two things at once:
 /// the pending card's standing promise, *"Nothing decides this but you. There is
@@ -517,10 +517,6 @@ final class ReadOnlyCardProseTests: XCTestCase {
 
     private let promise = "Nothing decides this but you"
 
-    private func profile(minor: UInt32) -> DaemonProfile {
-        DaemonProfile(protocolVersion: Wire.protocolVersion, protocolMinor: minor, capabilities: nil)
-    }
-
     /// **The promise is not made on a card that cannot be answered here.**
     func testAnUnanswerableCardMakesNoPromiseAboutWhoDecides() {
         XCTAssertNil(
@@ -530,30 +526,6 @@ final class ReadOnlyCardProseTests: XCTestCase {
             ApprovalCard.pendingPromise(isAnswerable: true),
             "Nothing decides this but you. There is no timer on this card.",
             "an answerable card keeps the promise verbatim — it survives every redesign")
-    }
-
-    /// **One sentence, and it is true.** It says what is wrong, what to do now,
-    /// and what to do about it — in that order, because the reader's next action
-    /// is at the Mac and the update is the fix, not the workaround.
-    func testTheReadOnlyCaveatIsOneTrueSentenceAndSaysWhereToAnswer() throws {
-        let caveat = try XCTUnwrap(
-            profile(minor: 18).codexAnswerCaveat,
-            "a minor-18 daemon cannot retire an answered Codex card, so the card is read-only")
-        XCTAssertFalse(
-            caveat.contains(promise),
-            "the caveat must not restate the promise it contradicts: \(caveat)")
-        XCTAssertTrue(
-            caveat.contains("answer it at the computer"),
-            "a read-only card must say where the question CAN be answered: \(caveat)")
-        XCTAssertTrue(
-            caveat.contains("Update it"),
-            "and what makes it answerable here: \(caveat)")
-        // **Short enough to survive AX5.** Measured, not guessed: the previous
-        // wording ran to four lines in the pinned action bar on a 6.9" phone at
-        // AX5 and clipped "Update it." off the bottom edge of the screen.
-        XCTAssertLessThanOrEqual(
-            caveat.count, 120,
-            "the caveat is \(caveat.count) characters; it clips at AX5 past ~120")
     }
 
     /// **One home, never both and never none.**
@@ -594,10 +566,4 @@ final class ReadOnlyCardProseTests: XCTestCase {
         }
     }
 
-    /// A daemon that CAN retire a Codex card offers no caveat at all, so the
-    /// promise stands and the card is answerable.
-    func testAMinor19DaemonHasNoCaveatAndKeepsThePromise() {
-        XCTAssertNil(profile(minor: 19).codexAnswerCaveat)
-        XCTAssertNotNil(ApprovalCard.pendingPromise(isAnswerable: true))
-    }
 }

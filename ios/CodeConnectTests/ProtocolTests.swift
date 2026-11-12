@@ -87,11 +87,6 @@ final class ProtocolTests: XCTestCase {
         guard case .helloAck(let ack) = message else { return XCTFail("wrong message") }
         XCTAssertEqual(ack.protocolMinor, 0)
         XCTAssertFalse(ack.capabilities.servesDiff)
-        let profile = DaemonProfile(
-            protocolVersion: ack.protocolVersion, protocolMinor: ack.protocolMinor,
-            capabilities: ack.capabilities)
-        XCTAssertFalse(profile.speaksMinor1OrLater)
-        XCTAssertFalse(profile.trustsTurnCompleteKind)
     }
 
     /// An unreadable or renamed capability must degrade one affordance, never

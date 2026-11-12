@@ -1295,7 +1295,6 @@ struct DecisionCardView: View {
         case .codex:
             return DecisionCard.codexUnanswerableReason(
                 isKnown: model.daemonProfile.isConnected,
-                caveat: model.daemonProfile.codexAnswerCaveat,
                 isVerified: verification.renderMatchesDisplayText,
                 linkReason: model.actionsBlockedReason)
         case .unsupported(let raw):

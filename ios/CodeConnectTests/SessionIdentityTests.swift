@@ -67,15 +67,9 @@ final class SessionIdentityTests: XCTestCase {
         XCTAssertEqual(sessions[0].sessionID, "cc-1", "the handle is still there for attach")
     }
 
-    func testCapabilityAndProfileAgreeOnUIDScoping() throws {
-        let modern = try profile(minor: 2, sessionUID: true)
-        XCTAssertTrue(modern.scopesSessionsByUID)
-        // The flag alone is enough — a daemon that says it does this does it.
-        XCTAssertTrue(try profile(minor: 1, sessionUID: true).scopesSessionsByUID)
-        // And the feature level alone is enough, for a daemon that renamed the key.
-        XCTAssertTrue(try profile(minor: 2, sessionUID: false).scopesSessionsByUID)
-        // A minor-1 daemon does neither, and must keep being treated as name-keyed.
-        XCTAssertFalse(try profile(minor: 1, sessionUID: false).scopesSessionsByUID)
+    /// A connected daemon names its runs by uid; while nothing is known of it, the app keeps the name.
+    func testAConnectedDaemonScopesSessionsByUID() throws {
+        XCTAssertTrue(try profile(minor: 34, sessionUID: true).scopesSessionsByUID)
         XCTAssertFalse(DaemonProfile.unknown.scopesSessionsByUID)
     }
 

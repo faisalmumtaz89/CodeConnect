@@ -573,21 +573,6 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertFalse(wire.types.contains("answer"))
     }
 
-    /// **Old daemons, on the send path.** Below minor 19 a Codex resolution carries no
-    /// `request_id`, so an answered card can never be retired: it stays live and
-    /// tappable for ever. The view already refuses to draw the options; this is
-    /// the path itself refusing, so a deep link or a stale sheet cannot answer.
-    func testAnOldDaemonAnswersNoCodexCard() async {
-        for minor in [UInt32(16), 17, 18] {
-            let (model, wire) = model(link: "subscribed", minor: minor)
-            let item = Self.approvalItem(sessionKey: key(), withOptions: true)
-            _ = await model.answer(item: item, decision: .optionId("accept"))
-            XCTAssertFalse(
-                wire.types.contains("answer"),
-                "minor \(minor) cannot retire a Codex card, so it must not answer one")
-        }
-    }
-
     // MARK: The line above the composer
 
     /// A Codex run's own outcome outranks the last Claude send: on a Codex run
