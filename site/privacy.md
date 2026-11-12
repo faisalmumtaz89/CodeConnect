@@ -1,10 +1,10 @@
 # CodeConnect Privacy Policy
 
-**Effective date: November 3, 2026**
+**Effective date: November 12, 2026**
 
 CodeConnect is an iOS app that connects your iPhone to the CodeConnect daemon (`ccd`) running on **your own computer**. This policy covers both halves — the app on your phone and the software on your computer, a Mac or a Linux computer — because they are one system.
 
-There is no account, no login and no analytics. Your data moves between your own devices. The deliberate exceptions: a push notification passes through Apple, and — unless your daemon holds its own Apple push key — through CodeConnect's push relay first. The relay is the one service CodeConnect operates; it exists so notifications can reach a closed app, and it is designed to be incapable of receiving your content.
+There is no account, no login and no analytics. CodeConnect moves your data between your own devices. The deliberate exceptions: a push notification passes through Apple, and — unless your daemon holds its own Apple push key — through CodeConnect's push relay first. The relay is the one service CodeConnect operates; it exists so notifications can reach a closed app, and it is designed to be incapable of receiving your content. The coding agents you use with CodeConnect are separate: each sends your conversation to the AI provider it uses, as described under *Every network connection, enumerated*.
 
 ## What we collect
 
@@ -12,7 +12,7 @@ There is no account, no login and no analytics. Your data moves between your own
 
 ## Where your data lives
 
-- **On your computer** — the daemon keeps its state under `~/.codeconnect`: the event log of your sessions and your agents' messages to each other (a local SQLite database), pairing records for your devices, TLS material, and configuration. None of it is transmitted anywhere except directly to your paired iPhone and, for your agents' messages, to your own other computers, as listed under *Every network connection, enumerated*. Notifications are the exceptions, exactly as described under *Push notifications*: in direct mode the computer sends Apple the notification itself, whose title can be a project's folder name; relay-backed, it sends the relay only the fields listed under *The push relay*.
+- **On your computer** — the daemon keeps its state under `~/.codeconnect`: the event log of your sessions and your agents' messages to each other (a local SQLite database), pairing records for your devices, TLS material, and configuration. CodeConnect transmits none of it anywhere except directly to your paired iPhone and, for your agents' messages, to your own other computers, as listed under *Every network connection, enumerated*. Notifications are the exceptions, exactly as described under *Push notifications*: in direct mode the computer sends Apple the notification itself, whose title can be a project's folder name; relay-backed, it sends the relay only the fields listed under *The push relay*.
 - **On your iPhone** — session data is cached locally solely so the app works offline and resumes quickly. The pairing — your computer's address and the per-device token — is stored in the iOS Keychain. When relay-backed notifications are enabled, the relay credential and its generation number, the App Attest key ID, the push token and its environment, and an install identifier are stored there too. Both are `ThisDeviceOnly` items that never sync to iCloud and never migrate to another phone.
 - **On the push relay** — once a phone has enrolled for relay-backed notifications, the content-free records listed under *The push relay*, for the periods given there.
 
@@ -41,7 +41,7 @@ When enabled, notifications reach your phone one of two ways, and only while an 
 
 ## Every network connection, enumerated
 
-A privacy policy that says "we respect your privacy" is weaker than one that lists the connections. Here is the complete list.
+A privacy policy that says "we respect your privacy" is weaker than one that lists the connections. Here is the complete list of CodeConnect's connections, followed by what your coding agents connect to.
 
 The **iPhone app** connects to:
 
@@ -62,7 +62,14 @@ The **CodeConnect push relay** itself connects to:
 1. **Apple's push service (APNs)** — to deliver the generic `CodeConnect` notification it built from those fields.
 2. **Operator-controlled backup storage** — an S3-compatible object store that receives the relay's encrypted daily database backups, each removed at the first daily backup after it is 30 days old. The backup is encrypted before it leaves the relay and contains only the content-free records listed above.
 
-There are no other endpoints. If you choose to reach your computer through a VPN or tunnel you operate (for example Tailscale), that traffic is governed by that provider's policy — CodeConnect does not require any specific provider.
+The **coding agents you run**, Claude Code and Codex, are not part of CodeConnect. To do their work, they send your conversation, including the code and file contents in it, to the AI provider they use: normally Anthropic for Claude Code and OpenAI for Codex, through your own account with them. That provider's terms and privacy policy for your kind of account apply, not this policy:
+
+1. **Claude Code** connects to Anthropic. It can also send its own usage figures and error reports to Anthropic and to services Anthropic uses. Anthropic describes what Claude Code sends and what Anthropic keeps in [Claude Code's data usage](https://code.claude.com/docs/en/data-usage) and its [privacy policy](https://www.anthropic.com/legal/privacy).
+2. **Codex** connects to OpenAI. In our short tests of Codex 0.167.0 in November 2026, signed in to ChatGPT, it sent your conversation, its requests for its lists of models and plugins, and its own usage reports to chatgpt.com. In a separate test, not signed in, its terminal window also connected to GitHub for OpenAI's tips, and to GitHub and npm to check for a newer version of Codex. Not signed in, it also tried api.openai.com and downloaded OpenAI's collection of plugins from GitHub. OpenAI's [privacy policy](https://openai.com/policies/row-privacy-policy/) links the version for where you live.
+
+CodeConnect starts these agents and passes them what you send from the app, but it never sits between an agent and its provider: each agent makes its own connection, and CodeConnect neither routes it nor reads it. CodeConnect also gives each agent tools for messaging your other agents, and what those tools return becomes part of the agent's conversation too: the list of your other running sessions (each one's computer, label, agent and project), the messages themselves, and instructions for handling them. So does a fixed line that tells the agent a message is waiting.
+
+CodeConnect connects to no other endpoints. If you choose to reach your computer through a VPN or tunnel you operate (for example Tailscale), that traffic is governed by that provider's policy — CodeConnect does not require any specific provider.
 
 ## How the connection is protected
 
@@ -75,7 +82,7 @@ Privacy laws give you rights to access, correct, export, and delete personal dat
 - **On your devices** — revoke a device with `codeconnect revoke`, remove the daemon with `codeconnect daemon uninstall` and delete `~/.codeconnect`, and in the app use *Unpair and erase cache*, which deletes the pairing, before deleting the app from your phone. Deleting the app removes its container and cache, but iOS keeps the app's `ThisDeviceOnly` Keychain items — the pairing, and the relay credential with its key ID, push token and install identifier — and they can outlive an uninstall; no shipped action currently leaves every local credential erased — resetting notification registration replaces the relay items and immediately re-enrolls.
 - **On the push relay** — CodeConnect holds only the records listed under *The push relay*. Resetting notification registration in the app enrolls afresh, which supersedes the previous record and starts its deletion clock: 30 days in the live database, and up to 31 more in the last backup. There is no separate on-request deletion path, because the record holds nothing that identifies you beyond the push token it is keyed to.
 
-Your sessions, code, and conversations exist only on your own devices, under your direct control; there is no copy anywhere else to ask us about, because we never had one. If you believe we have this wrong, contact us and we will answer plainly.
+We hold no copy of your sessions, code, or conversations, so there is none with us to ask about: we never had one. What the providers your coding agents use keep is up to their terms for your kind of account, so ask them about any copies they hold. If you believe we have this wrong, contact us and we will answer plainly.
 
 ## Children
 
@@ -83,7 +90,7 @@ CodeConnect is a developer tool and is not directed at children.
 
 ## Changes
 
-If this policy changes, the new version will be posted at this URL with a new effective date. Because the system holds nothing beyond the relay's content-free records, changes are expected to be rare and editorial.
+If this policy changes, the new version will be posted at this URL with a new effective date. Because our servers hold nothing beyond the relay's content-free records, changes are expected to be rare and editorial.
 
 ## Contact
 

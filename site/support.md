@@ -1,6 +1,6 @@
 # CodeConnect Support
 
-CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. Your sessions travel directly between the app and the daemon on your computer — no server in between — and never leave your own devices; the one CodeConnect-operated service is a content-free push relay, described in the privacy policy.
+CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. Your sessions travel between the app and the daemon on your computer without passing through any server CodeConnect runs, and CodeConnect never sends them anywhere else; the one CodeConnect-operated service is a content-free push relay, described in the privacy policy. Your coding agents themselves send your conversation to the AI providers they use, normally Anthropic or OpenAI, as the privacy policy explains.
 
 ## Requirements
 
@@ -64,7 +64,7 @@ The iPhone app updates from the App Store. When the app and a computer cannot un
 ## Frequently asked
 
 **Does my code ever leave my devices?**
-No. Sessions travel directly from your Mac to your phone and never touch a CodeConnect server. The one exception is the push notification: it passes through Apple, and — unless your daemon holds its own Apple push key — through CodeConnect's push relay first, which receives only a fixed handful of content-free fields. Both shapes are described exactly in the [privacy policy](https://codeconnect.sh/privacy).
+Not to any server of ours. Sessions travel directly from your Mac to your phone and never touch a CodeConnect server. Push notifications pass through Apple and, unless your daemon holds its own Apple push key, through CodeConnect's push relay first, which receives only a fixed handful of content-free fields. Dictation goes to Apple's speech recognition when your language can't be handled on the iPhone itself. Both are described exactly in the [privacy policy](https://codeconnect.sh/privacy). Your coding agent is different: to do its work, it sends your conversation, including the code in it, to the AI provider it uses, normally Anthropic for Claude Code and OpenAI for Codex, under that provider's own terms.
 
 **Is Tailscale required?**
 No, but it is the default: out of the box the daemon listens on your Mac's Tailscale address, so with both devices on the same tailnet there is nothing to configure. On your local network:
