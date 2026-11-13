@@ -1992,10 +1992,12 @@ impl Store {
             permission_mode: newest_decided(
                 &conn,
                 session_uid,
-                "(kind = ?2 OR source = ?3)",
+                "(kind = ?2 OR source = ?3 OR (kind = ?4 AND source = ?5))",
                 &[
                     protocol::facts::TRANSCRIPT_PERMISSION_MODE,
                     Source::Hook.as_str(),
+                    EventKind::SessionStart.as_str(),
+                    Source::Sdk.as_str(),
                 ],
                 protocol::facts::permission_mode_fact,
             )?,
@@ -2608,6 +2610,66 @@ impl Store {
         }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// File one SDK message from the host `host`, message `seq`, in one transaction:
+    /// the cursor, as [`Store::commit_cursor`] advances it, then the message's
+    /// `events`, then, from its init, the run's Claude `session_id` and the folder
+    /// claude runs in (`cwd`). `None`, with nothing written, when the cursor does not
+    /// move, and then the caller must not acknowledge `seq` (H3); otherwise the events
+    /// newly stored, which a replay leaves empty.
+    pub fn append_host_message(
+        &self,
+        session_uid: &str,
+        host: &ProcessIdentity,
+        seq: u64,
+        events: &[PendingEvent],
+        session_id: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<Option<Vec<Event>>> {
+        let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let moved = tx.execute(
+            "UPDATE run_hosts SET cursor = ?5
+              WHERE session_uid = ?1 AND host_pid = ?2
+                AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
+            params![
+                session_uid,
+                host.pid,
+                host.birth.start_sec,
+                host.birth.start_usec,
+                seq
+            ],
+        )?;
+        if moved != 1 {
+            return Ok(None);
+        }
+        let mut filed = Vec::with_capacity(events.len());
+        for pending in events {
+            if let Some(event) = append_in_tx(&tx, pending)? {
+                filed.push(event);
+            }
+        }
+        // A hosted run is Claude's, so its row is in Claude's table.
+        let (table, _) = session_tables_for(&AgentKind::Claude);
+        if let Some(id) = session_id {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET claude_session_id = ?2
+                      WHERE session_uid = ?1 AND claude_session_id IS NOT ?2"
+                ),
+                params![session_uid, id],
+            )?;
+        }
+        if let Some(cwd) = cwd {
+            tx.execute(
+                &format!("UPDATE {table} SET cwd = ?2 WHERE session_uid = ?1 AND cwd != ?2"),
+                params![session_uid, cwd],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(filed))
     }
 
     /// The answer kept for the folder whose real path is `path`.

@@ -71,14 +71,17 @@ pub fn model_fact(event: &Event) -> Option<ModelFact> {
 }
 
 /// What one event says the main agent's permission mode is, if anything: the
-/// `permission_mode` of a hook's input that names no `agent_id`, or Claude's own
-/// permission-mode transcript line.
+/// `permission_mode` of a hook's input that names no `agent_id`, Claude's own
+/// permission-mode transcript line, or the `permissionMode` of an SDK run's init.
 ///
 /// A background agent's hook carries its `agent_id`, and its mode (measured:
 /// `bubble`) is that agent's, never the run's.
 pub fn permission_mode_fact(event: &Event) -> Option<Fact> {
     let mode = match &event.kind {
         EventKind::Other(kind) if kind == TRANSCRIPT_PERMISSION_MODE => {
+            event.payload.get("permissionMode")?
+        }
+        EventKind::SessionStart if event.source == Source::Sdk => {
             event.payload.get("permissionMode")?
         }
         _ if event.source == Source::Hook => {

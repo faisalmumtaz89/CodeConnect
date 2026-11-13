@@ -97,6 +97,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 2,
       "subtype": "success"
     },
     "source": "sdk",
@@ -264,6 +265,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 2,
       "subtype": "success"
     },
     "source": "sdk",
@@ -407,6 +409,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 2,
       "subtype": "success"
     },
     "source": "sdk",
@@ -865,6 +868,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 8,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1019,6 +1023,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 2,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1194,6 +1199,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 3,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1323,6 +1329,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": true,
+      "num_turns": 3,
       "subtype": "error_during_execution"
     },
     "source": "sdk",
@@ -1452,6 +1459,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": true,
+      "num_turns": 3,
       "subtype": "error_during_execution"
     },
     "source": "sdk",
@@ -1555,6 +1563,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 1,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1639,6 +1648,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 1,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1716,6 +1726,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 0,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1788,6 +1799,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 1,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1872,6 +1884,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 1,
       "subtype": "success"
     },
     "source": "sdk",
@@ -1956,6 +1969,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 0,
       "subtype": "success"
     },
     "source": "sdk",
@@ -2021,6 +2035,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 0,
       "subtype": "success"
     },
     "source": "sdk",
@@ -2112,6 +2127,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 1,
       "subtype": "success"
     },
     "source": "sdk",
@@ -2215,6 +2231,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "num_turns": 1,
       "subtype": "success"
     },
     "source": "sdk",

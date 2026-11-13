@@ -29,6 +29,9 @@ pub enum Signal {
     Lifecycle { command_uuid: String, state: String },
     /// The run's Claude session id, from every `system/init`.
     SessionId { id: String },
+    /// The folder claude runs in, from every `system/init`: in a new worktree, the
+    /// one claude made, not the folder the run was started from.
+    Cwd { path: String },
     /// `/clear` began a new conversation. Its id is not the session id a run
     /// resumes: the next `system/init` carries that.
     Reset { new_conversation_id: String },
@@ -81,6 +84,9 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             if let Some(id) = text("session_id") {
                 mapped.signals.push(Signal::SessionId { id: id.into() });
             }
+            if let Some(path) = text("cwd") {
+                mapped.signals.push(Signal::Cwd { path: path.into() });
+            }
         }
         (Some("system"), Some("status")) if message.get("permissionMode").is_some() => {
             mapped.events.push(event(
@@ -129,10 +135,12 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             }
         }
         (Some("result"), _) => {
+            // `num_turns` 0 is a command's own turn (/compact, /clear, /effort), which
+            // otherwise ends exactly like the agent's.
             mapped.events.push(event(
                 EventKind::TurnComplete,
                 0,
-                pick(message, &["subtype", "is_error"]),
+                pick(message, &["subtype", "is_error", "num_turns"]),
             ));
             mapped.events.push(event(
                 EventKind::Usage,
@@ -327,8 +335,8 @@ mod tests {
     }
 
     /// Every delivery names a person's message whose echo the session carries,
-    /// and every echo is a delivery; one session id per init; the lifecycles and
-    /// the one `/clear`.
+    /// and every echo is a delivery; one session id and one folder per init; the
+    /// lifecycles and the one `/clear`.
     #[test]
     fn the_signals_are_the_session_s_deliveries_lifecycles_ids_and_reset() {
         let echoes: BTreeSet<String> = messages()
@@ -347,6 +355,7 @@ mod tests {
         assert_eq!(delivered, echoes);
         let count = |of: fn(&Signal) -> bool| signals.iter().filter(|s| of(s)).count();
         assert_eq!(count(|s| matches!(s, Signal::SessionId { .. })), 17);
+        assert_eq!(count(|s| matches!(s, Signal::Cwd { .. })), 17);
         assert_eq!(count(|s| matches!(s, Signal::Lifecycle { .. })), 12);
         assert_eq!(count(|s| matches!(s, Signal::Reset { .. })), 1);
     }

@@ -24,12 +24,13 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::config::Config;
-use protocol::event::Lifecycle;
+use protocol::event::{Lifecycle, SessionKey};
 use protocol::host::{
     FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
     HOST_PROTOCOL_VERSION,
 };
 use protocol::proc_identity::{read_birth_identity, ProcessIdentity};
+use protocol::sdk_map::Signal;
 use protocol::ws::{StartFailure, StartSessionResult};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -394,13 +395,55 @@ async fn commit_and_ack(
     }
 }
 
+/// Map one SDK message of a live run and file it with its cursor, then acknowledge it.
+/// `turn` is the uuid of the run's latest `system/init`: an init sets it before it is
+/// mapped, so the init's own events carry their turn.
+async fn apply_sdk(
+    daemon: &Daemon,
+    uid: &str,
+    host: ProcessIdentity,
+    seq: u64,
+    message: &serde_json::Value,
+    turn: &mut Option<String>,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let text = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
+    if text("type") == Some("system") && text("subtype") == Some("init") {
+        if let Some(uuid) = text("uuid") {
+            *turn = Some(uuid.to_string());
+        }
+    }
+    let mapped = protocol::sdk_map::map(&SessionKey::new(uid, uid), turn.as_deref(), message);
+    let (mut session_id, mut cwd) = (None, None);
+    for signal in mapped.signals {
+        match signal {
+            Signal::SessionId { id } => session_id = Some(id),
+            Signal::Cwd { path } => cwd = Some(path),
+            // Deliveries and command lifecycles settle sends (B5); `/clear` keeps the
+            // session id, which the next init names.
+            Signal::Delivered { .. } | Signal::Lifecycle { .. } | Signal::Reset { .. } => {}
+        }
+    }
+    match daemon
+        .ingest_host_message(uid, host, seq, mapped.events, session_id, cwd)
+        .await
+    {
+        Ok(true) => send(write, &ToHost::Ack { seq }).await,
+        Ok(false) => Err(format!(
+            "message {seq} is not past the run's cursor for this host"
+        )),
+        Err(err) => Err(format!("{err:#}")),
+    }
+}
+
 /// The run's connection after `start`: each message committed, then acknowledged, in
 /// order. It applies the run's `state` and the outcome of `start_uuid`, which makes the
 /// run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
-/// why the link ended if it ends first. After a refusal it also applies claude's
-/// `exited`, which has nothing to change in a `failed` run and lets its host end. It ends
-/// at the first message this daemon does not apply, which stays in the host with
-/// everything after it, or when the connection or a commit fails.
+/// why the link ended if it ends first. A `live` run's SDK messages are its events
+/// ([`apply_sdk`]); the host sends none before the outcome. After a refusal it also
+/// applies claude's `exited`, which has nothing to change in a `failed` run and lets its
+/// host end. It ends at the first message this daemon does not apply, which stays in the
+/// host with everything after it, or when the connection or a commit fails.
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
@@ -411,7 +454,8 @@ async fn link(
     mut write: OwnedWriteHalf,
 ) {
     let mut begun = Some(begun);
-    let mut refused = false;
+    let (mut live, mut refused) = (false, false);
+    let mut turn = None;
     let ended = loop {
         let line = match lines.next_line().await {
             Ok(Some(line)) => line,
@@ -450,7 +494,10 @@ async fn link(
                     .commit_outcome(uid.clone(), host, seq, lifecycle, initialize)
                     .await
                 {
-                    Ok(true) => refused = lifecycle == Lifecycle::Failed,
+                    Ok(true) => {
+                        live = lifecycle == Lifecycle::Live;
+                        refused = lifecycle == Lifecycle::Failed;
+                    }
                     Ok(false) => {
                         break format!("message {seq} is not past the run's cursor for this host")
                     }
@@ -464,6 +511,13 @@ async fn link(
                     let _ = begun.send(said);
                 }
                 if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                    break why;
+                }
+            }
+            Ok(FromHost::Sdk { seq, message }) if live => {
+                if let Err(why) =
+                    apply_sdk(&daemon, &uid, host, seq, &message, &mut turn, &mut write).await
+                {
                     break why;
                 }
             }
@@ -950,7 +1004,7 @@ mod tests {
         // is acknowledged and the cursor stays, so the host keeps both.
         say(
             &mut write,
-            serde_json::json!({"type": "sdk", "seq": 3, "message": {}}),
+            serde_json::json!({"type": "withdrawn", "seq": 3, "tool_use_id": "toolu_1"}),
         )
         .await;
         say(
@@ -1246,6 +1300,396 @@ mod tests {
         }
     }
 
+    /// One real session's SDK messages (SDK 0.3.322, claude 2.1.322), as a host relays
+    /// them, and the events the mapper makes of them.
+    const CAPTURE: &str = include_str!("../../../fixtures/claude/sdk-session-0.3.322.jsonl");
+    const WIRE: &str = include_str!("../../../fixtures/claude/sdk-session-wire.json");
+
+    fn capture() -> Vec<serde_json::Value> {
+        CAPTURE
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// A run a stand-in host has made `live` (its done outcome is seq 2), with the
+    /// host's side of the socket open.
+    async fn live_run(rig: &Rig) -> Played {
+        let host = stub_host(rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, played) =
+            tokio::join!(start(&daemon, run(rig, "req-live", &cwd, &host)), async {
+                let mut played = play_to_start(rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        assert_eq!(started_uid(&result), played.uid);
+        played
+    }
+
+    async fn sdk(write: &mut OwnedWriteHalf, seq: u64, message: serde_json::Value) {
+        say(
+            write,
+            serde_json::json!({"type": "sdk", "seq": seq, "message": message}),
+        )
+        .await;
+    }
+
+    /// The run's stored events, oldest first, as an app reads each (the mapper's
+    /// fixture's shape).
+    fn stored(rig: &Rig, uid: &str) -> Vec<serde_json::Value> {
+        let conn = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT kind, payload, source, source_event_id, turn_id, item_id FROM events
+                  WHERE session_uid = ?1 ORDER BY seq",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([uid], |row| {
+                let payload: String = row.get(1)?;
+                Ok(serde_json::json!({
+                    "kind": row.get::<_, String>(0)?,
+                    "payload": serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
+                    "source": row.get::<_, String>(2)?,
+                    "source_event_id": row.get::<_, Option<String>>(3)?,
+                    "turn_id": row.get::<_, Option<String>>(4)?,
+                    "item_id": row.get::<_, Option<String>>(5)?,
+                }))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    /// The run row's Claude session id and folder.
+    fn row_of(rig: &Rig, uid: &str) -> (Option<String>, String) {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT claude_session_id, cwd FROM sessions WHERE session_uid = ?1",
+                [uid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// A test-only trigger on the run's store, so a write fails where a test needs it.
+    fn trigger(rig: &Rig, sql: &str) {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
+    }
+
+    async fn summary(daemon: &Daemon, uid: &str) -> protocol::event::SessionSummary {
+        daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.session_uid == uid)
+            .unwrap()
+    }
+
+    /// **A live run's SDK messages are its events (G1, G2, G3).** The recorded session's
+    /// 150 messages, each filed with the run's cursor in one transaction, then
+    /// acknowledged: by each ack the cursor is that message's seq. The first, a
+    /// command's `queued`, files nothing. The run's events are the mapper's, each turn's
+    /// carrying its init's uuid, each broadcast once and in order. The session id stays
+    /// through the `/clear` (line 133) and is the next init's from line 135. A message
+    /// sent again with its seq files nothing and is not acknowledged: the link ends.
+    #[tokio::test]
+    async fn a_live_run_files_its_sdk_messages_with_their_cursor_then_acknowledges_them() {
+        let rig = rig();
+        let mut broadcast = rig.daemon.events_tx.subscribe();
+        let mut played = live_run(&rig).await;
+        let messages = capture();
+        let mut ids = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
+            let seq = index as u64 + 3;
+            sdk(&mut played.write, seq, message.clone()).await;
+            assert_eq!(
+                next(&mut played.lines).await,
+                Some(ToHost::Ack { seq }),
+                "line {}",
+                index + 1
+            );
+            assert_eq!(cursor(&rig, &played.uid), seq as i64, "line {}", index + 1);
+            if index == 0 {
+                assert!(stored(&rig, &played.uid).is_empty(), "the queued line");
+            }
+            ids.push(row_of(&rig, &played.uid).0);
+        }
+        let first_id = messages[2]["session_id"].as_str().map(str::to_string);
+        assert_eq!(ids[2], first_id, "after the first init");
+        assert_eq!(ids[132], first_id, "after the /clear");
+        assert_eq!(
+            ids[134],
+            messages[134]["session_id"].as_str().map(str::to_string),
+            "after the next init"
+        );
+        assert_ne!(ids[134], first_id);
+        let committed: serde_json::Value = serde_json::from_str(WIRE).unwrap();
+        assert_eq!(
+            serde_json::Value::Array(stored(&rig, &played.uid)),
+            committed
+        );
+        let mut seqs = Vec::new();
+        while let Ok(event) = broadcast.try_recv() {
+            if event.session_uid == played.uid {
+                seqs.push(event.seq);
+            }
+        }
+        assert_eq!(seqs, (1..=109).collect::<Vec<u64>>(), "each once, in order");
+
+        let last = messages.len() as u64 + 2;
+        sdk(&mut played.write, last, messages.last().unwrap().clone()).await;
+        assert_eq!(next(&mut played.lines).await, None);
+        assert_eq!(stored(&rig, &played.uid).len(), 109);
+        assert_eq!(cursor(&rig, &played.uid), last as i64);
+        stop(&played.dir);
+    }
+
+    /// **G1's injected failure:** a result's second event cannot be stored (a test
+    /// trigger aborts its insert). Its first event, already inserted, goes too; the
+    /// cursor stays, nothing is broadcast, and the message is not acknowledged.
+    #[tokio::test]
+    async fn a_message_whose_events_cannot_all_be_stored_files_none() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        trigger(
+            &rig,
+            "CREATE TRIGGER no_usage BEFORE INSERT ON events WHEN NEW.kind = 'usage'
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        );
+        let mut broadcast = rig.daemon.events_tx.subscribe();
+        sdk(
+            &mut played.write,
+            3,
+            serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
+                               "is_error": false, "num_turns": 1, "usage": {}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, None);
+        assert!(stored(&rig, &played.uid).is_empty());
+        assert_eq!(cursor(&rig, &played.uid), 2);
+        assert!(broadcast.try_recv().is_err());
+        stop(&played.dir);
+    }
+
+    /// **G3's injected failure:** an init whose session id cannot be kept (a test
+    /// trigger aborts that update) is kept back whole: no event, the cursor and the
+    /// row's id as they were, and no acknowledgement.
+    #[tokio::test]
+    async fn an_init_whose_session_id_cannot_be_kept_is_kept_back_whole() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        trigger(
+            &rig,
+            "CREATE TRIGGER no_id BEFORE UPDATE OF claude_session_id ON sessions
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        );
+        sdk(&mut played.write, 3, capture()[2].clone()).await;
+        assert_eq!(next(&mut played.lines).await, None);
+        assert!(stored(&rig, &played.uid).is_empty());
+        assert_eq!(cursor(&rig, &played.uid), 2);
+        assert_eq!(row_of(&rig, &played.uid).0, None);
+        stop(&played.dir);
+    }
+
+    /// **G2b:** an SDK message before the start's outcome is not applied, since the host
+    /// sends the outcome first: it files nothing and is not acknowledged.
+    #[tokio::test]
+    async fn an_sdk_message_before_the_outcome_is_not_applied() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (_, uid) = tokio::join!(start(&daemon, run(&rig, "req-early", &cwd, &host)), async {
+            let mut played = play_to_start(&rig).await;
+            sdk(&mut played.write, 2, capture()[2].clone()).await;
+            assert_eq!(next(&mut played.lines).await, None);
+            stop(&played.dir);
+            played.uid
+        });
+        assert!(stored(&rig, &uid).is_empty());
+        assert_eq!(cursor(&rig, &uid), 1);
+    }
+
+    /// **G3b:** a run is in the folder its init names: a new worktree's, which claude
+    /// made, rather than the folder it was started from. Once that message is
+    /// acknowledged the row and the fleet say so; a later init naming it again changes
+    /// nothing.
+    #[tokio::test]
+    async fn a_run_is_in_the_folder_its_init_names() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let started = rig.root.to_str().unwrap().to_string();
+        assert_eq!(row_of(&rig, &played.uid).1, started);
+        let worktree = rig.root.join(".claude/worktrees/feature-x");
+        let mut init = capture()[2].clone();
+        init["cwd"] = serde_json::json!(worktree.to_str().unwrap());
+        sdk(&mut played.write, 3, init.clone()).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(row_of(&rig, &played.uid).1, worktree.to_str().unwrap());
+        assert_eq!(
+            summary(&rig.daemon, &played.uid).await.cwd,
+            worktree.to_str().unwrap()
+        );
+        init["uuid"] = serde_json::json!("a-later-init");
+        sdk(&mut played.write, 4, init).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(row_of(&rig, &played.uid).1, worktree.to_str().unwrap());
+        stop(&played.dir);
+    }
+
+    /// **G4:** the init's permission mode is the run's, with that init's event's seq,
+    /// live and as a restarted daemon rebuilds it from the store.
+    #[tokio::test]
+    async fn the_inits_permission_mode_is_the_runs_live_and_after_a_restart() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        for (index, message) in capture().into_iter().take(3).enumerate() {
+            let seq = index as u64 + 3;
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let mode = protocol::event::Fact {
+            value: capture()[2]["permissionMode"].as_str().unwrap().to_string(),
+            seq: 1,
+        };
+        assert_eq!(
+            summary(&rig.daemon, &played.uid).await.permission_mode,
+            Some(mode.clone())
+        );
+        stop(&played.dir);
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        assert_eq!(
+            summary(&restarted, &played.uid).await.permission_mode,
+            Some(mode)
+        );
+    }
+
+    /// **G5:** nothing tied to the person's account reaches the store through the link:
+    /// an init carrying claude.ai connectors, a result with its login's expiry, and a
+    /// rate-limit message, each acknowledged, the last filing nothing at all.
+    #[tokio::test]
+    async fn nothing_tied_to_the_account_reaches_the_store() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let account = [
+            serde_json::json!({"type": "system", "subtype": "init", "uuid": "i1",
+                "session_id": "s1", "cwd": "/tmp", "model": "claude-opus-5-5",
+                "permissionMode": "default", "apiKeySource": "none",
+                "mcp_servers": [{"name": "claude.ai Example", "source": "claudeai",
+                                 "status": "connected"}],
+                "tools": ["Bash", "mcp__claude_ai_Example__search"],
+                "slash_commands": ["compact", "mcp__claude_ai_Example__prompt"]}),
+            serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
+                "is_error": false, "usage": {"input_tokens": 1}, "total_cost_usd": 0.01,
+                "credential_expires_at": 1_800_000_000_000_u64}),
+            serde_json::json!({"type": "rate_limit_event", "uuid": "l1",
+                "rate_limit_info": {"status": "allowed"}}),
+        ];
+        let mut filed = Vec::new();
+        for (index, message) in account.into_iter().enumerate() {
+            let seq = index as u64 + 3;
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+            filed.push(stored(&rig, &played.uid).len());
+        }
+        assert_eq!(filed, [1, 3, 3], "the rate-limit message files nothing");
+        let text = serde_json::to_string(&stored(&rig, &played.uid)).unwrap();
+        for field in [
+            "mcp_servers",
+            "\"tools\"",
+            "slash_commands",
+            "apiKeySource",
+            "rate_limit_info",
+            "credential_expires_at",
+            "claude.ai Example",
+            "mcp__claude_ai_Example",
+        ] {
+            assert!(!text.contains(field), "{field} reached the store");
+        }
+        stop(&played.dir);
+    }
+
+    const SESSION_EVENTS: &str = include_str!("../../../fixtures/claude/sdk-session-events.json");
+
+    /// The recorded session through a live run's link, as the wire delivers its events:
+    /// the store's own `Event`s, serialized. Only what differs between runs is pinned,
+    /// each checked first: the run's uid, which is also its name, and each event's clock
+    /// read (`ts`).
+    async fn the_capture_as_the_wire_delivers_it() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        for (index, message) in capture().into_iter().enumerate() {
+            let seq = index as u64 + 3;
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let events = rig
+            .daemon
+            .db
+            .events_after(played.uid.clone(), 0, 1000)
+            .await
+            .unwrap();
+        stop(&played.dir);
+        let mut wire = serde_json::to_value(&events).unwrap();
+        for event in wire.as_array_mut().unwrap() {
+            assert_eq!(event["session_uid"], played.uid.as_str());
+            assert_eq!(event["session_id"], played.uid.as_str());
+            assert!(
+                protocol::time::unix_ms_from_rfc3339(event["ts"].as_str().unwrap()).is_some(),
+                "ts is a clock read: {event}"
+            );
+            event["session_uid"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
+            event["session_id"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
+            event["ts"] = serde_json::json!("2026-11-13T12:00:00.000Z");
+        }
+        wire
+    }
+
+    /// **G6: the events of the recorded session as this build files and sends them**,
+    /// the fixture the apps' readers of a host run's events test against.
+    #[tokio::test]
+    async fn the_sdk_session_events_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value = serde_json::from_str(SESSION_EVENTS).unwrap();
+        assert_eq!(
+            the_capture_as_the_wire_delivers_it().await,
+            committed,
+            "the committed sdk session events no longer match what this build files. \
+             Regenerate them with cargo test -p ccd -- --ignored \
+             regenerate_the_sdk_session_events_fixture"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/sdk-session-events.json` with what this build files.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_sdk_session_events_fixture() {
+        let text =
+            serde_json::to_string_pretty(&the_capture_as_the_wire_delivers_it().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/sdk-session-events.json"
+            ),
+            text + "\n",
+        )
+        .unwrap();
+    }
+
     /// The agent host's one stand-in claude (mac/agent-host/test/stub-claude.ts), as its
     /// own tests write it (rig.ts `writeStub`): a sh wrapper running it on the built
     /// host as Bun. It answers initialize with a recorded claude's answer and, after the
@@ -1299,8 +1743,9 @@ mod tests {
     /// zsh's login shell (`-lic`), as a zsh user's start runs it, with the host's
     /// stand-in claude: the recorded pid and birth are the host's own, it leads a session
     /// of its own, the start's outcome makes the run `live` with the initialize answer's
-    /// models kept, and the host is still running after its 30 s no-start exit would
-    /// have ended it (claude's init is unacknowledged, so the host keeps it). A start
+    /// models kept, claude's init is filed as the run's first event (G8), and the host is
+    /// still running after its 30 s no-start exit would have ended it (claude keeps
+    /// running, so the host does). A start
     /// whose claude is missing is refused, naming it, and its run is `failed`. So is one
     /// whose claude starts and dies at initialize, or writes a line and then refuses it,
     /// and its host then ends, its claude's end acknowledged. A claude that writes a line
@@ -1422,10 +1867,30 @@ mod tests {
             .unwrap();
         let birth = read_birth_identity(pid).unwrap();
         assert_eq!(stored, (pid, birth.start_sec, birth.start_usec));
+        // The stand-in writes the recorded session's init after the first message: the
+        // host relays it once the outcome is committed, and it is filed, then acked.
+        let session_init: serde_json::Value = capture()
+            .into_iter()
+            .find(|message| message["subtype"] == "init")
+            .unwrap();
+        let mut filed = Vec::new();
+        for _ in 0..100 {
+            filed = self::stored(&rig, &uid);
+            if !filed.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(filed.len(), 1, "claude's init is the run's one event");
+        assert_eq!(filed[0]["kind"], "session_start");
+        assert_eq!(filed[0]["source"], "sdk");
+        assert_eq!(filed[0]["payload"]["model"], session_init["model"]);
+        assert_eq!(filed[0]["turn_id"], session_init["uuid"]);
+        assert_eq!(filed[0]["item_id"], session_init["uuid"]);
         assert_eq!(
             cursor(&rig, &uid),
-            2,
-            "the state and the outcome are committed"
+            3,
+            "the state, the outcome and the init are committed"
         );
         // SAFETY: getsid(2) and kill(2) with signal 0 only read one process's state.
         assert_eq!(unsafe { libc::getsid(pid) }, pid);
