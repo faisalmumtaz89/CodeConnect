@@ -10192,11 +10192,11 @@ impl Daemon {
     /// truth, and a daemon that pruned it on its own judgement would be
     /// deciding which of somebody's agent history was worth keeping.
     ///
-    /// **What it refuses to touch.** Anything not `Exited` — the store enforces
-    /// that — plus two things only this process knows: a run with a supervisor
-    /// attached right now, and a run with an approval still open. Either would
-    /// mean the daemon holds live state for a session it had just erased the
-    /// record of. Both should be impossible for a row marked `Exited`, which is
+    /// **What it refuses to touch.** Anything that has not ended (`Exited` or
+    /// `Failed`) — the store enforces that — plus two things only this process knows:
+    /// a run with a supervisor attached right now, and a run with an approval still
+    /// open. Either would mean the daemon holds live state for a session it had just
+    /// erased the record of. Both should be impossible for an ended row, which is
     /// exactly why they are checked: if one ever happens, it is a bug, and
     /// deleting the evidence of it is the worst possible response.
     pub async fn prune_ended_sessions(&self, dry_run: bool) -> Result<Vec<PrunedSession>> {

@@ -69,7 +69,7 @@ pub(crate) fn run_dir(root: &Path, uid: &str) -> PathBuf {
 }
 
 /// The agent host ccd spawns: `agent_host_bin` when the config names one, else the one
-/// beside ccd's own executable, where the Mac app and the installer put it.
+/// beside ccd's own executable, where the Mac app installs it.
 pub(crate) fn host_binary(config: &Config) -> Result<PathBuf, String> {
     if let Some(bin) = &config.agent_host_bin {
         return Ok(PathBuf::from(bin));
@@ -122,9 +122,10 @@ pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionRes
         Err(err) => return failed(format!("could not record the run: {err:#}")),
     }
     match bring_up(daemon, &uid, &run).await {
+        // A start in a new worktree does not know its folder until claude reports it.
         Ok(()) => StartSessionResult::Started {
             session_uid: uid,
-            cwd: Some(run.cwd.to_string()),
+            cwd: run.worktree.is_none().then(|| run.cwd.to_string()),
         },
         Err(detail) => {
             if let Err(err) = daemon
@@ -547,9 +548,10 @@ mod tests {
         }
     }
 
-    /// H1: while the run's host is starting, its row is already there, `starting`, with
-    /// its request id, so a ccd that died at that moment finds the run when it starts
-    /// again (H8) instead of a host nobody knows about.
+    /// H1: the row is written before the host is spawned, so a ccd that died while its
+    /// host starts finds the run when it starts again (H8) instead of a host nobody
+    /// knows about. A write lock held from a second connection makes the row's insert
+    /// wait (the store's busy timeout): while it is held, the host must not start.
     #[tokio::test]
     async fn the_row_is_there_while_the_host_starts() {
         let rig = rig();
@@ -558,18 +560,30 @@ mod tests {
         std::fs::write(&host, "#!/bin/sh\ntouch \"$1/started\"\nexec sleep 1\n").unwrap();
         std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (result, seen) =
+        let lock = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = || runs(&rig).iter().any(|dir| dir.join("started").exists());
+        let (result, (started_under_lock, seen)) =
             tokio::join!(start(&rig.daemon, run(&rig, "req-1", &cwd, &host)), async {
-                while !runs(&rig).iter().any(|dir| dir.join("started").exists()) {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let started_under_lock = started();
+                lock.execute_batch("ROLLBACK").unwrap();
+                while !started() {
                     tokio::time::sleep(POLL).await;
                 }
-                rig.daemon
+                let seen = rig
+                    .daemon
                     .db
                     .hosted_run_for_request("req-1".into())
                     .await
                     .unwrap()
-                    .map(|run| run.lifecycle)
+                    .map(|run| run.lifecycle);
+                (started_under_lock, seen)
             });
+        assert!(
+            !started_under_lock,
+            "the host started before its row could be written"
+        );
         assert_eq!(seen, Some(Lifecycle::Starting));
         assert!(
             matches!(result, StartSessionResult::Failed { .. }),
@@ -630,15 +644,53 @@ mod tests {
         assert_eq!(after_restart, did_not_start);
         assert_eq!(runs(&rig).len(), 1);
 
-        // Overlapping: the second asks while the first is still waiting for its host.
+        // Overlapping: the second asks while the first is still bringing its host up, and
+        // gets the first start's own answer when it comes, here a refusal, rather than
+        // "started" for a run that is about to fail.
         let cwd = rig.root.to_str().unwrap();
-        let (one, two, _) = tokio::join!(
-            rig.daemon
-                .starts
-                .once("req-2", start(&rig.daemon, run(&rig, "req-2", cwd, &host))),
-            rig.daemon
-                .starts
-                .once("req-2", start(&rig.daemon, run(&rig, "req-2", cwd, &host))),
+        let refused = stub_host(&rig, 999, None);
+        let (one, two) = tokio::join!(
+            rig.daemon.starts.once(
+                "req-2",
+                start(&rig.daemon, run(&rig, "req-2", cwd, &refused))
+            ),
+            rig.daemon.starts.once(
+                "req-2",
+                start(&rig.daemon, run(&rig, "req-2", cwd, &refused))
+            ),
+        );
+        assert!(
+            matches!(&one, StartSessionResult::Failed { detail, .. } if detail.contains("version 999")),
+            "{one:?}"
+        );
+        assert_eq!(
+            one, two,
+            "the repeat waited for the first start's own answer"
+        );
+        let dirs = runs(&rig);
+        assert_eq!(dirs.len(), 2);
+        for dir in dirs.iter().filter(|dir| dir.join("stub.pid").exists()) {
+            stop(dir);
+        }
+    }
+
+    /// The handshake against a stand-in host: the pid ccd spawned, its kernel birth,
+    /// the first state committed before its ack, `start` with the run's options, and
+    /// the run's link attached until the connection ends.
+    #[tokio::test]
+    async fn a_new_host_is_admitted_attached_and_started() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, (mut lines, mut write, record)) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    worktree: Some("feature-x"),
+                    ..run(&rig, "req-1", &cwd, &host)
+                }
+            ),
             async {
                 let dir = loop {
                     if let Some(dir) = runs(&rig)
@@ -657,46 +709,15 @@ mod tests {
                 )
                 .await;
                 assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 1 }));
-                assert!(matches!(next(&mut lines).await, Some(ToHost::Start { .. })));
-                assert_eq!(record.protocol_version, HOST_PROTOCOL_VERSION);
-                stop(&dir);
+                (lines, write, record)
             }
         );
-        assert_eq!(started_uid(&one), started_uid(&two));
-        assert_eq!(runs(&rig).len(), 2);
-    }
-
-    /// The handshake against a stand-in host: the pid ccd spawned, its kernel birth,
-    /// the first state committed before its ack, `start` with the run's options, and
-    /// the run's link attached until the connection ends.
-    #[tokio::test]
-    async fn a_new_host_is_admitted_attached_and_started() {
-        let rig = rig();
-        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
-        let cwd = rig.root.to_str().unwrap().to_string();
-        let daemon = Arc::clone(&rig.daemon);
-        let (result, (mut lines, mut write, record)) =
-            tokio::join!(start(&daemon, run(&rig, "req-1", &cwd, &host)), async {
-                let dir = loop {
-                    if let Some(dir) = runs(&rig)
-                        .into_iter()
-                        .find(|dir| dir.join("host.json").exists())
-                    {
-                        break dir;
-                    }
-                    tokio::time::sleep(POLL).await;
-                };
-                let (mut lines, mut write, record) = play_host(&dir).await;
-                assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 0 }));
-                say(
-                    &mut write,
-                    serde_json::json!({"type": "state", "seq": 1, "pending": []}),
-                )
-                .await;
-                assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 1 }));
-                (lines, write, record)
-            });
         let uid = started_uid(&result);
+        // A start in a new worktree does not know its folder until claude reports it.
+        assert!(
+            matches!(&result, StartSessionResult::Started { cwd: None, .. }),
+            "{result:?}"
+        );
         let dir = run_dir(&rig.root, &uid);
         assert_eq!(cursor(&rig, &uid), 1);
         match next(&mut lines).await {
@@ -710,7 +731,7 @@ mod tests {
                 assert_eq!(options.cwd, cwd);
                 assert_eq!(options.claude_path, "/nonexistent/claude");
                 assert_eq!(options.permission_mode, None, "the app chose no mode");
-                assert_eq!(options.worktree, None);
+                assert_eq!(options.worktree.as_deref(), Some("feature-x"));
                 assert_eq!(options.trust, Trust::NotTrusted);
                 assert_eq!(options.model, None, "Claude Code's own default is no model");
                 assert_eq!(
@@ -865,6 +886,10 @@ mod tests {
         let cwd = rig.root.to_str().unwrap().to_string();
         let result = start(&rig.daemon, run(&rig, "req-1", &cwd, &host)).await;
         let uid = started_uid(&result);
+        assert!(
+            matches!(&result, StartSessionResult::Started { cwd: Some(folder), .. } if *folder == cwd),
+            "{result:?}"
+        );
         let record = read_host_file(&run_dir(&rig.root, &uid).join("host.json")).unwrap();
         let pid = record.host_pid;
         let stored: (i32, i64, i64) = rusqlite::Connection::open(rig.root.join("events.db"))
