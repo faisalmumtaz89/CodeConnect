@@ -97,9 +97,10 @@ struct FoldersPane: View {
     private func row(_ answer: FolderAnswer, _ context: StartContext) -> some View {
         let trusted = answer.trust == .trusted
         let id = "folders.\(answer.path)"
+        let name = URL(fileURLWithPath: answer.path).lastPathComponent
         return HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(URL(fileURLWithPath: answer.path).lastPathComponent).font(Theme.ui(12.5, .medium))
+                Text(name).font(Theme.ui(12.5, .medium))
                     .foregroundStyle(Theme.text).lineLimit(1)
                 Text(answer.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
             }
@@ -109,11 +110,13 @@ struct FoldersPane: View {
                 .foregroundStyle(trusted ? Theme.text2 : Theme.amber)
                 .fixedSize()
                 .accessibilityIdentifier("\(id).state")
+            // Each control names its folder, so a list of the window's buttons reads "Trust demo", never "Trust, Trust".
             ActionButton(title: trusted ? "Don’t Trust" : "Trust", key: nil, prominent: false, id: "\(id).change") {
                 Task {
                     await send(context) { try await $0.setFolderTrust(path: answer.path, trust: trusted ? .notTrusted : .trusted) }
                 }
             }
+            .accessibilityLabel("\(trusted ? "Don’t Trust" : "Trust") \(name)")
             Button("Forget") {
                 Task { await send(context) { try await $0.forgetFolderTrust(path: answer.path) } }
             }
@@ -121,6 +124,7 @@ struct FoldersPane: View {
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text2)
             .help(FolderWords.forgetHelp)
+            .accessibilityLabel("Forget \(name)")
             .accessibilityIdentifier("\(id).forget")
         }
         .padding(.horizontal, 10)
