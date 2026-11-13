@@ -26946,4 +26946,151 @@ mod tests {
         std::fs::write(PHONE_TURN_STREAM_PATH, rendered).expect("the fixture is writable");
         println!("wrote {PHONE_TURN_STREAM_PATH}");
     }
+
+    // ------------------------------- a mail wake's turn, as the apps are sent it
+
+    /// The run the mail-wake fixture is emitted for.
+    const MAIL_WAKE_UID: &str = "01K1B3XQ8ZC0DE5FGH7MAWAKE0";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const MAIL_WAKE_AT: &str = "2026-11-13T00:00:00.000Z";
+    const MAIL_WAKE_TURN: &str = include_str!("../../../fixtures/codex/mail-wake-turn-wire.json");
+    const MAIL_WAKE_TURN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/codex/mail-wake-turn-wire.json"
+    );
+    const REGENERATE_MAIL_WAKE_TURN: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_mail_wake_turn_fixture";
+    /// The fixture's runs: each wake line the mail switch can pick, under its name.
+    const MAIL_WAKE_RUNS: [(&str, &str); 2] = [
+        ("act", protocol::ipc::MAIL_NUDGE_ACT),
+        ("show", protocol::ipc::MAIL_NUDGE_SHOW),
+    ];
+
+    /// The events this build files for the captured turn carrying `line` as its user
+    /// message (the turn a mail wake starts), as the `event` frames a subscribed app is
+    /// sent, in seq order.
+    async fn mail_wake_turn(line: &str) -> Value {
+        let session = SessionKey {
+            uid: MAIL_WAKE_UID.into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        {
+            let mut conn = visiting(
+                &daemon,
+                &session,
+                &mut adapter,
+                &mut amend,
+                LIFECYCLE_THREAD,
+                1,
+            );
+            for frame in live_turn(|frame| carrying(frame, line)) {
+                conn.observe_notification(&frame).await;
+            }
+        }
+        let frames: Vec<Value> = daemon
+            .store
+            .events_after(&session.uid, 0, 10_000)
+            .expect("the event log reads")
+            .into_iter()
+            .map(|event| {
+                serde_json::to_value(protocol::ws::ServerMessage::Event { event })
+                    .expect("the frame serialises")
+            })
+            .collect();
+        let mut out = json!({ "frames": frames });
+        normalise_clock(&mut out, MAIL_WAKE_AT);
+        drop(db);
+        out
+    }
+
+    /// Both runs of the mail-wake fixture.
+    async fn mail_wake_turns() -> Value {
+        let mut runs = serde_json::Map::new();
+        for (run, line) in MAIL_WAKE_RUNS {
+            runs.insert(run.to_string(), mail_wake_turn(line).await);
+        }
+        Value::Object(runs)
+    }
+
+    /// **A mail wake's turn reaches the apps as a `user_message` whose text is the wake
+    /// line, and this file is what this build sends for it.**
+    ///
+    /// `fixtures/codex/mail-wake-turn-wire.json` is the apps' pin for telling the wake
+    /// line from the person's own words: the daemon files the line as the turn's user
+    /// message, which the mailbox's wake rule counts ([`protocol::ipc::is_mail_nudge`]).
+    /// Gate one reads the committed bytes: in each run, one `user_message` carrying
+    /// exactly that run's wake line, then the turn's end. Gate two re-derives the file
+    /// from this build and requires the same bytes.
+    ///
+    /// **Mutation:** edit the wake line in the checked-in file and gate one fails; change
+    /// either line in `protocol::ipc` and gate two fails, naming the command that
+    /// rewrites the file.
+    #[tokio::test]
+    async fn the_mail_wake_turn_fixture_is_what_this_build_emits() {
+        let committed: Value =
+            serde_json::from_str(MAIL_WAKE_TURN).expect("the fixture must be JSON");
+        let runs = committed
+            .as_object()
+            .expect("the file is its runs, by name");
+        assert_eq!(
+            runs.keys().map(String::as_str).collect::<Vec<_>>(),
+            MAIL_WAKE_RUNS.map(|(run, _)| run).to_vec(),
+        );
+        for (run, line) in MAIL_WAKE_RUNS {
+            let events = fixture_events(&committed[run]);
+            assert_eq!(
+                events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+                (1..=events.len() as u64).collect::<Vec<_>>(),
+                "{run}: the daemon's own numbering, in order, with no holes"
+            );
+            let messages: Vec<_> = events
+                .iter()
+                .filter(|event| event.kind == protocol::event::EventKind::UserMessage)
+                .collect();
+            assert_eq!(messages.len(), 1, "{run}: the turn's one user message");
+            assert_eq!(
+                messages[0].payload,
+                json!({ "interrupted": false, "text": line }),
+                "{run}: the wake line, as a Codex user message carries text"
+            );
+            assert!(
+                events.iter().any(
+                    |event| event.kind == protocol::event::EventKind::TurnComplete
+                        && event.seq > messages[0].seq
+                ),
+                "{run}: the turn's end follows its wake line"
+            );
+        }
+
+        let derived = mail_wake_turns().await;
+        assert_eq!(
+            derived, committed,
+            "the committed mail-wake turn no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_MAIL_WAKE_TURN}"
+        );
+        assert_eq!(
+            MAIL_WAKE_TURN,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&derived).expect("the fixture serialises")
+            ),
+            "the committed bytes are not this build's rendering of them (a reformat, or \
+             an edit by hand). Regenerate it: {REGENERATE_MAIL_WAKE_TURN}"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/mail-wake-turn-wire.json` from this build.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_mail_wake_turn_fixture() {
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&mail_wake_turns().await).expect("it serialises")
+        );
+        std::fs::write(MAIL_WAKE_TURN_PATH, rendered).expect("the fixture is writable");
+        println!("wrote {MAIL_WAKE_TURN_PATH}");
+    }
 }
