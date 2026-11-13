@@ -979,8 +979,10 @@ pub enum StartSessionResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// No session was started, or (`launch_failed`) one was launched but never
-    /// reached the fleet; `detail` says which. It is human text, safe to show verbatim.
+    /// No session was started, or (`launch_failed`) one was launched but did not
+    /// finish starting; `detail` says which. It is human text, safe to show verbatim.
+    /// A Claude run whose host lost its link before saying how its start went stays
+    /// in the fleet as `starting`.
     Failed {
         reason: StartFailure,
         detail: String,

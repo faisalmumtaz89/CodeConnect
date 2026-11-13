@@ -9,7 +9,8 @@
 //! host's first `state` before acknowledging it, and sends `start`. The connection
 //! stays with a link task that commits and acknowledges each message in sequence
 //! order and stops at the first one it does not apply, which the host keeps, so
-//! nothing is acknowledged that was not stored.
+//! nothing is acknowledged that was not stored. The start's outcome, committed by the
+//! link, makes the run `live` or `failed`, and the app's answer waits for it.
 //!
 //! The lines are [`protocol::host`]'s; the host is mac/agent-host.
 
@@ -25,13 +26,15 @@ use protocol::agent::AgentKind;
 use protocol::config::Config;
 use protocol::event::Lifecycle;
 use protocol::host::{
-    FromHost, HostFile, McpCommand, StartOptions, ToHost, Trust, HOST_PROTOCOL_VERSION,
+    FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
+    HOST_PROTOCOL_VERSION,
 };
 use protocol::proc_identity::{read_birth_identity, ProcessIdentity};
 use protocol::ws::{StartFailure, StartSessionResult};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::state::Daemon;
@@ -94,8 +97,19 @@ pub(crate) fn answer_for(run: HostedRun) -> StartSessionResult {
     }
 }
 
-/// Start `run`: its row, its folder, its host, the first attach and `start`.
+/// What became of a run's `start`, as its link committed it: `Ok` once the start is
+/// done, or why it did not start (the host's refusal, or the link ending first).
+type Begun = Result<(), String>;
+
+/// Start `run`: its row, its folder, its host, the first attach and `start`, then the
+/// answer from the start's outcome.
 pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionResult {
+    start_within(daemon, run, crate::start_session::START_TIMEOUT).await
+}
+
+/// [`start`], with `timeout` for all of it, from the row to the outcome: the tests'
+/// way to a deadline shorter than START_TIMEOUT.
+async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> StartSessionResult {
     // The run and its first message are named together, before the row: the start's
     // uuid is the one claude stamps on that message.
     let (uid, start_uuid) =
@@ -124,12 +138,11 @@ pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionRes
         Ok(None) => {}
         Err(err) => return failed(format!("could not record the run: {err:#}")),
     }
-    match bring_up(daemon, &uid, &start_uuid, &run).await {
-        // A start in a new worktree does not know its folder until claude reports it.
-        Ok(()) => StartSessionResult::Started {
-            session_uid: uid,
-            cwd: run.worktree.is_none().then(|| run.cwd.to_string()),
-        },
+    let deadline = Instant::now() + timeout;
+    let begun = match bring_up(daemon, &uid, &start_uuid, &run, deadline).await {
+        Ok(begun) => begun,
+        // Before `start` no claude can exist (the host exits by itself at 30 s), so the
+        // run has failed.
         Err(detail) => {
             if let Err(err) = daemon
                 .db
@@ -138,8 +151,23 @@ pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionRes
             {
                 crate::log_error!("could not mark {uid} failed: {err:#}");
             }
-            failed(detail)
+            return failed(detail);
         }
+    };
+    // From `start` on, claude may be running, so only the outcome the link commits ends
+    // the run: a link that ends first leaves it `starting`, protected from deletion.
+    let started = StartSessionResult::Started {
+        session_uid: uid,
+        // A start in a new worktree does not know its folder until claude reports it.
+        cwd: run.worktree.is_none().then(|| run.cwd.to_string()),
+    };
+    match tokio::time::timeout_at(deadline, begun).await {
+        Ok(Ok(Ok(()))) => started,
+        Ok(Ok(Err(detail))) => failed(detail),
+        Ok(Err(_)) => failed("the agent host's link ended".into()),
+        // No outcome yet. The run exists and is starting, and its link keeps applying
+        // what comes, so a late outcome still makes it `live` or `failed`.
+        Err(_) => started,
     }
 }
 
@@ -150,13 +178,15 @@ fn failed(detail: String) -> StartSessionResult {
     }
 }
 
-/// The run's folder, its host spawned and admitted, attached, and `start` sent.
+/// The run's folder, its host spawned and admitted, attached, and `start` sent, by
+/// `deadline`: then what the link will commit of the start's outcome.
 async fn bring_up(
     daemon: &Arc<Daemon>,
     uid: &str,
     start_uuid: &str,
     run: &Run<'_>,
-) -> Result<(), String> {
+    deadline: Instant,
+) -> Result<oneshot::Receiver<Begun>, String> {
     let dir = run_dir(run.root, uid);
     let log = make_run_dir(run.root, &dir)
         .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?;
@@ -169,7 +199,6 @@ async fn bring_up(
     )
     .map_err(|err| format!("could not run the login shell: {err}"))?;
     let spawned = child.id();
-    let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
     let attached = attach(
         daemon, uid, start_uuid, run, &dir, spawned, &mut child, deadline,
     )
@@ -202,7 +231,7 @@ async fn attach(
     spawned: Option<u32>,
     child: &mut tokio::process::Child,
     deadline: Instant,
-) -> Result<(), String> {
+) -> Result<oneshot::Receiver<Begun>, String> {
     let record = loop {
         if let Some(record) = read_host_file(&dir.join("host.json")) {
             break record;
@@ -273,14 +302,18 @@ async fn attach(
     };
     send(&mut write, &start).await?;
     daemon.host_link_attached(uid).await;
+    // The link is a task of its own, so the start's answer timing out never ends it.
+    let (begun, outcome) = oneshot::channel();
     tokio::spawn(link(
         Arc::clone(daemon),
         uid.to_string(),
         host,
+        start_uuid.to_string(),
+        begun,
         lines,
         write,
     ));
-    Ok(())
+    Ok(outcome)
 }
 
 /// The run's `query()` options.
@@ -362,31 +395,84 @@ async fn commit_and_ack(
 }
 
 /// The run's connection after `start`: each message committed, then acknowledged, in
-/// order. It ends at the first message this daemon does not apply, which stays in the
-/// host with everything after it, or when the connection or a commit fails.
+/// order. It applies the run's `state` and the outcome of `start_uuid`, which makes the
+/// run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
+/// why the link ended if it ends first. It ends at the first message this daemon does
+/// not apply, which stays in the host with everything after it, or when the connection
+/// or a commit fails.
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
     host: ProcessIdentity,
+    start_uuid: String,
+    begun: oneshot::Sender<Begun>,
     mut lines: Lines<BufReader<OwnedReadHalf>>,
     mut write: OwnedWriteHalf,
 ) {
+    let mut begun = Some(begun);
     let ended = loop {
         let line = match lines.next_line().await {
             Ok(Some(line)) => line,
             Ok(None) => break "the agent host closed the connection".to_string(),
             Err(err) => break format!("could not read the agent host: {err}"),
         };
-        let seq = match serde_json::from_str::<FromHost>(&line) {
-            Ok(FromHost::State { seq, .. }) => seq,
+        match serde_json::from_str::<FromHost>(&line) {
+            Ok(FromHost::State { seq, .. }) => {
+                if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
+                    break why;
+                }
+            }
+            Ok(FromHost::Outcome {
+                seq,
+                uuid,
+                status,
+                detail,
+                initialize,
+                ..
+            }) if uuid == start_uuid => {
+                let (lifecycle, said) = match status {
+                    OutcomeStatus::Done => (Lifecycle::Live, Ok(())),
+                    OutcomeStatus::Refused => (
+                        Lifecycle::Failed,
+                        Err(detail.unwrap_or_else(|| "the agent host refused the start".into())),
+                    ),
+                };
+                let initialize = match initialize.as_ref().map(serde_json::to_string).transpose() {
+                    Ok(initialize) => initialize,
+                    Err(err) => {
+                        break format!("could not keep the start's initialize answer: {err}")
+                    }
+                };
+                match daemon
+                    .db
+                    .commit_outcome(uid.clone(), host, seq, lifecycle, initialize)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        break format!("message {seq} is not past the run's cursor for this host")
+                    }
+                    Err(err) => break format!("{err:#}"),
+                }
+                if let Err(detail) = &said {
+                    crate::log_info!("{uid}: the agent host refused the start: {detail}");
+                }
+                // Told once committed, before the ack: a failed ack keeps what is stored.
+                if let Some(begun) = begun.take() {
+                    let _ = begun.send(said);
+                }
+                if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                    break why;
+                }
+            }
             Ok(_) => break "a message this daemon does not apply yet; the host keeps it".into(),
             Err(err) => break format!("a line that is not a host message: {err}"),
-        };
-        if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
-            break why;
         }
     };
     crate::log_info!("{uid}: the agent host link ended: {ended}");
+    if let Some(begun) = begun.take() {
+        let _ = begun.send(Err(ended));
+    }
     daemon.host_link_detached(&uid).await;
 }
 
@@ -548,6 +634,91 @@ mod tests {
             .unwrap()
     }
 
+    /// The run's folder once the start has spawned its stand-in host, which has written
+    /// host.json there.
+    async fn spawned_dir(rig: &Rig) -> PathBuf {
+        loop {
+            if let Some(dir) = runs(rig)
+                .into_iter()
+                .find(|dir| dir.join("host.json").exists())
+            {
+                return dir;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// The host's side of a start, up to and including `start`: ccd's attach, the first
+    /// state and its ack, then the `start` line.
+    struct Played {
+        dir: PathBuf,
+        uid: String,
+        lines: Lines<BufReader<OwnedReadHalf>>,
+        write: OwnedWriteHalf,
+        record: HostFile,
+        start: ToHost,
+    }
+
+    impl Played {
+        fn start_uuid(&self) -> String {
+            match &self.start {
+                ToHost::Start { uuid, .. } => uuid.clone(),
+                other => panic!("not a start: {other:?}"),
+            }
+        }
+    }
+
+    async fn play_to_start(rig: &Rig) -> Played {
+        let dir = spawned_dir(rig).await;
+        let uid = dir.file_name().unwrap().to_str().unwrap().to_string();
+        let (mut lines, mut write, record) = play_host(&dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 0 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 1, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 1 }));
+        let start = next(&mut lines).await.expect("ccd sent start");
+        Played {
+            dir,
+            uid,
+            lines,
+            write,
+            record,
+            start,
+        }
+    }
+
+    /// An initialize answer as the host sends it in a done outcome.
+    fn initialize_answer() -> serde_json::Value {
+        serde_json::json!({
+            "commands": [{"name": "compact"}],
+            "models": [{"value": "opus"}],
+            "account": {"api_provider": "firstParty"}
+        })
+    }
+
+    /// What the store holds for run `uid`: its lifecycle and the initialize answer kept.
+    fn kept(rig: &Rig, uid: &str) -> (String, Option<serde_json::Value>) {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT s.lifecycle, h.initialize
+                   FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+                  WHERE session_uid = ?1",
+                [uid],
+                |row| {
+                    let initialize: Option<String> = row.get(1)?;
+                    Ok((
+                        row.get(0)?,
+                        initialize.map(|json| serde_json::from_str(&json).unwrap()),
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
     fn started_uid(result: &StartSessionResult) -> String {
         match result {
             StartSessionResult::Started { session_uid, .. } => session_uid.clone(),
@@ -682,15 +853,16 @@ mod tests {
     }
 
     /// The handshake against a stand-in host: the pid ccd spawned, its kernel birth,
-    /// the first state committed before its ack, `start` with the run's options, and
-    /// the run's link attached until the connection ends.
+    /// the first state committed before its ack, `start` with the run's options, its
+    /// done outcome committed (the run `live`, its initialize answer kept) before its
+    /// ack and before the answer, and the run's link attached until the connection ends.
     #[tokio::test]
     async fn a_new_host_is_admitted_attached_and_started() {
         let rig = rig();
         let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
         let daemon = Arc::clone(&rig.daemon);
-        let (result, (mut lines, mut write, record)) = tokio::join!(
+        let (result, played) = tokio::join!(
             start(
                 &daemon,
                 Run {
@@ -699,40 +871,44 @@ mod tests {
                 }
             ),
             async {
-                let dir = loop {
-                    if let Some(dir) = runs(&rig)
-                        .into_iter()
-                        .find(|dir| dir.join("host.json").exists())
-                    {
-                        break dir;
-                    }
-                    tokio::time::sleep(POLL).await;
-                };
-                let (mut lines, mut write, record) = play_host(&dir).await;
-                assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 0 }));
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
                 say(
-                    &mut write,
-                    serde_json::json!({"type": "state", "seq": 1, "pending": []}),
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
                 )
                 .await;
-                assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 1 }));
-                (lines, write, record)
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                // Acknowledged only once stored: the run is live, its answer kept.
+                assert_eq!(
+                    kept(&rig, &played.uid),
+                    ("live".to_string(), Some(initialize_answer()))
+                );
+                played
             }
         );
-        let uid = started_uid(&result);
+        let Played {
+            dir,
+            uid,
+            mut lines,
+            mut write,
+            record,
+            start,
+        } = played;
+        assert_eq!(started_uid(&result), uid);
         // A start in a new worktree does not know its folder until claude reports it.
         assert!(
             matches!(&result, StartSessionResult::Started { cwd: None, .. }),
             "{result:?}"
         );
-        let dir = run_dir(&rig.root, &uid);
-        assert_eq!(cursor(&rig, &uid), 1);
-        match next(&mut lines).await {
-            Some(ToHost::Start {
+        assert_eq!(cursor(&rig, &uid), 2);
+        match start {
+            ToHost::Start {
                 uuid,
                 options,
                 prompt,
-            }) => {
+            } => {
                 assert_eq!(uuid.len(), 36);
                 assert_eq!(prompt, "fix the tests");
                 assert_eq!(options.cwd, cwd);
@@ -766,16 +942,16 @@ mod tests {
         // is acknowledged and the cursor stays, so the host keeps both.
         say(
             &mut write,
-            serde_json::json!({"type": "sdk", "seq": 2, "message": {}}),
+            serde_json::json!({"type": "sdk", "seq": 3, "message": {}}),
         )
         .await;
         say(
             &mut write,
-            serde_json::json!({"type": "state", "seq": 3, "pending": []}),
+            serde_json::json!({"type": "state", "seq": 4, "pending": []}),
         )
         .await;
         assert_eq!(next(&mut lines).await, None);
-        assert_eq!(cursor(&rig, &uid), 1);
+        assert_eq!(cursor(&rig, &uid), 2);
         let detached = async {
             while link().await != Some(protocol::event::Link::Detached) {
                 tokio::time::sleep(POLL).await;
@@ -785,6 +961,139 @@ mod tests {
             .await
             .expect("the link reads detached once its connection ends");
         stop(&dir);
+    }
+
+    /// A start the host refuses: its outcome makes the run `failed`, and the app is
+    /// answered with the host's reason.
+    #[tokio::test]
+    async fn a_refused_start_fails_with_the_hosts_reason() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (result, played) =
+            tokio::join!(start(&rig.daemon, run(&rig, "req-1", &cwd, &host)), async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "refused", "detail": "claude would not start"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        assert_eq!(result, failed("claude would not start".into()));
+        assert_eq!(kept(&rig, &played.uid), ("failed".to_string(), None));
+        stop(&played.dir);
+    }
+
+    /// Once `start` is sent, claude may be running, so a run whose outcome is not
+    /// committed stays `starting`, and a delete is refused: the app is answered with the
+    /// reason, but the run is not marked failed. Three ways: the outcome's commit changes
+    /// nothing (the run's recorded host is another), the outcome is for another command,
+    /// and the connection ends first. None is acknowledged.
+    #[tokio::test]
+    async fn a_start_with_no_committed_outcome_leaves_its_run_starting() {
+        for (case, why) in [
+            ("another host", "not past the run's cursor"),
+            ("another command", "does not apply"),
+            ("closed", "closed the connection"),
+        ] {
+            let rig = rig();
+            let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+            let cwd = rig.root.to_str().unwrap().to_string();
+            let (result, (dir, uid)) =
+                tokio::join!(start(&rig.daemon, run(&rig, "req-1", &cwd, &host)), async {
+                    let Played {
+                        dir,
+                        uid,
+                        mut lines,
+                        mut write,
+                        start,
+                        ..
+                    } = play_to_start(&rig).await;
+                    let uuid = match &start {
+                        ToHost::Start { uuid, .. } => uuid.clone(),
+                        other => panic!("{other:?}"),
+                    };
+                    let outcome = |uuid: &str| {
+                        serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                           "status": "done", "initialize": initialize_answer()})
+                    };
+                    match case {
+                        "another host" => {
+                            rusqlite::Connection::open(rig.root.join("events.db"))
+                                .unwrap()
+                                .execute(
+                                    "UPDATE run_hosts SET host_start_usec = host_start_usec + 1
+                                      WHERE session_uid = ?1",
+                                    [&uid],
+                                )
+                                .unwrap();
+                            say(&mut write, outcome(&uuid)).await;
+                        }
+                        "another command" => say(&mut write, outcome("not-the-start")).await,
+                        _ => drop(write),
+                    }
+                    assert_eq!(next(&mut lines).await, None, "{case}: acknowledged");
+                    (dir, uid)
+                });
+            assert!(
+                matches!(&result, StartSessionResult::Failed { detail, .. } if detail.contains(why)),
+                "{case}: {result:?}"
+            );
+            assert_eq!(kept(&rig, &uid), ("starting".to_string(), None), "{case}");
+            assert_eq!(cursor(&rig, &uid), 1, "{case}");
+            let deleted = rig.daemon.db.delete_exited_session(uid).await.unwrap();
+            assert!(
+                matches!(deleted, crate::store::DeleteOutcome::NotExited { .. }),
+                "{case}: {deleted:?}"
+            );
+            stop(&dir);
+        }
+    }
+
+    /// 97's condition on the start's deadline: the app is answered `Started` once it
+    /// passes with no outcome, and the run's link keeps applying what comes, so a late
+    /// outcome still makes the run `live` (with its answer kept) or `failed`.
+    #[tokio::test]
+    async fn a_late_outcome_still_ends_the_run() {
+        for (status, lifecycle) in [("done", "live"), ("refused", "failed")] {
+            let rig = rig();
+            let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+            let cwd = rig.root.to_str().unwrap().to_string();
+            let (result, played) = tokio::join!(
+                start_within(
+                    &rig.daemon,
+                    run(&rig, "req-1", &cwd, &host),
+                    Duration::from_secs(3)
+                ),
+                async {
+                    let mut played = play_to_start(&rig).await;
+                    let uuid = played.start_uuid();
+                    // Past the start's deadline: the answer has gone.
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    assert_eq!(kept(&rig, &played.uid).0, "starting");
+                    say(
+                        &mut played.write,
+                        serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                           "status": status, "detail": "late",
+                                           "initialize": (status == "done").then(initialize_answer)}),
+                    )
+                    .await;
+                    assert_eq!(
+                        next(&mut played.lines).await,
+                        Some(ToHost::Ack { seq: 2 }),
+                        "{status}"
+                    );
+                    played
+                }
+            );
+            assert_eq!(started_uid(&result), played.uid, "{status}");
+            assert_eq!(kept(&rig, &played.uid).0, lifecycle, "{status}");
+            stop(&played.dir);
+        }
     }
 
     /// The host gets the run's environment as it was given, with only the run's uid
@@ -914,12 +1223,57 @@ mod tests {
         }
     }
 
+    /// The agent host's one stand-in claude (mac/agent-host/test/stub-claude.ts), as its
+    /// own tests write it (rig.ts `writeStub`): a sh wrapper running it on the built
+    /// host as Bun. It answers initialize with a recorded claude's answer and, after the
+    /// first message, writes the recorded session's `system/init`.
+    fn stand_in_claude(rig: &Rig, host: &Path) -> (PathBuf, serde_json::Value) {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let init =
+            std::fs::read_to_string(repo.join("fixtures/claude/initialize-api-key-2.1.319.jsonl"))
+                .unwrap();
+        let init = init.lines().next().unwrap().to_string();
+        let session =
+            std::fs::read_to_string(repo.join("fixtures/claude/sdk-session-0.3.322.jsonl"))
+                .unwrap();
+        let session_init = session
+            .lines()
+            .find(|line| {
+                line.contains(r#""type":"system""#) && line.contains(r#""subtype":"init""#)
+            })
+            .unwrap();
+        let script = rig.root.join("stub.json");
+        std::fs::write(
+            &script,
+            serde_json::json!({"init": init, "after_user": [session_init],
+                               "log": rig.root.join("stub.log")})
+            .to_string(),
+        )
+        .unwrap();
+        let claude = rig.root.join("claude");
+        std::fs::write(
+            &claude,
+            format!(
+                "#!/bin/sh\nBUN_BE_BUN=1 exec '{}' '{}' '{}' \"$@\"\n",
+                host.display(),
+                repo.join("mac/agent-host/test/stub-claude.ts").display(),
+                script.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let answer: serde_json::Value = serde_json::from_str(&init).unwrap();
+        (claude, answer["response"]["response"]["models"].clone())
+    }
+
     /// Against the real agent host (mac/agent-host/build.sh's `cc-agent-host`), through
-    /// zsh's login shell (`-lic`), as a zsh user's start runs it: the recorded pid and
-    /// birth are the host's own, it leads a session of its own, its first state is
-    /// committed, and it is still running after its 30 s no-start exit would have ended
-    /// it, so `start` reached it. Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names
-    /// the built host.
+    /// zsh's login shell (`-lic`), as a zsh user's start runs it, with the host's
+    /// stand-in claude: the recorded pid and birth are the host's own, it leads a session
+    /// of its own, the start's outcome makes the run `live` with the initialize answer's
+    /// models kept, and the host is still running after its 30 s no-start exit would
+    /// have ended it (claude's init is unacknowledged, so the host keeps it). A start
+    /// whose claude is missing is refused, naming it, and its run is `failed`. Ignored
+    /// and gated: `CODECONNECT_TEST_AGENT_HOST` names the built host.
     #[tokio::test]
     #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
     async fn the_real_host_is_admitted_attached_and_kept_by_start() {
@@ -931,12 +1285,36 @@ mod tests {
         rig.environment
             .insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
         let cwd = rig.root.to_str().unwrap().to_string();
-        let result = start(&rig.daemon, run(&rig, "req-1", &cwd, &host)).await;
+        let (claude, models) = stand_in_claude(&rig, &host);
+        let missing = start(&rig.daemon, run(&rig, "req-0", &cwd, &host)).await;
+        assert!(
+            matches!(&missing, StartSessionResult::Failed { detail, .. } if detail.contains("/nonexistent/claude")),
+            "{missing:?}"
+        );
+        let refused = rig
+            .daemon
+            .db
+            .hosted_run_for_request("req-0".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refused.lifecycle, Lifecycle::Failed);
+        let result = start(
+            &rig.daemon,
+            Run {
+                claude_path: claude.to_str().unwrap(),
+                ..run(&rig, "req-1", &cwd, &host)
+            },
+        )
+        .await;
         let uid = started_uid(&result);
         assert!(
             matches!(&result, StartSessionResult::Started { cwd: Some(folder), .. } if *folder == cwd),
             "{result:?}"
         );
+        let (lifecycle, initialize) = kept(&rig, &uid);
+        assert_eq!(lifecycle, "live");
+        assert_eq!(initialize.unwrap()["models"], models);
         let record = read_host_file(&run_dir(&rig.root, &uid).join("host.json")).unwrap();
         let pid = record.host_pid;
         let stored: (i32, i64, i64) = rusqlite::Connection::open(rig.root.join("events.db"))
@@ -950,13 +1328,18 @@ mod tests {
             .unwrap();
         let birth = read_birth_identity(pid).unwrap();
         assert_eq!(stored, (pid, birth.start_sec, birth.start_usec));
-        assert_eq!(cursor(&rig, &uid), 1);
+        assert_eq!(
+            cursor(&rig, &uid),
+            2,
+            "the state and the outcome are committed"
+        );
         // SAFETY: getsid(2) and kill(2) with signal 0 only read one process's state.
         assert_eq!(unsafe { libc::getsid(pid) }, pid);
         tokio::time::sleep(Duration::from_secs(31)).await;
         let alive = unsafe { libc::kill(pid, 0) } == 0;
-        // SAFETY: a plain kill(2) of the host this test started, by its recorded pid.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+        // SAFETY: kill(2) of the process group this test's host leads (its recorded pid),
+        // which holds the host and its stand-in claude.
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
         assert!(alive, "the host ended within 31 s: start never reached it");
     }
 }

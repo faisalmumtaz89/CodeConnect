@@ -320,11 +320,12 @@ impl PendingEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifecycle {
-    /// ccd has written the run's row and is bringing its host up.
+    /// ccd has written the run's row and is bringing its host up, or has sent the
+    /// host `start` and has not yet heard how it went.
     Starting,
     Live,
     Exited,
-    /// The run never started: its host did not come up, or claude refused.
+    /// The run never started: its host did not come up, or its start was refused.
     Failed,
     Unknown,
 }

@@ -1100,7 +1100,13 @@ its run (`starting`, under its `request_id`) before anything runs, makes the run
 folder `runs/<uid>/` under the CodeConnect folder (0700), and runs the agent host,
 `cc-agent-host <run folder>`, through the user's login shell in a session of its
 own, so it outlives the daemon; ccd hands the host the first message as the run's
-`start` over the run's link, and the host runs that claude with it.
+`start` over the run's link, and the host runs that claude with it. The start's
+answer waits for the host's outcome: a done start makes the run `live` and is
+answered started, and a refused one makes it `failed` and is answered with the
+reason. With no outcome within the start's 80 s, the answer is started and the run
+stays `starting` until its outcome comes. Once `start` is sent, only that outcome
+ends a run, so a run whose host lost its link first stays `starting`, and a delete
+refuses it.
 A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
