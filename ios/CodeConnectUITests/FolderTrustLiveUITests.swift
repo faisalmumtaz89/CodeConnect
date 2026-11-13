@@ -125,8 +125,15 @@ final class FolderTrustLiveUITests: XCTestCase {
     func testRenderQuestion() throws {
         let app = try launch()
         reachReady(app, folder: "proj-a", message: "render the folder question")
-        let pillSend = app.buttons["start-message-button"]
-        if pillSend.exists { pillSend.tap() } else { app.buttons["start-go"].tap() }
+        // Start via the control the size presents. At non-accessibility sizes the
+        // Ready bar's start-go sends and the message pill's button is dictate, so
+        // prefer start-go; only when it is hidden (the accessibility sizes where the
+        // focused pill covers the bar) does the pill's own send start the run.
+        if app.buttons["start-go"].exists {
+            app.buttons["start-go"].tap()
+        } else {
+            app.buttons["start-message-button"].tap()
+        }
         XCTAssertTrue(app.buttons["trust-yes"].waitForExistence(timeout: 25), "the folder question")
         XCTAssertTrue(app.buttons["start-back"].exists, "the sheet's round Back on the question")
         XCTAssertTrue(app.buttons["trust-no"].exists, "both answers present")
@@ -160,8 +167,12 @@ final class FolderTrustLiveUITests: XCTestCase {
     /// Scenario 4: Settings › Folders lists the kept answers and Forget removes one.
     func test3_settingsListsAndForgets() throws {
         let app = try launch()
-        // Ensure a kept answer: trust proj-a if the question comes.
-        reachReady(app, folder: "proj-a", message: "work on proj-a")
+        // test3 owns proj-c — distinct from proj-a/proj-b — and trusts it itself, so
+        // the kept answer this checks never depends on another test having trusted a
+        // folder first. The rig is fresh per run, so proj-c starts untrusted: the
+        // question comes and is answered; if a prior run left it trusted the guard
+        // skips and it is already in the store.
+        reachReady(app, folder: "proj-c", message: "work on proj-c")
         app.buttons["start-go"].tap()
         if app.buttons["trust-yes"].waitForExistence(timeout: 20) { app.buttons["trust-yes"].tap() }
         backToProjects(app)
@@ -170,20 +181,21 @@ final class FolderTrustLiveUITests: XCTestCase {
         let folders = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Folders'")).firstMatch
         XCTAssertTrue(folders.waitForExistence(timeout: 15), "the Folders row in Settings")
         folders.tap()
-        let listed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'proj-a'")).firstMatch
-        XCTAssertTrue(listed.waitForExistence(timeout: 20), "proj-a listed in Settings › Folders")
+        let listed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'proj-c'")).firstMatch
+        XCTAssertTrue(listed.waitForExistence(timeout: 20), "proj-c listed in Settings › Folders")
         shot(app, "4-folders-listed")
-        let forget = app.buttons.matching(NSPredicate(format: "label == 'Forget'")).firstMatch
-        XCTAssertTrue(forget.waitForExistence(timeout: 10), "a Forget control")
-        forget.tap()
-        // proj-a was the only kept answer, so its Forget (and its row) leaves the
-        // pane. ('proj-a' still shows in the fleet's session rows behind Settings —
-        // the stub runs that started — so this is scoped to the Forget control.)
+        // Forget proj-c and watch its row leave. The acceptance runs one method per
+        // fresh rig, so proj-c is the only kept answer here and its Forget is the one
+        // Forget control; the assertion is that the count of Forget controls drops,
+        // which is scoped to this pane (so proj-c's path still showing in the fleet
+        // rows behind Settings cannot confuse it).
+        let forgetCount = { app.buttons.matching(NSPredicate(format: "label == 'Forget'")).count }
+        let before = forgetCount()
+        XCTAssertGreaterThan(before, 0, "proj-c's Forget control is listed")
+        app.buttons.matching(NSPredicate(format: "label == 'Forget'")).firstMatch.tap()
         let forgotten = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                !app.buttons.matching(NSPredicate(format: "label == 'Forget'")).firstMatch.exists
-            }, object: nil)
-        XCTAssertEqual(XCTWaiter().wait(for: [forgotten], timeout: 15), .completed, "proj-a was forgotten (its Folders row is gone)")
+            predicate: NSPredicate { _, _ in forgetCount() == before - 1 }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [forgotten], timeout: 15), .completed, "proj-c was forgotten (its Folders row is gone)")
         shot(app, "4-forgotten")
     }
 }
