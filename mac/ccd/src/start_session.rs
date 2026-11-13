@@ -910,7 +910,7 @@ fn this_computer() -> String {
 
 /// The sentence a signed-out Claude Code's start is refused with.
 fn signed_out(computer: &str) -> String {
-    format!("Claude Code on {computer} isn't signed in.")
+    format!("Claude Code on {computer} isn’t signed in.")
 }
 
 /// What the list says of a Claude Code a start can run: its models and its sign-in,
@@ -939,7 +939,7 @@ async fn claude_probe(
     let path = claude_path(environment, claude_bin).await.ok_or_else(|| {
         (
             StartFailure::AgentMissing,
-            format!("Claude Code isn't installed on {}.", this_computer()),
+            format!("Claude Code isn’t installed on {}.", this_computer()),
         )
     })?;
     let unread = || {
@@ -950,7 +950,7 @@ async fn claude_probe(
         (
             StartFailure::LaunchFailed,
             format!(
-                "Claude Code on {} didn't report its version.",
+                "Claude Code on {} didn’t report its version.",
                 this_computer()
             ),
         )
@@ -2974,7 +2974,7 @@ esac"#;
         assert_eq!(
             listed.detail,
             Some(format!(
-                "Claude Code isn't installed on {}.",
+                "Claude Code isn’t installed on {}.",
                 this_computer()
             ))
         );
@@ -3066,7 +3066,7 @@ esac"#;
     async fn a_claude_that_does_not_say_its_version_is_refused() {
         let rig = recording("no-version");
         let sentence = format!(
-            "Claude Code on {} didn't report its version.",
+            "Claude Code on {} didn’t report its version.",
             this_computer()
         );
         for (said, exit) in [("2.1.300 (Claude Code)\n", "1"), ("unknown\n", "0")] {
@@ -3090,7 +3090,7 @@ esac"#;
             agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None).await;
         assert!(listed.available);
         assert_eq!(listed.signed_in, Some(false));
-        let sentence = format!("Claude Code on {} isn't signed in.", this_computer());
+        let sentence = format!("Claude Code on {} isn’t signed in.", this_computer());
         assert_eq!(listed.detail, Some(sentence.clone()));
         let result = rig.start(&rig.project(), Some("hi")).await;
         assert_eq!(result, failed(StartFailure::LaunchFailed, sentence));
