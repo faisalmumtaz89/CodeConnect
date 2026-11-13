@@ -343,6 +343,7 @@ mod tests {
     /// One real sample on this computer: every value read, and in range.
     #[tokio::test]
     async fn a_sample_of_this_computer_is_complete_and_in_range() {
+        let _env = crate::ProcessEnvRead::take();
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         let sample = stats(home.as_deref()).await;
         let cpu = sample.cpu.expect("cpu");

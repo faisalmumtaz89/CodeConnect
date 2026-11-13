@@ -849,20 +849,21 @@ ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ backup-machine
         super::set_mode(path, mode).unwrap();
     }
 
-    /// `HOME` is process-global while tests run in parallel threads, so every
-    /// redirect is serialised and restored. Without this, one test's fake home
-    /// would still be installed when an unrelated test resolved a path.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// A fake `HOME` for one test. `HOME` is process-global while tests run in
+    /// parallel threads, so a redirect holds `crate::PROCESS_ENV` for writing and is
+    /// restored on drop: no other redirect, and no test holding
+    /// `crate::ProcessEnvRead`, sees it.
     pub(crate) struct FakeHome {
         pub(crate) dir: PathBuf,
         previous: Option<std::ffi::OsString>,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: std::sync::RwLockWriteGuard<'static, ()>,
     }
 
     impl FakeHome {
         pub(crate) fn new(tag: &str) -> FakeHome {
-            let guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = crate::PROCESS_ENV
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
             let dir = std::env::temp_dir().join(format!(
                 "ccd-home-{}-{}-{}",
                 tag,

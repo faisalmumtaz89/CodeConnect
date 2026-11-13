@@ -943,7 +943,7 @@ pub struct AgentAvailability {
     /// own words. Claude Code lists its default first, as `default`, its detail
     /// naming the model that is now; Codex lists no such entry, and a start that
     /// names no model gets its default. Empty when the agent could not be asked,
-    /// and from a daemon below 33.
+    /// for a signed-out Claude Code, which is not asked, and from a daemon below 33.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<AgentModel>,
     /// Whether the agent is signed in (minor 33), to show; absent when not known.

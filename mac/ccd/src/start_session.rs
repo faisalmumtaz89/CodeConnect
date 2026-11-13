@@ -1287,13 +1287,17 @@ fn home_in(environment: &HashMap<OsString, OsString>) -> PathBuf {
 /// The models Claude Code at `ready` offers a start. Asking starts it, and Claude
 /// Code refreshes its caches in `~/.claude.json` as it starts, so a signed-in
 /// claude's answer is kept for its version, and asked again once it is updated or
-/// the daemon restarts; a claude not signed in is asked at every list, so the
-/// models show once it is.
+/// the daemon restarts. A claude that `auth status` says is signed out is not asked,
+/// since its start is refused. One whose sign-in is not known is asked at every
+/// list, since its start goes on.
 async fn claude_models(
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
     ready: &ReadyClaude,
 ) -> Vec<AgentModel> {
+    if ready.signed_in == Some(false) {
+        return Vec::new();
+    }
     if ready.signed_in == Some(true) {
         if let Some(kept) = known.offered(&AgentKind::Claude, &ready.version) {
             if kept.signed_in == Some(true) {
@@ -1717,13 +1721,22 @@ fn session_environment(_own: &HashMap<OsString, OsString>) -> Option<HashMap<OsS
         .collect()
 }
 
+/// Where every [`test_claude`] appends the `HOME`, `PATH` and `XPC_SERVICE_NAME` it
+/// ran with, one line a run (`unset` for a variable it did not have), so a test run
+/// can be checked for a probe that ran in another test's fake `HOME` or took the
+/// service branch.
+#[cfg(test)]
+pub(crate) fn claude_env_log() -> PathBuf {
+    std::env::temp_dir().join("claude-env.log")
+}
+
 /// A Claude Code for tests, `<dir>/bin/claude`, and the environment a start finds it
 /// in. It says it is 2.1.268 and signed in unless `<claude>.version`,
 /// `<claude>.version_exit`, `<claude>.auth` or `<claude>.auth_exit` say otherwise,
-/// answers `-p` with `<claude>.ask`, and adds each run's arguments to
-/// `<claude>.argv`. The environment's home is `<dir>/home`, whose `.profile` makes
-/// the PATH `<dir>/bin:/usr/bin:/bin`, so no claude, shell file or sign-in of the
-/// person running the tests is ever reached.
+/// answers `-p` with `<claude>.ask`, adds each run's arguments to `<claude>.argv`,
+/// and each run's environment to [`claude_env_log`]. The environment's home is
+/// `<dir>/home`, whose `.profile` makes the PATH `<dir>/bin:/usr/bin:/bin`, so no
+/// claude, shell file or sign-in of the person running the tests is ever reached.
 #[cfg(test)]
 pub(crate) fn test_claude(dir: &Path) -> (PathBuf, HashMap<OsString, OsString>) {
     let bin = dir.join("bin");
@@ -1733,8 +1746,11 @@ pub(crate) fn test_claude(dir: &Path) -> (PathBuf, HashMap<OsString, OsString>) 
     let claude = bin.join("claude");
     std::fs::write(
         &claude,
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "$0.argv"
+        format!(
+            "#!/bin/sh\nprintf 'HOME=%s PATH=%s XPC_SERVICE_NAME=%s\\n' \"${{HOME-unset}}\" \
+             \"${{PATH-unset}}\" \"${{XPC_SERVICE_NAME-unset}}\" >> '{}'\n",
+            claude_env_log().display()
+        ) + r#"printf '%s\n' "$*" >> "$0.argv"
 answer() { if [ -f "$0.$1" ]; then cat "$0.$1"; else printf '%b' "$2"; fi; }
 case "$1" in
 --version) answer version '2.1.268 (Claude Code)\n'; exit "$(cat "$0.version_exit" 2>/dev/null || echo 0)" ;;
@@ -3020,6 +3036,7 @@ mod tests {
     /// listed (`answer` fills it in): the phone starts there.
     #[test]
     fn the_root_and_the_home_folder_list() {
+        let _env = crate::ProcessEnvRead::take();
         let (path, contents) = list_folder("/", false);
         assert_eq!(path, "/");
         assert!(!listed(contents).0.is_empty());
@@ -3230,6 +3247,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_session_path_on_macos_is_launchds() {
+        let _env = crate::ProcessEnvRead::take();
         let own = environment(&[
             ("PATH", "/service/bin:/usr/bin"),
             ("HOME", "/h"),
@@ -3544,6 +3562,7 @@ esac"#;
     /// asked once per version.
     #[tokio::test]
     async fn a_signed_out_codex_is_asked_again_only_once_login_status_says_signed_in() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = Rig::new("codex-offer", ANSWERING);
         let known = KnownAgents::default();
         let codex = |version: &'static str| {
@@ -3586,11 +3605,11 @@ esac"#;
         assert_eq!(asked(&rig, "codex app-server"), 3);
     }
 
-    /// **Claude Code is asked at every list until `auth status` says it is signed
-    /// in, then once per version**: its own bookkeeping as it starts is what any
-    /// start of it does.
+    /// **A signed-out Claude Code is never asked; signed in, it is asked once per
+    /// version; its sign-in unknown, at every list**: asking starts it, which a
+    /// signed-out list has no use for, since its start is refused.
     #[tokio::test]
-    async fn claude_is_asked_until_it_is_signed_in_then_once_per_version() {
+    async fn claude_is_not_asked_signed_out_and_once_per_version_signed_in() {
         let rig = Rig::new("claude-offer", ANSWERING);
         let known = KnownAgents::default();
         let ready = |version: &str, signed_in| ReadyClaude {
@@ -3607,9 +3626,15 @@ esac"#;
         rig.claude_says("ask", CLAUDE_SIGNED_OUT);
         for _ in 0..2 {
             let models = claude_models(&known, &rig.env, &ready("2.1.319", Some(false))).await;
+            assert!(models.is_empty(), "{models:?}");
+        }
+        assert_eq!(asks(), 0, "a signed-out list starts no claude");
+
+        for _ in 0..2 {
+            let models = claude_models(&known, &rig.env, &ready("2.1.319", None)).await;
             assert_eq!(models.len(), 5);
         }
-        assert_eq!(asks(), 2);
+        assert_eq!(asks(), 2, "its sign-in unknown, it is asked at every list");
 
         rig.claude_says("ask", CLAUDE_API_KEY);
         for _ in 0..2 {
@@ -3796,13 +3821,29 @@ esac"#;
                                \"email\": \"b9-marker@example.invalid\",\n  \
                                \"orgName\": \"B9-MARKER-ORG\"\n}\n";
 
-    /// **`auth status` is read for `loggedIn` and nothing else (P1 22)**: signed in,
-    /// and on an exit it does not give, its email and organization are in neither
-    /// what the probe keeps, the list's frame, nor a refusal.
+    /// A signed-in `initialize` answer to the models ask, whose `account` carries the
+    /// same marker email and organization, with one model named by a control marker
+    /// that the list's frame shows.
+    const ASK_MARKED: &str = concat!(
+        r#"{"type":"control_response","response":{"subtype":"success","request_id":"models","#,
+        r#""response":{"models":[{"value":"default","displayName":"B18-CONTROL-MODEL","#,
+        r#""description":"Default"}],"account":{"email":"b9-marker@example.invalid","#,
+        r#""organization":"B9-MARKER-ORG","subscriptionType":"max","tokenSource":"claude.ai","#,
+        r#""apiProvider":"firstParty"}}}}"#,
+        "\n"
+    );
+
+    /// **Of the account, nothing is kept from `auth status` or from the models ask's
+    /// answer (P1 22)**: `auth status` is read for `loggedIn` alone and the ask's
+    /// answer for its models alone. Signed in, and on an exit `auth status` does not
+    /// give, the email and organization in either are in neither what the probe
+    /// keeps, the offer the list keeps, the list's frame, nor a refusal; the ask's
+    /// control model is in the frame and the kept offer, so its answer was read.
     #[tokio::test]
-    async fn auth_status_leaves_nothing_of_the_account_behind() {
+    async fn nothing_of_the_account_is_kept_from_auth_status_or_the_models_ask() {
         let rig = recording("account");
         rig.claude_says("auth", &format!("startup noise {{\n{AUTH_MARKED}"));
+        rig.claude_says("ask", ASK_MARKED);
         let markers = ["b9-marker@example.invalid", "B9-MARKER-ORG"];
         let clean = |text: &str| markers.iter().all(|marker| !text.contains(marker));
         for exit in ["0", "2"] {
@@ -3810,15 +3851,24 @@ esac"#;
             let ready = claude_probe(&rig.env, None).await.unwrap();
             assert_eq!(ready.signed_in, (exit == "0").then_some(true));
             assert!(clean(&format!("{ready:?}")), "{ready:?}");
-            let listed =
-                agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None)
-                    .await;
+            let known = KnownAgents::default();
+            let listed = agent_availability(&AgentKind::Claude, &known, &rig.env, None).await;
+            let kept = format!("{:?}", known.offered(&AgentKind::Claude, &ready.version));
+            assert!(clean(&kept), "{kept}");
+            assert!(
+                kept.contains("B18-CONTROL-MODEL"),
+                "the ask was kept: {kept}"
+            );
             let frame = serde_json::to_string(&ServerMessage::Projects {
                 projects: Vec::new(),
                 agents: vec![listed],
             })
             .unwrap();
             assert!(clean(&frame), "{frame}");
+            assert!(
+                frame.contains("B18-CONTROL-MODEL"),
+                "the ask was read: {frame}"
+            );
         }
         rig.claude_says("version", "2.1.267 (Claude Code)\n");
         let refused = format!("{:?}", rig.start(&rig.project(), Some("hi")).await);
@@ -4102,6 +4152,8 @@ esac"#;
     /// recorded answers (Claude Code signed out, Codex with an API key), and a start
     /// that names one of the models. From the recordings and fixed values, the
     /// computer named "this computer", so the fixture is the same on every machine.
+    /// Claude Code's entry pairs the signed-out sentence with its recorded answer's
+    /// models, for the apps' decoders; a list sends a signed-out Claude Code with none.
     fn derived_minor_33_wire() -> serde_json::Value {
         let claude = startable_claude(
             auth_reading(Some(1), AUTH_SIGNED_OUT.as_bytes()),

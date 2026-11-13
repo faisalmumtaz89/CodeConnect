@@ -983,29 +983,50 @@ fn managed_by_codeconnect_job() -> bool {
     state::launchd_label().as_deref() == Some(protocol::launchd_label())
 }
 
-/// Held for the length of any test that writes [`state::SERVICE_LABEL_VAR`], by way of
-/// [`LaunchdLabelEnv`] — which is the only thing that can take it, and the only
-/// place in this crate that writes the variable at all.
+/// The process environment, held for writing by every test that changes it, and for
+/// reading by the tests whose reads of it raced those writers.
 ///
-/// The variable is process-global and `cargo test` runs the crate's tests on a
-/// thread pool, so two tests writing it are one interleaving away from reading
-/// each other's value. Two do: [`managed_by_codeconnect_job`] is asserted from
-/// this module and [`state::launchd_label`] from `state`, both by setting the
-/// variable and reading back what the production code makes of it. A lock taken
-/// by one of them excludes nothing, because the other never takes it — which is
-/// exactly the shape those two were in, one holding a lock private to itself
-/// while the other wrote the same variable freely and neither could see the
-/// other doing it.
+/// The environment is process-global and `cargo test` runs the crate's tests on a
+/// thread pool. Two helpers change it: `legacy_credentials::test_support::FakeHome`
+/// sets `HOME`, and [`LaunchdLabelEnv`] sets [`state::SERVICE_LABEL_VAR`]. A test
+/// that lists or starts through a live server reaches `phone_environment`, which
+/// copies the whole environment, so a probe that ran while a writer held it ran in a
+/// fake (or already deleted) `HOME`, or took the service branch; a test that reads
+/// `HOME` twice saw two homes. A lock that only the writers take excludes nothing
+/// from those readers. So writers take this for writing, through those two helpers,
+/// and those readers take it for reading, through [`ProcessEnvRead`]: readers still
+/// run side by side, a writer waits for them, and they wait for it.
 ///
-/// So it lives at the crate root, above the function whose answer it protects,
-/// where both modules reach it the same way and a third test that starts
-/// writing that variable has one obvious thing to use. `#[cfg(test)]` because
-/// production reads this variable and never writes it: outside a test run there
-/// is nothing here to serialise.
+/// It lives at the crate root, where every module reaches it the same way.
+/// `#[cfg(test)]` because production reads its environment and never writes it.
+/// Poisoning is ignored on purpose: each writer restores the environment in its
+/// `Drop`, before its guard is released, so a panicking holder has already put it
+/// back and the next test inherits a clean environment rather than an unusable lock.
 #[cfg(test)]
-static LAUNCHD_LABEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static PROCESS_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-/// Exclusive use of [`state::SERVICE_LABEL_VAR`] for as long as this value is alive.
+/// A test's read of the process environment: while this value is alive, no
+/// [`PROCESS_ENV`] writer can change it. Wrapped, as [`LaunchdLabelEnv`] wraps its
+/// guard, because an async reader holds it across its `.await`s. That is safe here:
+/// each test takes it once, on its own thread (a `#[tokio::test]` runs its own
+/// runtime there), so a reader waits only for a writer to finish, and a writer only
+/// for readers to finish.
+#[cfg(test)]
+pub(crate) struct ProcessEnvRead {
+    _lock: std::sync::RwLockReadGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ProcessEnvRead {
+    pub(crate) fn take() -> Self {
+        Self {
+            _lock: PROCESS_ENV.read().unwrap_or_else(|held| held.into_inner()),
+        }
+    }
+}
+
+/// Exclusive use of [`state::SERVICE_LABEL_VAR`] for as long as this value is alive:
+/// it holds [`PROCESS_ENV`] for writing.
 ///
 /// Bundled rather than left as a bare lock because the two mistakes here are
 /// the same mistake: writing the variable without excluding the other test, and
@@ -1018,14 +1039,9 @@ static LAUNCHD_LABEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// `std::env::var(..).ok()` folds "unset" together with "set to bytes that are
 /// not UTF-8", and restoring from that would silently *delete* a variable it
 /// could not read rather than put it back.
-///
-/// Poisoning is ignored on purpose: the data this lock guards is the process
-/// environment, and a panicking holder has already restored it on the way out,
-/// so the next test inherits a clean variable rather than a permanently
-/// unusable lock.
 #[cfg(test)]
 pub(crate) struct LaunchdLabelEnv {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: std::sync::RwLockWriteGuard<'static, ()>,
     previous: Option<std::ffi::OsString>,
 }
 
@@ -1033,9 +1049,7 @@ pub(crate) struct LaunchdLabelEnv {
 impl LaunchdLabelEnv {
     pub(crate) fn take() -> Self {
         Self {
-            _lock: LAUNCHD_LABEL_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|held| held.into_inner()),
+            _lock: PROCESS_ENV.write().unwrap_or_else(|held| held.into_inner()),
             previous: std::env::var_os(state::SERVICE_LABEL_VAR),
         }
     }
@@ -2293,8 +2307,10 @@ mod tests {
     fn the_boundary_covers_every_path_the_daemon_writes() {
         // `state_paths` derives from an explicit root so it can be tested; this
         // is what keeps that derivation in step with the protocol crate's own
-        // idea of where things live. Both sides read `root_dir()` at the same
-        // instant, so no environment variable has to be moved to compare them.
+        // idea of where things live. Both sides read `root_dir()`, which follows
+        // HOME when CODECONNECT_HOME is unset (as on CI), so they read it under
+        // the process-environment read guard: no FakeHome moves HOME in between.
+        let _env = crate::ProcessEnvRead::take();
         let root = protocol::root_dir();
         let paths = state_paths(&root);
         for expected in [
@@ -2561,7 +2577,10 @@ mod tests {
         // out of its way not to call an address it could not check public; this
         // one asserted it outright, which left an operator whose `ws_bind` is
         // their own tailnet address being told it was public by one line and
-        // unverifiable by the next.
+        // unverifiable by the next. The advice and the expected text each resolve
+        // `tls_dir()`, which follows HOME when CODECONNECT_HOME is unset (as on
+        // CI), so both are read under the process-environment read guard.
+        let _env = crate::ProcessEnvRead::take();
         let mut config = config_with(Some("100.64.12.34"));
         config.ws_allow_plaintext = true;
         let plan = plan_bind(&config, &[], false);
