@@ -54,11 +54,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The agents the phone can start.
 const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 
-/// The answer to a `list_projects`, `get_project_git`, `list_folder`,
-/// `create_folder` or `start_session`.
+/// The answer to a `get_project_git`, `list_folder`, `create_folder` or
+/// `start_session`. A `list_projects` is answered by [`list_projects`].
 pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     match message {
-        ClientMessage::ListProjects => list_projects(daemon).await,
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
         ClientMessage::ListFolder {
@@ -140,8 +139,8 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             }
         }
         _ => unreachable!(
-            "handle_client passes only list_projects, get_project_git, list_folder, \
-             create_folder and start_session here"
+            "handle_client passes only get_project_git, list_folder, create_folder and \
+             start_session here"
         ),
     }
 }
@@ -180,22 +179,8 @@ impl KnownAgents {
     }
 }
 
-/// The agents for a project list: the last check's answer, with a fresh check
-/// started for the next list; or, the first time, a check waited for.
-async fn agents(daemon: &Arc<Daemon>) -> Vec<AgentAvailability> {
-    if let Some(known) = daemon.agents.get() {
-        let daemon = Arc::clone(daemon);
-        tokio::spawn(async move {
-            let checked = check_agents(
-                &daemon.agents,
-                &phone_environment(),
-                daemon.config.claude_bin.as_deref(),
-            )
-            .await;
-            daemon.agents.set(checked)
-        });
-        return known;
-    }
+/// The agents as a check finds them now, kept for the next list.
+async fn check_and_keep(daemon: &Arc<Daemon>) -> Vec<AgentAvailability> {
     let checked = check_agents(
         &daemon.agents,
         &phone_environment(),
@@ -741,16 +726,25 @@ fn last_line(bytes: &[u8]) -> Option<String> {
         .map(|line| line.strip_prefix("Error: ").unwrap_or(line).to_string())
 }
 
-/// The answer to `list_projects`.
-async fn list_projects(daemon: &Arc<Daemon>) -> ServerMessage {
+/// The answer to `list_projects`, sent to `replies`: the folders, and the agents as
+/// the last check found them, or, the first time, as a check waited for finds them.
+/// An answer from the last check then waits for a fresh one, kept for the next
+/// list, and when it finds the agents changed, the same folders go out again with
+/// them, so a sign-in, an install or an update shows without another list. Both
+/// are sent from here, so the second always follows the first.
+pub(crate) async fn list_projects(
+    daemon: &Arc<Daemon>,
+    replies: &tokio::sync::mpsc::UnboundedSender<ServerMessage>,
+) {
     let rows = match daemon.db.projects().await {
         Ok(rows) => rows,
         Err(err) => {
             crate::log_error!("could not list projects: {err:#}");
-            return ServerMessage::Error {
+            let _ = replies.send(ServerMessage::Error {
                 code: "projects_unavailable".into(),
                 message: format!("could not read the project list: {err}"),
-            };
+            });
+            return;
         }
     };
     let git_bin = daemon.config.git_bin.as_deref();
@@ -775,8 +769,28 @@ async fn list_projects(daemon: &Arc<Daemon>) -> ServerMessage {
         })
         .buffered(BRANCH_READS_AT_ONCE)
         .collect::<Vec<_>>();
-    let (projects, agents) = tokio::join!(projects, agents(daemon));
-    ServerMessage::Projects { projects, agents }
+    let known = daemon.agents.get();
+    let agents = async {
+        match &known {
+            Some(known) => known.clone(),
+            None => check_and_keep(daemon).await,
+        }
+    };
+    let (projects, agents) = tokio::join!(projects, agents);
+    let _ = replies.send(ServerMessage::Projects {
+        projects: projects.clone(),
+        agents: agents.clone(),
+    });
+    if known.is_none() {
+        return;
+    }
+    let checked = check_and_keep(daemon).await;
+    if checked != agents {
+        let _ = replies.send(ServerMessage::Projects {
+            projects,
+            agents: checked,
+        });
+    }
 }
 
 /// Whether `agent` can start here, and what it offers a start. Claude Code is what
@@ -1486,7 +1500,8 @@ printf '%s\n' "$*" >> "$0.argv"
 answer() { if [ -f "$0.$1" ]; then cat "$0.$1"; else printf '%b' "$2"; fi; }
 case "$1" in
 --version) answer version '2.1.268 (Claude Code)\n'; exit "$(cat "$0.version_exit" 2>/dev/null || echo 0)" ;;
-auth) answer auth '{\n  "loggedIn": true\n}\n'; exit "$(cat "$0.auth_exit" 2>/dev/null || echo 0)" ;;
+auth) while [ -f "$0.auth_hold" ]; do sleep 0.02; done
+      answer auth '{\n  "loggedIn": true\n}\n'; exit "$(cat "$0.auth_exit" 2>/dev/null || echo 0)" ;;
 -p) [ -f "$0.ask" ] || exit 1; cat "$0.ask"; cat > /dev/null ;;
 esac
 "#,

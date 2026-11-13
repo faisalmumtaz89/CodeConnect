@@ -785,7 +785,15 @@ where
                     let daemon = daemon.clone();
                     let replies = replies_tx.clone();
                     tokio::spawn(async move {
-                        let _ = replies.send(crate::start_session::answer(&daemon, parsed).await);
+                        match parsed {
+                            ClientMessage::ListProjects => {
+                                crate::start_session::list_projects(&daemon, &replies).await
+                            }
+                            parsed => {
+                                let _ = replies
+                                    .send(crate::start_session::answer(&daemon, parsed).await);
+                            }
+                        }
                     });
                     continue;
                 }
@@ -9958,6 +9966,145 @@ esac
             _ => panic!("no projects reply within 30 s"),
         };
         assert_eq!(reply["type"], "projects", "{reply}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A stub claude for a list test, signed out, and a live server whose check asks
+    /// it; the folder to remove after.
+    async fn list_rig(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, LiveServer) {
+        let root = std::env::temp_dir().join(format!(
+            "ccd-{tag}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (claude, _) = crate::start_session::test_claude(&root);
+        let (server, _) = live_server(protocol::config::Config {
+            claude_bin: Some(claude.display().to_string()),
+            ..Default::default()
+        })
+        .await;
+        let rig = (root, claude, server);
+        say_signed_in(&rig.1, false);
+        rig
+    }
+
+    /// What the stub claude's `auth status` says: signed in, or signed out as
+    /// 2.1.268 says it (exit 1).
+    fn say_signed_in(claude: &std::path::Path, signed_in: bool) {
+        let file = |what: &str| format!("{}.{what}", claude.display());
+        std::fs::write(
+            file("auth"),
+            format!("{{\n  \"loggedIn\": {signed_in}\n}}\n"),
+        )
+        .unwrap();
+        std::fs::write(file("auth_exit"), if signed_in { "0" } else { "1" }).unwrap();
+    }
+
+    /// What a `projects` frame says of Claude Code's sign-in.
+    fn claude_signed_in(frame: &ServerMessage) -> Option<bool> {
+        match frame {
+            ServerMessage::Projects { agents, .. } => agents
+                .iter()
+                .find(|agent| agent.agent == protocol::agent::AgentKind::Claude)
+                .and_then(|agent| agent.signed_in),
+            other => panic!("not a projects frame: {other:?}"),
+        }
+    }
+
+    /// **A list answers again when the check it started finds the agents changed**
+    /// (B17). The first list waits for its check and is answered once. After the
+    /// stub claude signs in, the next list is answered from the last check (signed
+    /// out) at once, while its own check is still held, and then with what that
+    /// check found. With nothing changed, a list is answered once.
+    #[tokio::test]
+    async fn a_list_answers_again_when_its_check_finds_a_change() {
+        let (root, claude, server) = list_rig("list-again").await;
+        let (replies, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let drain = |sent: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMessage>| {
+            let mut said = Vec::new();
+            while let Ok(frame) = sent.try_recv() {
+                said.push(claude_signed_in(&frame));
+            }
+            said
+        };
+        crate::start_session::list_projects(&server.daemon, &replies).await;
+        assert_eq!(
+            drain(&mut sent),
+            [Some(false)],
+            "the first list waits for its check"
+        );
+
+        say_signed_in(&claude, true);
+        let hold = format!("{}.auth_hold", claude.display());
+        std::fs::write(&hold, "").unwrap();
+        let listing = tokio::spawn({
+            let (daemon, replies) = (Arc::clone(&server.daemon), replies.clone());
+            async move { crate::start_session::list_projects(&daemon, &replies).await }
+        });
+        let answer = tokio::time::timeout(Duration::from_secs(10), sent.recv())
+            .await
+            .expect("answered while its check is held")
+            .unwrap();
+        assert_eq!(
+            claude_signed_in(&answer),
+            Some(false),
+            "the last check's answer"
+        );
+        assert!(
+            sent.try_recv().is_err(),
+            "nothing more while the check is held"
+        );
+        std::fs::remove_file(&hold).unwrap();
+        listing.await.unwrap();
+        assert_eq!(drain(&mut sent), [Some(true)], "then what the check found");
+
+        crate::start_session::list_projects(&server.daemon, &replies).await;
+        assert_eq!(
+            drain(&mut sent),
+            [Some(true)],
+            "nothing changed: one answer"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **Over the wire, the second answer reaches the device that listed**: it
+    /// lists (signed out), the stub claude signs in, and the next list gets the
+    /// last check's answer and then the new one.
+    #[tokio::test]
+    async fn the_device_that_listed_hears_what_its_check_found() {
+        let (root, claude, server) = list_rig("list-again-wire").await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        async fn next_projects(
+            socket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+        ) -> Option<bool> {
+            loop {
+                match next_frame(socket, Duration::from_secs(30)).await {
+                    Frame::Json(frame) if frame["type"] == "projects" => {
+                        let frame: ServerMessage = serde_json::from_value(frame).unwrap();
+                        return claude_signed_in(&frame);
+                    }
+                    Frame::Json(_) => continue,
+                    Frame::Closed | Frame::Silent => panic!("no projects frame within 30 s"),
+                }
+            }
+        }
+        let list = || Message::Text(r#"{"type":"list_projects"}"#.into());
+        phone.send(list()).await.unwrap();
+        assert_eq!(next_projects(&mut phone).await, Some(false));
+        say_signed_in(&claude, true);
+        phone.send(list()).await.unwrap();
+        assert_eq!(
+            next_projects(&mut phone).await,
+            Some(false),
+            "the last check's answer"
+        );
+        assert_eq!(
+            next_projects(&mut phone).await,
+            Some(true),
+            "then what its check found"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
