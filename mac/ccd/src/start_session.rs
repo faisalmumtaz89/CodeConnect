@@ -31,7 +31,7 @@ use crate::state::Daemon;
 /// The launcher gives up on its own after 75 s (a Codex start can take eleven
 /// seconds when nothing is wrong), so while it runs its answer is the one that
 /// counts; this is only the backstop for one that never ends.
-const START_TIMEOUT: Duration = Duration::from_secs(80);
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(80);
 
 /// How often a start that has run looks again for its session in the fleet.
 const LISTED_POLL: Duration = Duration::from_millis(50);
@@ -119,7 +119,26 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 };
             }
             let state_dir = protocol::root_dir();
+            // One environment per start: the check and the run it starts read the
+            // same login shell, since `auth status` turns on variables alone.
             let environment = phone_environment();
+            if agent == AgentKind::Claude {
+                let start = claude_start(
+                    daemon,
+                    crate::state::codex_launcher(),
+                    &state_dir,
+                    &request_id,
+                    &path,
+                    prompt.as_deref().unwrap_or_default(),
+                    worktree.as_ref(),
+                    model.as_deref(),
+                    &environment,
+                );
+                return ServerMessage::StartSessionResult {
+                    result: daemon.starts.once(&request_id, start).await,
+                    request_id,
+                };
+            }
             let launch = launch(
                 &daemon.db,
                 daemon.config.git_bin.as_deref(),
@@ -278,38 +297,8 @@ pub(crate) async fn launch(
     environment: &HashMap<OsString, OsString>,
     claude_bin: Option<&str>,
 ) -> StartSessionResult {
-    if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
-        return failed(
-            StartFailure::LaunchFailed,
-            format!("{} cannot be started from the phone", agent.as_str()),
-        );
-    }
-    if prompt.is_some_and(|prompt| prompt.len() > protocol::ws::MAX_COMPOSE_BYTES) {
-        return failed(
-            StartFailure::LaunchFailed,
-            "the first message is longer than 8 KiB".into(),
-        );
-    }
-    if let Err(why) = may_name(path) {
-        return failed(StartFailure::LaunchFailed, why);
-    }
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => {}
-        // Refused, it is there but this daemon may not reach it; every other
-        // error (gone, a file in the path, a symlink loop) is a folder no longer
-        // there, as before.
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            return failed(
-                StartFailure::LaunchFailed,
-                format!("{path}: {}", refusal_words(&err, Path::new(path))),
-            );
-        }
-        _ => {
-            return failed(
-                StartFailure::FolderMissing,
-                format!("{path} no longer exists"),
-            )
-        }
+    if let Some(refusal) = refusal(agent, path, prompt) {
+        return refusal;
     }
     if *agent == AgentKind::Claude {
         if let Err(refusal) = claude_preflight(environment, claude_bin).await {
@@ -401,6 +390,134 @@ pub(crate) async fn launch(
                 }),
         ),
     }
+}
+
+/// The refusals a start gets before anything is run: an agent the phone cannot
+/// start, a first message past the limit, a path that is not absolute, and a folder
+/// that is gone or that this daemon may not reach.
+fn refusal(agent: &AgentKind, path: &str, prompt: Option<&str>) -> Option<StartSessionResult> {
+    if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
+        return Some(failed(
+            StartFailure::LaunchFailed,
+            format!("{} cannot be started from the phone", agent.as_str()),
+        ));
+    }
+    if prompt.is_some_and(|prompt| prompt.len() > protocol::ws::MAX_COMPOSE_BYTES) {
+        return Some(failed(
+            StartFailure::LaunchFailed,
+            "the first message is longer than 8 KiB".into(),
+        ));
+    }
+    if let Err(why) = may_name(path) {
+        return Some(failed(StartFailure::LaunchFailed, why));
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => None,
+        // Refused, it is there but this daemon may not reach it; every other
+        // error (gone, a file in the path, a symlink loop) is a folder no longer
+        // there, as before.
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Some(failed(
+            StartFailure::LaunchFailed,
+            format!("{path}: {}", refusal_words(&err, Path::new(path))),
+        )),
+        _ => Some(failed(
+            StartFailure::FolderMissing,
+            format!("{path} no longer exists"),
+        )),
+    }
+}
+
+/// A Claude start: the run its request already has (H1), or the start's checks, then
+/// its row and its agent host ([`crate::claude_host`]). Everything that can refuse the
+/// start comes before the row, so a refused start leaves none: the cheap refusals,
+/// the claude check, the host, and `launcher` (the `codeconnect` that runs the mail
+/// server), all before the place, the one step that can change the repository. A new
+/// worktree is claude's to make, as `--worktree` makes it today.
+#[allow(clippy::too_many_arguments)]
+async fn claude_start(
+    daemon: &Arc<Daemon>,
+    launcher: Result<PathBuf, String>,
+    root: &Path,
+    request_id: &str,
+    path: &str,
+    prompt: &str,
+    worktree: Option<&StartWorktree>,
+    model: Option<&str>,
+    environment: &HashMap<OsString, OsString>,
+) -> StartSessionResult {
+    match daemon
+        .db
+        .hosted_run_for_request(request_id.to_string())
+        .await
+    {
+        Ok(Some(run)) => return crate::claude_host::answer_for(run),
+        Ok(None) => {}
+        Err(err) => {
+            return failed(
+                StartFailure::LaunchFailed,
+                format!("could not read this computer's runs: {err:#}"),
+            )
+        }
+    }
+    if let Some(refusal) = refusal(&AgentKind::Claude, path, Some(prompt)) {
+        return refusal;
+    }
+    let ready = match claude_preflight(environment, daemon.config.claude_bin.as_deref()).await {
+        Ok(ready) => ready,
+        Err(refusal) => return refusal,
+    };
+    let host_bin = match crate::claude_host::host_binary(&daemon.config) {
+        Ok(host_bin) => host_bin,
+        Err(why) => return failed(StartFailure::LaunchFailed, why),
+    };
+    let codeconnect = match launcher {
+        Ok(codeconnect) => codeconnect,
+        Err(why) => return failed(StartFailure::LaunchFailed, why),
+    };
+    let Some(claude_path) = ready.path.to_str() else {
+        return failed(
+            StartFailure::LaunchFailed,
+            format!(
+                "the claude at {} has a path that is not text",
+                ready.path.display()
+            ),
+        );
+    };
+    let (cwd, new_worktree) = match worktree {
+        None => (path.to_string(), None),
+        Some(StartWorktree::New { name }) => match check_worktree_name(name) {
+            Ok(()) => (path.to_string(), Some(name.as_str())),
+            Err(why) => return failed(StartFailure::LaunchFailed, why),
+        },
+        Some(worktree) => match place(
+            environment,
+            daemon.config.git_bin.as_deref(),
+            path,
+            &AgentKind::Claude,
+            worktree,
+        )
+        .await
+        {
+            Ok(place) => (place.cwd, None),
+            Err(why) => return failed(StartFailure::LaunchFailed, why),
+        },
+    };
+    crate::claude_host::start(
+        daemon,
+        crate::claude_host::Run {
+            root,
+            request_id,
+            cwd: &cwd,
+            prompt,
+            model,
+            worktree: new_worktree,
+            claude_path,
+            host_bin: &host_bin,
+            codeconnect: &codeconnect,
+            environment,
+        },
+    )
+    .await
 }
 
 /// Wait until the session `uid` is one the fleet lists (its row, which `sessions`
@@ -717,7 +834,7 @@ async fn project_git(daemon: &Arc<Daemon>, path: String) -> ServerMessage {
 /// The last line of `bytes` with anything on it: where a failing program says why,
 /// without the `Error: ` the launcher prints before it. The user's shell startup
 /// speaks first, so it is never the last line.
-fn last_line(bytes: &[u8]) -> Option<String> {
+pub(crate) fn last_line(bytes: &[u8]) -> Option<String> {
     String::from_utf8_lossy(bytes)
         .lines()
         .rev()
@@ -1324,7 +1441,7 @@ async fn codex_signed_in(environment: &HashMap<OsString, OsString>, launcher: &P
 /// What those files print with no newline at its end, as a terminal's shell
 /// integration prints its escape codes, is ended with one before `args` run, so
 /// the first line `args` print is theirs alone.
-fn login_shell_command(
+pub(crate) fn login_shell_command(
     environment: &HashMap<OsString, OsString>,
     args: &[&OsStr],
 ) -> tokio::process::Command {
@@ -1347,6 +1464,47 @@ fn login_shell_command(
         .arg("codeconnect-start")
         .args(args);
     command
+}
+
+/// `args` run as a run's agent host: through the user's login shell
+/// ([`login_shell_command`]) in a session of its own, so it outlives this daemon; from
+/// `cwd`; with `uid` as `CODECONNECT_SESSION_UID`; stdin closed; and stdout and stderr
+/// into `log`. It must be a file, never a pipe, which would break under the host's next
+/// write once this daemon is gone. [`reap`] waits for the child once the caller no
+/// longer needs it.
+pub(crate) fn spawn_detached(
+    environment: &HashMap<OsString, OsString>,
+    args: &[&OsStr],
+    cwd: &Path,
+    uid: &str,
+    log: std::fs::File,
+) -> std::io::Result<tokio::process::Child> {
+    let log_err = log.try_clone()?;
+    let mut command = login_shell_command(environment, args);
+    command
+        .env(protocol::ENV_SESSION_UID, uid)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err);
+    // SAFETY: `setsid` is async-signal-safe and touches nothing of the parent's.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+/// Wait for `child` while this daemon lives, so it is never left a zombie; after it,
+/// the system adopts the process.
+pub(crate) fn reap(mut child: tokio::process::Child) {
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
 }
 
 /// What CodeConnect's own service definition sets for the daemon alone.
@@ -1766,6 +1924,235 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    /// A daemon for a Claude start's arm: its store, `test_claude`'s claude and a stand-in
+    /// host in `root`, a folder of the test's own under `/tmp` (removed by the caller).
+    fn hosted_daemon(root: &Path, claude: &Path, host: &Path) -> Arc<Daemon> {
+        let store = crate::store::Store::open(&root.join("events.db")).unwrap();
+        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(transcript_rx));
+        Daemon::new(
+            protocol::config::Config {
+                claude_bin: Some(claude.display().to_string()),
+                agent_host_bin: Some(host.display().to_string()),
+                ..Default::default()
+            },
+            Arc::new(store),
+            Arc::new(crate::apns::LoggingPushSender::new()),
+            crate::state::Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            transcript_tx,
+        )
+    }
+
+    fn arm_root(tag: &str) -> PathBuf {
+        let uid = protocol::uid::new().unwrap();
+        let root = PathBuf::from(format!("/tmp/cca{tag}.{}", &uid[16..]));
+        std::fs::create_dir_all(root.join("project")).unwrap();
+        root
+    }
+
+    /// The arm's way to the run: a Claude start whose claude is ready gets its row,
+    /// under the frame's request id, and its host is spawned in the run's folder.
+    #[tokio::test]
+    async fn a_claude_start_gets_its_row_and_its_host() {
+        let root = arm_root("1");
+        let (claude, environment) = test_claude(&root);
+        let host = root.join("stand-in-host");
+        std::fs::write(&host, "#!/bin/sh\ntouch \"$1/reached\"\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let project = root.join("project");
+        let result = claude_start(
+            &daemon,
+            Ok(root.join("codeconnect")),
+            &root,
+            "req-arm",
+            project.to_str().unwrap(),
+            "fix the tests",
+            None,
+            None,
+            &environment,
+        )
+        .await;
+        let run = daemon
+            .db
+            .hosted_run_for_request("req-arm".into())
+            .await
+            .unwrap()
+            .expect("the start wrote its row");
+        let reached = crate::claude_host::run_dir(&root, &run.session_uid)
+            .join("reached")
+            .exists();
+        let checked = std::fs::read_to_string(claude.with_extension("argv")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(result, StartSessionResult::Failed { .. }),
+            "{result:?}"
+        );
+        assert_eq!(run.lifecycle, protocol::event::Lifecycle::Failed);
+        assert!(reached, "the host was not spawned in the run's folder");
+        assert!(
+            checked.contains("--version"),
+            "the start did not check its claude: {checked}"
+        );
+    }
+
+    /// A signed-out claude is refused with B9's sentence, before any row or folder.
+    #[tokio::test]
+    async fn a_signed_out_claude_start_is_refused_before_its_row() {
+        let root = arm_root("2");
+        let (claude, environment) = test_claude(&root);
+        std::fs::write(
+            claude.with_extension("auth"),
+            "{\n  \"loggedIn\": false\n}\n",
+        )
+        .unwrap();
+        std::fs::write(claude.with_extension("auth_exit"), "1").unwrap();
+        let host = root.join("stand-in-host");
+        std::fs::write(&host, "#!/bin/sh\n").unwrap();
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let project = root.join("project");
+        let result = claude_start(
+            &daemon,
+            Ok(root.join("codeconnect")),
+            &root,
+            "req-out",
+            project.to_str().unwrap(),
+            "fix the tests",
+            None,
+            None,
+            &environment,
+        )
+        .await;
+        let row = daemon
+            .db
+            .hosted_run_for_request("req-out".into())
+            .await
+            .unwrap();
+        let folder = root.join("runs").exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(&result, StartSessionResult::Failed { detail, .. } if detail.contains("isn’t signed in")),
+            "{result:?}"
+        );
+        assert_eq!(row, None, "a refused start wrote a row");
+        assert!(!folder, "a refused start made a run folder");
+    }
+
+    /// A Claude start the host or the launcher refuses leaves the repository as it was:
+    /// those refusals come before the place, so a start on a branch makes no worktree.
+    #[tokio::test]
+    async fn a_refused_claude_start_on_a_branch_makes_no_worktree() {
+        let root = arm_root("3");
+        let (claude, environment) = test_claude(&root);
+        let project = root.join("project");
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["commit", "-q", "--allow-empty", "-m", "A"]);
+        git(&project, &["branch", "feature"]);
+        let host = root.join("stand-in-host");
+        std::fs::write(&host, "#!/bin/sh\n").unwrap();
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let result = claude_start(
+            &daemon,
+            Err("no codeconnect here".into()),
+            &root,
+            "req-branch",
+            project.to_str().unwrap(),
+            "fix the tests",
+            Some(&StartWorktree::Branch {
+                branch: "feature".into(),
+            }),
+            None,
+            &environment,
+        )
+        .await;
+        let worktrees = git(&project, &["worktree", "list", "--porcelain"]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(&result, StartSessionResult::Failed { detail, .. } if detail == "no codeconnect here"),
+            "{result:?}"
+        );
+        assert_eq!(
+            worktrees.matches("worktree ").count(),
+            1,
+            "a refused start made a worktree: {worktrees}"
+        );
+    }
+
+    /// The claude check and the host see one environment, the start's own: a sign-in
+    /// variable the check saw reaches the host unchanged, both see the same home, and
+    /// neither has a Claude config folder.
+    #[tokio::test]
+    async fn the_check_and_the_host_see_one_environment() {
+        let root = arm_root("4");
+        let (claude, mut environment) = test_claude(&root);
+        environment.insert(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("sk-test-marker"),
+        );
+        // The stand-in claude also records the environment the check runs it in.
+        let script = std::fs::read_to_string(&claude).unwrap();
+        let (shebang, body) = script.split_once('\n').unwrap();
+        std::fs::write(&claude, format!("{shebang}\nenv > \"$0.env\"\n{body}")).unwrap();
+        let host = root.join("stand-in-host");
+        std::fs::write(&host, "#!/bin/sh\nenv > \"$1/env.txt\"\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let project = root.join("project");
+        claude_start(
+            &daemon,
+            Ok(root.join("codeconnect")),
+            &root,
+            "req-env",
+            project.to_str().unwrap(),
+            "fix the tests",
+            None,
+            None,
+            &environment,
+        )
+        .await;
+        let run = daemon
+            .db
+            .hosted_run_for_request("req-env".into())
+            .await
+            .unwrap()
+            .expect("the start wrote its row");
+        let checked = std::fs::read_to_string(claude.with_extension("env")).unwrap_or_default();
+        let hosted = std::fs::read_to_string(
+            crate::claude_host::run_dir(&root, &run.session_uid).join("env.txt"),
+        )
+        .unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&root);
+        let line = |seen: &str, name: &str| {
+            seen.lines()
+                .find(|line| line.starts_with(&format!("{name}=")))
+                .map(str::to_string)
+        };
+        for name in ["ANTHROPIC_API_KEY", "HOME"] {
+            assert!(
+                line(&checked, name).is_some(),
+                "the check saw no {name}: {checked}"
+            );
+            assert_eq!(line(&checked, name), line(&hosted, name), "{name} differs");
+        }
+        assert_eq!(
+            line(&hosted, "ANTHROPIC_API_KEY").as_deref(),
+            Some("ANTHROPIC_API_KEY=sk-test-marker")
+        );
+        assert!(!checked.contains("CLAUDE_CONFIG_DIR") && !hosted.contains("CLAUDE_CONFIG_DIR"));
     }
 
     const STUB_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";

@@ -392,7 +392,7 @@ async fn read_loop(
                                 matches!(
                                     s.lifecycle,
                                     protocol::event::Lifecycle::Live
-                                        | protocol::event::Lifecycle::Spawning
+                                        | protocol::event::Lifecycle::Starting
                                 )
                             })
                             .count(),
@@ -419,7 +419,13 @@ async fn read_loop(
                         kept_held: match daemon.sessions().await {
                             Ok(sessions) => sessions
                                 .iter()
-                                .filter(|s| s.lifecycle == protocol::event::Lifecycle::Exited)
+                                .filter(|s| {
+                                    matches!(
+                                        s.lifecycle,
+                                        protocol::event::Lifecycle::Exited
+                                            | protocol::event::Lifecycle::Failed
+                                    )
+                                })
                                 .count()
                                 .saturating_sub(if dry_run { removed.len() } else { 0 }),
                             Err(_) => 0,

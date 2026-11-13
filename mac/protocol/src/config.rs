@@ -376,6 +376,12 @@ pub struct Config {
     #[serde(default)]
     pub codex_bin: Option<String>,
 
+    /// Explicit path to the agent host (`cc-agent-host`) ccd runs for each Claude
+    /// run. Unset, it is the one beside ccd's own executable, where the Mac app
+    /// installs it.
+    #[serde(default)]
+    pub agent_host_bin: Option<String>,
+
     /// Cap on each of the daemon's own launchd logs. One previous generation is
     /// kept alongside, so the ceiling is twice this per stream.
     ///
@@ -524,6 +530,7 @@ impl Default for Config {
             fsevents: true,
             claude_bin: None,
             codex_bin: None,
+            agent_host_bin: None,
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
             tmux_history_limit: default_tmux_history_limit(),

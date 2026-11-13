@@ -1348,8 +1348,8 @@ fn unit_document(ccd: &Path, path_value: &str) -> String {
 #
 # * Restart=on-failure restarts ccd after a crash but respects a clean exit, so
 #   stopping the unit does not fight a restart loop.
-# * KillMode=process ends ccd alone. It is deliberately NOT the parent of any
-#   agent, and the helpers it starts to outlive it are left running.
+# * KillMode=process ends ccd alone. The agent host it starts for each Claude
+#   run, and the other helpers it starts to outlive it, are left running.
 # * The log files are truncated in place by ccd itself once they pass its cap;
 #   systemd appends to them.
 [Unit]

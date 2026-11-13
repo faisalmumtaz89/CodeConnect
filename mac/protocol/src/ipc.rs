@@ -1180,6 +1180,19 @@ impl PromptPresence {
     }
 }
 
+/// The arguments that start `codeconnect mcp`, the mail server, for the run
+/// `session_uid`, speaking to the daemon at `socket`. The launcher and ccd both
+/// build a run's server from this, and `codeconnect mcp` parses them back.
+pub fn mail_server_args(session_uid: &str, socket: &std::path::Path) -> Vec<String> {
+    vec![
+        "mcp".into(),
+        "--session-uid".into(),
+        session_uid.into(),
+        "--socket".into(),
+        socket.to_string_lossy().into_owned(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     /// **The wake matches the mail switch**: on, it says to handle each message as

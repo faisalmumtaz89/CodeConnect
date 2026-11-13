@@ -238,6 +238,42 @@ impl Db {
             .await
     }
 
+    pub async fn hosted_run_for_request(
+        &self,
+        request_id: String,
+    ) -> Result<Option<crate::store::HostedRun>> {
+        self.run(move |store| store.hosted_run_for_request(&request_id))
+            .await
+    }
+
+    pub async fn begin_run(
+        &self,
+        row: SessionRow,
+        request_id: String,
+    ) -> Result<Option<crate::store::HostedRun>> {
+        self.run(move |store| store.begin_run(&row, &request_id))
+            .await
+    }
+
+    pub async fn record_host(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+    ) -> Result<()> {
+        self.run(move |store| store.record_host(&session_uid, &host))
+            .await
+    }
+
+    pub async fn commit_cursor(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+    ) -> Result<bool> {
+        self.run(move |store| store.commit_cursor(&session_uid, &host, seq))
+            .await
+    }
+
     /// Remove one ended run. Small next to a prune, and off the runtime for the
     /// same reason: it is still a multi-table transaction on the write
     /// connection, and the phone is waiting on the answer.

@@ -466,6 +466,10 @@ struct Inner {
     /// Keyed by `session_uid`. A second run of the same name gets its own slot
     /// instead of evicting the first's supervisor.
     supervisors: HashMap<String, SupervisorHandle>,
+    /// Hosted Claude runs whose agent host this daemon is attached to now, by
+    /// `session_uid` ([`crate::claude_host`]): what makes such a run's link read
+    /// attached, since it has no supervisor.
+    host_links: HashSet<String>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -9643,6 +9647,20 @@ impl Daemon {
         ))
     }
 
+    /// The run `session_uid`'s agent host is attached ([`crate::claude_host`]).
+    pub(crate) async fn host_link_attached(&self, session_uid: &str) {
+        self.inner
+            .lock()
+            .await
+            .host_links
+            .insert(session_uid.to_string());
+    }
+
+    /// The run `session_uid`'s connection to its agent host has ended.
+    pub(crate) async fn host_link_detached(&self, session_uid: &str) {
+        self.inner.lock().await.host_links.remove(session_uid);
+    }
+
     /// Build the fleet listing from rows already read and a state already locked.
     ///
     /// Split out so the read above is plainly *all* database work and this is plainly
@@ -9660,8 +9678,10 @@ impl Daemon {
         for row in rows {
             let attached = inner.supervisors.contains_key(&row.session_uid);
             let last_seen = inner.last_seen_ms.get(&row.session_uid).copied();
-            // Positive liveness only: silence is `stale`, never `idle`.
+            // Positive liveness only: silence is `stale`, never `idle`. A hosted run's
+            // link is its connection to its agent host, which is there or not.
             let link = match (attached, last_seen) {
+                _ if inner.host_links.contains(&row.session_uid) => Link::Attached,
                 (false, _) => Link::Detached,
                 (true, Some(ms)) if now - ms > config.stale_after_ms as i64 => Link::Stale,
                 (true, Some(_)) => Link::Attached,
@@ -10145,7 +10165,7 @@ impl Daemon {
                 protocol::ws::DeleteSessionResult::Deleted { events }
             }
             // The store's word for it, carried through rather than flattened.
-            // `Live` and `Spawning` mean the agent is there; `Unknown` means the
+            // `Live` and `Starting` mean the agent is there; `Unknown` means the
             // daemon never found out, and those are not the same refusal.
             crate::store::DeleteOutcome::NotExited { lifecycle }
                 if lifecycle == crate::store::lifecycle_str(Lifecycle::Unknown) =>
@@ -10172,11 +10192,11 @@ impl Daemon {
     /// truth, and a daemon that pruned it on its own judgement would be
     /// deciding which of somebody's agent history was worth keeping.
     ///
-    /// **What it refuses to touch.** Anything not `Exited` — the store enforces
-    /// that — plus two things only this process knows: a run with a supervisor
-    /// attached right now, and a run with an approval still open. Either would
-    /// mean the daemon holds live state for a session it had just erased the
-    /// record of. Both should be impossible for a row marked `Exited`, which is
+    /// **What it refuses to touch.** Anything that has not ended (`Exited` or
+    /// `Failed`) — the store enforces that — plus two things only this process knows:
+    /// a run with a supervisor attached right now, and a run with an approval still
+    /// open. Either would mean the daemon holds live state for a session it had just
+    /// erased the record of. Both should be impossible for an ended row, which is
     /// exactly why they are checked: if one ever happens, it is a bug, and
     /// deleting the evidence of it is the worst possible response.
     pub async fn prune_ended_sessions(&self, dry_run: bool) -> Result<Vec<PrunedSession>> {

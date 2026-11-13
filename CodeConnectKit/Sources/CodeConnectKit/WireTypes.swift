@@ -143,7 +143,7 @@ extension EventSource: Codable {
 }
 
 public enum Lifecycle: String, Codable, Sendable, Hashable {
-    case spawning, live, exited, unknown
+    case starting, live, exited, failed, unknown
 
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
@@ -708,12 +708,13 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
 
     /// Whether the phone may offer to remove this run.
     ///
-    /// Two routes, matching the daemon's own delete rule exactly. A **hosted**
-    /// run must be proven `exited` — `lifecycle`, never the derived Ended
-    /// status. An **unhosted** run — adopted, empty `tmux_session`, nothing
-    /// ever put it in tmux — is removable at any lifecycle, because no probe
-    /// can ever prove it ended and a row awaiting an unobtainable proof would
-    /// be immortal.
+    /// Two routes. A run in tmux must be proven `exited` — `lifecycle`, never
+    /// the derived Ended status. A run with an empty `tmux_session` is offered
+    /// at any lifecycle: an adopted one, because no probe can ever prove it
+    /// ended and a row awaiting an unobtainable proof would be immortal. A run
+    /// started through ccd's agent host also has no tmux session, and the
+    /// daemon refuses one that has not ended (`exited` or `failed`) with
+    /// `still_running`, a complete answer.
     public var isRemovable: Bool { lifecycle == .exited || tmuxSession.isEmpty }
 
     public var id: String { sessionKey }

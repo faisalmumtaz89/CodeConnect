@@ -9,6 +9,7 @@
 mod apns;
 mod apns_sender;
 mod catalog;
+mod claude_host;
 mod claude_waiter;
 mod codex_adapter;
 mod codex_approval;
@@ -532,6 +533,7 @@ fn state_paths(root: &Path) -> StatePaths {
         dirs: vec![
             root.to_path_buf(),
             root.join("sessions"),
+            root.join("runs"),
             root.join("logs"),
             root.join("tls"),
         ],

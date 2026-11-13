@@ -159,6 +159,24 @@ fn random_tail() -> std::io::Result<u128> {
     Ok(tail)
 }
 
+/// A random (version 4) UUID, lowercase and hyphenated: the uuid ccd stamps on a
+/// command to a run's agent host, which the Agent SDK carries as a message uuid
+/// and types as a UUID.
+pub fn uuid_v4() -> std::io::Result<String> {
+    let mut bytes = crate::secret::random_bytes::<16>()?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
+}
+
 /// Mint a uid that sorts as though it were created at `unix_ms`.
 ///
 /// Used when an upgraded daemon synthesises identities for sessions that
@@ -242,6 +260,24 @@ fn symbol_value(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_uuid_is_version_4_in_the_hyphenated_form() {
+        let uuids: HashSet<String> = (0..32).map(|_| uuid_v4().unwrap()).collect();
+        assert_eq!(uuids.len(), 32);
+        for uuid in &uuids {
+            let parts: Vec<&str> = uuid.split('-').collect();
+            assert_eq!(
+                parts.iter().map(|part| part.len()).collect::<Vec<_>>(),
+                [8, 4, 4, 4, 12]
+            );
+            assert!(uuid
+                .chars()
+                .all(|c| c == '-' || c.is_ascii_digit() || ('a'..='f').contains(&c)));
+            assert!(parts[2].starts_with('4'), "{uuid}");
+            assert!("89ab".contains(&parts[3][..1]), "{uuid}");
+        }
+    }
 
     #[test]
     fn a_minted_uid_is_well_formed() {

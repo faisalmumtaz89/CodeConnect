@@ -130,7 +130,7 @@ fn mcp_config(codeconnect: &Path, session_uid: &str, socket: &Path) -> serde_jso
             "codeconnect": {
                 "type": "stdio",
                 "command": codeconnect,
-                "args": crate::mcp::server_args(session_uid, socket),
+                "args": protocol::ipc::mail_server_args(session_uid, socket),
             }
         }
     })

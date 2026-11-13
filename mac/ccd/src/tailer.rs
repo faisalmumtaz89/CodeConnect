@@ -986,7 +986,7 @@ mod tests {
             row("live-uid", Lifecycle::Live, Some("/tmp/live.jsonl")),
             row("dead-uid", Lifecycle::Exited, Some("/tmp/dead.jsonl")),
             row("unsure-uid", Lifecycle::Unknown, Some("/tmp/unsure.jsonl")),
-            row("spawning-uid", Lifecycle::Spawning, Some("/tmp/new.jsonl")),
+            row("starting-uid", Lifecycle::Starting, Some("/tmp/new.jsonl")),
             row("nopath-uid", Lifecycle::Live, None),
         ]);
 
@@ -998,7 +998,7 @@ mod tests {
         // `unknown` is emphatically *not* the same as ended: the daemon could
         // not establish what happened, so the transcript may still be growing.
         assert!(tails.contains_key("unsure-uid"));
-        assert!(tails.contains_key("spawning-uid"));
+        assert!(tails.contains_key("starting-uid"));
         assert!(!tails.contains_key("nopath-uid"));
         assert_eq!(tails.len(), 3);
 

@@ -198,9 +198,10 @@ fn fetch() -> Result<Vec<SessionSummary>> {
 
 fn lifecycle_word(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
-        Lifecycle::Spawning => "spawning",
+        Lifecycle::Starting => "starting",
         Lifecycle::Live => "live",
         Lifecycle::Exited => "exited",
+        Lifecycle::Failed => "failed",
         Lifecycle::Unknown => "unknown",
     }
 }
@@ -216,12 +217,13 @@ fn tally(sessions: &[SessionSummary]) -> String {
             .count()
     };
     format!(
-        "{} session(s): {} live, {} exited, {} unknown, {} spawning",
+        "{} session(s): {} live, {} exited, {} unknown, {} starting, {} failed",
         sessions.len(),
         count(Lifecycle::Live),
         count(Lifecycle::Exited),
         count(Lifecycle::Unknown),
-        count(Lifecycle::Spawning),
+        count(Lifecycle::Starting),
+        count(Lifecycle::Failed),
     )
 }
 
@@ -275,9 +277,10 @@ mod tests {
     #[test]
     fn every_lifecycle_has_a_word_and_none_of_them_is_blank() {
         for lifecycle in [
-            Lifecycle::Spawning,
+            Lifecycle::Starting,
             Lifecycle::Live,
             Lifecycle::Exited,
+            Lifecycle::Failed,
             Lifecycle::Unknown,
         ] {
             assert!(!lifecycle_word(lifecycle).is_empty());
