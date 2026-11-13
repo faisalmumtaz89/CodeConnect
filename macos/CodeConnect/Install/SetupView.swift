@@ -22,8 +22,8 @@ struct SetupView: View {
             VStack(spacing: 0) {
                 row("Background service", setup.service, id: "setup.service")
                 row("Terminal sessions", setup.tmux, id: "setup.tmux")
-                row("Claude Code", setup.claude, id: "setup.claude")
-                row("Codex", setup.codex, id: "setup.codex")
+                row("Claude Code", setup.agent(.claude, in: machines), id: "setup.claude")
+                row("Codex", setup.agent(.codex, in: machines), id: "setup.codex")
                 commandLine
             }
             .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
@@ -34,7 +34,7 @@ struct SetupView: View {
                 Rectangle().fill(Theme.hairline).frame(height: 1)
                 HStack(spacing: 8) {
                     Spacer()
-                    if setup.settled, setup.needsAttention {
+                    if setup.settled, setup.needsAttention(machines) {
                         ActionButton(title: "Try Again", key: nil, prominent: false, id: "setup.tryAgain") {
                             setup.reopen(machines: machines)
                         }
@@ -48,9 +48,11 @@ struct SetupView: View {
         }
         .frame(width: 560, height: 470)
         .background(Theme.sheet)
+        // The agents' rows are this Mac's service's answer: asked for once its link is up, while the checklist is open.
+        .task(id: machines.startContexts.map(\.id)) { setup.thisMacContext(in: machines)?.load() }
     }
 
-    /// A row's answer: a word or a version beside its name; what to do, under it.
+    /// A row's answer: a word beside its name, or, for a row that isn't ready, its sentence under it.
     private func row(_ title: String, _ state: Setup.Row, id: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -113,7 +115,7 @@ struct SetupView: View {
         }
         .font(.system(size: 12))
         .frame(width: 14)
-        // The row's state in one word, the same on every row: beside it, a ready agent's row shows only its version.
+        // The row's state, in the same words on every row.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(word(state))
         .accessibilityIdentifier("\(id).state")
@@ -123,7 +125,7 @@ struct SetupView: View {
         switch state {
         case .checking: "Checking"
         case .ready: "Ready"
-        case .missing: "Missing"
+        case .missing: "Not ready"
         }
     }
 
