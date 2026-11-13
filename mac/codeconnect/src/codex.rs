@@ -3084,7 +3084,11 @@ mod tests {
         let mut attaches = 0;
         let err = wait_with_terminal(
             uid,
-            Duration::from_millis(200),
+            // The product's own patience, so the test waits as the launcher waits: what ends
+            // the wait is the next look finding the recorded failure. A budget sized for the
+            // test is outlasted by one slow, fsynced attach-and-write under load, and the
+            // time-out is then reported in place of the reason.
+            LAUNCH_PATIENCE,
             Duration::from_millis(5),
             |_| {
                 attaches += 1;
