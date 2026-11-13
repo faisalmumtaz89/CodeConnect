@@ -213,6 +213,34 @@ public enum StartFailure: String, Sendable {
     case launchFailed = "launch_failed"
 }
 
+/// The person's answer to "trust this folder?" (`trust`).
+public enum FolderTrust: String, Hashable, Sendable, Codable {
+    case trusted
+    case notTrusted = "not_trusted"
+}
+
+/// One folder's answer, as the computer keeps it (`folder_trust.folders`).
+public struct FolderAnswer: Hashable, Sendable {
+    /// The folder's real path, symlinks resolved, as the computer keys it.
+    public let path: String
+    public let trust: FolderTrust
+    public let answeredAt: Date
+}
+
+extension FolderAnswer: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case path, trust
+        case answeredAt = "answered_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        trust = try c.decode(FolderTrust.self, forKey: .trust)
+        answeredAt = ISO8601.parse(try c.decode(String.self, forKey: .answeredAt)) ?? .distantPast
+    }
+}
+
 /// `StartSessionResult.result`.
 public enum StartOutcome: Hashable, Sendable {
     /// `cwd` is the folder the agent started in (minor 29), absent when the
@@ -220,13 +248,17 @@ public enum StartOutcome: Hashable, Sendable {
     /// shows once the session's first hook names it.
     case started(sessionUID: String, cwd: String? = nil)
     case failed(StartFailure, detail: String)
+    /// Nothing ran: the computer keeps no answer to "trust this folder?" for
+    /// `path`, the folder's real path, and the start gave none. The app asks, and
+    /// an answer goes in a new start.
+    case needsTrust(path: String)
 }
 
 extension StartOutcome: Decodable {
     private enum CodingKeys: String, CodingKey {
         case status, reason, detail
         case sessionUID = "session_uid"
-        case cwd
+        case cwd, path
     }
 
     /// A reason or a status this build has never heard of is still a start that
@@ -239,6 +271,10 @@ extension StartOutcome: Decodable {
             self = .started(
                 sessionUID: try c.decode(String.self, forKey: .sessionUID),
                 cwd: try c.decodeIfPresent(String.self, forKey: .cwd))
+            return
+        }
+        if status == "needs_trust" {
+            self = .needsTrust(path: try c.decode(String.self, forKey: .path))
             return
         }
         let detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? status
@@ -256,6 +292,9 @@ public struct SessionStart: Identifiable, Hashable {
     /// The model the start names (a listed `value`); nil names none.
     public let model: String?
     public let prompt: String?
+    /// The folder's answer the start carries, sent again with it after a
+    /// reconnect; nil carries none.
+    public let trust: FolderTrust?
     public let machineName: String
     public let sentAt: Date
     public var outcome: StartOutcome?
@@ -388,13 +427,13 @@ public final class SessionStarter {
     @discardableResult
     public func start(
         project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String,
-        machineName: String
+        trust: FolderTrust? = nil, machineName: String
     ) -> String {
         let requestID = UUID().uuidString.lowercased()
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         starts[requestID] = SessionStart(
             requestID: requestID, project: project, place: place, agent: agent, model: model,
-            prompt: trimmed.isEmpty ? nil : trimmed, machineName: machineName, sentAt: Date())
+            prompt: trimmed.isEmpty ? nil : trimmed, trust: trust, machineName: machineName, sentAt: Date())
         return requestID
     }
 

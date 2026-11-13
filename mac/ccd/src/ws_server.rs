@@ -764,9 +764,10 @@ where
                     continue;
                 }
 
-                // Starting, and the folder and project frames that choose where:
-                // any paired device, on any transport the listener admits, with
-                // the authority that saying and answering already carry there.
+                // Starting, the folder and project frames that choose where, and the
+                // folders' answers to "trust this folder?": any paired device, on any
+                // transport the listener admits, with the authority that saying and
+                // answering already carry there.
                 if matches!(
                     parsed,
                     ClientMessage::ListProjects
@@ -774,6 +775,9 @@ where
                         | ClientMessage::ListFolder { .. }
                         | ClientMessage::CreateFolder { .. }
                         | ClientMessage::StartSession { .. }
+                        | ClientMessage::ListFolderTrust { .. }
+                        | ClientMessage::SetFolderTrust { .. }
+                        | ClientMessage::ForgetFolderTrust { .. }
                 ) {
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
@@ -1199,6 +1203,9 @@ where
         | ClientMessage::ListFolder { .. }
         | ClientMessage::CreateFolder { .. }
         | ClientMessage::StartSession { .. }
+        | ClientMessage::ListFolderTrust { .. }
+        | ClientMessage::SetFolderTrust { .. }
+        | ClientMessage::ForgetFolderTrust { .. }
         | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
@@ -9439,6 +9446,7 @@ mod tests {
                     None,
                     env,
                     None,
+                    Some(protocol::host::Trust::Trusted),
                 )
                 .await
             }
@@ -9470,6 +9478,7 @@ mod tests {
                 prompt: None,
                 worktree: None,
                 model: None,
+                trust: None,
             })
             .unwrap(),
             "start_session_unlisted_started": reply(start(at(&src.join("new-app"))).await),
@@ -9613,6 +9622,7 @@ mod tests {
                     None,
                     env,
                     None,
+                    Some(protocol::host::Trust::Trusted),
                 )
                 .await
             }
@@ -9632,6 +9642,7 @@ mod tests {
                 prompt: None,
                 worktree: Some(worktree),
                 model: None,
+                trust: None,
             })
             .unwrap()
         };
@@ -9814,6 +9825,7 @@ esac
                     None,
                     env,
                     None,
+                    Some(protocol::host::Trust::Trusted),
                 )
                 .await
             }
@@ -9843,6 +9855,7 @@ esac
                 prompt: Some("fix the \"login\" test; then run it\nand commit;".into()),
                 worktree: None,
                 model: None,
+                trust: None,
             })
             .unwrap(),
             "projects": projects,
@@ -10143,6 +10156,7 @@ esac
                     prompt: prompt.map(str::to_string),
                     worktree: None,
                     model: None,
+                    trust: None,
                 })
                 .unwrap(),
             )
@@ -10180,6 +10194,103 @@ esac
             }
         };
         assert_eq!(result(reply.clone())["reason"], "folder_missing", "{reply}");
+    }
+
+    /// The folders' answers to "trust this folder?" are listed, changed and
+    /// forgotten by a paired device, each request answered with the whole list.
+    /// The bootstrap token is refused all three.
+    #[tokio::test]
+    async fn folder_answers_are_listed_changed_and_forgotten_by_a_paired_device() {
+        use protocol::host::Trust;
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let frame =
+            |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        let set = |request_id: &str, path: &str, trust: Trust| {
+            frame(ClientMessage::SetFolderTrust {
+                request_id: request_id.into(),
+                path: path.into(),
+                trust,
+            })
+        };
+        let forget = |request_id: &str, path: &str| {
+            frame(ClientMessage::ForgetFolderTrust {
+                request_id: request_id.into(),
+                path: path.into(),
+            })
+        };
+        let list = |request_id: &str| {
+            frame(ClientMessage::ListFolderTrust {
+                request_id: request_id.into(),
+            })
+        };
+
+        let (mut bootstrap, _) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        for refused in [
+            list("b1"),
+            set("b2", "/srv/a", Trust::Trusted),
+            forget("b3", "/srv/a"),
+        ] {
+            bootstrap.send(refused).await.unwrap();
+            let reply = next_json(&mut bootstrap).await.unwrap();
+            assert_eq!(reply["code"], "not_authorised", "{reply}");
+        }
+
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        /// Sends `message` and returns its `folder_trust` reply's folders as
+        /// sorted `[path, trust]` pairs.
+        async fn ask(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            message: Message,
+            request_id: &str,
+        ) -> serde_json::Value {
+            phone.send(message).await.unwrap();
+            let reply = loop {
+                let reply = next_json(phone).await.expect("a folder_trust reply");
+                if reply["type"] == "folder_trust" {
+                    break reply;
+                }
+            };
+            assert_eq!(reply["request_id"], request_id, "{reply}");
+            let mut folders: Vec<(String, String)> = reply["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|folder| {
+                    (
+                        folder["path"].as_str().unwrap().to_string(),
+                        folder["trust"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            folders.sort();
+            serde_json::json!(folders)
+        }
+        assert_eq!(
+            ask(&mut phone, list("t1"), "t1").await,
+            serde_json::json!([])
+        );
+        assert_eq!(
+            ask(&mut phone, set("t2", "/srv/a", Trust::Trusted), "t2").await,
+            serde_json::json!([["/srv/a", "trusted"]])
+        );
+        assert_eq!(
+            ask(&mut phone, set("t3", "/srv/b", Trust::NotTrusted), "t3").await,
+            serde_json::json!([["/srv/a", "trusted"], ["/srv/b", "not_trusted"]])
+        );
+        assert_eq!(
+            ask(&mut phone, set("t4", "/srv/a", Trust::NotTrusted), "t4").await,
+            serde_json::json!([["/srv/a", "not_trusted"], ["/srv/b", "not_trusted"]])
+        );
+        assert_eq!(
+            ask(&mut phone, forget("t5", "/srv/a"), "t5").await,
+            serde_json::json!([["/srv/b", "not_trusted"]])
+        );
+        assert_eq!(
+            ask(&mut phone, list("t6"), "t6").await,
+            serde_json::json!([["/srv/b", "not_trusted"]])
+        );
     }
 
     /// A detach, a resize and an input naming *another* terminal leave the live

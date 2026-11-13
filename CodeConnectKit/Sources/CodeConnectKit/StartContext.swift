@@ -23,9 +23,9 @@ public struct StartContext {
 
     public func start(
         _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model choice: String? = nil,
-        prompt: String
+        prompt: String, trust: FolderTrust? = nil
     ) -> String {
-        model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt)
+        model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt, trust: trust)
     }
 
     /// The folder's repository, once the computer has said: `.some(nil)` for

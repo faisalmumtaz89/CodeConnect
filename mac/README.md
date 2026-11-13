@@ -1066,17 +1066,29 @@ git branch and whether it still exists, and, for the computer, whether each
 agent can start as last checked (Claude Code: the check a start makes, below;
 Codex: `codeconnect codex --version` through the user's login shell): the first list after the daemon starts waits for the
 check, and every later one answers from the last check and checks again; when that check finds the agents changed,
-`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt}` takes a listed
+`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt, trust?}` takes a listed
 folder (from `>= 30`, any absolute folder) and a first message, and a start
 without one (`prompt` absent, empty or only white space) is refused with
-`launch_failed` before anything is checked or run. A Claude Code start is then
-checked, before anything runs: the daemon finds the claude the launcher would run,
+`launch_failed` before anything is checked or run. `trust` is the person's
+answer to "trust this folder?", `trusted` or `not_trusted`, kept for the
+folder by its real path (symlinks resolved) in the store's own `folder_trust`
+table, so removing a run keeps it. The first start in a folder with no answer
+kept, sent without one, is answered `needs_trust {path}` with that real path,
+and nothing runs: the app asks, then sends a new start, with a new
+`request_id`, carrying the answer. `list_folder_trust {request_id}`,
+`set_folder_trust {request_id, path, trust}` and `forget_folder_trust {request_id,
+path}` are each answered with `folder_trust {request_id, folders: [{path, trust,
+answered_at}]}`, every answer kept, newest first, once
+the change is made; a forgotten folder is asked about again. They are served to
+the connections `start_session` is. The folder question comes before the agent's
+check, so a folder nobody has answered for runs nothing at all. A Claude Code start
+that goes on is then checked, before anything runs: the daemon finds the claude the launcher would run,
 from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
 the login shell's `PATH`, and asks that claude itself its `--version` and
 `auth status` from the login shell. It is `agent_missing` when no claude is found,
 and `launch_failed` when it is older than 2.1.268, does not say its version, or is
 signed out (`auth status` exits 1 with `loggedIn` false). `auth status` is read for
-`loggedIn` only; nothing else it prints is kept. It runs `codeconnect <agent> --no-attach -- <prompt>` there through
+`loggedIn` only; nothing else it prints is kept. A start that goes on runs `codeconnect <agent> --no-attach -- <prompt>` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise), every value an argument of its own. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,

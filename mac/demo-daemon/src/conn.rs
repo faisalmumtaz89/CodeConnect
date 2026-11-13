@@ -272,7 +272,10 @@ where
         | ClientMessage::GetProjectGit { .. }
         | ClientMessage::ListFolder { .. }
         | ClientMessage::CreateFolder { .. }
-        | ClientMessage::StartSession { .. } => {
+        | ClientMessage::StartSession { .. }
+        | ClientMessage::ListFolderTrust { .. }
+        | ClientMessage::SetFolderTrust { .. }
+        | ClientMessage::ForgetFolderTrust { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
