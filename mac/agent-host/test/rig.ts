@@ -163,6 +163,8 @@ export async function open(dir: string): Promise<Ccd> {
 export interface StubScript {
   /** The initialize answer, one control_response line. */
   init?: string;
+  /** Lines written at the initialize request, before its answer. */
+  before_init?: string[];
   /** Lines written after the first user message. */
   after_user?: string[];
   /** Exit with this code once the first user message has come. */
@@ -185,6 +187,8 @@ export function writeStub(dir: string, script: StubScript): string {
 
 /** A recorded claude's own initialize answer (2.1.319), and the system/init line of a recorded SDK session. */
 export const recordedInit = fixture('claude/initialize-api-key-2.1.319.jsonl').split('\n')[0]!;
+/** The recorded SDK session's first line: its first message's `command_lifecycle` "queued", ahead of system/init. */
+export const sessionQueued = fixture('claude/sdk-session-0.3.322.jsonl').split('\n')[0]!;
 export const sessionInit = fixture('claude/sdk-session-0.3.322.jsonl')
   .split('\n')
   .find((text) => text.includes('"type":"system"') && text.includes('"subtype":"init"'))!;

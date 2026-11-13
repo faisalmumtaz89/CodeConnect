@@ -83,6 +83,9 @@ function begin(start: Start): void {
     },
   );
   void (async () => {
+    // The outcome is the run's first line to ccd. claude can write the first message's own lines before it answers
+    // initialize; they wait for it.
+    await outcome;
     try {
       for await (const message of run) {
         facts = noteMessage(facts, message);
@@ -91,9 +94,8 @@ function begin(start: Start): void {
     } catch (error) {
       console.error(`the query ended: ${oneLine(error)}`);
     }
-    // claude's end comes after the outcome and after every message the query yielded. A claude that never started
-    // (no pid) has no end to report.
-    await outcome;
+    // claude's end comes after every message the query yielded. A claude that never started (no pid) has no end to
+    // report.
     const ended = await claudeEnded;
     if (ended) {
       link.send({

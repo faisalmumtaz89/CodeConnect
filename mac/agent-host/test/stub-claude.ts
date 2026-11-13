@@ -1,8 +1,8 @@
 // The stand-in claude a test gives a run as its claude (rig.ts writeStub), run on the built host as Bun. It speaks the
 // SDK's stream-json over stdio as claude does: it answers `initialize` with its script's answer (a recorded claude's
-// own, from fixtures/claude/), and after the first user message writes its script's lines. Every other control request
-// is refused and recorded, so a test sees any the SDK sends unasked. It records its argv, its environment, its pid,
-// and every line it read.
+// own, from fixtures/claude/), after any lines its script has it write first, and after the first user message writes
+// its script's lines. Every other control request is refused and recorded, so a test sees any the SDK sends unasked.
+// It records its argv, its environment, its pid, and every line it read.
 //
 //   stub-claude.ts <script.json> <claude's own arguments...>
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -18,6 +18,8 @@ for await (const text of createInterface({ input: process.stdin })) {
   record({ stdin: message });
   if (message.type === 'control_request' && message.request?.subtype === 'initialize') {
     if (script.die_on_init) process.exit(1);
+    // Lines claude writes before its answer, as a slow answer lets the first message's own lines come first.
+    process.stdout.write((script.before_init ?? []).map((line: string) => `${line}\n`).join(''));
     if (script.init_error) {
       write({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'refused by the stand-in' } });
     } else {
