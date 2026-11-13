@@ -22,17 +22,14 @@ use serde_json::Value;
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
 
 /// `host.json`, created by the host exclusively, so a second host for the same run
-/// exits. Start times are not here: ccd reads each pid's birth identity from the kernel
-/// ([`crate::proc_identity`]), the form a process cannot write for itself. claude runs in
-/// the host's process group, whose id is `host_pid`.
+/// exits. Its start time is not here: ccd reads the host's birth identity from the
+/// kernel ([`crate::proc_identity`]), the form a process cannot write for itself. claude
+/// runs in the host's process group, whose id is `host_pid`, and ccd reaches it through
+/// that group alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostFile {
     pub protocol_version: u32,
     pub host_pid: i32,
-    /// Written before claude is handed to the SDK, so claude does no work before it is
-    /// on disk.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_pid: Option<i32>,
 }
 
 /// A line ccd sends the host.
@@ -436,7 +433,6 @@ mod tests {
                 serde_json::to_value(HostFile {
                     protocol_version: HOST_PROTOCOL_VERSION,
                     host_pid: 4242,
-                    claude_pid: Some(4243),
                 })
                 .unwrap(),
             ),
