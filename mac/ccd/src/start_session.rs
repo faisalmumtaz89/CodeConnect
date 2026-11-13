@@ -1544,13 +1544,22 @@ fn session_environment(_own: &HashMap<OsString, OsString>) -> Option<HashMap<OsS
         .collect()
 }
 
+/// Where every [`test_claude`] appends the `HOME`, `PATH` and `XPC_SERVICE_NAME` it
+/// ran with, one line a run (`unset` for a variable it did not have), so a test run
+/// can be checked for a probe that ran in another test's fake `HOME` or took the
+/// service branch.
+#[cfg(test)]
+pub(crate) fn claude_env_log() -> PathBuf {
+    std::env::temp_dir().join("claude-env.log")
+}
+
 /// A Claude Code for tests, `<dir>/bin/claude`, and the environment a start finds it
 /// in. It says it is 2.1.268 and signed in unless `<claude>.version`,
 /// `<claude>.version_exit`, `<claude>.auth` or `<claude>.auth_exit` say otherwise,
-/// answers `-p` with `<claude>.ask`, and adds each run's arguments to
-/// `<claude>.argv`. The environment's home is `<dir>/home`, whose `.profile` makes
-/// the PATH `<dir>/bin:/usr/bin:/bin`, so no claude, shell file or sign-in of the
-/// person running the tests is ever reached.
+/// answers `-p` with `<claude>.ask`, adds each run's arguments to `<claude>.argv`,
+/// and each run's environment to [`claude_env_log`]. The environment's home is
+/// `<dir>/home`, whose `.profile` makes the PATH `<dir>/bin:/usr/bin:/bin`, so no
+/// claude, shell file or sign-in of the person running the tests is ever reached.
 #[cfg(test)]
 pub(crate) fn test_claude(dir: &Path) -> (PathBuf, HashMap<OsString, OsString>) {
     let bin = dir.join("bin");
@@ -1560,8 +1569,11 @@ pub(crate) fn test_claude(dir: &Path) -> (PathBuf, HashMap<OsString, OsString>) 
     let claude = bin.join("claude");
     std::fs::write(
         &claude,
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "$0.argv"
+        format!(
+            "#!/bin/sh\nprintf 'HOME=%s PATH=%s XPC_SERVICE_NAME=%s\\n' \"${{HOME-unset}}\" \
+             \"${{PATH-unset}}\" \"${{XPC_SERVICE_NAME-unset}}\" >> '{}'\n",
+            claude_env_log().display()
+        ) + r#"printf '%s\n' "$*" >> "$0.argv"
 answer() { if [ -f "$0.$1" ]; then cat "$0.$1"; else printf '%b' "$2"; fi; }
 case "$1" in
 --version) answer version '2.1.268 (Claude Code)\n'; exit "$(cat "$0.version_exit" 2>/dev/null || echo 0)" ;;
@@ -2549,6 +2561,7 @@ mod tests {
     /// listed (`answer` fills it in): the phone starts there.
     #[test]
     fn the_root_and_the_home_folder_list() {
+        let _env = crate::ProcessEnvRead::take();
         let (path, contents) = list_folder("/", false);
         assert_eq!(path, "/");
         assert!(!listed(contents).0.is_empty());
@@ -2759,6 +2772,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_session_path_on_macos_is_launchds() {
+        let _env = crate::ProcessEnvRead::take();
         let own = environment(&[
             ("PATH", "/service/bin:/usr/bin"),
             ("HOME", "/h"),
@@ -3073,6 +3087,7 @@ esac"#;
     /// asked once per version.
     #[tokio::test]
     async fn a_signed_out_codex_is_asked_again_only_once_login_status_says_signed_in() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = Rig::new("codex-offer", ANSWERING);
         let known = KnownAgents::default();
         let codex = |version: &'static str| {
