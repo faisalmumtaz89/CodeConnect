@@ -31,7 +31,7 @@ use crate::state::Daemon;
 /// The launcher gives up on its own after 75 s (a Codex start can take eleven
 /// seconds when nothing is wrong), so while it runs its answer is the one that
 /// counts; this is only the backstop for one that never ends.
-const START_TIMEOUT: Duration = Duration::from_secs(80);
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(80);
 
 /// How often a start that has run looks again for its session in the fleet.
 const LISTED_POLL: Duration = Duration::from_millis(50);
@@ -717,7 +717,7 @@ async fn project_git(daemon: &Arc<Daemon>, path: String) -> ServerMessage {
 /// The last line of `bytes` with anything on it: where a failing program says why,
 /// without the `Error: ` the launcher prints before it. The user's shell startup
 /// speaks first, so it is never the last line.
-fn last_line(bytes: &[u8]) -> Option<String> {
+pub(crate) fn last_line(bytes: &[u8]) -> Option<String> {
     String::from_utf8_lossy(bytes)
         .lines()
         .rev()
@@ -1324,7 +1324,7 @@ async fn codex_signed_in(environment: &HashMap<OsString, OsString>, launcher: &P
 /// What those files print with no newline at its end, as a terminal's shell
 /// integration prints its escape codes, is ended with one before `args` run, so
 /// the first line `args` print is theirs alone.
-fn login_shell_command(
+pub(crate) fn login_shell_command(
     environment: &HashMap<OsString, OsString>,
     args: &[&OsStr],
 ) -> tokio::process::Command {

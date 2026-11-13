@@ -16,7 +16,7 @@
 //! agent, which is what makes the messages read.
 
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -391,22 +391,12 @@ fn unexpected(frame: &DaemonFrame) -> String {
     )
 }
 
-/// The arguments that start this server for one session.
-pub fn server_args(session_uid: &str, socket: &Path) -> Vec<String> {
-    vec![
-        "mcp".into(),
-        "--session-uid".into(),
-        session_uid.into(),
-        "--socket".into(),
-        socket.to_string_lossy().into_owned(),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol::ipc::AgentEntry;
     use std::cell::RefCell;
+    use std::path::Path;
 
     fn reply(line: &str, daemon: impl FnMut(&ClientFrame) -> Result<DaemonFrame>) -> Value {
         answer(line, "01K1B3XQ8ZC0DE5FGH7JKMNPQR", true, daemon)
@@ -423,7 +413,10 @@ mod tests {
     /// whatever its config says.
     #[test]
     fn only_the_launcher_says_which_session_the_server_speaks_for() {
-        let copied = server_args("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Path::new("/tmp/ccd.sock"));
+        let copied = protocol::ipc::mail_server_args(
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            Path::new("/tmp/ccd.sock"),
+        );
         let (uid, socket) =
             parse(&copied[1..], Some("01K1B3XQ8ZC0DE5FGH7JKMNPZZ".to_string())).unwrap();
         assert_eq!(uid, "01K1B3XQ8ZC0DE5FGH7JKMNPZZ");

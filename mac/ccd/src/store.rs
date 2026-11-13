@@ -62,6 +62,7 @@ use anyhow::{Context, Result};
 use protocol::agent::AgentKind;
 use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::pairing::DeviceSummary;
+use protocol::proc_identity::ProcessIdentity;
 use protocol::secret::Redacted;
 use protocol::ws::AnswerOutcome;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -573,12 +574,28 @@ pub enum DeleteOutcome {
     Deleted {
         events: u64,
     },
-    /// Refused: the row is not `Exited`. Carries the daemon's own word for what
+    /// Refused: the row has not ended (`Exited` or `Failed`). Carries the daemon's own word for what
     /// it is, so the refusal can be stated rather than guessed at.
     NotExited {
         lifecycle: String,
     },
     NotFound,
+}
+
+/// A Claude run ccd started, as its start request finds it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedRun {
+    pub session_uid: String,
+    pub cwd: String,
+    pub lifecycle: Lifecycle,
+}
+
+fn hosted_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostedRun> {
+    Ok(HostedRun {
+        session_uid: row.get(0)?,
+        cwd: row.get(1)?,
+        lifecycle: parse_lifecycle(&row.get::<_, String>(2)?),
+    })
 }
 
 /// Where a run of this agent is stored, and where it therefore must not be.
@@ -645,6 +662,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "mail_sent",
     "mail_wake",
     "mail_runs",
+    "claude_hosts",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -2420,6 +2438,121 @@ impl Store {
         Ok(rows)
     }
 
+    /// The Claude run ccd started for the app's start request `request_id`, if any.
+    pub fn hosted_run_for_request(&self, request_id: &str) -> Result<Option<HostedRun>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT h.session_uid, s.cwd, s.lifecycle
+                   FROM claude_hosts AS h JOIN sessions AS s USING(session_uid)
+                  WHERE h.request_id = ?1",
+                params![request_id],
+                hosted_run_from,
+            )
+            .optional()?)
+    }
+
+    /// Write a new hosted Claude run's row and its `claude_hosts` row in one
+    /// transaction, before anything for it is spawned (H1). If `request_id`
+    /// already has a run, nothing is written and that run is returned, so a
+    /// repeated start never makes a second one.
+    pub fn begin_claude_run(
+        &self,
+        row: &SessionRow,
+        request_id: &str,
+    ) -> Result<Option<HostedRun>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT h.session_uid, s.cwd, s.lifecycle
+                   FROM claude_hosts AS h JOIN sessions AS s USING(session_uid)
+                  WHERE h.request_id = ?1",
+                params![request_id],
+                hosted_run_from,
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        tx.execute(
+            "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                  claude_session_id, transcript_path, lifecycle,
+                                  created_at, updated_at, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                row.session_uid,
+                row.session_id,
+                row.tmux_session,
+                row.tmux_socket,
+                row.cwd,
+                row.claude_session_id,
+                row.transcript_path,
+                lifecycle_str(row.lifecycle),
+                row.created_at,
+                row.updated_at,
+                row.agent.as_str(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO claude_hosts(session_uid, request_id) VALUES (?1, ?2)",
+            params![row.session_uid, request_id],
+        )?;
+        tx.execute(
+            &format!("{RECORD_PROJECTS} VALUES (?1, ?2, ?3) {RECORD_PROJECTS_NEWEST}"),
+            params![row.cwd, row.created_at, row.agent.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(None)
+    }
+
+    /// Record the agent host's identity, as ccd read it from the kernel.
+    pub fn record_host(&self, session_uid: &str, host: &ProcessIdentity) -> Result<()> {
+        let conn = self.write();
+        let changed = conn.execute(
+            "UPDATE claude_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4
+              WHERE session_uid = ?1",
+            params![
+                session_uid,
+                host.pid,
+                host.birth.start_sec,
+                host.birth.start_usec
+            ],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "{session_uid} has no hosted run to record a host for"
+        );
+        Ok(())
+    }
+
+    /// Advance the run's cursor to `seq`: everything up to it from the host
+    /// `host` is committed. `false` when nothing changed, because the run's
+    /// recorded host is another one or the cursor is already there, and then
+    /// the caller must not acknowledge `seq` (H3).
+    pub fn commit_cursor(
+        &self,
+        session_uid: &str,
+        host: &ProcessIdentity,
+        seq: u64,
+    ) -> Result<bool> {
+        let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+        let conn = self.write();
+        let changed = conn.execute(
+            "UPDATE claude_hosts SET cursor = ?5
+              WHERE session_uid = ?1 AND host_pid = ?2
+                AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
+            params![
+                session_uid,
+                host.pid,
+                host.birth.start_sec,
+                host.birth.start_usec,
+                seq
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// The whole fleet, both agents, oldest first.
     ///
     /// Reads `all_sessions` — see [`create_schema`]. This daemon owns Codex runs
@@ -2444,7 +2577,7 @@ impl Store {
 
     /// Remove exactly one ended run, by uid.
     ///
-    /// Shares `SESSION_SCOPED_TABLES` and the `lifecycle = 'exited'` predicate with
+    /// Shares `SESSION_SCOPED_TABLES` and the ended predicate (`exited` or `failed`) with
     /// `prune_exited_sessions` rather than restating them: a second delete path
     /// that forgot a table would leave orphaned answers and cursors pointing at a
     /// session nobody can see, and the two would drift the first time a table was
@@ -2481,26 +2614,39 @@ impl Store {
             .query_row(
                 "SELECT lifecycle, tmux_socket, session_id FROM all_sessions
                   WHERE session_uid = ?1
-                  ORDER BY (lifecycle = ?2 OR tmux_socket = '') ASC
+                  ORDER BY (lifecycle IN (?2, ?3) OR tmux_socket = '') ASC
                   LIMIT 1",
-                params![session_uid, lifecycle_str(Lifecycle::Exited)],
+                params![
+                    session_uid,
+                    lifecycle_str(Lifecycle::Exited),
+                    lifecycle_str(Lifecycle::Failed)
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
         let Some((lifecycle, tmux_socket, session_id_of_row)) = row else {
             return Ok(DeleteOutcome::NotFound);
         };
+        let ccd_hosted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claude_hosts WHERE session_uid = ?1)",
+            params![session_uid],
+            |row| row.get(0),
+        )?;
         // **A run the daemon never hosted is deletable at any lifecycle.** An
         // empty `tmux_socket` means adoption: the hooks arrived but nothing here
         // spawned or supervises the process, so no probe can ever prove it
         // ended, and holding the row hostage to a proof that cannot exist would
         // make it immortal. "The daemon cannot say — you may remove it" is the
         // honest contract; Claude Code's own transcript, the authoritative
-        // record, is untouched either way. Hosted rows keep the strict rule.
-        let unhosted = tmux_socket.is_empty();
-        if !unhosted && lifecycle != lifecycle_str(Lifecycle::Exited) {
+        // record, is untouched either way. Hosted rows keep the strict rule, and
+        // a run ccd started has no tmux at all: its `claude_hosts` row is what
+        // makes it hosted.
+        let unhosted = tmux_socket.is_empty() && !ccd_hosted;
+        let ended = lifecycle == lifecycle_str(Lifecycle::Exited)
+            || lifecycle == lifecycle_str(Lifecycle::Failed);
+        if !unhosted && !ended {
             // **Which non-ended state it is, because they do not mean the same
-            // thing.** `Live` and `Spawning` say the agent is there. `Unknown`
+            // thing.** `Live` and `Starting` say the agent is there. `Unknown`
             // says the opposite of a claim: the daemon could not establish what
             // happened to this run — which `prune_exited_sessions` treats as the
             // sharpest reason of all not to delete, and which is precisely not
@@ -2535,9 +2681,15 @@ impl Store {
                 // reaches the statement text.
                 &format!(
                     "DELETE FROM {table}
-                      WHERE session_uid = ?1 AND (lifecycle = ?2 OR tmux_socket = '')"
+                      WHERE session_uid = ?1
+                        AND (lifecycle IN (?2, ?3) OR (tmux_socket = '' AND ?4))"
                 ),
-                params![session_uid, lifecycle_str(Lifecycle::Exited)],
+                params![
+                    session_uid,
+                    lifecycle_str(Lifecycle::Exited),
+                    lifecycle_str(Lifecycle::Failed),
+                    unhosted
+                ],
             )?;
         }
         if gone != 1 {
@@ -2580,8 +2732,8 @@ impl Store {
     /// agents' work was worth keeping. This runs when a human asks and never
     /// otherwise.
     ///
-    /// What makes it safe to run at all is that it is defined *only* over
-    /// `Exited`. `Live` is left alone because the agent may be working, and —
+    /// What makes it safe to run at all is that it is defined *only* over ended
+    /// runs, `Exited` and `Failed`. `Live` is left alone because the agent may be working, and —
     /// more sharply — `Unknown` is left alone because "we could not establish
     /// what happened to this" is the one state where deletion destroys the
     /// evidence somebody would need to find out. `protect` is the caller's
@@ -2591,7 +2743,7 @@ impl Store {
     /// Three things make this hard to get wrong:
     ///   * One `BEGIN IMMEDIATE` around the whole sweep, so a session cannot
     ///     come back to life between being chosen and being deleted.
-    ///   * The final `DELETE` re-states `lifecycle = 'exited'` in its own
+    ///   * The final `DELETE` re-states the ended lifecycles in its own
     ///     `WHERE` and insists it removed exactly one row. A bug in the
     ///     candidate query above therefore aborts the transaction rather than
     ///     removing a live agent's history.
@@ -2613,7 +2765,7 @@ impl Store {
             // in `codex_sessions`. Without the `NOT EXISTS` the shadow is a
             // candidate, the loop below deletes the uid's children before it
             // touches either identity row, and the identity delete then restates
-            // `lifecycle = 'exited'` — matching the shadow and not the live copy,
+            // the ended lifecycles — matching the shadow and not the live copy,
             // so `gone == 1`, the sweep commits, and a running agent's events and
             // ledgers are gone. `sessions_refuse_codex_shadow` is what stops the
             // duplicate existing; this is what stops it being destructive if one
@@ -2627,13 +2779,17 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT session_uid, session_id, cwd, created_at, updated_at
                    FROM all_sessions AS a
-                  WHERE a.lifecycle = ?1
+                  WHERE a.lifecycle IN (?1, ?2)
                     AND NOT EXISTS(SELECT 1 FROM all_sessions AS b
                                     WHERE b.session_uid = a.session_uid
-                                      AND b.lifecycle <> ?1)
+                                      AND b.lifecycle NOT IN (?1, ?2))
                   ORDER BY created_at ASC, session_uid ASC",
             )?;
-            let rows = stmt.query_map(params![lifecycle_str(Lifecycle::Exited)], |row| {
+            let ended = params![
+                lifecycle_str(Lifecycle::Exited),
+                lifecycle_str(Lifecycle::Failed)
+            ];
+            let rows = stmt.query_map(ended, |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -2678,8 +2834,14 @@ impl Store {
                     gone += tx.execute(
                         // A compile-time list in this file; nothing a caller
                         // supplies reaches the statement text.
-                        &format!("DELETE FROM {table} WHERE session_uid = ?1 AND lifecycle = ?2"),
-                        params![session_uid, lifecycle_str(Lifecycle::Exited)],
+                        &format!(
+                            "DELETE FROM {table} WHERE session_uid = ?1 AND lifecycle IN (?2, ?3)"
+                        ),
+                        params![
+                            session_uid,
+                            lifecycle_str(Lifecycle::Exited),
+                            lifecycle_str(Lifecycle::Failed)
+                        ],
                     )?;
                 }
                 // Belt and braces over the query above. If this ever removes
@@ -5753,6 +5915,20 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             updated_at      TEXT    NOT NULL
         );
 
+        -- A Claude run ccd hosts: the app's start request it answers, its agent
+        -- host's kernel identity (null until the host has written host.json),
+        -- and the highest host message whose effects are committed. The row
+        -- is written with the run's `sessions` row, before anything is spawned,
+        -- so a repeated request finds the run instead of starting another.
+        CREATE TABLE IF NOT EXISTS claude_hosts(
+            session_uid     TEXT PRIMARY KEY,
+            request_id      TEXT    NOT NULL UNIQUE,
+            host_pid        INTEGER,
+            host_start_sec  INTEGER,
+            host_start_usec INTEGER,
+            cursor          INTEGER NOT NULL DEFAULT 0
+        );
+
         -- A deletion is a decision, and this is its record. A uid here was
         -- deliberately erased by an operator; nothing may file anything under
         -- it again. Without this, a hook or registration in flight when the
@@ -6980,18 +7156,20 @@ fn insert_device_row(
 
 pub(crate) fn lifecycle_str(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
-        Lifecycle::Spawning => "spawning",
+        Lifecycle::Starting => "starting",
         Lifecycle::Live => "live",
         Lifecycle::Exited => "exited",
+        Lifecycle::Failed => "failed",
         Lifecycle::Unknown => "unknown",
     }
 }
 
 fn parse_lifecycle(value: &str) -> Lifecycle {
     match value {
-        "spawning" => Lifecycle::Spawning,
+        "starting" => Lifecycle::Starting,
         "live" => Lifecycle::Live,
         "exited" => Lifecycle::Exited,
+        "failed" => Lifecycle::Failed,
         _ => Lifecycle::Unknown,
     }
 }
@@ -8122,7 +8300,7 @@ mod tests {
         let dead = key("DD", "cc-4");
         seed_run(&store, &live, Lifecycle::Live, 2);
         seed_run(&store, &unsure, Lifecycle::Unknown, 2);
-        seed_run(&store, &spawning, Lifecycle::Spawning, 2);
+        seed_run(&store, &spawning, Lifecycle::Starting, 2);
         seed_run(&store, &dead, Lifecycle::Exited, 2);
 
         let removed = store.prune_exited_sessions(&[], false).unwrap();
@@ -12318,12 +12496,76 @@ mod tests {
         assert_eq!(stored.decision, AnswerDecision::Allow);
     }
 
+    /// A hosted Claude run: written with its start request, before anything spawns.
+    fn begun(store: &Store, tag: &str, request_id: &str) -> SessionKey {
+        let session = key(tag, &format!("run-{tag}"));
+        let mut row = session_row(&session);
+        row.tmux_session.clear();
+        row.tmux_socket.clear();
+        row.lifecycle = Lifecycle::Starting;
+        assert_eq!(store.begin_claude_run(&row, request_id).unwrap(), None);
+        session
+    }
+
+    #[test]
+    fn a_second_start_with_the_same_request_gets_the_first_run() {
+        let (store, _path) = temp_store();
+        let first = begun(&store, "AA", "req-1");
+        let mut second = session_row(&key("BB", "run-BB"));
+        second.lifecycle = Lifecycle::Starting;
+        let existing = store
+            .begin_claude_run(&second, "req-1")
+            .unwrap()
+            .expect("the first run");
+        assert_eq!(existing.session_uid, first.uid);
+        assert_eq!(existing.lifecycle, Lifecycle::Starting);
+        assert!(store.get_session(&second.session_uid).unwrap().is_none());
+    }
+
+    /// A run ccd hosts has no tmux, and that must not make it removable while it
+    /// runs: only once it has ended, and then its hosted row goes with it.
+    #[test]
+    fn a_hosted_run_is_removed_only_once_it_has_ended() {
+        let (store, _path) = temp_store();
+        let session = begun(&store, "AA", "req-1");
+        for lifecycle in [Lifecycle::Starting, Lifecycle::Live] {
+            store.set_lifecycle(&session.uid, lifecycle).unwrap();
+            assert_eq!(
+                store.delete_exited_session(&session.uid).unwrap(),
+                DeleteOutcome::NotExited {
+                    lifecycle: lifecycle_str(lifecycle).into()
+                }
+            );
+        }
+        store
+            .set_lifecycle(&session.uid, Lifecycle::Failed)
+            .unwrap();
+        assert!(matches!(
+            store.delete_exited_session(&session.uid).unwrap(),
+            DeleteOutcome::Deleted { .. }
+        ));
+        assert_eq!(store.hosted_run_for_request("req-1").unwrap(), None);
+    }
+
+    #[test]
+    fn prune_removes_a_failed_run_and_keeps_a_starting_one() {
+        let (store, _path) = temp_store();
+        let failed = begun(&store, "AA", "req-1");
+        let starting = begun(&store, "BB", "req-2");
+        store.set_lifecycle(&failed.uid, Lifecycle::Failed).unwrap();
+        let removed = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_uid, failed.uid);
+        assert_eq!(store.hosted_run_for_request("req-1").unwrap(), None);
+        assert!(store.get_session(&starting.uid).unwrap().is_some());
+    }
+
     #[test]
     fn session_upsert_preserves_learned_fields() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
         let mut row = session_row(&session);
-        row.lifecycle = Lifecycle::Spawning;
+        row.lifecycle = Lifecycle::Starting;
         store.upsert_session(&row).unwrap().assert_present();
 
         // SessionStart teaches us the transcript path.

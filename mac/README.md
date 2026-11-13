@@ -1184,10 +1184,12 @@ See `protocol/src/lib.rs` for the authoritative ledger.
 **`delete_session` is the only destructive verb a phone has.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
 run, so it is not an identity a destructive request may be pointed at. For a
-hosted run the daemon refuses anything whose lifecycle is not `exited`, and
+hosted run — launched by `codeconnect claude`, or started from the app in an
+agent host the daemon spawned — the daemon refuses anything whose lifecycle has
+not ended (`exited`, or `failed` for an app start that never started), and
 anything it still holds a supervisor or an open approval for. An **adopted**
-run — empty `tmux_session`; CodeConnect never launched it, so no probe can
-ever prove it ended — is deletable at any lifecycle. Only an earlier `cc-hook`
+run — CodeConnect never launched it, so it has neither tmux nor an agent host,
+and no probe can ever prove it ended — is deletable at any lifecycle. Only an earlier `cc-hook`
 recorded such runs: this one reports only for a run its launcher started.
 A refusal is a `delete_session_result`, not an error. It deletes the daemon's own record only:
 Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
@@ -1429,6 +1431,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is `CODECONNECT_CLAUDE_BIN` if set, then the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds, without `CODECONNECT_CLAUDE_BIN`. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is `CODECONNECT_CODEX_BIN` if set, then the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
+| `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where the app and the installer put it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
 | `ws_allow_plaintext` | `false` | Serve `ws://` on a `ws_bind` whose privacy only you can vouch for. Honoured on a local-network address; refused on `0.0.0.0`, `::` and public addresses. `tls_required` wins over it. See [TLS](#tls). |

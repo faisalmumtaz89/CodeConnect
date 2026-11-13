@@ -733,7 +733,7 @@ pub(crate) fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<
 /// Placed after `--listen`, on the app-server only — the TUI gets nothing new.
 /// Each value is TOML, and a JSON string or array of strings is one.
 fn mcp_overrides(codeconnect: &Path, session_uid: &str, socket: &Path) -> Vec<String> {
-    let args = crate::mcp::server_args(session_uid, socket);
+    let args = protocol::ipc::mail_server_args(session_uid, socket);
     vec![
         "-c".into(),
         format!(

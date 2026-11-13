@@ -143,7 +143,7 @@ extension EventSource: Codable {
 }
 
 public enum Lifecycle: String, Codable, Sendable, Hashable {
-    case spawning, live, exited, unknown
+    case starting, live, exited, failed, unknown
 
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
