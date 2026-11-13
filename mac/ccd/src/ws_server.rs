@@ -8894,15 +8894,20 @@ mod tests {
 
     /// **A paired device gets the project list; the bootstrap token gets a
     /// refusal.** A folder that is gone is listed as gone, and a repository's
-    /// branch rides along.
+    /// branch rides along. The list's agent check asks the test's own claude.
     #[tokio::test]
     async fn list_projects_answers_a_paired_device_with_its_folders() {
-        let (server, _device) = live_server(protocol::config::Config::default()).await;
         let root = std::env::temp_dir().join(format!(
             "ccd-projects-{}-{}",
             std::process::id(),
             protocol::time::now_unix_ms()
         ));
+        let (claude, _) = crate::start_session::test_claude(&root.join("claude-rig"));
+        let (server, _device) = live_server(protocol::config::Config {
+            claude_bin: Some(claude.display().to_string()),
+            ..Default::default()
+        })
+        .await;
         let repo = root.join("app");
         std::fs::create_dir_all(&repo).unwrap();
         let init = std::process::Command::new("git")
@@ -9345,6 +9350,7 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "first"]);
         let launcher = root.join("codeconnect");
+        let (_, claude_env) = crate::start_session::test_claude(&root.join("claude-rig"));
         std::fs::write(
             &launcher,
             "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-1\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
@@ -9411,7 +9417,7 @@ mod tests {
         .await;
 
         let start = |path: String| {
-            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            let (db, launcher, env) = (&server.daemon.db, launcher.clone(), &claude_env);
             async move {
                 crate::start_session::launch(
                     db,
@@ -9422,6 +9428,8 @@ mod tests {
                     &AgentKind::Claude,
                     None,
                     None,
+                    None,
+                    env,
                     None,
                 )
                 .await
@@ -9529,6 +9537,7 @@ mod tests {
                 .replacen("/tmp/ccd-minor-29", &canonical, 1)
         };
         let launcher = root.join("codeconnect");
+        let (_, claude_env) = crate::start_session::test_claude(&root.join("claude-rig"));
         std::fs::write(
             &launcher,
             "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-4\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
@@ -9582,7 +9591,7 @@ mod tests {
         let get_project_git_request = get_project_git(at(&app));
 
         let start = |path: String, agent: AgentKind, worktree: StartWorktree| {
-            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            let (db, launcher, env) = (&server.daemon.db, launcher.clone(), &claude_env);
             async move {
                 crate::start_session::launch(
                     db,
@@ -9593,6 +9602,8 @@ mod tests {
                     &agent,
                     None,
                     Some(&worktree),
+                    None,
+                    env,
                     None,
                 )
                 .await
@@ -9685,7 +9696,8 @@ mod tests {
     ///
     /// Fixed paths under `/tmp/ccd-minor-28`, so the fixture is the same on every
     /// machine. Which agents can start is set rather than checked: a check asks
-    /// this machine's launcher, and the fixture would say what it found.
+    /// this machine's launcher, and the fixture would say what it found. The check
+    /// the list starts for the next list asks the fixture's own claude.
     async fn derived_minor_28_wire() -> serde_json::Value {
         use protocol::agent::AgentKind;
         use protocol::ws::{AgentAvailability, StartSessionResult};
@@ -9702,6 +9714,7 @@ mod tests {
             .unwrap();
         assert!(init.success());
         let launcher = root.join("codeconnect");
+        let (claude, claude_env) = crate::start_session::test_claude(&root.join("claude-rig"));
         std::fs::write(
             &launcher,
             r#"#!/bin/sh
@@ -9719,7 +9732,11 @@ esac
             .status()
             .unwrap();
 
-        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (server, _device) = live_server(protocol::config::Config {
+            claude_bin: Some(claude.display().to_string()),
+            ..Default::default()
+        })
+        .await;
         for (cwd, at, agent) in [
             (&app, "2026-11-04T09:00:00.000Z", AgentKind::Codex),
             (&notes, "2026-11-03T18:30:00.000Z", AgentKind::Claude),
@@ -9774,7 +9791,7 @@ esac
         let projects = next_json(&mut phone).await.unwrap();
 
         let start = |path: &std::path::Path, agent: AgentKind, prompt: Option<&'static str>| {
-            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            let (db, launcher, env) = (&server.daemon.db, launcher.clone(), &claude_env);
             let path = path.display().to_string();
             async move {
                 crate::start_session::launch(
@@ -9786,6 +9803,8 @@ esac
                     &agent,
                     prompt,
                     None,
+                    None,
+                    env,
                     None,
                 )
                 .await
@@ -9901,11 +9920,20 @@ esac
     /// On the LAN the operator switched on with `ws_allow_plaintext`, a
     /// paired device may start sessions and browse folders, as it may read, answer and
     /// say there. The bootstrap token still may not, and the terminal stays on private
-    /// transports only.
+    /// transports only. The list's agent check asks the test's own claude.
     #[tokio::test]
     async fn a_paired_device_on_the_operator_allowed_lan_may_start_and_browse() {
+        let root = std::env::temp_dir().join(format!(
+            "ccd-lan-start-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (claude, _) = crate::start_session::test_claude(&root);
         let (server, _) = live_server_on(
-            protocol::config::Config::default(),
+            protocol::config::Config {
+                claude_bin: Some(claude.display().to_string()),
+                ..Default::default()
+            },
             Arc::new(crate::apns::LoggingPushSender::new()),
             PlaintextTrust::OperatorAllowed,
         )
@@ -9930,6 +9958,7 @@ esac
             _ => panic!("no projects reply within 30 s"),
         };
         assert_eq!(reply["type"], "projects", "{reply}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A run starts with a first message. A start without one is refused

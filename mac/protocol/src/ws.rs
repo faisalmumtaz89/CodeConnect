@@ -905,7 +905,8 @@ pub struct AgentAvailability {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<AgentModel>,
     /// Whether the agent is signed in (minor 33), to show; absent when not known.
-    /// A start does not depend on it: a signed-out agent asks for a sign-in itself.
+    /// A signed-out Claude Code is refused at the start; a signed-out Codex asks for
+    /// a sign-in itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_in: Option<bool>,
 }
