@@ -61,10 +61,11 @@ const READERS: usize = 4;
 use anyhow::{Context, Result};
 use protocol::agent::AgentKind;
 use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
+use protocol::host::Trust;
 use protocol::pairing::DeviceSummary;
 use protocol::proc_identity::ProcessIdentity;
 use protocol::secret::Redacted;
-use protocol::ws::AnswerOutcome;
+use protocol::ws::{AnswerOutcome, FolderAnswer};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema generation. Bumped when a migration is added; stored in SQLite's own
@@ -2552,6 +2553,61 @@ impl Store {
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// The answer kept for the folder whose real path is `path`.
+    pub fn folder_trust(&self, path: &str) -> Result<Option<Trust>> {
+        let trusted = self
+            .read()
+            .query_row(
+                "SELECT trusted FROM folder_trust WHERE path = ?1",
+                params![path],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+        Ok(trusted.map(trust_from))
+    }
+
+    /// Keeps `trust` as the folder's answer, replacing any earlier one.
+    pub fn set_folder_trust(&self, path: &str, trust: &Trust) -> Result<()> {
+        self.write().execute(
+            "INSERT INTO folder_trust(path, trusted, answered_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET
+                 trusted = excluded.trusted, answered_at = excluded.answered_at",
+            params![
+                path,
+                *trust == Trust::Trusted,
+                protocol::time::now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the folder's answer; whether there was one.
+    pub fn forget_folder_trust(&self, path: &str) -> Result<bool> {
+        let removed = self
+            .write()
+            .execute("DELETE FROM folder_trust WHERE path = ?1", params![path])?;
+        Ok(removed > 0)
+    }
+
+    /// Every folder's answer, newest first.
+    pub fn folder_trusts(&self) -> Result<Vec<FolderAnswer>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT path, trusted, answered_at FROM folder_trust
+              ORDER BY answered_at DESC, path",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(FolderAnswer {
+                    path: row.get(0)?,
+                    trust: trust_from(row.get(1)?),
+                    answered_at: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// The whole fleet, both agents, oldest first.
@@ -5963,6 +6019,15 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             last_agent TEXT NOT NULL
         );
 
+        -- Each folder's answer to "trust this folder?", by the folder's real
+        -- path. Its own table for the same reason as `projects`: removing a run
+        -- keeps the answer, and only Forget removes it.
+        CREATE TABLE IF NOT EXISTS folder_trust(
+            path        TEXT PRIMARY KEY,
+            trusted     INTEGER NOT NULL,
+            answered_at TEXT NOT NULL
+        );
+
         -- Pairing codes are stored hashed. The code is a bearer capability
         -- for five minutes; a database file or a backup that leaked one in
         -- the clear would hand over that capability, and hashing costs
@@ -6381,6 +6446,15 @@ fn move_codex_pending_approvals(tx: &Connection) -> Result<usize> {
 
 /// The most folders [`Store::projects`] returns.
 const MAX_PROJECTS: u32 = 200;
+
+/// `folder_trust.trusted` as the answer it stands for.
+fn trust_from(trusted: bool) -> Trust {
+    if trusted {
+        Trust::Trusted
+    } else {
+        Trust::NotTrusted
+    }
+}
 
 /// Files `(path, last_used, last_agent)` rows into `projects`, each row followed
 /// by [`RECORD_PROJECTS_NEWEST`]: a folder keeps the newest start it has seen.

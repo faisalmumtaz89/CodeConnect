@@ -1028,7 +1028,7 @@ impl Daemon {
             .clone();
         #[cfg(not(test))]
         {
-            let bin = protocol::pairing::tailscale_bin()?;
+            let bin = self.config.tailscale_bin()?;
             let run = tokio::process::Command::new(bin)
                 .args(["status", "--json"])
                 .kill_on_drop(true)

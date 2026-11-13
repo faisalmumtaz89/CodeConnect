@@ -137,6 +137,9 @@ struct FleetView: View {
     /// flow has gone).
     @State private var startOpen = false
     @State private var startedRequest: String?
+    /// Set when the start flow is reopened from the folder question's Back, so
+    /// it comes back with the earlier answers in it; nil for a fresh "New".
+    @State private var startSeed: StartSeed?
     /// Every paired computer that can start a session.
     private var startContexts: [StartContext] { machines.startContexts }
     private var canStart: Bool { !startContexts.isEmpty }
@@ -319,7 +322,8 @@ struct FleetView: View {
                         try? await Task.sleep(for: .milliseconds(450))
                         openStart()
                     }
-                }
+                },
+                onNeedsTrust: { openTrust($0, $1) }
             )
             .environment(
                 machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
@@ -401,7 +405,7 @@ struct FleetView: View {
     private func presentations(_ list: some View, _ screen: FleetScreen) -> some View {
         list
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
-                StartStepsSheet(contexts: startContexts, onStarted: started, onClose: { startOpen = false })
+                StartStepsSheet(contexts: startContexts, seed: startSeed, onStarted: started, onClose: { startOpen = false })
                 .ccTallSheet()
             }
             .onChange(of: startContexts.map(\.id), initial: true) { _, _ in loadStart() }
@@ -885,7 +889,33 @@ struct FleetView: View {
 
     private func openStart() {
         guard canStart else { return }
+        startSeed = nil
         startOpen = true
+    }
+
+    /// A start came back `needsTrust`: reopen the sheet on the folder question,
+    /// seeded from the start so the Ready form behind it still carries the typed
+    /// first message and the computer, folder, agent and place, and the
+    /// question's Back is a sheet pop to it. The start's computer is the one
+    /// still holding its request; a link that dropped in between falls back to a
+    /// fresh flow.
+    private func openTrust(_ start: SessionStart, _ folderPath: String) {
+        guard canStart, let context = startContexts.first(where: { $0.starter.starts[start.id] != nil }) else {
+            path = []
+            Task {
+                try? await Task.sleep(for: .milliseconds(450))
+                openStart()
+            }
+            return
+        }
+        startSeed = StartSeed(
+            context: context, project: start.project, place: start.place, agent: start.agent,
+            message: start.prompt ?? "", trustPath: folderPath)
+        path = []
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            startOpen = true
+        }
     }
 
     /// A flow sent a start: close it, and open the new session as it goes.

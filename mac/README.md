@@ -1070,11 +1070,23 @@ git branch and whether it still exists, and, for the computer, whether each
 agent can start as last checked (Claude Code: the check a start makes, below;
 Codex: `codeconnect codex --version` through the user's login shell): the first list after the daemon starts waits for the
 check, and every later one answers from the last check and checks again; when that check finds the agents changed,
-`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt}` takes a listed
+`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt, trust?}` takes a listed
 folder (from `>= 30`, any absolute folder) and a first message, and a start
 without one (`prompt` absent, empty or only white space) is refused with
-`launch_failed` before anything is checked or run. A Claude Code start is then
-checked, before anything runs: the daemon finds the claude the launcher would run,
+`launch_failed` before anything is checked or run. `trust` is the person's
+answer to "trust this folder?", `trusted` or `not_trusted`, kept for the
+folder by its real path (symlinks resolved) in the store's own `folder_trust`
+table, so removing a run keeps it. The first start in a folder with no answer
+kept, sent without one, is answered `needs_trust {path}` with that real path,
+and nothing runs: the app asks, then sends a new start, with a new
+`request_id`, carrying the answer. `list_folder_trust {request_id}`,
+`set_folder_trust {request_id, path, trust}` and `forget_folder_trust {request_id,
+path}` are each answered with `folder_trust {request_id, folders: [{path, trust,
+answered_at}]}`, every answer kept, newest first, once
+the change is made; a forgotten folder is asked about again. They are served to
+the connections `start_session` is. The folder question comes before the agent's
+check, so a folder nobody has answered for runs nothing at all. A Claude Code start
+that goes on is then checked, before anything runs: the daemon finds the claude the launcher would run,
 from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
 the login shell's `PATH`, and asks that claude itself its `--version` and
 `auth status` from the login shell. It is `agent_missing` when no claude is found,
@@ -1086,7 +1098,7 @@ folder `runs/<uid>/` under the CodeConnect folder (0700), and runs the agent hos
 `cc-agent-host <run folder>`, through the user's login shell in a session of its
 own, so it outlives the daemon; ccd hands the host the first message as the run's
 `start` over the run's link, and the host runs that claude with it.
-A Codex start runs `codeconnect codex --no-attach -- <prompt>` there through
+A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
 same environment. The shell starts from the
@@ -1459,6 +1471,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `local_resolve_poll_ms` | `2000` | How often to re-check the pane while an approval is open. |
 | `diff_max_bytes` | `524288` | `get_diff` cap; larger diffs come back with `truncated: true`. |
 | `diff_timeout_ms` | `10000` | Per-`git`-subcommand ceiling. |
+| `tailscale_bin` | auto | Explicit path to `tailscale`. Auto is the first of `/usr/local/bin/tailscale`, `/opt/homebrew/bin/tailscale`, the Tailscale app's own (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) and `/usr/bin/tailscale` that exists. Set, it is the only one the daemon and `codeconnect` run: a path that does not exist means no Tailscale, as if it were not installed (no tailnet addresses, peers or mail between computers, and no certificate issued; a cached one still serves). A test or rig daemon sets one so it never reads this computer's tailnet. |
 | `git_bin` | auto | Explicit path to `git` (launchd has no shell PATH). Auto is `/usr/bin/git` when Apple's developer tools are installed, else Homebrew's or `/usr/local/bin/git`; with none, branches and changes are absent. |
 | `fsevents` | `true` | Watch transcript directories with FSEvents. The poll below keeps running either way. |
 | `log_max_bytes` | `8388608` | Cap on each launchd log; one `.1` generation is kept, so the ceiling is twice this per stream. |

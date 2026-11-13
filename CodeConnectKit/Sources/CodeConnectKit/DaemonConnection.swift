@@ -319,6 +319,7 @@ public final class DaemonConnection {
     private var catalogWaiters: [String: [Waiter<CommandCatalogResult>]] = [:]
     private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
     private var testPushWaiters: [String: [Waiter<TestPushResult>]] = [:]
+    private var folderTrustWaiters: [String: [Waiter<[FolderAnswer]>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
     /// Keyed by the phone's own `request_id`, not by session: the reply echoes
     /// it back, and a phone may hold a stop and a message in flight on one run.
@@ -1058,6 +1059,36 @@ public final class DaemonConnection {
             send: .testPush(requestID: requestID))
     }
 
+    /// Every folder's answer to "trust this folder?" the computer keeps, newest
+    /// first.
+    public func listFolderTrust() async throws -> [FolderAnswer] {
+        let requestID = "ft-" + UUID().uuidString
+        return try await request(
+            key: requestID,
+            store: \.folderTrustWaiters,
+            send: .listFolderTrust(requestID: requestID))
+    }
+
+    /// Changes one folder's answer (`path` as the computer gave it); every answer
+    /// kept, once it is changed.
+    public func setFolderTrust(path: String, trust: FolderTrust) async throws -> [FolderAnswer] {
+        let requestID = "ft-" + UUID().uuidString
+        return try await request(
+            key: requestID,
+            store: \.folderTrustWaiters,
+            send: .setFolderTrust(requestID: requestID, path: path, trust: trust))
+    }
+
+    /// Forgets one folder's answer, so the next start there asks again; every
+    /// answer still kept.
+    public func forgetFolderTrust(path: String) async throws -> [FolderAnswer] {
+        let requestID = "ft-" + UUID().uuidString
+        return try await request(
+            key: requestID,
+            store: \.folderTrustWaiters,
+            send: .forgetFolderTrust(requestID: requestID, path: path))
+    }
+
         public func capture(session: String, lines: UInt32?) async throws -> String {
         try await request(
             key: session,
@@ -1261,6 +1292,10 @@ public final class DaemonConnection {
         testPushWaiters = [:]
         for queue in tests.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
+        let folderAnswers = folderTrustWaiters
+        folderTrustWaiters = [:]
+        for queue in folderAnswers.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
         let interrupts = interruptWaiters
         interruptWaiters = [:]
         for queue in interrupts.values { for w in queue { w.continuation?.resume(throwing: error) } }
@@ -1361,6 +1396,8 @@ public final class DaemonConnection {
             deliver(store: \.deleteWaiters, key: sessionUID, value: result)
         case .testPushResult(let requestID, let result):
             deliver(store: \.testPushWaiters, key: requestID, value: result)
+        case .folderTrust(let requestID, let folders):
+            deliver(store: \.folderTrustWaiters, key: requestID, value: folders)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         // **The echoed session is checked, not ignored.** Correlation is by

@@ -6681,9 +6681,9 @@ async fn a_claim_outstanding_across_a_daemon_bounce_becomes_one_terminal_unknown
 /// **Isolated from the operator's own daemon by construction, not by care.** A private
 /// `CODECONNECT_HOME` moves the database, the IPC socket, the token, the TLS directory
 /// and the config together (`protocol::root_dir`), and the config it writes pins the
-/// listener to `127.0.0.1` on a port claimed and released a moment earlier — so the child
-/// never asks tailscale for anything, never binds 8787, and cannot be reached from
-/// outside this machine. The root is short (`/tmp/ccg5.…`) because a unix socket path is
+/// listener to `127.0.0.1` on a port claimed and released a moment earlier and names a
+/// `tailscale_bin` that does not exist — so the child never runs this computer's
+/// tailscale, never binds 8787, and cannot be reached from outside this machine. The root is short (`/tmp/ccg5.…`) because a unix socket path is
 /// capped at `SUN_LEN`, which the scratchpad path is far past.
 struct CcdChild {
     home: PathBuf,
@@ -6729,7 +6729,9 @@ impl CcdChild {
         drop(probe);
         std::fs::write(
             home.join("config.json"),
-            format!(r#"{{"ws_port":{port},"ws_bind":"127.0.0.1","ws_loopback":true}}"#),
+            format!(
+                r#"{{"ws_port":{port},"ws_bind":"127.0.0.1","ws_loopback":true,"tailscale_bin":"/nonexistent/tailscale"}}"#
+            ),
         )
         .expect("write the child's config");
         let child = CcdChild::spawn_on(&home);

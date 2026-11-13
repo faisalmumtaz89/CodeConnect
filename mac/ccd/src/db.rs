@@ -121,6 +121,10 @@ db_ops! {
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
     fn projects() -> Vec<crate::store::ProjectRow>;
+    fn folder_trust(path: String) -> Option<protocol::host::Trust>;
+    fn set_folder_trust(path: String, trust: protocol::host::Trust) -> ();
+    fn forget_folder_trust(path: String) -> bool;
+    fn folder_trusts() -> Vec<protocol::ws::FolderAnswer>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
     fn upsert_pending_approval(row: PendingApprovalRow) -> bool;
     /// File one Codex approval card **and** the `ApprovalRequest` it stands

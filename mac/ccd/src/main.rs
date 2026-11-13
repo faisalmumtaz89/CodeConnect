@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
     // opening its sockets would be exactly the startup dependency the three
     // second probe budget exists to refuse. On two of its three paths it never
     // completes at all.
-    let tailnet_watch = tokio::spawn(watch_for_tailnet(plan.watch_tailnet));
+    let tailnet_watch = tokio::spawn(watch_for_tailnet(plan.watch_tailnet, daemon.config.clone()));
     let mail_sweep = tokio::spawn(mail::run_mail_sweeps(Arc::clone(&daemon)));
 
     // Every one of these is meant to run for the life of the process. A task
@@ -814,13 +814,13 @@ enum PlaintextOptIn {
 /// the network it is on is acceptable.
 async fn resolve_bind(config: &Config) -> BindPlan {
     let tailnet = if needs_tailnet_probe(config) {
-        tailnet_addresses().await
+        tailnet_addresses(config).await
     } else {
         Vec::new()
     };
     let mut plan = plan_bind(config, &tailnet, managed_by_codeconnect_job());
     if plan.origin == BindOrigin::LoopbackFallback {
-        if let Some(ip) = userspace_tailnet_address().await {
+        if let Some(ip) = userspace_tailnet_address(config).await {
             plan = userspace_plan(plan, ip);
         }
     }
@@ -1415,10 +1415,10 @@ fn tailnet_watch_delay(attempt: u32) -> Duration {
 /// keep off it, and another on every pass after. A report that said nothing
 /// would leave [`TailnetWatch::Report`] — which never returns — watching with
 /// no output at all, when the output is the whole of what that path does.
-async fn watch_for_tailnet(watch: TailnetWatch) {
+async fn watch_for_tailnet(watch: TailnetWatch, config: Config) {
     watch_tailnet_with(
         watch,
-        reachable_tailnet,
+        move || reachable_tailnet(config.clone()),
         tailnet_watch_delay,
         report_tailnet_change,
     )
@@ -1582,13 +1582,13 @@ const TAILSCALE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// `tailscale ip` still prints the node's addresses while the interface no
 /// longer carries them, and binding one fails and ends the daemon on every
 /// start. Until the tunnel is back they count as no tailnet at all.
-async fn tailnet_addresses() -> Vec<IpAddr> {
+async fn tailnet_addresses(config: &Config) -> Vec<IpAddr> {
     let deadline = tokio::time::Instant::now() + TAILSCALE_PROBE_TIMEOUT;
-    for candidate in protocol::pairing::TAILSCALE_CANDIDATES {
-        if !Path::new(candidate).exists() {
+    for candidate in config.tailscale_candidates() {
+        if !candidate.exists() {
             continue;
         }
-        let run = tokio::process::Command::new(candidate)
+        let run = tokio::process::Command::new(&candidate)
             .arg("ip")
             .kill_on_drop(true)
             .output();
@@ -1597,8 +1597,9 @@ async fn tailnet_addresses() -> Vec<IpAddr> {
             Ok(Err(_)) => continue,
             Err(_) => {
                 crate::log_warn!(
-                    "`{candidate} ip` did not answer within the {}s tailnet probe budget; \
+                    "`{} ip` did not answer within the {}s tailnet probe budget; \
                      treating the tailnet as unavailable",
+                    candidate.display(),
                     TAILSCALE_PROBE_TIMEOUT.as_secs()
                 );
                 break;
@@ -1627,8 +1628,8 @@ fn held_here(ip: IpAddr) -> bool {
 /// Asked only when no tailnet address is held here. In userspace mode none
 /// ever is — there is no TUN device to carry one — and tailscaled hands every
 /// tailnet connection to this node's address on to `127.0.0.1` on the same port.
-async fn userspace_tailnet_address() -> Option<IpAddr> {
-    let bin = protocol::pairing::tailscale_bin()?;
+async fn userspace_tailnet_address(config: &Config) -> Option<IpAddr> {
+    let bin = config.tailscale_bin()?;
     let run = tokio::process::Command::new(bin)
         .args(["status", "--json"])
         .kill_on_drop(true)
@@ -1658,12 +1659,15 @@ fn userspace_tailnet_ip(status_json: &str) -> Option<IpAddr> {
 /// What the watcher asks: the held tailnet addresses, or, with none held, the
 /// userspace one — the two answers a start acts on, so the watcher never waits
 /// for an address a start would not use (see [`preferred_tailnet_ip`]).
-async fn reachable_tailnet() -> Vec<IpAddr> {
-    let held = tailnet_addresses().await;
+async fn reachable_tailnet(config: Config) -> Vec<IpAddr> {
+    let held = tailnet_addresses(&config).await;
     if !held.is_empty() {
         return held;
     }
-    userspace_tailnet_address().await.into_iter().collect()
+    userspace_tailnet_address(&config)
+        .await
+        .into_iter()
+        .collect()
 }
 
 /// How long the name the QR would carry gets to resolve before the daemon stops
@@ -1798,9 +1802,14 @@ async fn resolve_name(hostname: String) -> std::io::Result<Vec<IpAddr>> {
 ///
 /// Every failure here is a degradation to plaintext on the same host, never a
 /// daemon that refuses to start, and each one is reported in the operator's
-/// terms at the point the reason is known.
-async fn certificate_for(hostname: String, refresh_days: u64) -> Option<tokio_rustls::TlsAcceptor> {
-    match tls::ensure(&hostname, refresh_days).await {
+/// terms at the point the reason is known. `tailscale` is the one to ask for a
+/// certificate when none is cached.
+async fn certificate_for(
+    hostname: String,
+    refresh_days: u64,
+    tailscale: Option<std::path::PathBuf>,
+) -> Option<tokio_rustls::TlsAcceptor> {
+    match tls::ensure(&hostname, refresh_days, tailscale).await {
         Ok(material) => match tls::acceptor(&material) {
             Ok(acceptor) => {
                 crate::log_info!(
@@ -1859,9 +1868,9 @@ async fn resolve_transport(
     resolve_transport_with(
         config,
         plan,
-        tls::magic_dns_name,
+        || tls::magic_dns_name(config.tailscale_bin()),
         resolve_name,
-        |hostname| certificate_for(hostname, config.cert_refresh_days),
+        |hostname| certificate_for(hostname, config.cert_refresh_days, config.tailscale_bin()),
     )
     .await
 }
@@ -2378,10 +2387,13 @@ mod tests {
 
     /// The port is pinned rather than defaulted so the assertions below are
     /// about the address that was chosen, not about a constant elsewhere.
+    /// A config for these tests: its `tailscale` does not exist, so nothing here can
+    /// run this computer's own.
     fn config_with(ws_bind: Option<&str>) -> Config {
         Config {
             ws_bind: ws_bind.map(str::to_string),
             ws_port: 8787,
+            tailscale_bin: Some("/nonexistent/tailscale".into()),
             ..Config::default()
         }
     }
@@ -3327,9 +3339,9 @@ mod tests {
         let (spelled_out, spelled_out_endpoint) = resolve_transport_with(
             &config,
             &plan,
-            tls::magic_dns_name,
+            || tls::magic_dns_name(config.tailscale_bin()),
             resolve_name,
-            |hostname| certificate_for(hostname, config.cert_refresh_days),
+            |hostname| certificate_for(hostname, config.cert_refresh_days, config.tailscale_bin()),
         )
         .await;
 
@@ -4465,8 +4477,15 @@ mod tests {
             TailnetWatch::Restart,
             TailnetWatch::Report,
         ] {
+            // A configured tailscale that does not exist: whatever arm runs, no probe
+            // can reach this computer's own Tailscale.
+            let config = Config {
+                tailscale_bin: Some("/nonexistent/tailscale".into()),
+                ..Config::default()
+            };
             let outcome =
-                tokio::time::timeout(Duration::from_millis(100), watch_for_tailnet(watch)).await;
+                tokio::time::timeout(Duration::from_millis(100), watch_for_tailnet(watch, config))
+                    .await;
             assert!(
                 outcome.is_err(),
                 "{watch:?}: the production watcher returned; every task in main's \

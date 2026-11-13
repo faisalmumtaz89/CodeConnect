@@ -23,9 +23,9 @@ public struct StartContext {
 
     public func start(
         _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model choice: String? = nil,
-        prompt: String
+        prompt: String, trust: FolderTrust? = nil
     ) -> String {
-        model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt)
+        model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt, trust: trust)
     }
 
     /// The folder's repository, once the computer has said: `.some(nil)` for
@@ -72,14 +72,26 @@ public struct StartContext {
     /// When this computer last ran anything the phone can start again.
     public var lastUsed: Date? { projects.first?.lastUsed }
 
-    /// Why an agent cannot be started on this computer, or nil when it can: in
-    /// plain words, never the computer's own check output, which names its
-    /// command line and its settings file. "Can't start" is true whether the
-    /// agent is missing, its shell is slow or its version check failed.
+    /// Why an agent cannot be started on this computer, or nil when it can: the computer's own sentence for Claude
+    /// Code, else plain words naming the computer.
     public func missingReason(_ agent: StartAgent) -> String? {
         guard !starter.availableAgents.contains(agent) else { return nil }
-        return "\(agent.displayName) can’t start on \(machineName)."
+        return said(agent) ?? "\(agent.displayName) can’t start on \(machineName)."
     }
+
+    /// The computer's own sentence for why Claude Code would be refused (`detail`): the owner's words, naming the
+    /// computer, safe to show as sent. Codex's `detail` is still its check output, which names command lines and
+    /// settings files, so Codex is never quoted.
+    private func said(_ agent: StartAgent) -> String? {
+        agent == .claude ? starter.agents.first { $0.agent == agent }?.detail : nil
+    }
+
+    /// How to sign in to Claude Code on a computer other than this Mac (the owner's 2A): these words, then
+    /// `claudeSignIn` to copy. On this Mac the form shows the sentence alone.
+    public var signInThere: String {
+        "To sign in, run this in a terminal on \(machineName). CodeConnect sees it when you’re done."
+    }
+    public static let claudeSignIn = "claude auth login"
 
     // MARK: Models
 
@@ -95,13 +107,15 @@ public struct StartContext {
     /// What the model menu holds for an agent here. The agent's own models, in
     /// its order and words, with Default first: Claude Code's own `default`
     /// entry, or, for an agent that lists none (Codex), a Default that names no
-    /// model. A signed-out agent offers nothing but how to sign in. With no
-    /// models listed, because the agent couldn't be asked, Default alone.
+    /// model. A signed-out agent offers nothing but why. With no models listed,
+    /// because the agent couldn't be asked, Default alone.
     public func models(_ agent: StartAgent) -> StartModels {
         guard starter.projects != nil else { return .checking }
         if let reason = missingReason(agent) { return .missing(reason) }
         let status = starter.agents.first { $0.agent == agent }
-        if status?.signedIn == false { return .signedOut("Sign in to \(agent.displayName) on this computer to use it.") }
+        if status?.signedIn == false {
+            return .signedOut(said(agent) ?? "\(agent.displayName) on \(machineName) isn’t signed in.")
+        }
         let offered = (status?.models ?? []).map {
             StartModelChoice(agent: agent, model: $0.value, label: $0.label, detail: $0.detail)
         }
@@ -144,7 +158,7 @@ public enum StartModels: Hashable, Sendable {
     case checking
     /// It can't start there: `missingReason`'s words.
     case missing(String)
-    /// It isn't signed in: how to sign in, and nothing to choose.
+    /// It isn't signed in: the sentence that says so, and nothing to choose.
     case signedOut(String)
     case choices([StartModelChoice])
 }
