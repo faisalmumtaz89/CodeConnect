@@ -85,6 +85,30 @@ final class FolderTrustLiveUITests: XCTestCase {
             "the Ready step (Start bar, or the pill's send when a focused message hides it)")
     }
 
+    /// The fleet header ("N agents · …", or "No agents running") counts live sessions
+    /// from the model and is always drawn — unlike the session rows, which lazy
+    /// rendering leaves off-screen once the fleet holds more than a couple (seen: the
+    /// header read "2 agents" while only one `session-` row was in the tree). So the
+    /// count of started runs is read from the header, not by counting rows. -1 until
+    /// the header is up.
+    private func agentCount(_ app: XCUIApplication) -> Int {
+        if app.staticTexts["No agents running"].exists { return 0 }
+        let h = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ agent.*")).firstMatch
+        guard h.exists else { return -1 }
+        return Int(h.label.prefix(while: { $0.isNumber })) ?? -1
+    }
+
+    /// Wait for the fleet to finish loading (a session row realized, or none running),
+    /// then its live-agent count from the header.
+    private func settledAgentCount(_ app: XCUIApplication) -> Int {
+        let loaded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'")).firstMatch.exists
+                || app.staticTexts["No agents running"].exists
+        }, object: nil)
+        _ = XCTWaiter().wait(for: [loaded], timeout: 20)
+        return self.agentCount(app)
+    }
+
     /// Scenarios 1 + 2: a never-seen folder asks, an answer starts, no second ask.
     func test1_questionAsksAndAnswerStartsOnce() throws {
         let app = try launch()
@@ -124,7 +148,9 @@ final class FolderTrustLiveUITests: XCTestCase {
     /// with its round Back and both answers.
     func testRenderQuestion() throws {
         let app = try launch()
-        reachReady(app, folder: "proj-a", message: "render the folder question")
+        // proj-e is this test's own folder — no other test trusts it, so it is
+        // always never-seen here and the question shows regardless of suite order.
+        reachReady(app, folder: "proj-e", message: "render the folder question")
         // Start via the control the size presents. At non-accessibility sizes the
         // Ready bar's start-go sends and the message pill's button is dictate, so
         // prefer start-go; only when it is hidden (the accessibility sizes where the
@@ -205,20 +231,23 @@ final class FolderTrustLiveUITests: XCTestCase {
     /// always asked here regardless of what another test trusted.
     func test4_doubleTapStartsOneSession() throws {
         let app = try launch()
+        // Read the live-agent count from the fleet header (see agentCount): counting
+        // session rows is unreliable once the fleet is non-empty. test4 owns proj-d so
+        // the question is always asked here, whatever another test trusted.
+        let before = settledAgentCount(app)
         reachReady(app, folder: "proj-d", message: "work on proj-d")
         app.buttons["start-go"].tap()
         let yes = app.buttons["trust-yes"]
         XCTAssertTrue(yes.waitForExistence(timeout: 25), "the folder-trust question")
-        // Each started session is one button identified `session-<key>` (FleetView).
-        let sessions = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'"))
-        // Must-fail control: before the answer there is none, so the "exactly one"
-        // below is seen to tell the states apart rather than always reading one.
-        XCTAssertEqual(sessions.count, 0, "no session has started before the answer")
         yes.doubleTap()
         backToProjects(app)
-        XCTAssertTrue(sessions.firstMatch.waitForExistence(timeout: 25),
-                      "the started session appears in the fleet")
-        XCTAssertEqual(sessions.count, 1, "the double-tap started exactly one session, not two")
+        // One new live agent: the header goes before → before+1. A double start would
+        // make it before+2 (the throwaway two-starts control proves the guard catches it).
+        let grew = XCTNSPredicateExpectation(
+            predicate: NSPredicate { [self] _, _ in agentCount(app) == before + 1 }, object: nil)
+        let r = XCTWaiter().wait(for: [grew], timeout: 45)
+        XCTAssertEqual(r, .completed,
+                       "the double-tap started exactly one session (header agents \(before) → \(agentCount(app)), expected \(before + 1))")
         shot(app, "4a-double-tap-one-session")
     }
 }
