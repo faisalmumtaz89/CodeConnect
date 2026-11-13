@@ -1103,7 +1103,7 @@ own, so it outlives the daemon; ccd hands the host the first message as the run'
 `start` over the run's link, and the host runs that claude with it. The start's
 answer waits for the host's outcome: a done start makes the run `live` and is
 answered started, and a refused one makes it `failed` and is answered with the
-reason. With no outcome within the start's 80 s, the answer is started and the run
+reason; its host then ends, once claude's end is acknowledged. With no outcome within the start's 80 s, the answer is started and the run
 stays `starting` until its outcome comes. Once `start` is sent, only that outcome
 ends a run, so a run whose host lost its link first stays `starting`, and a delete
 refuses it.

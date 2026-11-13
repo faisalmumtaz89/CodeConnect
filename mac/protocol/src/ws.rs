@@ -981,8 +981,8 @@ pub enum StartSessionResult {
     },
     /// No session was started, or (`launch_failed`) one was launched but did not
     /// finish starting; `detail` says which. It is human text, safe to show verbatim.
-    /// A Claude run whose host lost its link before saying how its start went stays
-    /// in the fleet as `starting`.
+    /// A Claude run whose host lost its link after ccd sent it `start`, before saying
+    /// how the start went, stays in the fleet as `starting`.
     Failed {
         reason: StartFailure,
         detail: String,
