@@ -2686,7 +2686,7 @@ fn peers_frame(
 ) -> ServerMessage {
     protocol::tailnet::peers_frame(
         tailnet,
-        protocol::pairing::tailscale_bin().is_some(),
+        daemon.config.tailscale_bin().is_some(),
         daemon.config.ws_port,
         viewer,
     )

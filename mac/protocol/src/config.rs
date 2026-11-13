@@ -376,6 +376,12 @@ pub struct Config {
     #[serde(default)]
     pub codex_bin: Option<String>,
 
+    /// Explicit path to `tailscale`. Unset, it is the first of the known install
+    /// locations that exists. Set, it is the only one: a path that does not exist
+    /// means no Tailscale, so the daemon never runs this computer's and never sees
+    /// its tailnet (a test or rig daemon sets one).
+    pub tailscale_bin: Option<String>,
+
     /// Cap on each of the daemon's own launchd logs. One previous generation is
     /// kept alongside, so the ceiling is twice this per stream.
     ///
@@ -524,6 +530,7 @@ impl Default for Config {
             fsevents: true,
             claude_bin: None,
             codex_bin: None,
+            tailscale_bin: None,
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
             tmux_history_limit: default_tmux_history_limit(),
@@ -552,7 +559,41 @@ fn unknown_settings(given: &serde_json::Value, known: &serde_json::Value) -> Vec
         .collect()
 }
 
+/// Where the Tailscale CLI lives when it is installed at all. Neither launchd nor a
+/// systemd user unit hands the daemon a shell `PATH`, so lookup is by known install
+/// location, never `which`, and the daemon and the CLI share it through
+/// [`Config::tailscale_candidates`], so "is Tailscale installed" cannot answer
+/// differently on the two sides of one machine. The last entry is where Linux
+/// distribution packages put it. Private: every lookup goes through the config, so
+/// `tailscale_bin` decides it.
+const TAILSCALE_LOCATIONS: &[&str] = &[
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/bin/tailscale",
+];
+
 impl Config {
+    /// Where `tailscale` may be, in the order to try: the configured `tailscale_bin`
+    /// alone when it is set, whether or not it exists, else the known locations.
+    pub fn tailscale_candidates(&self) -> Vec<std::path::PathBuf> {
+        match &self.tailscale_bin {
+            Some(path) => vec![std::path::PathBuf::from(path)],
+            None => TAILSCALE_LOCATIONS
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+        }
+    }
+
+    /// The `tailscale` to run: the first of [`Config::tailscale_candidates`] that is
+    /// a file, or none.
+    pub fn tailscale_bin(&self) -> Option<std::path::PathBuf> {
+        self.tailscale_candidates()
+            .into_iter()
+            .find(|path| path.is_file())
+    }
+
     pub fn load() -> Config {
         let path = crate::config_path();
         let raw = match std::fs::read_to_string(&path) {
@@ -733,6 +774,35 @@ mod tests {
     }
 
     use super::*;
+
+    /// `tailscale_bin` decides where `tailscale` is. A configured path that exists is
+    /// that path; one that does not exist is no tailscale and the only candidate, so
+    /// nothing falls back to this computer's own; unset is the known locations. Nothing
+    /// here runs a tailscale.
+    #[test]
+    fn a_configured_tailscale_is_the_only_one() {
+        let present = std::env::current_exe().unwrap();
+        let configured = |path: &str| Config {
+            tailscale_bin: Some(path.into()),
+            ..Config::default()
+        };
+        let found = configured(present.to_str().unwrap());
+        assert_eq!(found.tailscale_bin(), Some(present.clone()));
+        assert_eq!(found.tailscale_candidates(), vec![present]);
+        let missing = configured("/nonexistent/tailscale");
+        assert_eq!(missing.tailscale_bin(), None);
+        assert_eq!(
+            missing.tailscale_candidates(),
+            vec![std::path::PathBuf::from("/nonexistent/tailscale")]
+        );
+        assert_eq!(
+            Config::default().tailscale_candidates(),
+            TAILSCALE_LOCATIONS
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn defaults_are_coherent() {

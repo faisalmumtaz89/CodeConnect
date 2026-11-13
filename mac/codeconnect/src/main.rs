@@ -730,7 +730,11 @@ fn advise_before_attach(config: &Config) {
     // group shares one decision. Reachability first: a phone that cannot
     // connect at all outranks a version it would fetch.
     let style = update_check::style_for_stream(std::io::stderr().is_terminal());
-    let reachability = phone_unreachable_note(crate::pair::configured_ws_bind(config), style);
+    let reachability = phone_unreachable_note(
+        crate::pair::configured_ws_bind(config),
+        config.tailscale_bin(),
+        style,
+    );
     // One update slot: the release advisory, behind the `update_check`
     // switch. `codeconnect update` is what resolves it.
     let update = config
@@ -814,6 +818,7 @@ const TAILSCALE_UP: &str = "sudo tailscale up --qr";
 /// the session over the terminal's rows microseconds later.
 fn phone_unreachable_note(
     ws_bind: Option<std::net::IpAddr>,
+    tailscale: Option<std::path::PathBuf>,
     style: update_check::Style,
 ) -> Option<String> {
     // The timeout is advisory-sized — this check must never make a healthy
@@ -828,7 +833,7 @@ fn phone_unreachable_note(
         }
         _ => return None,
     };
-    let signal = match protocol::pairing::tailscale_bin() {
+    let signal = match tailscale {
         None => TailscaleSignal::NotInstalled,
         Some(bin) => probe_tailscale(&bin),
     };
