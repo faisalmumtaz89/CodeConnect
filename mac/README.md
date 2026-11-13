@@ -1120,9 +1120,9 @@ started by hand has the session's environment already and uses its own; so
 does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
 it names an encoding (`LC_ALL`, `LC_CTYPE`, `LANG`), `LC_CTYPE` is the platform's
 UTF-8 (`UTF-8`, or `C.UTF-8` on Linux), as a UTF-8 terminal sets it; the user's
-own startup files run after and win. A Claude Code start is answered `started`
-once its host is attached and has the start, and is listed from the moment its row
-is written; a start that does not get that far is `failed`, and so is its row.
+own startup files run after and win. A Claude Code start is listed from the moment
+its row is written, and is answered from its host's outcome, as above; a start that
+fails before its host has the start is `failed`, and so is its row.
 For a Codex start, the launcher writes what it
 started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
 answers `start_session_result` with the session's uid, or `failed` with

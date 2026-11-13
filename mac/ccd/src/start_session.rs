@@ -502,11 +502,12 @@ async fn folder_question(
 }
 
 /// A Claude start: the run its request already has (H1), or the start's checks, then
-/// its row and its agent host ([`crate::claude_host`]). Everything that can refuse the
-/// start comes before the row, so a refused start leaves none: the cheap refusals,
-/// the folder question, the claude check, the host, and `launcher` (the `codeconnect`
-/// that runs the mail server), all before the place, the one step that can change the
-/// repository. A new worktree is claude's to make, as `--worktree` makes it today.
+/// its row and its agent host ([`crate::claude_host`]). Every check that can refuse the
+/// start comes before the row, so a start these refuse leaves none: the cheap
+/// refusals, the folder question, the claude check, the host, and `launcher` (the
+/// `codeconnect` that runs the mail server), all before the place, the one step that
+/// can change the repository. A refusal that comes later, from claude itself, leaves
+/// its row `failed`. A new worktree is claude's to make, as `--worktree` makes it today.
 #[allow(clippy::too_many_arguments)]
 async fn claude_start(
     daemon: &Arc<Daemon>,

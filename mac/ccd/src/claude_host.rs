@@ -1302,8 +1302,9 @@ mod tests {
     /// models kept, and the host is still running after its 30 s no-start exit would
     /// have ended it (claude's init is unacknowledged, so the host keeps it). A start
     /// whose claude is missing is refused, naming it, and its run is `failed`. So is one
-    /// whose claude starts and dies at initialize, and its host then ends, its claude's
-    /// end acknowledged. A claude that writes a line before its initialize answer still
+    /// whose claude starts and dies at initialize, or writes a line and then refuses it,
+    /// and its host then ends, its claude's end acknowledged. A claude that writes a line
+    /// before its initialize answer still
     /// gives a started, live run: the host sends the outcome first. Ignored and gated:
     /// `CODECONNECT_TEST_AGENT_HOST` names the built host.
     #[tokio::test]
@@ -1318,49 +1319,67 @@ mod tests {
             .insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
         let cwd = rig.root.to_str().unwrap().to_string();
         let (claude, models) = stand_in_claude(&rig, &host, "ready", serde_json::json!({}));
-        let (dying, _) = stand_in_claude(
-            &rig,
-            &host,
-            "dying",
-            serde_json::json!({"die_on_init": true}),
-        );
-        let died = start(
-            &rig.daemon,
-            Run {
-                claude_path: dying.to_str().unwrap(),
-                ..run(&rig, "req-2", &cwd, &host)
-            },
+        let session = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/claude/sdk-session-0.3.322.jsonl"),
         )
-        .await;
-        assert!(
-            matches!(&died, StartSessionResult::Failed { .. }),
-            "{died:?}"
-        );
-        let dead = rig
-            .daemon
-            .db
-            .hosted_run_for_request("req-2".into())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(dead.lifecycle, Lifecycle::Failed);
-        let dead_host = read_host_file(&run_dir(&rig.root, &dead.session_uid).join("host.json"))
-            .unwrap()
-            .host_pid;
-        let mut ended = false;
-        for _ in 0..100 {
-            // SAFETY: kill(2) with signal 0 only asks whether the process exists.
-            if unsafe { libc::kill(dead_host, 0) } != 0 {
-                ended = true;
-                break;
+        .unwrap();
+        let queued = session.lines().next().unwrap().to_string();
+        // A claude that starts and refuses its initialize: one that dies at it, and one
+        // that first writes the first message's own line, then answers with an error.
+        // Each start is refused, its run `failed`, and its host ends once claude's end is
+        // acknowledged.
+        for (name, refusal, request) in [
+            ("dying", serde_json::json!({"die_on_init": true}), "req-2"),
+            (
+                "refusing-early",
+                serde_json::json!({"before_init": [queued.clone()], "init_error": true}),
+                "req-4",
+            ),
+        ] {
+            let (refusing, _) = stand_in_claude(&rig, &host, name, refusal);
+            let refused = start(
+                &rig.daemon,
+                Run {
+                    claude_path: refusing.to_str().unwrap(),
+                    ..run(&rig, request, &cwd, &host)
+                },
+            )
+            .await;
+            let row = rig
+                .daemon
+                .db
+                .hosted_run_for_request(request.into())
+                .await
+                .unwrap()
+                .unwrap();
+            let refused_host =
+                read_host_file(&run_dir(&rig.root, &row.session_uid).join("host.json"))
+                    .unwrap()
+                    .host_pid;
+            let mut ended = false;
+            for _ in 0..100 {
+                // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+                if unsafe { libc::kill(refused_host, 0) } != 0 {
+                    ended = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if !ended {
+                // SAFETY: kill(2) of the process group this test's host leads.
+                unsafe { libc::kill(-refused_host, libc::SIGTERM) };
+            }
+            assert!(
+                matches!(&refused, StartSessionResult::Failed { .. }),
+                "{name}: {refused:?}"
+            );
+            assert_eq!(row.lifecycle, Lifecycle::Failed, "{name}");
+            assert!(
+                ended,
+                "{name}: a refused start's host did not end within 10 s"
+            );
         }
-        if !ended {
-            // SAFETY: kill(2) of the process group this test's host leads.
-            unsafe { libc::kill(-dead_host, libc::SIGTERM) };
-        }
-        assert!(ended, "a refused start's host did not end within 10 s");
         let missing = start(&rig.daemon, run(&rig, "req-0", &cwd, &host)).await;
         assert!(
             matches!(&missing, StartSessionResult::Failed { detail, .. } if detail.contains("/nonexistent/claude")),
@@ -1419,12 +1438,6 @@ mod tests {
         // Claude's own lines before its initialize answer, as a slow answer lets the
         // first message's lines come first: the host sends the start's outcome before
         // any of them, so the start is answered started and the run is live.
-        let session = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../fixtures/claude/sdk-session-0.3.322.jsonl"),
-        )
-        .unwrap();
-        let queued = session.lines().next().unwrap();
         let (early, _) = stand_in_claude(
             &rig,
             &host,
