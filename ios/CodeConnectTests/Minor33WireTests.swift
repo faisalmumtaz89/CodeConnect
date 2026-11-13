@@ -19,15 +19,23 @@ final class Minor33WireTests: XCTestCase {
         return try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue)
     }
 
-    /// The recorded `projects` frame, with Claude Code's `signed_in` and models changed where a case needs it.
-    private func projects(claudeSignedIn: Bool? = nil, claudeModels: [JSONValue]? = nil) throws -> ServerMessage {
+    /// The recorded `projects` frame, with an agent's fields changed where a case needs it.
+    private func projects(
+        claudeSignedIn: Bool? = nil, claudeModels: [JSONValue]? = nil, claude claudeFields: [String: JSONValue] = [:],
+        codex codexFields: [String: JSONValue] = [:]
+    ) throws -> ServerMessage {
         var frame = try XCTUnwrap(try wire("minor-33-wire")["projects"]?.objectValue)
         var agents = try XCTUnwrap(frame["agents"]?.arrayValue)
         var claude = try XCTUnwrap(agents[0].objectValue)
         XCTAssertEqual(claude["agent"], .string("claude"))
         if let claudeSignedIn { claude["signed_in"] = .bool(claudeSignedIn) }
         if let claudeModels { claude["models"] = .array(claudeModels) }
+        claude.merge(claudeFields) { $1 }
         agents[0] = .object(claude)
+        var codex = try XCTUnwrap(agents[1].objectValue)
+        XCTAssertEqual(codex["agent"], .string("codex"))
+        codex.merge(codexFields) { $1 }
+        agents[1] = .object(codex)
         frame["agents"] = .array(agents)
         return try JSONDecoder().decode(ServerMessage.self, from: Data(JSONValue.object(frame).canonicalJSONString.utf8))
     }
@@ -115,11 +123,11 @@ final class Minor33WireTests: XCTestCase {
         XCTAssertEqual(StartContext.starts(codexDefault), "Starts Codex with its default model.")
     }
 
-    /// The recorded frame as sent: Claude Code is signed out, so it offers how to sign in, and the start opens on
-    /// Codex's Default even in a folder Claude Code used last.
-    func testASignedOutAgentOffersOnlyHowToSignIn() throws {
+    /// The recorded frame as sent: Claude Code is signed out, so it offers nothing but why, in the daemon's sentence
+    /// naming the computer, and the start opens on Codex's Default even in a folder Claude Code used last.
+    func testASignedOutAgentOffersOnlyWhy() throws {
         let (context, _) = try context(try projects())
-        XCTAssertEqual(context.models(.claude), .signedOut("Sign in to Claude Code on this computer to use it."))
+        XCTAssertEqual(context.models(.claude), .signedOut("Claude Code on this computer isn’t signed in."))
         XCTAssertFalse(context.modelChoices.contains { $0.agent == .claude })
         let folder = StartProject(
             path: "/tmp/ccd-minor-33/app", name: "app", lastUsed: Date(), lastAgent: .claude, gitBranch: "main",
@@ -127,6 +135,39 @@ final class Minor33WireTests: XCTestCase {
         let opening = try XCTUnwrap(context.defaultChoice(for: folder))
         XCTAssertEqual(opening.agent, .codex)
         XCTAssertNil(opening.model)
+    }
+
+    /// Claude Code's own sentence (`detail`, the computer's words naming itself) is what both apps show, as sent:
+    /// for a Claude Code that can't start and for one that is signed out. A sentence no app could write itself proves
+    /// it is the computer's.
+    func testClaudeCodesOwnSentenceIsShownAsSent() throws {
+        let refused = "Refused, in the computer’s own words 7f3a."
+        let (missing, _) = try context(
+            try projects(claude: ["available": .bool(false), "detail": .string(refused), "models": .array([])]))
+        XCTAssertEqual(missing.missingReason(.claude), refused)
+        XCTAssertEqual(missing.models(.claude), .missing(refused))
+        let signedOut = "Signed out, in the computer’s own words 9c2e."
+        let (out, _) = try context(try projects(claude: ["signed_in": .bool(false), "detail": .string(signedOut)]))
+        XCTAssertNil(out.missingReason(.claude), "signed out is not unavailable")
+        XCTAssertEqual(out.models(.claude), .signedOut(signedOut))
+    }
+
+    /// Codex's `detail` is still its check output (a login shell's error, a stderr line), so it is never shown: Codex
+    /// gets plain words naming the computer.
+    func testCodexsCheckOutputIsNeverShown() throws {
+        let checkOutput = "could not run the login shell: No such file or directory (os error 2)"
+        let (missing, _) = try context(try projects(codex: ["available": .bool(false), "detail": .string(checkOutput)]))
+        XCTAssertEqual(missing.missingReason(.codex), "Codex can’t start on this computer.")
+        let (out, _) = try context(try projects(codex: ["signed_in": .bool(false), "detail": .string(checkOutput)]))
+        XCTAssertEqual(out.models(.codex), .signedOut("Codex on this computer isn’t signed in."))
+    }
+
+    /// How to sign in to Claude Code on a computer this device isn't (the owner's 2A), in one copy for both apps.
+    func testSigningInOnAnotherComputerIsSaidOnce() throws {
+        let (context, _) = try context(try projects())
+        XCTAssertEqual(
+            context.signInThere, "To sign in, run this in a terminal on this computer. CodeConnect sees it when you’re done.")
+        XCTAssertEqual(StartContext.claudeSignIn, "claude auth login")
     }
 
     /// No models listed, because the agent couldn't be asked: Default alone.

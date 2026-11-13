@@ -112,6 +112,7 @@ struct StartForm: View {
                 if let context {
                     computerRow(context)
                     folderRows(context)
+                    AgentNotice(context: context, elsewhere: !isThisMac(context))
                     composer(context)
                 }
             }

@@ -4,7 +4,7 @@ import Observation
 
 /// First run, and every launch after it: CodeConnect installed and its daemon answering, this Mac paired
 /// with its own daemon without a code, and what the checklist shows — the background service, tmux, the
-/// agents found, and `codeconnect` on the PATH of a new Terminal.
+/// agents as that daemon finds them, and `codeconnect` on the PATH of a new Terminal.
 @MainActor @Observable
 final class Setup {
     enum Row: Equatable {
@@ -19,17 +19,41 @@ final class Setup {
 
     private(set) var service: Row = .checking
     private(set) var tmux: Row = .checking
-    private(set) var claude: Row = .checking
-    private(set) var codex: Row = .checking
     private(set) var commandLine: Row = .checking
+    /// This Mac's daemon's id (`LocalDaemon.machineID`), read from its CodeConnect folder whatever the install did, so
+    /// the agents' rows follow the service once it answers again: the computer whose agents the checklist shows, known
+    /// as the start form knows it.
+    private(set) var localMachineID: String?
     /// True once this run has its answers: the service, with this Mac paired with it when it is up, and tmux;
-    /// and, while the checklist is open, the agents and the PATH line.
+    /// and, while the checklist is open, the PATH line.
     private(set) var settled = false
     /// The checklist is open: on its own when the service or tmux isn't working, and from the menu.
     var shown = false
-    /// A row that needs the person: the service, tmux, or an agent not found. The PATH line is an opt-in with its own
-    /// Set up, so it never asks for Try Again.
-    var needsAttention: Bool { [service, tmux, claude, codex].contains(where: \.isMissing) }
+
+    /// This Mac's own computer among those that can start: the one whose daemon said this Mac's daemon's id when it
+    /// connected.
+    func thisMacContext(in machines: Machines) -> StartContext? {
+        guard let localMachineID else { return nil }
+        return machines.startContexts.first { machines.model(for: $0.id)?.connection.helloAck?.machineID == localMachineID }
+    }
+
+    /// An agent as this Mac's service answers for it (its list of folders and agents), so the checklist and the start
+    /// form say the same: Checking… until it has answered, Ready, or why not (Claude Code's in the computer's own
+    /// sentence, Codex's in the app's). A later answer replaces it.
+    func agent(_ agent: StartAgent, in machines: Machines) -> Row {
+        guard let context = thisMacContext(in: machines) else { return .checking }
+        switch context.models(agent) {
+        case .checking: return .checking
+        case .choices: return .ready("Ready")
+        case .missing(let sentence), .signedOut(let sentence): return .missing(sentence)
+        }
+    }
+
+    /// A row that needs the person: the service, tmux, or an agent that can't start. The PATH line is an opt-in with
+    /// its own Set up, so it never asks for Try Again.
+    func needsAttention(_ machines: Machines) -> Bool {
+        [service, tmux, agent(.claude, in: machines), agent(.codex, in: machines)].contains(where: \.isMissing)
+    }
 
     let installer: Installer?
     private let pairing: PairingStore
@@ -81,21 +105,22 @@ final class Setup {
         if let failure {
             service = .missing(failure)
         } else if let address = LocalDaemon.address(root: installer.root) {
-            service = await pairWithThisMac(at: address, machines: machines, root: installer.root)
-                ? .ready("Running") : .missing("Running, but this Mac couldn't pair with it.")
+            let paired = await pairWithThisMac(at: address, machines: machines, root: installer.root)
+            service = paired ? .ready("Running") : .missing("Running, but this Mac couldn't pair with it.")
         } else {
             service = .missing("The background service isn't answering.")
         }
+        localMachineID = LocalDaemon.machineID(root: installer.root)
         let bin = installer.bin
         tmux = FileManager.default.isExecutableFile(atPath: bin.appendingPathComponent("cc-tmux").path)
             ? .ready("Ready") : .missing("Missing. Choose Try Again to install it again.")
-        // Only a service or tmux that isn't working opens the checklist by itself. The agents and the PATH line
-        // are optional, so they are asked only while it is open: each one runs a login shell.
+        // Only a service or tmux that isn't working opens the checklist by itself. The PATH line is optional, so it
+        // is asked only while the checklist is open: it runs a login shell. The agents are the service's answer,
+        // asked for again here, so Try Again after installing or signing in shows what is there now.
         shown = shown || service.isMissing || tmux.isMissing
         if shown {
+            thisMacContext(in: machines)?.load()
             let codeconnect = bin.appendingPathComponent("codeconnect").path
-            claude = await Task.detached { Self.agent("claude", codeconnect: codeconnect) }.value
-            codex = await Task.detached { Self.agent("codex", codeconnect: codeconnect) }.value
             let found = await Task.detached { Self.inNewTerminal("command -v codeconnect") }.value
             commandLine = found?.contains(codeconnect) == true
                 ? .ready("Ready") : .missing("Not set up yet")
@@ -149,15 +174,6 @@ final class Setup {
     nonisolated private static func inNewTerminal(_ command: String) -> [String]? {
         let (status, output) = Installer.run(URL(fileURLWithPath: "/bin/zsh"), ["-ilc", command])
         return status == 0 ? output.split(separator: "\n").map(String.init) : nil
-    }
-
-    /// An agent as `codeconnect` starts it from a new Terminal, never bundled: `codeconnect claude --version`
-    /// resolves the agent as `codeconnect claude` does and, with no terminal to host a session in, runs only its
-    /// `--version`; the row shows the last line printed.
-    nonisolated private static func agent(_ name: String, codeconnect: String) -> Row {
-        guard let version = inNewTerminal("'\(codeconnect)' \(name) --version")?.last
-        else { return .missing("Not found. Install it, then choose Try Again.") }
-        return .ready(version)
     }
 }
 
