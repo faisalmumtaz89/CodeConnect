@@ -5,23 +5,26 @@ import SwiftUI
 /// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
 /// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. Lazy, so
 /// a run thousands of rows long builds only what is near the screen. It opens at the newest row and moves for one
-/// reason only: new rows are followed while the newest is on screen. The row at the top of what is on screen stays
-/// where it is as rows or a page of earlier history land around it. Reaching the top pages back on its own, as the
-/// iPhone does.
+/// reason only: new rows are followed while the newest is on screen. A reader who went up stays where they are as rows
+/// land below; when a page of earlier history lands above, the row they were at is brought back to the top. Reaching
+/// the top pages back on its own, as the iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
-    /// The row at the top of what is on screen, kept in place when a page of earlier history lands above it.
-    @State private var topRow: String?
+    /// The place (`TimelineItem.places`) of the first row on screen as the reader left it, and the column's first place
+    /// when it was taken. A tool call's row keeps its place when a page brings the call.
+    @State private var heldRow: String?
+    @State private var heldFirst: String?
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
+        let places = TimelineItem.places(items)
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Earlier(model: model, key: key)
                     LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(items) { item in
+                        ForEach(Array(zip(places, items)), id: \.0) { _, item in
                             ConversationRow(item: item, model: model)
                         }
                     }
@@ -32,7 +35,23 @@ struct Conversation: View {
                 }
                 .padding(.horizontal, 28)
             }
-            .scrollPosition(id: $topRow, anchor: .top)
+            // The first row on screen, however the reader scrolled. At a landing this reports the page's rows before the
+            // column's first place changes, so a report made while that place differs from the one held is not taken.
+            .onScrollTargetVisibilityChange(idType: String.self) { visible in
+                guard heldFirst == nil || heldFirst == places.first else { return }
+                heldRow = visible.first
+                heldFirst = places.first
+            }
+            // When the column's first place changes (a page of earlier history landed, the window was set afresh, or
+            // Kit's rebuild changed the first row) and the held row is still there, it is brought back to the top. A
+            // page landing takes the reader to the end, where the follow keeps them; the restore is dispatched past this
+            // update and has run after both in every measured landing, an order SwiftUI does not promise.
+            .onChange(of: places.first) {
+                if let heldRow, places.contains(heldRow) {
+                    DispatchQueue.main.async { proxy.scrollTo(heldRow, anchor: .top) }
+                }
+                heldFirst = places.first
+            }
             // The column's top and bottom margin, kept by the scroll view, so a row scrolled to the bottom shows the end.
             .contentMargins(.vertical, 18, for: .scrollContent)
             // At the bottom from the first frame, so nothing above the newest row is passed over on the way.
@@ -65,27 +84,25 @@ struct Conversation: View {
 
 /// The row above the first: once it is really on screen and Kit can page, it asks for the page before; while that
 /// page is on its way it says so. Kit decides whether there is anything earlier and guards a page already in flight.
+/// One height whether it says so or not: a row above the reader that grows moves them to the end.
 private struct Earlier: View {
     let model: AppModel
     let key: String
     @State private var onScreen = false
 
     var body: some View {
-        Group {
-            if model.isLoadingEarlier(key) {
-                Text("Loading earlier history")
-                    .font(Theme.ui(12))
-                    .foregroundStyle(Theme.text3)
-                    .frame(maxWidth: .infinity)
-            } else {
-                Color.clear.frame(height: 1)
+        let loading = model.isLoadingEarlier(key)
+        Text("Loading earlier history")
+            .font(Theme.ui(12))
+            .foregroundStyle(Theme.text3)
+            .frame(maxWidth: .infinity)
+            .opacity(loading ? 1 : 0)
+            .accessibilityHidden(!loading)
+            .accessibilityIdentifier("session.earlier")
+            .onScrollVisibilityChange { onScreen = $0 }
+            .task(id: [onScreen, model.isReadyToPage(key)]) {
+                if onScreen, model.isReadyToPage(key) { model.reachedTop(key: key) }
             }
-        }
-        .accessibilityIdentifier("session.earlier")
-        .onScrollVisibilityChange { onScreen = $0 }
-        .task(id: [onScreen, model.isReadyToPage(key)]) {
-            if onScreen, model.isReadyToPage(key) { model.reachedTop(key: key) }
-        }
     }
 }
 
