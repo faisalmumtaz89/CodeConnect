@@ -59,8 +59,23 @@ final class FolderTrustWireTests: XCTestCase {
         return (model, sent)
     }
 
+    /// A give-a-chance settle, for a negative check (assert something was NOT sent).
     private func settle() async {
         for _ in 0..<5 { await Task.yield() }
+    }
+
+    /// Polls `condition` on the main actor, sleeping briefly between checks, until it
+    /// holds or a generous bound elapses — so a send that takes an unknown number of
+    /// turns under load is waited for, not guessed at with a fixed yield count.
+    private func waitUntil(
+        _ condition: () -> Bool, _ what: String,
+        file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        for _ in 0..<1000 {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTFail("timed out waiting for \(what)", file: file, line: line)
     }
 
     private var project: StartProject {
@@ -114,7 +129,7 @@ final class FolderTrustWireTests: XCTestCase {
         let context = StartContext(model: model)
         let asking = context.start(project, agent: .claude, prompt: "fix the tests")
         let answering = context.start(project, agent: .claude, prompt: "fix the tests", trust: .notTrusted)
-        await settle()
+        await waitUntil({ sent.sent.count >= 2 }, "both starts to be sent")
         let byID = Dictionary(
             uniqueKeysWithValues: try sent.sent.map { message -> (String, JSONValue) in
                 let object = try XCTUnwrap(try encoded(message).objectValue)
@@ -132,9 +147,9 @@ final class FolderTrustWireTests: XCTestCase {
     func testAnAnswerIsSentAgainWithItsStart() async throws {
         let (model, sent) = try model()
         let id = model.startSession(project, agent: .claude, prompt: "fix the tests", trust: .notTrusted)
-        await settle()
+        await waitUntil({ sent.starts.contains { $0.requestID == id } }, "the start to be sent")
         try reconnect(model)
-        await settle()
+        await waitUntil({ sent.starts.filter { $0.requestID == id }.count >= 2 }, "the start re-sent on reconnect")
         let starts = sent.starts.filter { $0.requestID == id }
         XCTAssertEqual(starts.count, 2, "sent, then sent again")
         XCTAssertEqual(starts.map(\.trust), [.notTrusted, .notTrusted])
@@ -144,7 +159,7 @@ final class FolderTrustWireTests: XCTestCase {
     func testTheQuestionSettlesItsStart() async throws {
         let (model, sent) = try model()
         let id = model.startSession(project, agent: .claude, prompt: "fix the tests")
-        await settle()
+        await waitUntil({ sent.starts.contains { $0.requestID == id } }, "the start to be sent")
         model.connection.injectForTesting(.startSessionResult(requestID: id, outcome: .needsTrust(path: Self.folder)))
         XCTAssertEqual(model.starter.starts[id]?.outcome, .needsTrust(path: Self.folder))
         try reconnect(model)
@@ -157,10 +172,11 @@ final class FolderTrustWireTests: XCTestCase {
         let (model, sent) = try model()
         let answer = FolderAnswer(path: Self.folder, trust: .trusted, answeredAt: Date(timeIntervalSince1970: 0))
         func answered(_ ask: @escaping () async throws -> [FolderAnswer]) async throws -> [FolderAnswer] {
+            let before = sent.sent.count
             async let folders = ask()
-            await settle()
+            await waitUntil({ sent.sent.count > before }, "the ask's frame to be sent")
             let id: String? =
-                switch sent.sent.last {
+                switch sent.sent[before] {
                 case .listFolderTrust(let id), .setFolderTrust(let id, _, _), .forgetFolderTrust(let id, _): id
                 default: nil
                 }
