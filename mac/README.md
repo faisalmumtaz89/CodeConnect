@@ -1185,9 +1185,11 @@ known; Codex is signed in when it holds an account or needs no OpenAI sign-in. A
 refreshes its caches in `~/.claude.json`, and Codex begins a plugin sync that the
 ask cuts short, leaving a 4 KB `~/.codex/.tmp/git-*` it never removes. So an
 answer that says signed in is kept until the agent's `--version` changes or the
-daemon restarts; any other answer is asked again at the next list, except a
-signed-out Codex's, asked again only once `codex login status`, which starts
-nothing, says it is signed in. An agent that does not answer within the check's
+daemon restarts. A Claude Code that `auth status` says is signed out is not asked
+at all, since its start is refused. One whose sign-in is not known is asked at
+every list. A signed-out Codex's answer is
+asked again only once `codex login status`, which starts nothing, says it is
+signed in. An agent that does not answer within the check's
 10 s offers no models. `start_session`'s `model` is given to the agent as one
 argument, `--model=<value>`, after `--no-attach`; absent, or Claude Code's
 `default`, the agent gets no `--model` and starts with the model its settings name.
