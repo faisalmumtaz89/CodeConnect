@@ -440,7 +440,8 @@ pub enum ClientMessage {
     },
 
     /// **The folders sessions have run in on this computer** (minor 28,
-    /// `start_session`), answered with one [`ServerMessage::Projects`].
+    /// `start_session`), answered with a [`ServerMessage::Projects`], and with a
+    /// second one when the agent check that answer started finds a change.
     ListProjects,
     /// **Start an agent in one of those folders** (minor 28, `start_session`), as
     /// if `codeconnect <agent>` had been typed there. Answered with one
@@ -695,7 +696,10 @@ pub enum ServerMessage {
     },
 
     /// The answer to [`ClientMessage::ListProjects`]: most recently used first.
-    /// `agents` says which agents this computer can start, for every project.
+    /// `agents` says which agents this computer can start, for every project. An
+    /// answer from the last agent check is followed, unasked, by another to the
+    /// device that asked, when the fresh check it started finds the agents changed:
+    /// a reader keeps the latest.
     Projects {
         projects: Vec<Project>,
         agents: Vec<AgentAvailability>,

@@ -1065,7 +1065,8 @@ its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
 agent can start as last checked (Claude Code: the check a start makes, below;
 Codex: `codeconnect codex --version` through the user's login shell): the first list after the daemon starts waits for the
-check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt}` takes a listed
+check, and every later one answers from the last check and checks again; when that check finds the agents changed,
+`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt}` takes a listed
 folder (from `>= 30`, any absolute folder) and a first message, and a start
 without one (`prompt` absent, empty or only white space) is refused with
 `launch_failed` before anything is checked or run. A Claude Code start is then
