@@ -302,6 +302,23 @@ mod tests {
             SessionPresence::Gone
         );
 
+        // `kill-server` returns while the server is still going away, and a
+        // probe in that moment reaches the dying server: "server exited
+        // unexpectedly", which is rightly `Unknown`. The server's pid, read
+        // while it is up, says when it has gone.
+        let server = tokio::process::Command::new(protocol::tmux::tmux_bin().unwrap())
+            .args(["-S", &socket, "display-message", "-p", "#{pid}"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .ok()
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+            })
+            .expect("the test server's pid");
         let _ = tokio::process::Command::new(protocol::tmux::tmux_bin().unwrap())
             .args(["-S", &socket, "kill-server"])
             .stdin(std::process::Stdio::null())
@@ -309,6 +326,14 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .status()
             .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !protocol::proc_identity::exited(server) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the tmux server {server} outlived kill-server"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
             prober.presence(&target).await.presence,
             SessionPresence::Gone,
