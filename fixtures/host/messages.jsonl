@@ -18,4 +18,4 @@
 {"dir":"from_host","message":{"effort":"high","model":"sonnet","pending":[{"input":{"command":"cargo test","description":"Run the tests"},"options":{"displayName":"Run command","title":"Claude wants to run cargo test"},"tool_name":"Bash","tool_use_id":"toolu_01"}],"permission_mode":"default","seq":7,"session_id":"5f0c1e2a-0000-4000-8000-000000000001","type":"state"}}
 {"dir":"from_host","message":{"code":0,"seq":8,"type":"exited"}}
 {"dir":"from_host","message":{"seq":9,"signal":"SIGTERM","type":"exited"}}
-{"dir":"host_json","message":{"claude_pid":4243,"host_pid":4242,"protocol_version":1}}
+{"dir":"host_json","message":{"host_pid":4242,"protocol_version":1}}

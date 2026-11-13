@@ -12,8 +12,6 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 export interface HostFile {
   protocol_version: number;
   host_pid: number;
-  /** Written before claude is handed to the SDK. */
-  claude_pid?: number;
 }
 
 /** CodeConnect's mail server, run by Claude as a stdio MCP server. */
