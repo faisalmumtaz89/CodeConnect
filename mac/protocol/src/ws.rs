@@ -894,7 +894,8 @@ pub struct Project {
 pub struct AgentAvailability {
     pub agent: crate::agent::AgentKind,
     pub available: bool,
-    /// Why not, safe to show verbatim; absent when available.
+    /// Why a start would be refused, safe to show verbatim: for an agent not
+    /// available, and for a signed-out Claude Code. Absent when a start goes ahead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// The models the agent offers a start (minor 33), in its own order and its

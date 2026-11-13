@@ -802,7 +802,7 @@ async fn agent_availability(
             Ok(ready) => AgentAvailability {
                 agent: agent.clone(),
                 available: true,
-                detail: None,
+                detail: (ready.signed_in == Some(false)).then(signed_out),
                 models: claude_models(known, environment, &ready).await,
                 signed_in: ready.signed_in,
             },
@@ -882,14 +882,20 @@ pub(crate) async fn claude_preflight(
         .await
         .map_err(|(reason, detail)| failed(reason, detail))?;
     if ready.signed_in == Some(false) {
-        let computer =
-            crate::machine::computer_name().unwrap_or_else(|| "this computer".to_string());
-        return Err(failed(
-            StartFailure::LaunchFailed,
-            format!("Claude Code isn't signed in on {computer}. Sign in with Claude Code there."),
-        ));
+        return Err(failed(StartFailure::LaunchFailed, signed_out()));
     }
     Ok(ready)
+}
+
+/// The computer the refusals name: its name as the system shows it, or "this
+/// computer". Each sentence states the fact only; what to do about it is the app's.
+fn this_computer() -> String {
+    crate::machine::computer_name().unwrap_or_else(|| "this computer".to_string())
+}
+
+/// The sentence a signed-out Claude Code's start is refused with.
+fn signed_out() -> String {
+    format!("Claude Code on {} isn't signed in.", this_computer())
 }
 
 /// Find the claude a start runs ([`claude_path`]) and ask it its version and its
@@ -902,15 +908,19 @@ async fn claude_probe(
     let path = claude_path(environment, claude_bin).await.ok_or_else(|| {
         (
             StartFailure::AgentMissing,
-            "Claude Code was not found on this computer.".to_string(),
+            format!("Claude Code isn't installed on {}.", this_computer()),
         )
     })?;
     let unread = || {
+        crate::log_warn!(
+            "Claude Code at {} did not report its version",
+            path.display()
+        );
         (
             StartFailure::LaunchFailed,
             format!(
-                "Claude Code at {} did not report its version.",
-                path.display()
+                "Claude Code on {} didn't report its version.",
+                this_computer()
             ),
         )
     };
@@ -923,11 +933,13 @@ async fn claude_probe(
         .and_then(version_in)
         .ok_or_else(unread)?;
     if number < CLAUDE_FLOOR {
+        let (major, minor, patch) = CLAUDE_FLOOR;
         return Err((
             StartFailure::LaunchFailed,
             format!(
-                "CodeConnect needs Claude Code 2.1.268 or newer; this computer has {version}. \
-                 Update Claude Code, then start again."
+                "Claude Code {version} on {} is older than {major}.{minor}.{patch}, the oldest \
+                 CodeConnect works with.",
+                this_computer()
             ),
         ));
     }
@@ -2924,8 +2936,11 @@ esac"#;
             agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None).await;
         assert!(!listed.available);
         assert_eq!(
-            listed.detail.as_deref(),
-            Some("Claude Code was not found on this computer.")
+            listed.detail,
+            Some(format!(
+                "Claude Code isn't installed on {}.",
+                this_computer()
+            ))
         );
         let result = rig.start(&rig.project(), Some("hi")).await;
         assert!(
@@ -2990,18 +3005,17 @@ esac"#;
     #[tokio::test]
     async fn claude_below_the_floor_is_refused_with_the_floor_sentence() {
         let rig = recording("floor");
-        let sentence = "CodeConnect needs Claude Code 2.1.268 or newer; this computer has \
-                        2.1.267. Update Claude Code, then start again.";
+        let sentence = format!(
+            "Claude Code 2.1.267 on {} is older than 2.1.268, the oldest CodeConnect works with.",
+            this_computer()
+        );
         rig.claude_says("version", "2.1.267 (Claude Code)\n");
         let listed =
             agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None).await;
         assert!(!listed.available);
-        assert_eq!(listed.detail.as_deref(), Some(sentence));
+        assert_eq!(listed.detail, Some(sentence.clone()));
         let result = rig.start(&rig.project(), Some("hi")).await;
-        assert_eq!(
-            result,
-            failed(StartFailure::LaunchFailed, sentence.to_string())
-        );
+        assert_eq!(result, failed(StartFailure::LaunchFailed, sentence));
         assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
 
         rig.claude_says("version", "2.1.268 (Claude Code)\n");
@@ -3016,8 +3030,8 @@ esac"#;
     async fn a_claude_that_does_not_say_its_version_is_refused() {
         let rig = recording("no-version");
         let sentence = format!(
-            "Claude Code at {} did not report its version.",
-            rig.claude.display()
+            "Claude Code on {} didn't report its version.",
+            this_computer()
         );
         for (said, exit) in [("2.1.300 (Claude Code)\n", "1"), ("unknown\n", "0")] {
             rig.claude_says("version", said);
@@ -3040,18 +3054,10 @@ esac"#;
             agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None).await;
         assert!(listed.available);
         assert_eq!(listed.signed_in, Some(false));
-        let computer =
-            crate::machine::computer_name().unwrap_or_else(|| "this computer".to_string());
+        let sentence = format!("Claude Code on {} isn't signed in.", this_computer());
+        assert_eq!(listed.detail, Some(sentence.clone()));
         let result = rig.start(&rig.project(), Some("hi")).await;
-        assert_eq!(
-            result,
-            failed(
-                StartFailure::LaunchFailed,
-                format!(
-                    "Claude Code isn't signed in on {computer}. Sign in with Claude Code there."
-                )
-            )
-        );
+        assert_eq!(result, failed(StartFailure::LaunchFailed, sentence));
         assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
     }
 
