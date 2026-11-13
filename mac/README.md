@@ -1081,7 +1081,7 @@ its run (`starting`, under its `request_id`) before anything runs, makes the run
 folder `runs/<uid>/` under the CodeConnect folder (0700), and runs the agent host,
 `cc-agent-host <run folder>`, through the user's login shell in a session of its
 own, so it outlives the daemon; ccd hands the host the first message as the run's
-`start` over the run's link (the host does not yet run claude with it).
+`start` over the run's link, and the host runs that claude with it.
 A Codex start runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
