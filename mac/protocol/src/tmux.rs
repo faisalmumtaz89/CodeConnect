@@ -130,8 +130,9 @@ pub fn path_hits(name: &str) -> Vec<PathBuf> {
     }
 }
 
-/// [`path_hits`] over a given `PATH` value and current directory.
-fn hits_on(path: &std::ffi::OsStr, cwd: Option<&Path>, name: &str) -> Vec<PathBuf> {
+/// [`path_hits`] over a given `PATH` value and current directory: another
+/// process's, such as a login shell's.
+pub fn hits_on(path: &std::ffi::OsStr, cwd: Option<&Path>, name: &str) -> Vec<PathBuf> {
     std::env::split_paths(path)
         .filter_map(|dir| match dir.is_absolute() {
             true => Some(dir),

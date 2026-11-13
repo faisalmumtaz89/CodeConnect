@@ -4,6 +4,7 @@
       {
         "agent": "claude",
         "available": true,
+        "detail": "Claude Code on this computer isn't signed in.",
         "models": [
           {
             "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",

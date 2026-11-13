@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 pub mod agent;
 pub mod build_identity;
+pub mod claude_bin;
 pub mod composite_id;
 pub mod config;
 pub mod event;

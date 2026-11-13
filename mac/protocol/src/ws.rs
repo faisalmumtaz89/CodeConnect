@@ -894,7 +894,8 @@ pub struct Project {
 pub struct AgentAvailability {
     pub agent: crate::agent::AgentKind,
     pub available: bool,
-    /// Why not, safe to show verbatim; absent when available.
+    /// Why a start would be refused, safe to show verbatim: for an agent not
+    /// available, and for a signed-out Claude Code. Absent when a start goes ahead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// The models the agent offers a start (minor 33), in its own order and its
@@ -905,7 +906,8 @@ pub struct AgentAvailability {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<AgentModel>,
     /// Whether the agent is signed in (minor 33), to show; absent when not known.
-    /// A start does not depend on it: a signed-out agent asks for a sign-in itself.
+    /// A signed-out Claude Code is refused at the start; a signed-out Codex asks for
+    /// a sign-in itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_in: Option<bool>,
 }

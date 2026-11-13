@@ -1063,12 +1063,19 @@ token. `list_projects` is answered with
 `projects`: every folder a session has started in, most recent first, kept in
 its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
-agent can start (`codeconnect <agent> --version` through the user's login
-shell) as last checked: the first list after the daemon starts waits for the
+agent can start as last checked (Claude Code: the check a start makes, below;
+Codex: `codeconnect codex --version` through the user's login shell): the first list after the daemon starts waits for the
 check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt}` takes a listed
 folder (from `>= 30`, any absolute folder) and a first message, and a start
 without one (`prompt` absent, empty or only white space) is refused with
-`launch_failed` before anything is checked or run. It runs `codeconnect <agent> --no-attach -- <prompt>` there through
+`launch_failed` before anything is checked or run. A Claude Code start is then
+checked, before anything runs: the daemon finds the claude the launcher would run,
+from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
+the login shell's `PATH`, and asks that claude itself its `--version` and
+`auth status` from the login shell. It is `agent_missing` when no claude is found,
+and `launch_failed` when it is older than 2.1.268, does not say its version, or is
+signed out (`auth status` exits 1 with `loggedIn` false). `auth status` is read for
+`loggedIn` only; nothing else it prints is kept. It runs `codeconnect <agent> --no-attach -- <prompt>` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise), every value an argument of its own. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
@@ -1152,16 +1159,16 @@ read is omitted. The sample is answered off the connection's loop, so nothing
 else on it waits for the half second.
 `>= 33` lets a start pick the agent's model. Each agent in `projects` carries
 `models`, `{value, label, detail?}` in the agent's own order and words, and
-`signed_in`, to show (a start does not depend on it). The daemon asks the agent
-itself, through the launcher from the home folder, once `--version` says it is
-there: Claude Code as `codeconnect claude -p --input-format stream-json
+`signed_in`, to show: a signed-out Claude Code's start is refused, and a Codex
+start does not depend on it. The daemon asks the agent itself from the home folder,
+once `--version` says it is there: Claude Code as `<claude> -p --input-format stream-json
 --output-format stream-json --verbose --no-session-persistence
 --strict-mcp-config --settings '{"disableAllHooks":true}'`, which answers one
 `initialize` with its models, its own `default` first with the model that is now;
 Codex as `codeconnect codex app-server`, which answers `model/list` (hidden models
-left out) and `account/read`. Claude Code with no token and no API key, for
-Anthropic's own API, is signed out; Codex is signed in when it holds an account or
-needs no OpenAI sign-in. An agent keeps its own books as it starts: Claude Code
+left out) and `account/read`. Claude Code is signed in when `auth status` exits 0
+with `loggedIn` true, signed out when it exits 1 with it false, and otherwise not
+known; Codex is signed in when it holds an account or needs no OpenAI sign-in. An agent keeps its own books as it starts: Claude Code
 refreshes its caches in `~/.claude.json`, and Codex begins a plugin sync that the
 ask cuts short, leaving a 4 KB `~/.codex/.tmp/git-*` it never removes. So an
 answer that says signed in is kept until the agent's `--version` changes or the
@@ -1419,7 +1426,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
-| `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is `CODECONNECT_CLAUDE_BIN` if set, then the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. |
+| `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is `CODECONNECT_CLAUDE_BIN` if set, then the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds, without `CODECONNECT_CLAUDE_BIN`. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is `CODECONNECT_CODEX_BIN` if set, then the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
