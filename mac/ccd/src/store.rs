@@ -1974,8 +1974,8 @@ impl Store {
     ///
     /// Each read is narrowed in SQL to the rows that can decide its fact under
     /// [`protocol::facts`] — a `session_start` or a user line for the model, a
-    /// hook or Claude's permission-mode line for the mode — so a long run costs
-    /// those rows down to the deciding one, not its whole log.
+    /// hook, Claude's permission-mode line or an SDK run's init for the mode — so a
+    /// long run costs those rows down to the deciding one, not its whole log.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
         let conn = self.read();
         Ok(protocol::facts::SessionFacts {

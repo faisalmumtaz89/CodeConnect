@@ -1,7 +1,8 @@
 //! Claude Agent SDK messages as CodeConnect events.
 //!
-//! One event per SDK message, as the transcript tailer files one per transcript
-//! line, so an app reads an SDK event as it reads a transcript line: an assistant
+//! One event per SDK message that has a row (a result files two: the turn's end and
+//! its usage), as the transcript tailer files one per transcript line, so an app
+//! reads an SDK event as it reads a transcript line: an assistant
 //! message is one `agent_message` whose content blocks carry its text, thinking and
 //! tool calls. A payload keeps only the fields a reader uses, never the whole
 //! message, so the account's metadata the SDK yields with every turn never reaches
@@ -11,8 +12,8 @@
 //! and is kept like any tool call.
 //!
 //! What is not a row comes back as a [`Signal`]: the echo of a person's message,
-//! a stamped command's lifecycle, the session id every `system/init` carries, and
-//! a `/clear`. A subagent's own messages, and every type with no row here, are
+//! a stamped command's lifecycle, the session id and the folder every `system/init`
+//! carries, and a `/clear`. A subagent's own messages, and every type with no row here, are
 //! skipped.
 
 use serde_json::{json, Map, Value};
@@ -267,8 +268,9 @@ mod tests {
         )
     }
 
-    /// **The events of the recorded session, emitted by this build.** It is the
-    /// fixture for the apps' readers of `sdk` events.
+    /// **The events of the recorded session, emitted by this build:** the mapper's own
+    /// gate. The apps' readers test against what ccd files and sends,
+    /// `fixtures/claude/sdk-session-events.json`.
     #[test]
     fn the_sdk_session_wire_fixture_is_what_this_build_emits() {
         let committed: Value = serde_json::from_str(WIRE).unwrap();

@@ -1505,10 +1505,12 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **G2b:** an SDK message before the start's outcome is not applied, since the host
-    /// sends the outcome first: it files nothing and is not acknowledged.
+    /// **G2b:** an SDK message is applied only in a live run. Before the start's outcome,
+    /// and after a refusal, the host sends none (the outcome first; nothing but claude's
+    /// end after a refusal), and one that came would file nothing and not be
+    /// acknowledged.
     #[tokio::test]
-    async fn an_sdk_message_before_the_outcome_is_not_applied() {
+    async fn an_sdk_message_outside_a_live_run_is_not_applied() {
         let rig = rig();
         let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
@@ -1522,6 +1524,31 @@ mod tests {
         });
         assert!(stored(&rig, &uid).is_empty());
         assert_eq!(cursor(&rig, &uid), 1);
+
+        let rig = self::rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (_, uid) = tokio::join!(
+            start(&daemon, run(&rig, "req-refused", &cwd, &host)),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "refused", "detail": "claude refused it"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                sdk(&mut played.write, 3, capture()[2].clone()).await;
+                assert_eq!(next(&mut played.lines).await, None);
+                stop(&played.dir);
+                played.uid
+            }
+        );
+        assert!(stored(&rig, &uid).is_empty());
+        assert_eq!(cursor(&rig, &uid), 2);
     }
 
     /// **G3b:** a run is in the folder its init names: a new worktree's, which claude
@@ -1881,17 +1908,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(filed.len(), 1, "claude's init is the run's one event");
-        assert_eq!(filed[0]["kind"], "session_start");
-        assert_eq!(filed[0]["source"], "sdk");
-        assert_eq!(filed[0]["payload"]["model"], session_init["model"]);
-        assert_eq!(filed[0]["turn_id"], session_init["uuid"]);
-        assert_eq!(filed[0]["item_id"], session_init["uuid"]);
-        assert_eq!(
-            cursor(&rig, &uid),
-            3,
-            "the state, the outcome and the init are committed"
-        );
+        let committed = cursor(&rig, &uid);
         // SAFETY: getsid(2) and kill(2) with signal 0 only read one process's state.
         assert_eq!(unsafe { libc::getsid(pid) }, pid);
         tokio::time::sleep(Duration::from_secs(31)).await;
@@ -1899,6 +1916,17 @@ mod tests {
         // SAFETY: kill(2) of the process group this test's host leads (its recorded pid),
         // which holds the host and its stand-in claude.
         unsafe { libc::kill(-pid, libc::SIGTERM) };
+        // Checked once the host is stopped, so a failing check leaves no host behind.
+        assert_eq!(filed.len(), 1, "claude's init is the run's one event");
+        assert_eq!(filed[0]["kind"], "session_start");
+        assert_eq!(filed[0]["source"], "sdk");
+        assert_eq!(filed[0]["payload"]["model"], session_init["model"]);
+        assert_eq!(filed[0]["turn_id"], session_init["uuid"]);
+        assert_eq!(filed[0]["item_id"], session_init["uuid"]);
+        assert_eq!(
+            committed, 3,
+            "the state, the outcome and the init are committed"
+        );
 
         // Claude's own lines before its initialize answer, as a slow answer lets the
         // first message's lines come first: the host sends the start's outcome before
