@@ -15,7 +15,7 @@ const golden = readFileSync(join(import.meta.dir, '..', '..', '..', 'fixtures', 
   .map((text) => JSON.parse(text) as { dir: string; message: { type?: string; protocol_version?: number } });
 const typeOf: Record<string, string> = { to_host: 'ToHost', from_host: 'FromHost', host_json: 'HostFile' };
 
-test('every golden line is a value of its type, every variant has a line, and link.ts type-checks', () => {
+test('every golden line is a value of its type, every variant has a line, and link.ts and start.ts type-check', () => {
   const module = [`import type { FromHost, HostFile, ToHost } from ${JSON.stringify(join(src, 'protocol.ts'))};`];
   golden.forEach(({ dir, message }, index) => {
     expect(typeOf[dir]).toBeDefined();
@@ -30,7 +30,7 @@ test('every golden line is a value of its type, every variant has a line, and li
   try {
     writeFileSync(join(dir, 'golden.ts'), `${module.join('\n')}\n`);
     const check = Bun.spawnSync([process.execPath, 'check', '--no-pretty', '--exactOptionalPropertyTypes',
-      join(dir, 'golden.ts'), join(src, 'link.ts')], { env: { ...process.env, BUN_BE_BUN: '1' } });
+      join(dir, 'golden.ts'), join(src, 'link.ts'), join(src, 'start.ts')], { env: { ...process.env, BUN_BE_BUN: '1' } });
     // golden.ts's row n + 1 holds golden line n; the rows after them are the variant checks.
     const errors = `${check.stdout}${check.stderr}`.replace(/\S*golden\.ts\((\d+),\d+\)/g, (_, row: string) =>
       Number(row) - 1 <= golden.length ? `golden line ${Number(row) - 1}` : 'every variant has a line');
