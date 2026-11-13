@@ -8912,6 +8912,7 @@ mod tests {
     /// branch rides along. The list's agent check asks the test's own claude.
     #[tokio::test]
     async fn list_projects_answers_a_paired_device_with_its_folders() {
+        let _env = crate::ProcessEnvRead::take();
         let root = std::env::temp_dir().join(format!(
             "ccd-projects-{}-{}",
             std::process::id(),
@@ -8990,6 +8991,11 @@ mod tests {
             .map(|agent| agent["agent"].as_str().unwrap())
             .collect();
         assert_eq!(agents, ["claude", "codex"]);
+        assert_eq!(
+            reply["agents"][0]["available"], true,
+            "the stub claude was asked: {reply}"
+        );
+        assert_eq!(reply["agents"][0]["signed_in"], true, "{reply}");
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -8999,6 +9005,7 @@ mod tests {
     /// connection is answered first, well inside the sample's half second.
     #[tokio::test]
     async fn machine_stats_is_answered_without_holding_up_the_connection() {
+        let _env = crate::ProcessEnvRead::take();
         let (server, _device) = live_server(protocol::config::Config::default()).await;
         let (mut phone, ack) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
@@ -9721,6 +9728,8 @@ mod tests {
         use protocol::agent::AgentKind;
         use protocol::ws::{AgentAvailability, StartSessionResult};
 
+        let _env = crate::ProcessEnvRead::take();
+
         let root = std::path::Path::new("/tmp/ccd-minor-28");
         let (app, notes, gone) = (root.join("app"), root.join("notes"), root.join("gone"));
         std::fs::create_dir_all(&app).unwrap();
@@ -9944,6 +9953,7 @@ esac
     /// transports only. The list's agent check asks the test's own claude.
     #[tokio::test]
     async fn a_paired_device_on_the_operator_allowed_lan_may_start_and_browse() {
+        let _env = crate::ProcessEnvRead::take();
         let root = std::env::temp_dir().join(format!(
             "ccd-lan-start-{}-{}",
             std::process::id(),
@@ -9979,6 +9989,12 @@ esac
             _ => panic!("no projects reply within 30 s"),
         };
         assert_eq!(reply["type"], "projects", "{reply}");
+        assert_eq!(reply["agents"][0]["agent"], "claude", "{reply}");
+        assert_eq!(
+            reply["agents"][0]["available"], true,
+            "the stub claude was asked: {reply}"
+        );
+        assert_eq!(reply["agents"][0]["signed_in"], true, "{reply}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -10032,6 +10048,7 @@ esac
     /// answered once.
     #[tokio::test]
     async fn a_list_answers_again_when_its_check_finds_a_change() {
+        let _env = crate::ProcessEnvRead::take();
         let (root, claude, server) = list_rig("list-again").await;
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
@@ -10102,6 +10119,7 @@ esac
     /// last check's answer and then the new one.
     #[tokio::test]
     async fn the_device_that_listed_hears_what_its_check_found() {
+        let _env = crate::ProcessEnvRead::take();
         let (root, claude, server) = list_rig("list-again-wire").await;
         let (mut phone, _) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
@@ -10138,11 +10156,113 @@ esac
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// One list from a paired device on a fresh live server whose check asks a stub
+    /// claude, and the lines [`crate::start_session::claude_env_log`] gained meanwhile:
+    /// what the stub's runs saw of `HOME`, `PATH` and `XPC_SERVICE_NAME`.
+    async fn canary_of_one_list(tag: &str) -> Vec<String> {
+        let log = crate::start_session::claude_env_log();
+        let from = std::fs::metadata(&log).map_or(0, |meta| meta.len() as usize);
+        let root = std::env::temp_dir().join(format!(
+            "ccd-{tag}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (claude, _) = crate::start_session::test_claude(&root);
+        let (server, _) = live_server(protocol::config::Config {
+            claude_bin: Some(claude.display().to_string()),
+            ..Default::default()
+        })
+        .await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        phone
+            .send(Message::Text(r#"{"type":"list_projects"}"#.into()))
+            .await
+            .unwrap();
+        match next_frame(&mut phone, Duration::from_secs(30)).await {
+            Frame::Json(reply) => assert_eq!(reply["type"], "projects", "{reply}"),
+            _ => panic!("no projects reply within 30 s"),
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        let said = std::fs::read_to_string(&log).unwrap_or_default();
+        said.get(from..)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// **A list never runs in a `HOME` another test set**: the check that fails when
+    /// a writer no longer takes the process-environment lock. A thread installs a fake
+    /// `HOME`, says so, and lets it go by itself 3 s later; only then does this test
+    /// list. With the lock, the list waits for the writer, so the stub claude never
+    /// sees the fake `HOME`. Without it, the probe runs in it. The writer never waits
+    /// for the reader, so this cannot deadlock. Ignored: it holds a writer for 3 s, so
+    /// it is run alone.
+    #[tokio::test]
+    #[ignore = "holds the process-environment lock's writer for 3 s: run alone"]
+    async fn a_list_never_runs_in_a_home_another_test_set() {
+        let (placed, in_place) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let home = crate::legacy_credentials::test_support::FakeHome::new("mf1");
+            placed.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(home);
+        });
+        in_place.recv().unwrap();
+        let _env = crate::ProcessEnvRead::take();
+        let lines = canary_of_one_list("mf1").await;
+        writer.join().unwrap();
+        assert!(!lines.is_empty(), "the stub claude was run");
+        assert!(
+            lines.iter().all(|line| !line.contains("/ccd-home-")),
+            "a probe ran in the fake HOME: {lines:?}"
+        );
+    }
+
+    /// **A list never takes the service branch for a label another test set**: the
+    /// same shape as `a_list_never_runs_in_a_home_another_test_set`, with
+    /// [`crate::LaunchdLabelEnv`] setting this build's own launchd label, which sends
+    /// `phone_environment` to launchd's session environment (`XPC_SERVICE_NAME=0`).
+    /// Run where the process itself has none of 0, as under `env -i`. Ignored: it
+    /// holds a writer for 3 s, so it is run alone.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "holds the process-environment lock's writer for 3 s: run alone"]
+    async fn a_list_never_takes_the_service_branch_for_a_label_another_test_set() {
+        let (placed, in_place) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let label = crate::LaunchdLabelEnv::take();
+            label.set(Some(protocol::launchd_label()));
+            placed.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(label);
+        });
+        in_place.recv().unwrap();
+        let _env = crate::ProcessEnvRead::take();
+        assert_ne!(
+            std::env::var_os("XPC_SERVICE_NAME").as_deref(),
+            Some(std::ffi::OsStr::new("0")),
+            "this process's own XPC_SERVICE_NAME is 0: run it under env -i"
+        );
+        let lines = canary_of_one_list("mf2").await;
+        writer.join().unwrap();
+        assert!(!lines.is_empty(), "the stub claude was run");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.ends_with("XPC_SERVICE_NAME=0")),
+            "a probe took the service branch: {lines:?}"
+        );
+    }
+
     /// A run starts with a first message. A start without one is refused
     /// before anything is launched, whatever else it names; with one, the same request
     /// goes on to the ordinary checks.
     #[tokio::test]
     async fn a_start_without_a_first_message_is_refused_before_anything_runs() {
+        let _env = crate::ProcessEnvRead::take();
         let (server, _) = live_server(protocol::config::Config::default()).await;
         let (mut phone, _) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
