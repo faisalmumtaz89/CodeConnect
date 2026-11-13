@@ -190,8 +190,9 @@ pub enum ClientMessage {
     /// narrow: `session_uid`, never a tmux name, because a name is handed to the
     /// next run and a phone that deleted "cc-1" could destroy a session it never
     /// saw. A **hosted** run (in tmux, or through the agent host ccd started for
-    /// it) is refused until it has ended: `exited`, or `failed` for a start whose
-    /// host never came up. An **adopted** one (empty `tmux_session` and no host of
+    /// it) is refused until it has ended: `exited`, or `failed` for a start that
+    /// never began (its host did not come up, or its start was refused). An
+    /// **adopted** one (empty `tmux_session` and no host of
     /// ccd's — CodeConnect never launched it, so no proof of its end can ever
     /// exist) is accepted at any lifecycle, and its deletion also stops
     /// observation of that conversation until a new session start re-adopts it.
