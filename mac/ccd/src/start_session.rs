@@ -2007,7 +2007,7 @@ mod tests {
         );
         let answered = rig.start_answering(&path, Some(Trust::Trusted)).await;
         assert!(
-            matches!(&answered, StartSessionResult::Failed { detail, .. } if detail.contains("isn't signed in")),
+            matches!(&answered, StartSessionResult::Failed { detail, .. } if detail.contains("isn’t signed in")),
             "{answered:?}"
         );
         assert_eq!(rig.launcher_runs(), 0, "a signed-out claude's start ran");
