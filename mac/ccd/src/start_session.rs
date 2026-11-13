@@ -151,6 +151,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                     worktree.as_ref(),
                     model.as_deref(),
                     &environment,
+                    trust,
                 );
                 return ServerMessage::StartSessionResult {
                     result: daemon.starts.once(&request_id, start).await,
@@ -339,31 +340,8 @@ pub(crate) async fn launch(
     if let Some(refusal) = refusal(agent, path, prompt) {
         return refusal;
     }
-    // The folder question, by the folder's real path: an answer given is kept,
-    // and with none given or kept nothing runs and the app asks.
-    let folder = match std::fs::canonicalize(path) {
-        Ok(folder) => folder.to_string_lossy().into_owned(),
-        Err(err) => return failed(StartFailure::LaunchFailed, format!("{path}: {err}")),
-    };
-    let answered = match trust {
-        Some(trust) => db
-            .set_folder_trust(folder.clone(), trust)
-            .await
-            .map(|()| true),
-        None => db
-            .folder_trust(folder.clone())
-            .await
-            .map(|kept| kept.is_some()),
-    };
-    match answered {
-        Ok(true) => {}
-        Ok(false) => return StartSessionResult::NeedsTrust { path: folder },
-        Err(err) => {
-            return failed(
-                StartFailure::LaunchFailed,
-                format!("the folder's answer could not be read or kept: {err}"),
-            )
-        }
+    if let Some(asked) = folder_question(db, path, trust).await {
+        return asked;
     }
     if *agent == AgentKind::Claude {
         if let Err(refusal) = claude_preflight(environment, claude_bin).await {
@@ -492,12 +470,43 @@ fn refusal(agent: &AgentKind, path: &str, prompt: Option<&str>) -> Option<StartS
     }
 }
 
+/// The folder question, by the folder's real path: an answer given is kept, and with
+/// none given or kept nothing runs and the app asks. `None` lets the start go on.
+async fn folder_question(
+    db: &crate::db::Db,
+    path: &str,
+    trust: Option<Trust>,
+) -> Option<StartSessionResult> {
+    let folder = match std::fs::canonicalize(path) {
+        Ok(folder) => folder.to_string_lossy().into_owned(),
+        Err(err) => return Some(failed(StartFailure::LaunchFailed, format!("{path}: {err}"))),
+    };
+    let answered = match trust {
+        Some(trust) => db
+            .set_folder_trust(folder.clone(), trust)
+            .await
+            .map(|()| true),
+        None => db
+            .folder_trust(folder.clone())
+            .await
+            .map(|kept| kept.is_some()),
+    };
+    match answered {
+        Ok(true) => None,
+        Ok(false) => Some(StartSessionResult::NeedsTrust { path: folder }),
+        Err(err) => Some(failed(
+            StartFailure::LaunchFailed,
+            format!("the folder's answer could not be read or kept: {err}"),
+        )),
+    }
+}
+
 /// A Claude start: the run its request already has (H1), or the start's checks, then
 /// its row and its agent host ([`crate::claude_host`]). Everything that can refuse the
 /// start comes before the row, so a refused start leaves none: the cheap refusals,
-/// the claude check, the host, and `launcher` (the `codeconnect` that runs the mail
-/// server), all before the place, the one step that can change the repository. A new
-/// worktree is claude's to make, as `--worktree` makes it today.
+/// the folder question, the claude check, the host, and `launcher` (the `codeconnect`
+/// that runs the mail server), all before the place, the one step that can change the
+/// repository. A new worktree is claude's to make, as `--worktree` makes it today.
 #[allow(clippy::too_many_arguments)]
 async fn claude_start(
     daemon: &Arc<Daemon>,
@@ -509,6 +518,7 @@ async fn claude_start(
     worktree: Option<&StartWorktree>,
     model: Option<&str>,
     environment: &HashMap<OsString, OsString>,
+    trust: Option<Trust>,
 ) -> StartSessionResult {
     match daemon
         .db
@@ -526,6 +536,9 @@ async fn claude_start(
     }
     if let Some(refusal) = refusal(&AgentKind::Claude, path, Some(prompt)) {
         return refusal;
+    }
+    if let Some(asked) = folder_question(&daemon.db, path, trust).await {
+        return asked;
     }
     let ready = match claude_preflight(environment, daemon.config.claude_bin.as_deref()).await {
         Ok(ready) => ready,
@@ -2068,6 +2081,7 @@ mod tests {
             None,
             None,
             &environment,
+            Some(Trust::Trusted),
         )
         .await;
         let run = daemon
@@ -2118,6 +2132,7 @@ mod tests {
             None,
             None,
             &environment,
+            Some(Trust::Trusted),
         )
         .await;
         let row = daemon
@@ -2133,6 +2148,71 @@ mod tests {
         );
         assert_eq!(row, None, "a refused start wrote a row");
         assert!(!folder, "a refused start made a run folder");
+    }
+
+    /// **A Claude start asks the folder question first.** In a folder nobody has
+    /// answered for, it is answered `needs_trust` with the folder's real path before
+    /// its claude is checked, and leaves no row and no run folder. Answered, the same
+    /// start goes on to the check and its row.
+    #[tokio::test]
+    async fn a_claude_start_asks_the_folder_question_first() {
+        let root = arm_root("5");
+        let (claude, environment) = test_claude(&root);
+        let host = root.join("stand-in-host");
+        std::fs::write(&host, "#!/bin/sh\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let project = root.join("project");
+        let real = std::fs::canonicalize(&project)
+            .unwrap()
+            .display()
+            .to_string();
+        let start = |request_id: &'static str, trust: Option<Trust>| {
+            claude_start(
+                &daemon,
+                Ok(root.join("codeconnect")),
+                &root,
+                request_id,
+                project.to_str().unwrap(),
+                "fix the tests",
+                None,
+                None,
+                &environment,
+                trust,
+            )
+        };
+        let asked = start("req-ask", None).await;
+        let asked_row = daemon
+            .db
+            .hosted_run_for_request("req-ask".into())
+            .await
+            .unwrap();
+        let asked_folder = root.join("runs").exists();
+        let checked_before = claude.with_extension("argv").exists();
+        start("req-answered", Some(Trust::Trusted)).await;
+        let answered_row = daemon
+            .db
+            .hosted_run_for_request("req-answered".into())
+            .await
+            .unwrap();
+        let checked = std::fs::read_to_string(claude.with_extension("argv")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(asked, StartSessionResult::NeedsTrust { path: real });
+        assert_eq!(asked_row, None, "an unanswered start wrote a row");
+        assert!(!asked_folder, "an unanswered start made a run folder");
+        assert!(
+            !checked_before,
+            "the claude was checked before the folder was answered for"
+        );
+        assert!(answered_row.is_some(), "the answered start wrote no row");
+        assert!(
+            checked.contains("--version"),
+            "the answered start did not check its claude: {checked}"
+        );
     }
 
     /// A Claude start the host or the launcher refuses leaves the repository as it was:
@@ -2160,6 +2240,7 @@ mod tests {
             }),
             None,
             &environment,
+            Some(Trust::Trusted),
         )
         .await;
         let worktrees = git(&project, &["worktree", "list", "--porcelain"]);
@@ -2209,6 +2290,7 @@ mod tests {
             None,
             None,
             &environment,
+            Some(Trust::Trusted),
         )
         .await;
         let run = daemon

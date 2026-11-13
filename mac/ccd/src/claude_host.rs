@@ -291,7 +291,8 @@ fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
         // The app chooses no mode at a start, so claude picks its own: the person's
         // `defaultMode`, else its default.
         permission_mode: None,
-        // A run is trusted only on the start's folder answer, and this start carries none.
+        // Not trusted, whatever the folder's answer: that answer decides only whether
+        // the start goes on (start_session's folder question).
         trust: Trust::NotTrusted,
         resume: None,
         model: run
