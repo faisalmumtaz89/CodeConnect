@@ -1080,6 +1080,7 @@ private struct FolderMachineSection: View {
 
     private func folderRow(_ folder: FolderAnswer) -> some View {
         let trusted = folder.trust == .trusted
+        let name = (folder.path as NSString).lastPathComponent
         return VStack(alignment: .leading, spacing: CC.space.sm) {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
                 Text(verbatim: folder.path)
@@ -1101,7 +1102,11 @@ private struct FolderMachineSection: View {
                     trusted ? "Don’t Trust" : "Trust",
                     variant: .secondary, size: .sm,
                     action: { change(folder.path, to: trusted ? .notTrusted : .trusted) })
+                    .accessibilityLabel(trusted ? "Don’t Trust \(name)" : "Trust \(name)")
+                    .accessibilityIdentifier("folder-trust-\(folder.path)")
                 CCButton("Forget", variant: .ghost, size: .sm, action: { forget(folder.path) })
+                    .accessibilityLabel("Forget \(name)")
+                    .accessibilityIdentifier("folder-forget-\(folder.path)")
                 Spacer(minLength: 0)
             }
             .disabled(changing.contains(folder.path))

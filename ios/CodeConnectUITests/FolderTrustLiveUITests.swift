@@ -184,18 +184,17 @@ final class FolderTrustLiveUITests: XCTestCase {
         let listed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'proj-c'")).firstMatch
         XCTAssertTrue(listed.waitForExistence(timeout: 20), "proj-c listed in Settings › Folders")
         shot(app, "4-folders-listed")
-        // Forget proj-c and watch its row leave. The acceptance runs one method per
-        // fresh rig, so proj-c is the only kept answer here and its Forget is the one
-        // Forget control; the assertion is that the count of Forget controls drops,
-        // which is scoped to this pane (so proj-c's path still showing in the fleet
-        // rows behind Settings cannot confuse it).
-        let forgetCount = { app.buttons.matching(NSPredicate(format: "label == 'Forget'")).count }
-        let before = forgetCount()
-        XCTAssertGreaterThan(before, 0, "proj-c's Forget control is listed")
-        app.buttons.matching(NSPredicate(format: "label == 'Forget'")).firstMatch.tap()
-        let forgotten = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in forgetCount() == before - 1 }, object: nil)
-        XCTAssertEqual(XCTWaiter().wait(for: [forgotten], timeout: 15), .completed, "proj-c was forgotten (its Folders row is gone)")
+        // Forget proj-c by its OWN row's control. Each row's Forget now names its
+        // folder for VoiceOver ("Forget proj-c"), which is also how this reaches the
+        // one row rather than a bare "Forget" shared by every row. That name is the
+        // must-fail: on the old screen every Forget read the bare word and this query
+        // found nothing.
+        let forget = app.buttons["Forget proj-c"]
+        XCTAssertTrue(forget.waitForExistence(timeout: 15), "proj-c's Forget names its folder (VoiceOver)")
+        forget.tap()
+        let gone = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in !app.buttons["Forget proj-c"].exists }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, "proj-c's row left after Forget")
         shot(app, "4-forgotten")
     }
 
