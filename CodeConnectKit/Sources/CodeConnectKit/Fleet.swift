@@ -413,12 +413,13 @@ public enum FleetStatusRule {
     /// arrived and was non-zero. So this reads a fact the daemon reported rather
     /// than inferring one from what the agent printed.
     ///
-    /// **This is currently unreachable, deliberately.** Both writers of
-    /// `session_end` send `exit_code: null` — the supervisor because it proves
-    /// death by tmux absence and never sees a status, the daemon's sweep for the
-    /// same reason. Until something observes a real exit status, every ended run is
-    /// `Ended`, which is what is known. Inventing a failure from weaker evidence is
-    /// the defect this replaced.
+    /// **Only a Claude run started from the app reaches this.** Its agent host
+    /// reports claude's own exit and the daemon files that code, so a non-zero
+    /// exit reads `Failed`. Every other `session_end` carries `exit_code: null` —
+    /// the supervisor's because it proves death by tmux absence and never sees a
+    /// status, the daemon's sweep for the same reason, and the daemon's own when a
+    /// run's agent host is gone. Those runs are `Ended`, which is what is known.
+    /// Inventing a failure from weaker evidence is the defect this replaced.
     private static func endedAbnormally(_ shown: SessionState.Shown?) -> Bool {
         guard let shown else { return false }
         return shown.timeline.reversed().contains { item in
