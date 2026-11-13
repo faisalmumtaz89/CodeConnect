@@ -198,4 +198,28 @@ final class FolderTrustLiveUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [forgotten], timeout: 15), .completed, "proj-c was forgotten (its Folders row is gone)")
         shot(app, "4-forgotten")
     }
+
+    /// Two taps on an answer start ONE session, not two. The answer button carries
+    /// no explicit double-tap guard (nor does the Ready bar's start-go); the sheet
+    /// dismissing on the first answer is what keeps the second tap from starting a
+    /// second run, and this holds it to that. test4 owns proj-d so the question is
+    /// always asked here regardless of what another test trusted.
+    func test4_doubleTapStartsOneSession() throws {
+        let app = try launch()
+        reachReady(app, folder: "proj-d", message: "work on proj-d")
+        app.buttons["start-go"].tap()
+        let yes = app.buttons["trust-yes"]
+        XCTAssertTrue(yes.waitForExistence(timeout: 25), "the folder-trust question")
+        // Each started session is one button identified `session-<key>` (FleetView).
+        let sessions = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'"))
+        // Must-fail control: before the answer there is none, so the "exactly one"
+        // below is seen to tell the states apart rather than always reading one.
+        XCTAssertEqual(sessions.count, 0, "no session has started before the answer")
+        yes.doubleTap()
+        backToProjects(app)
+        XCTAssertTrue(sessions.firstMatch.waitForExistence(timeout: 25),
+                      "the started session appears in the fleet")
+        XCTAssertEqual(sessions.count, 1, "the double-tap started exactly one session, not two")
+        shot(app, "4a-double-tap-one-session")
+    }
 }
