@@ -3,17 +3,20 @@ import SwiftUI
 
 // MARK: - 2 · Steps
 
-/// What reopening the start flow needs to put every earlier answer back: the
-/// folder question's Back returns here, so the typed first message and the
-/// computer, folder, agent and place survive instead of being lost to a fresh
-/// flow (decision 168, placement 1B). Built from the `SessionStart` the question
-/// stands on.
+/// Reopening the start sheet to ask the folder question (decision 168, placement
+/// 1B): the sheet lands on the trust step with the folder's path, over the Ready
+/// form rebuilt from the earlier answers — so the typed first message and the
+/// computer, folder, agent and place are all still there, and the question's
+/// Back is a plain sheet pop to that form. Built from the `SessionStart` the
+/// `needsTrust` outcome stands on.
 struct StartSeed {
     let context: StartContext
     let project: StartProject
     let place: StartPlace
     let agent: StartAgent
     let message: String
+    /// The folder the question is about.
+    let trustPath: String
 }
 
 /// New session, one question a screen: which computer, which folder (a recent
@@ -31,7 +34,7 @@ struct StartStepsSheet: View {
     /// back retraces the way in; nil is the home folder, which the computer
     /// names.
     enum Screen: Hashable {
-        case computer, folder, browse(String?), agent, branch, newWorktree, start
+        case computer, folder, browse(String?), agent, branch, newWorktree, start, trust
     }
 
     @State private var trail: [Screen] = [.computer]
@@ -55,6 +58,8 @@ struct StartStepsSheet: View {
     /// The computer tapped on the first step, held from then on: a link that
     /// drops later neither takes it away nor hands its choices to another.
     @State private var chosen: StartContext?
+    /// Set when the sheet opens on the folder question: the folder it is about.
+    @State private var trustPath: String?
 
     init(
         contexts: [StartContext], seed: StartSeed? = nil,
@@ -64,18 +69,20 @@ struct StartStepsSheet: View {
         self.onStarted = onStarted
         self.onClose = onClose
         guard let seed else { return }
-        // Reopened from the folder question's Back: land on Ready with the
-        // computer, folder, agent, place and typed message as they were, and a
-        // trail that still lets every "Change" step back to its own screen. The
-        // branch screen is in the trail only for a repository, which is the one
-        // place the Ready summary offers a Branch row to revisit.
+        // Reopened to ask the folder question: rebuild the Ready form from the
+        // earlier answers (computer, folder, agent, place, typed message) with a
+        // trail that still lets every "Change" step back to its own screen, then
+        // land on the trust step over it, so the question's Back is a sheet pop
+        // to that form. The branch screen is in the trail only for a repository,
+        // the one place Ready offers a Branch row to revisit.
         _chosen = State(initialValue: seed.context)
         _project = State(initialValue: seed.project)
         _agent = State(initialValue: seed.agent)
         _place = State(initialValue: seed.place)
         _message = State(initialValue: seed.message)
+        _trustPath = State(initialValue: seed.trustPath)
         let isRepo = seed.context.git(seed.project.path).map { $0 != nil } ?? seed.context.branchAhead(seed.project)
-        let steps: [Screen] = [.computer, .folder, .agent] + (isRepo ? [.branch] : []) + [.start]
+        let steps: [Screen] = [.computer, .folder, .agent] + (isRepo ? [.branch] : []) + [.start, .trust]
         _trail = State(initialValue: steps)
     }
 
@@ -135,6 +142,7 @@ struct StartStepsSheet: View {
         case .branch: return "Which branch?"
         case .newWorktree: return "New worktree"
         case .start: return "Ready to start"
+        case .trust: return "New session"
         }
     }
 
@@ -143,7 +151,7 @@ struct StartStepsSheet: View {
     private var subtitle: String? {
         switch screen {
         case .computer, .start: return nil
-        case .folder, .browse: return chosen?.machineName
+        case .folder, .browse, .trust: return chosen?.machineName
         case .agent, .branch, .newWorktree: return project?.name
         }
     }
@@ -159,6 +167,7 @@ struct StartStepsSheet: View {
         case .branch: branchStep
         case .newWorktree: newWorktreeStep
         case .start: startStep
+        case .trust: trustStep
         }
     }
 
@@ -612,6 +621,27 @@ struct StartStepsSheet: View {
         onStarted(context.start(project, place: place, agent: agent, prompt: message))
     }
 
+    // MARK: Trust
+
+    /// The folder question as a step of the sheet (decision 168): the approved
+    /// card under the sheet's own chrome — "New session" over the computer's
+    /// name, a round Back to the Ready form behind it. An answer re-sends the
+    /// start carrying it, and the sheet gives way to the session as any Start
+    /// does.
+    @ViewBuilder
+    private var trustStep: some View {
+        if let project, let agent, let trustPath {
+            ScrollView {
+                TrustFolderCard(path: trustPath, computerName: context.machineName) { trust in
+                    onStarted(context.start(project, place: place, agent: agent, prompt: message, trust: trust))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(CC.space.md)
+            }
+            .accessibilityIdentifier("start-list")
+        }
+    }
+
     /// One choice made, named, and a tap back to the screen that made it.
     /// `oneLine` for a path, cut from the front; every other value wraps.
     private func summary(
@@ -701,12 +731,12 @@ struct TrustFolderCard: View {
                     .ccType(CC.type.title)
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
-                // Free-standing, the block would step its text out to the content
-                // column and hang its border, landing the path a second edge in
-                // from the title; declaring the inset the card already carries
-                // lands its text on the title's edge instead.
+                // Drawn flush, so the box's border sits on the one left edge the
+                // title, the body and the answers card below it all share; free-
+                // standing it would hang its border out into a gutter this card
+                // does not have.
                 CCMonoBlock(path, lineLimit: 2, truncation: .head, isSmall: true)
-                    .ccColumnInset(CC.space.md)
+                    .ccCentredContent()
             }
 
             CCProse(

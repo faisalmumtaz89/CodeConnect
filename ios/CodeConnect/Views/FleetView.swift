@@ -323,8 +323,7 @@ struct FleetView: View {
                         openStart()
                     }
                 },
-                onAnswer: { path = [SessionRoute(key: "start-\($0)", startRequestID: $0)] },
-                onBackToForm: { reopenStart(seededBy: $0) }
+                onNeedsTrust: { openTrust($0, $1) }
             )
             .environment(
                 machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
@@ -894,11 +893,13 @@ struct FleetView: View {
         startOpen = true
     }
 
-    /// The folder question's Back: reopen the start form seeded from the start,
-    /// so the typed first message and the computer, folder, agent and place come
-    /// back as they were. The start's computer is the one still holding its
-    /// request; a link that dropped in between falls back to a fresh flow.
-    private func reopenStart(seededBy start: SessionStart) {
+    /// A start came back `needsTrust`: reopen the sheet on the folder question,
+    /// seeded from the start so the Ready form behind it still carries the typed
+    /// first message and the computer, folder, agent and place, and the
+    /// question's Back is a sheet pop to it. The start's computer is the one
+    /// still holding its request; a link that dropped in between falls back to a
+    /// fresh flow.
+    private func openTrust(_ start: SessionStart, _ folderPath: String) {
         guard canStart, let context = startContexts.first(where: { $0.starter.starts[start.id] != nil }) else {
             path = []
             Task {
@@ -909,7 +910,7 @@ struct FleetView: View {
         }
         startSeed = StartSeed(
             context: context, project: start.project, place: start.place, agent: start.agent,
-            message: start.prompt ?? "")
+            message: start.prompt ?? "", trustPath: folderPath)
         path = []
         Task {
             try? await Task.sleep(for: .milliseconds(450))
