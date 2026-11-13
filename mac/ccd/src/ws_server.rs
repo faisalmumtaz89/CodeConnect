@@ -10015,14 +10015,30 @@ esac
     /// (B17). The first list waits for its check and is answered once. After the
     /// stub claude signs in, the next list is answered from the last check (signed
     /// out) at once, while its own check is still held, and then with what that
-    /// check found. With nothing changed, a list is answered once.
+    /// check found, the same folder in both. With nothing changed, a list is
+    /// answered once.
     #[tokio::test]
     async fn a_list_answers_again_when_its_check_finds_a_change() {
         let (root, claude, server) = list_rig("list-again").await;
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        register_stub_session(&server.store, app.display().to_string());
+        let folders = |frame: &ServerMessage| match frame {
+            ServerMessage::Projects { projects, .. } => projects
+                .iter()
+                .map(|project| project.path.clone())
+                .collect::<Vec<_>>(),
+            other => panic!("not a projects frame: {other:?}"),
+        };
         let (replies, mut sent) = tokio::sync::mpsc::unbounded_channel();
         let drain = |sent: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMessage>| {
             let mut said = Vec::new();
             while let Ok(frame) = sent.try_recv() {
+                assert_eq!(
+                    folders(&frame),
+                    [app.display().to_string()],
+                    "every frame's folder"
+                );
                 said.push(claude_signed_in(&frame));
             }
             said
@@ -10050,6 +10066,7 @@ esac
             Some(false),
             "the last check's answer"
         );
+        assert_eq!(folders(&answer), [app.display().to_string()]);
         assert!(
             sent.try_recv().is_err(),
             "nothing more while the check is held"
