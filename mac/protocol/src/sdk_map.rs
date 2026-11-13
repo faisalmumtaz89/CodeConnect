@@ -298,9 +298,10 @@ mod tests {
         .unwrap();
     }
 
-    /// One event per message the map files a row for: 150 messages, 109 events.
+    /// The recorded session's 150 messages file 109 events: one for each message that
+    /// has a row, and two, its end and its usage, for each turn's result.
     #[test]
-    fn the_session_files_one_event_per_mapped_message() {
+    fn the_session_files_its_events_by_kind() {
         let mut counts = BTreeMap::new();
         for event in mapped().0 {
             *counts.entry(event.kind.as_str().to_string()).or_insert(0) += 1;

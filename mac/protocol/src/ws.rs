@@ -980,8 +980,8 @@ pub enum StartSessionResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// The start was refused, or (`launch_failed`) its success could not be
-    /// confirmed; `detail` says which, and may include output from other programs.
+    /// The start was refused, or its success could not be confirmed; `detail` says
+    /// which, and may include output from other programs.
     /// A Claude run whose host lost its link after ccd sent it `start`, before saying
     /// how the start went, stays in the fleet as `starting`.
     Failed {
