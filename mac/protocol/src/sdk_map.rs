@@ -1,7 +1,8 @@
 //! Claude Agent SDK messages as CodeConnect events.
 //!
-//! One event per SDK message, as the transcript tailer files one per transcript
-//! line, so an app reads an SDK event as it reads a transcript line: an assistant
+//! One event per SDK message that has a row (a result files two: the turn's end and
+//! its usage), as the transcript tailer files one per transcript line, so an app
+//! reads an SDK event as it reads a transcript line: an assistant
 //! message is one `agent_message` whose content blocks carry its text, thinking and
 //! tool calls. A payload keeps only the fields a reader uses, never the whole
 //! message, so the account's metadata the SDK yields with every turn never reaches
@@ -11,8 +12,8 @@
 //! and is kept like any tool call.
 //!
 //! What is not a row comes back as a [`Signal`]: the echo of a person's message,
-//! a stamped command's lifecycle, the session id every `system/init` carries, and
-//! a `/clear`. A subagent's own messages, and every type with no row here, are
+//! a stamped command's lifecycle, the session id and the folder every `system/init`
+//! carries, and a `/clear`. A subagent's own messages, and every type with no row here, are
 //! skipped.
 
 use serde_json::{json, Map, Value};
@@ -29,6 +30,9 @@ pub enum Signal {
     Lifecycle { command_uuid: String, state: String },
     /// The run's Claude session id, from every `system/init`.
     SessionId { id: String },
+    /// The folder claude runs in, from every `system/init`: in a new worktree, the
+    /// one claude made, not the folder the run was started from.
+    Cwd { path: String },
     /// `/clear` began a new conversation. Its id is not the session id a run
     /// resumes: the next `system/init` carries that.
     Reset { new_conversation_id: String },
@@ -81,6 +85,9 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             if let Some(id) = text("session_id") {
                 mapped.signals.push(Signal::SessionId { id: id.into() });
             }
+            if let Some(path) = text("cwd") {
+                mapped.signals.push(Signal::Cwd { path: path.into() });
+            }
         }
         (Some("system"), Some("status")) if message.get("permissionMode").is_some() => {
             mapped.events.push(event(
@@ -129,10 +136,12 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             }
         }
         (Some("result"), _) => {
+            // `num_turns` 0 is a command's own turn (/compact, /clear, /effort), which
+            // otherwise ends exactly like the agent's.
             mapped.events.push(event(
                 EventKind::TurnComplete,
                 0,
-                pick(message, &["subtype", "is_error"]),
+                pick(message, &["subtype", "is_error", "num_turns"]),
             ));
             mapped.events.push(event(
                 EventKind::Usage,
@@ -259,8 +268,9 @@ mod tests {
         )
     }
 
-    /// **The events of the recorded session, emitted by this build.** It is the
-    /// fixture for the apps' readers of `sdk` events.
+    /// **The events of the recorded session, emitted by this build:** the mapper's own
+    /// gate. The apps' readers test against what ccd files and sends,
+    /// `fixtures/claude/sdk-session-events.json`.
     #[test]
     fn the_sdk_session_wire_fixture_is_what_this_build_emits() {
         let committed: Value = serde_json::from_str(WIRE).unwrap();
@@ -288,9 +298,10 @@ mod tests {
         .unwrap();
     }
 
-    /// One event per message the map files a row for: 150 messages, 109 events.
+    /// The recorded session's 150 messages file 109 events: one for each message that
+    /// has a row, and two, its end and its usage, for each turn's result.
     #[test]
-    fn the_session_files_one_event_per_mapped_message() {
+    fn the_session_files_its_events_by_kind() {
         let mut counts = BTreeMap::new();
         for event in mapped().0 {
             *counts.entry(event.kind.as_str().to_string()).or_insert(0) += 1;
@@ -327,8 +338,8 @@ mod tests {
     }
 
     /// Every delivery names a person's message whose echo the session carries,
-    /// and every echo is a delivery; one session id per init; the lifecycles and
-    /// the one `/clear`.
+    /// and every echo is a delivery; one session id and one folder per init; the
+    /// lifecycles and the one `/clear`.
     #[test]
     fn the_signals_are_the_session_s_deliveries_lifecycles_ids_and_reset() {
         let echoes: BTreeSet<String> = messages()
@@ -347,6 +358,7 @@ mod tests {
         assert_eq!(delivered, echoes);
         let count = |of: fn(&Signal) -> bool| signals.iter().filter(|s| of(s)).count();
         assert_eq!(count(|s| matches!(s, Signal::SessionId { .. })), 17);
+        assert_eq!(count(|s| matches!(s, Signal::Cwd { .. })), 17);
         assert_eq!(count(|s| matches!(s, Signal::Lifecycle { .. })), 12);
         assert_eq!(count(|s| matches!(s, Signal::Reset { .. })), 1);
     }

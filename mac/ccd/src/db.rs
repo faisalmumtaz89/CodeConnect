@@ -292,6 +292,28 @@ impl Db {
         .await
     }
 
+    pub async fn append_host_message(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        events: Vec<PendingEvent>,
+        session_id: Option<String>,
+        cwd: Option<String>,
+    ) -> Result<Option<Vec<Event>>> {
+        self.run(move |store| {
+            store.append_host_message(
+                &session_uid,
+                &host,
+                seq,
+                &events,
+                session_id.as_deref(),
+                cwd.as_deref(),
+            )
+        })
+        .await
+    }
+
     /// Remove one ended run. Small next to a prune, and off the runtime for the
     /// same reason: it is still a multi-table transaction on the write
     /// connection, and the phone is waiting on the answer.

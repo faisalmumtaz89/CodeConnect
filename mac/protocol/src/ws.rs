@@ -935,8 +935,9 @@ pub struct Project {
 pub struct AgentAvailability {
     pub agent: crate::agent::AgentKind,
     pub available: bool,
-    /// Why a start would be refused, safe to show verbatim: for an agent not
-    /// available, and for a signed-out Claude Code. Absent when a start goes ahead.
+    /// Why a start would be refused: for an agent not available, and for a
+    /// signed-out Claude Code. Absent when a start goes ahead. May include output
+    /// from other programs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// The models the agent offers a start (minor 33), in its own order and its
@@ -959,10 +960,9 @@ pub struct AgentModel {
     /// What a [`ClientMessage::StartSession`] names it by, and the agent is given
     /// as `--model=<value>`.
     pub value: String,
-    /// The agent's own name for it, safe to show verbatim.
+    /// The agent's own name for it.
     pub label: String,
-    /// The agent's own line about it, safe to show verbatim; absent when it gives
-    /// none.
+    /// The agent's own description; absent when it gives none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -980,8 +980,8 @@ pub enum StartSessionResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// No session was started, or (`launch_failed`) one was launched but did not
-    /// finish starting; `detail` says which. It is human text, safe to show verbatim.
+    /// The start was refused, or its success could not be confirmed; `detail` says
+    /// which, and may include output from other programs.
     /// A Claude run whose host lost its link after ccd sent it `start`, before saying
     /// how the start went, stays in the fleet as `starting`.
     Failed {
@@ -1030,7 +1030,8 @@ pub enum InterruptResult {
     /// because the ask never reached that point. A client may say the turn is
     /// untouched by this ask, which no other status licenses.
     ///
-    /// The reason is human text, safe to show verbatim: the run is not a Codex
+    /// The reason is ccd's sentence, which can carry the app-server's own turn
+    /// status. It says the run is not a Codex
     /// session (a Claude one is told where its stop control actually is), the
     /// control link is not watching the turn's thread so no stop could be
     /// confirmed, the hash does not bind this ask to the turn it names, or a

@@ -1106,7 +1106,10 @@ answered started, and a refused one makes it `failed` and is answered with the
 reason; its host then ends, once claude's end is acknowledged. With no outcome within the start's 80 s, the answer is started and the run
 stays `starting` until its outcome comes. Once `start` is sent, only that outcome
 ends a run, so a run whose host lost its link first stays `starting`, and a delete
-refuses it.
+refuses it. A live run's conversation is what claude sends over the link: each SDK
+message becomes the run's events (`sdk` source, through `protocol::sdk_map`), filed with
+the run's cursor in one transaction before it is acknowledged, and each init also names
+the run's Claude session id and the folder claude runs in, a new worktree's included.
 A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the

@@ -2887,22 +2887,81 @@ impl Daemon {
         };
 
         if let Some(event) = &event {
-            let mut inner = self.inner.lock().await;
-            inner
-                .session_facts
-                .entry(session_uid.clone())
-                .or_default()
-                .observe(event);
-            inner
-                .last_seen_ms
-                .insert(session_uid.clone(), protocol::time::now_unix_ms());
-            note_tool_result(&mut inner, event);
-            drop(inner);
-            if event.kind == EventKind::TurnComplete {
-                self.refresh_tree(&session_uid);
-            }
+            self.published(&session_uid, std::slice::from_ref(event))
+                .await;
         }
         Ok(event)
+    }
+
+    /// Persist one message from a run's agent host, message `seq` from the host
+    /// `host`, with its cursor ([`crate::store::Store::append_host_message`]), then
+    /// fan out what was filed. `false` when the cursor did not move: nothing was
+    /// written, and the message must not be acknowledged.
+    pub async fn ingest_host_message(
+        &self,
+        session_uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        pendings: Vec<PendingEvent>,
+        session_id: Option<String>,
+        cwd: Option<String>,
+    ) -> Result<bool> {
+        let mut pendings = pendings;
+        for pending in &mut pendings {
+            self.truncate_payload(pending);
+        }
+        let gate = self.publish_gate(session_uid).await;
+        let events = {
+            // Held across the commit and the broadcast, as in `ingest_scan`.
+            let _ordered = gate.lock().await;
+            let Some(events) = self
+                .db
+                .append_host_message(
+                    session_uid.to_string(),
+                    host,
+                    seq,
+                    pendings,
+                    session_id,
+                    cwd,
+                )
+                .await?
+            else {
+                return Ok(false);
+            };
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        self.published(session_uid, &events).await;
+        Ok(true)
+    }
+
+    /// What follows filing a run's events, once they are broadcast: its facts, when
+    /// it was last seen, the calls their results end, and its tree after a turn.
+    async fn published(&self, session_uid: &str, events: &[Event]) {
+        if events.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock().await;
+        for event in events {
+            inner
+                .session_facts
+                .entry(session_uid.to_string())
+                .or_default()
+                .observe(event);
+            note_tool_result(&mut inner, event);
+        }
+        inner
+            .last_seen_ms
+            .insert(session_uid.to_string(), protocol::time::now_unix_ms());
+        drop(inner);
+        if events
+            .iter()
+            .any(|event| event.kind == EventKind::TurnComplete)
+        {
+            self.refresh_tree(session_uid);
+        }
     }
 
     /// Persist a transcript batch **and** its cursor in one transaction, then
