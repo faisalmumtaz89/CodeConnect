@@ -28,7 +28,9 @@ codeconnect claude                         # in any project directory
 A source build runs on the Mac's own tmux (`brew install tmux`); only a release
 installs CodeConnect's, `cc-tmux`, beside the binaries. Every CodeConnect process
 uses `$CODECONNECT_TMUX` when set, then a `cc-tmux` beside its own binary, then a
-system tmux.
+system tmux. Both install the agent host, `cc-agent-host`, beside the binaries:
+ccd runs it for every Claude run started from the app. A source build builds it
+with `agent-host/build.sh`, which fetches the Bun it pins.
 
 `codeconnect claude` passes every argument through to the real `claude`, so
 `codeconnect claude --permission-mode default --resume` works exactly as expected.
@@ -440,9 +442,10 @@ CodeConnect update available · 0.2.0 → 0.3.0
 ```
 
 It ends with the one fix: `codeconnect update`, which downloads that release,
-proves it is signed by CodeConnect's Apple team, and replaces all three
-binaries in a single directory exchange — so an interrupted update leaves the
-complete old set or the complete new one, never a mixture. Where CodeConnect.app
+proves it is signed by CodeConnect's Apple team, and replaces the three
+binaries, their tmux and the agent host in a single directory exchange — so an
+interrupted update leaves the complete old set or the complete new one, never a
+mixture. Where CodeConnect.app
 installed the binaries (it leaves `~/.codeconnect/bin/.installed-by-app`), the
 app keeps them current: there is no background check and no advisory, and
 `codeconnect update` refuses with "CodeConnect.app keeps these up to date;
@@ -599,7 +602,8 @@ keeps filling, and nothing says so.
 ## On Linux
 
 The same three binaries, built static (musl) for x86_64 and aarch64, so one archive runs on any
-distribution; checked on Debian 12, Ubuntu 22.04 to 26.04, Fedora 44 and Alpine 3.22.
+distribution; checked on Debian 12, Ubuntu 22.04 to 26.04, Fedora 44 and Alpine 3.22. The agent
+host beside them, which runs Claude for the app, is built and tested on Ubuntu only.
 
 **Install.** The installer at codeconnect.sh downloads the release's
 `codeconnect-<version>-linux-<arch>.tar.gz`, its `.sha256`, and `.sha256.sig` — an Ed25519
@@ -1443,7 +1447,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is `CODECONNECT_CLAUDE_BIN` if set, then the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds, without `CODECONNECT_CLAUDE_BIN`. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is `CODECONNECT_CODEX_BIN` if set, then the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
-| `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where the Mac app installs it. |
+| `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
 | `ws_allow_plaintext` | `false` | Serve `ws://` on a `ws_bind` whose privacy only you can vouch for. Honoured on a local-network address; refused on `0.0.0.0`, `::` and public addresses. `tls_required` wins over it. See [TLS](#tls). |

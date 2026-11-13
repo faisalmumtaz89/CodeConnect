@@ -42,7 +42,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
      curl -fsSL https://codeconnect.sh | sh
      ```
 
-The installer checks the release's signature before installing anything, installs to `~/.codeconnect/bin` with its own tmux, and asks before adding that folder to your `PATH`. Then it asks "Set up CodeConnect now?" and does whatever is still missing, in order:
+The installer checks the release's signature before installing anything, installs to `~/.codeconnect/bin` with its own tmux and the agent host that runs Claude for the app, and asks before adding that folder to your `PATH`. Then it asks "Set up CodeConnect now?" and does whatever is still missing, in order:
 
 1. Connects Tailscale, saying how to install it if it is missing.
 2. Starts the CodeConnect daemon.
