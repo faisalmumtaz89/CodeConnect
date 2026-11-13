@@ -3,11 +3,19 @@
 //
 // host.json is created exclusively: a second host for the same run finds it and exits 3, touching nothing. Having won
 // it, the host removes a socket file a dead host left, and listens. It exits 4 if no `start` arrives within 30 s.
+//
+// The first `start` runs the run's one query() (start.ts); a later one is ignored. claude stays in the host's process
+// group (H2). The start's outcome carries the initialize answer, or the reason the start failed; every message the
+// query yields follows as `sdk`; claude's end is the last message, `exited`. Once the run is over and ccd has
+// acknowledged everything, the host exits 0.
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createLink } from './link.ts';
 import { HOST_PROTOCOL_VERSION, type HostFile } from './protocol.ts';
+import { type Facts, firstMessage, initializeAnswer, noteMessage, oneLine, queryOptions, type Start, startFacts } from './start.ts';
 
 const runDir = process.argv[2];
 const recordPath = join(runDir, 'host.json');
@@ -29,7 +37,75 @@ const noStart = setTimeout(() => {
   process.exit(4);
 }, 30_000);
 
-const link = createLink(() => clearTimeout(noStart));
+let facts: Facts = {};
+const link = createLink({ start: begin, facts: () => facts, drained: () => process.exit(0) });
+
+// A start after the first is ignored: ccd re-sends a start whose outcome it does not hold yet, and the first one's
+// outcome is still to come.
+let begun = false;
+
+function begin(start: Start): void {
+  if (begun) return;
+  begun = true;
+  clearTimeout(noStart);
+  facts = startFacts(start.options);
+  let claudeEnded: Promise<{ code: number | null; signal: string | null }> | undefined;
+  const input = (async function* () {
+    yield firstMessage(start);
+    // The input stays open for the run's later messages.
+    await new Promise(() => {});
+  })();
+  const run = query({
+    prompt: input,
+    options: {
+      ...queryOptions(start.options),
+      // No `detached`: claude stays in the host's process group, whose id is the host's pid. Its stderr is the host's
+      // own (host.log), so no unread pipe can stall it.
+      spawnClaudeCodeProcess: (spawned) => {
+        const child = spawn(spawned.command, spawned.args, {
+          cwd: spawned.cwd,
+          env: spawned.env,
+          signal: spawned.signal,
+          stdio: ['pipe', 'pipe', 'inherit'],
+        });
+        if (child.pid !== undefined) {
+          claudeEnded = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+        }
+        return child;
+      },
+    },
+  });
+  const outcome = run.initializationResult().then(
+    (answer) => link.send({ type: 'outcome', uuid: start.uuid, status: 'done', initialize: initializeAnswer(answer) }),
+    (error) => {
+      link.send({ type: 'outcome', uuid: start.uuid, status: 'refused', detail: oneLine(error) });
+      run.close();
+    },
+  );
+  void (async () => {
+    try {
+      for await (const message of run) {
+        facts = noteMessage(facts, message);
+        link.send({ type: 'sdk', message });
+      }
+    } catch (error) {
+      console.error(`the query ended: ${oneLine(error)}`);
+    }
+    // claude's end comes after the outcome and after every message the query yielded. A claude that never started
+    // (no pid) has no end to report.
+    await outcome;
+    const ended = await claudeEnded;
+    if (ended) {
+      link.send({
+        type: 'exited',
+        ...(ended.code === null ? {} : { code: ended.code }),
+        ...(ended.signal === null ? {} : { signal: ended.signal }),
+      });
+    }
+    link.finish();
+  })();
+}
+
 const socketPath = join(runDir, 'host.sock');
 rmSync(socketPath, { force: true });
 createServer((socket) => {

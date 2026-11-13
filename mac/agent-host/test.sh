@@ -5,10 +5,11 @@
 #
 # The executable is both the Bun that runs `bun test` (BUN_BE_BUN=1), so the tests run on the pinned Bun the host is
 # made from, and the host the tests start (CC_AGENT_HOST), each with an environment of its own that holds no
-# BUN_BE_BUN. test/protocol.test.ts type-checks src/protocol.ts and src/link.ts against fixtures/host/messages.jsonl,
-# the lines ccd's own tests emit; test/host.test.ts drives the executable over its socket. The tests import only
-# Bun's and Node's built-in modules, so nothing is installed. They write only into temporary folders, apart from
-# Bun's own transpiler cache (~/Library/Caches/bun on macOS).
+# BUN_BE_BUN. test/protocol.test.ts type-checks src/protocol.ts, src/link.ts and src/start.ts against
+# fixtures/host/messages.jsonl, the lines ccd's own tests emit; test/host.test.ts drives the executable over its
+# socket; test/start.test.ts starts runs whose claude is the stand-in test/stub-claude.ts, which the executable also
+# runs as Bun. The tests import only Bun's and Node's built-in modules, so nothing is installed. They write only into
+# temporary folders, apart from Bun's own transpiler cache (~/Library/Caches/bun on macOS).
 set -euo pipefail
 executable="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 cd "$(dirname "$0")"
