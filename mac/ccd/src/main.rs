@@ -254,6 +254,7 @@ async fn main() -> Result<()> {
         let daemon = Arc::clone(&daemon);
         let period = daemon.config.liveness_sweep_secs;
         tokio::spawn(async move {
+            daemon.watch_hosted_runs().await;
             report_liveness(&daemon.reconcile_liveness().await);
             if period == 0 {
                 crate::log_warn!(
@@ -273,6 +274,7 @@ async fn main() -> Result<()> {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
+                daemon.watch_hosted_runs().await;
                 let sweep = daemon.reconcile_liveness().await;
                 // Only when it changed something or could not see. A quiet
                 // fleet must not write a line a minute into the log it shares

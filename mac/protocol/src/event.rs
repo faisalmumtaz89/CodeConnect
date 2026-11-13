@@ -325,7 +325,8 @@ pub enum Lifecycle {
     Starting,
     Live,
     Exited,
-    /// The run never started: its host did not come up, or its start was refused.
+    /// The run never started: its host did not come up, or ended before saying how the
+    /// start went, or its start was refused.
     Failed,
     Unknown,
 }

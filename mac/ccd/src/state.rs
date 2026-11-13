@@ -9058,7 +9058,7 @@ impl Daemon {
         observed: EndEstablishedAgainst,
     ) -> bool {
         let gate = self.registration_gate(&session.uid).await;
-        let _commit = gate.lock().await;
+        let _commit = gate.lock_owned().await;
         let (owner, row_writes) = {
             let inner = self.inner.lock().await;
             (
@@ -9112,6 +9112,14 @@ impl Daemon {
         if let Err(err) = self.ingest(pending).await {
             crate::log_error!("failed to record exit: {err:#}");
         }
+        self.after_the_end(session, _commit).await;
+        true
+    }
+
+    /// What follows a run's recorded end, its `SessionEnd` already in the log: its tail
+    /// stopped and its cards closed. `commit` is the run's registration gate, held since
+    /// the end was recorded; it is released before the cards close.
+    async fn after_the_end(&self, session: &SessionKey, commit: tokio::sync::OwnedMutexGuard<()>) {
         // Sent *after* the event, so the order on the wire is the order things
         // happened: everything the tailer has already read is in the log ahead
         // of the end, and its own final read lands after it. A run that has
@@ -9134,11 +9142,55 @@ impl Daemon {
             .filter(|(uid, _)| *uid == session.uid)
             .map(|(_, request_id)| request_id.clone())
             .collect();
-        drop(_commit);
+        drop(commit);
         for request_id in open {
             self.close_card_of_ended_run(session, &request_id).await;
         }
-        true
+    }
+
+    /// End the hosted run `session_uid` (H6, H7): in one transaction, with `cursor`
+    /// the host's message that reports it, the row from `from` to `to` and its
+    /// `SessionEnd` with `payload`, published as `ingest_host_message` publishes; then
+    /// what follows any run's end. `false` when the cursor did not move: nothing was
+    /// written, and the message must not be acknowledged.
+    pub(crate) async fn end_hosted_run(
+        &self,
+        session_uid: &str,
+        cursor: Option<(protocol::proc_identity::ProcessIdentity, u64)>,
+        from: Lifecycle,
+        to: Lifecycle,
+        payload: serde_json::Value,
+    ) -> Result<bool> {
+        // A hosted run is named by its uid.
+        let session = SessionKey::new(session_uid, session_uid);
+        let gate = self.registration_gate(session_uid).await;
+        let commit = gate.lock_owned().await;
+        let end = PendingEvent::new(&session, EventKind::SessionEnd, payload, Source::Daemon)
+            .with_source_event_id(format!("exit:{session_uid}"));
+        let publish = self.publish_gate(session_uid).await;
+        let events = {
+            let _ordered = publish.lock().await;
+            let Some(events) = self
+                .db
+                .end_hosted_run(session_uid.to_string(), cursor, from, to, end)
+                .await?
+            else {
+                return Ok(false);
+            };
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        if events.is_empty() {
+            // The row had already left `from`: someone else ended it.
+            return Ok(true);
+        }
+        self.published(session_uid, &events).await;
+        self.end_mail(session_uid).await;
+        self.inner.lock().await.note_row_write(session_uid);
+        self.after_the_end(&session, commit).await;
+        Ok(true)
     }
 
     /// Ask the supervisor for something, and be precise about failure.
@@ -9716,6 +9768,31 @@ impl Daemon {
     }
 
     /// The run `session_uid`'s connection to its agent host has ended.
+    /// H7 for a run whose link has ended: each hosted run that has not ended and whose host
+    /// is not attached is checked by its recorded identity, and a host gone ends its run
+    /// ([`crate::claude_host::end_if_host_gone`]), each in a task of its own. On the
+    /// liveness tick, beside the tmux sweep rather than inside it, so the sweep's no-tmux
+    /// return never skips it.
+    pub async fn watch_hosted_runs(self: &Arc<Self>) {
+        let watched = match self.db.watched_hosts().await {
+            Ok(watched) => watched,
+            Err(err) => {
+                crate::log_error!("could not read the hosted runs to watch: {err:#}");
+                return;
+            }
+        };
+        let attached = self.inner.lock().await.host_links.clone();
+        for watch in watched {
+            if attached.contains(&watch.session_uid) {
+                continue;
+            }
+            let daemon = Arc::clone(self);
+            tokio::spawn(async move {
+                crate::claude_host::end_if_host_gone(&daemon, &watch.session_uid).await;
+            });
+        }
+    }
+
     pub(crate) async fn host_link_detached(&self, session_uid: &str) {
         self.inner.lock().await.host_links.remove(session_uid);
     }

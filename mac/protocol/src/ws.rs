@@ -983,7 +983,8 @@ pub enum StartSessionResult {
     /// The start was refused, or its success could not be confirmed; `detail` says
     /// which, and may include output from other programs.
     /// A Claude run whose host lost its link after ccd sent it `start`, before saying
-    /// how the start went, stays in the fleet as `starting`.
+    /// how the start went, stays in the fleet as `starting` while its host runs, and
+    /// becomes `failed` once its host is gone.
     Failed {
         reason: StartFailure,
         detail: String,
