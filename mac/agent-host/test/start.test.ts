@@ -6,7 +6,7 @@ import { afterAll, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cleanup, exitWithin, goldenLine, goldenLines, open, recordedInit, runDir, sessionInit, startHost, type StubScript, stubLog, waitFor, writeStub } from './rig.ts';
+import { cleanup, exitWithin, goldenLine, goldenLines, open, recordedInit, runDir, sessionInit, sessionQueued, startHost, type StubScript, stubLog, waitFor, writeStub } from './rig.ts';
 
 afterAll(cleanup);
 
@@ -125,6 +125,13 @@ test("every message the query yields reaches ccd untouched, and the state then n
     permission_mode: init.permissionMode,
     pending: [],
   });
+}, 10_000);
+
+test("the start's outcome comes before every SDK line, even one claude writes before it answers initialize", async () => {
+  const { ccd } = await run(trustedStart, { before_init: [sessionQueued] });
+  const sdk = await ccd.line('the line claude wrote first', (line) => line.type === 'sdk');
+  expect(sdk.message).toStrictEqual(JSON.parse(sessionQueued));
+  expect(ccd.lines.map((line) => line.type).slice(0, 3)).toStrictEqual(['state', 'outcome', 'sdk']);
 }, 10_000);
 
 test("claude's end is the last message; the host exits 0 once ccd has acknowledged it, and not before", async () => {
