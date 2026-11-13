@@ -26,11 +26,14 @@ export interface McpCommand {
 export interface StartOptions {
   cwd: string;
   claude_path: string;
-  permission_mode: string;
+  /** The mode the app chose; absent, claude picks its starting mode itself: the person's `defaultMode`, else its own default. */
+  permission_mode?: string;
   trust: 'trusted' | 'not_trusted';
   /** The Claude session to continue. */
   resume?: string;
   model?: string;
+  /** A new worktree for claude to make and start in, as `claude --worktree <name>`. */
+  worktree?: string;
   mail: McpCommand;
 }
 

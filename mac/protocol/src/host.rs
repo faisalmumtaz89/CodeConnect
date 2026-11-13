@@ -93,13 +93,19 @@ pub struct StartOptions {
     pub cwd: String,
     /// The claude the probe found.
     pub claude_path: String,
-    pub permission_mode: String,
+    /// The mode the app chose. Absent, `query()` is given none, and claude picks its
+    /// starting mode itself: the person's `defaultMode`, else its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     pub trust: Trust,
     /// The Claude session to continue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// A new worktree for claude to make and start in, as `claude --worktree <name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// CodeConnect's mail server, run by Claude as a stdio MCP server.
     pub mail: McpCommand,
 }
@@ -305,10 +311,11 @@ mod tests {
                 options: StartOptions {
                     cwd: "/Users/person/project".into(),
                     claude_path: "/Users/person/.local/bin/claude".into(),
-                    permission_mode: "default".into(),
+                    permission_mode: None,
                     trust: Trust::Trusted,
                     resume: None,
                     model: None,
+                    worktree: Some("feature-x".into()),
                     mail: mail(),
                 },
                 prompt: "fix the tests".into(),
@@ -318,10 +325,11 @@ mod tests {
                 options: StartOptions {
                     cwd: "/Users/person/project".into(),
                     claude_path: "/Users/person/.local/bin/claude".into(),
-                    permission_mode: "acceptEdits".into(),
+                    permission_mode: Some("acceptEdits".into()),
                     trust: Trust::NotTrusted,
                     resume: Some("5f0c1e2a-0000-4000-8000-000000000001".into()),
                     model: Some("opus".into()),
+                    worktree: None,
                     mail: mail(),
                 },
                 prompt: "and the docs".into(),
