@@ -9767,7 +9767,6 @@ impl Daemon {
             .insert(session_uid.to_string());
     }
 
-    /// The run `session_uid`'s connection to its agent host has ended.
     /// H7 for a run whose link has ended: each hosted run that has not ended and whose host
     /// is not attached is checked by its recorded identity, and a host gone ends its run
     /// ([`crate::claude_host::end_if_host_gone`]), each in a task of its own. On the
@@ -9793,6 +9792,7 @@ impl Daemon {
         }
     }
 
+    /// The run `session_uid`'s connection to its agent host has ended.
     pub(crate) async fn host_link_detached(&self, session_uid: &str) {
         self.inner.lock().await.host_links.remove(session_uid);
     }
