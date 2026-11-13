@@ -201,9 +201,11 @@ OLDCC="$WT/target/debug/codeconnect"
 
 # Loopback + a free port + push off, so both binaries do their real migrate and
 # recovery without fighting a live ccd, and a fast liveness sweep so the old
-# binary actually writes during its short run.
+# binary actually writes during its short run. `tailscale_bin` names a tailscale
+# that does not exist, so the new binary never runs this computer's own; the old
+# binary predates the field and ignores it.
 cat > "$H/config.json" <<EOF
-{ "ws_port": $PORT, "ws_bind": "127.0.0.1", "ws_loopback": true, "push_enabled": false, "liveness_sweep_secs": 1 }
+{ "ws_port": $PORT, "ws_bind": "127.0.0.1", "ws_loopback": true, "push_enabled": false, "liveness_sweep_secs": 1, "tailscale_bin": "/nonexistent/tailscale" }
 EOF
 
 # How long each daemon gets. It is a named constant because it is load-bearing,

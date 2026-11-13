@@ -1417,8 +1417,13 @@ impl LiveSandbox {
         // test starts after the bounce, and a port collision is a startup failure
         // that arrives here as an unrelated timeout. Nothing in this gate dials
         // the WS listener; only the IPC socket is used.
-        std::fs::write(self.home.join("config.json"), "{\"ws_port\": 0}")
-            .expect("write the sandbox daemon config");
+        // Loopback, and a tailscale that does not exist: this daemon never runs this
+        // computer's own Tailscale or listens on its tailnet.
+        std::fs::write(
+            self.home.join("config.json"),
+            "{\"ws_port\": 0, \"ws_bind\": \"127.0.0.1\", \"tailscale_bin\": \"/nonexistent/tailscale\"}",
+        )
+        .expect("write the sandbox daemon config");
         let log = std::fs::File::create(self.base.join("ccd.log")).expect("ccd log");
         let child = Command::new(ccd)
             .env("CODECONNECT_HOME", &self.home)

@@ -35,8 +35,6 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use protocol::pairing::TAILSCALE_CANDIDATES;
-
 /// ACME issuance is not fast, and the first call on a tailnet may do a full
 /// order. Generous, but bounded: a wedged subprocess must not wedge startup.
 const CERT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -93,21 +91,14 @@ pub fn outbound_h2(what: &str) -> Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-pub fn tailscale_bin() -> Option<PathBuf> {
-    TAILSCALE_CANDIDATES
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
-}
-
 /// The node's own MagicDNS name, without the trailing dot.
 ///
 /// `Self.DNSName` is authoritative and already fully qualified; deriving it
 /// from `HostName` + `MagicDNSSuffix` would guess wrong the moment a hostname
 /// contains a character Tailscale rewrites — a Mac named "Ada's Mac Studio"
 /// answers to `adas-mac-studio`, which no naive join of the two fields produces.
-pub async fn magic_dns_name() -> Option<String> {
-    let bin = tailscale_bin()?;
+pub async fn magic_dns_name(tailscale: Option<PathBuf>) -> Option<String> {
+    let bin = tailscale?;
     let output = tokio::time::timeout(
         STATUS_TIMEOUT,
         tokio::process::Command::new(bin)
@@ -147,7 +138,11 @@ impl Material {
 
 /// Return usable certificate material for `hostname`, issuing or renewing when
 /// what is on disk is missing, unreadable, or too close to expiry.
-pub async fn ensure(hostname: &str, refresh_days: u64) -> Result<Material> {
+pub async fn ensure(
+    hostname: &str,
+    refresh_days: u64,
+    tailscale: Option<PathBuf>,
+) -> Result<Material> {
     let dir = protocol::tls_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     restrict(&dir, 0o700)?;
@@ -174,7 +169,7 @@ pub async fn ensure(hostname: &str, refresh_days: u64) -> Result<Material> {
         );
     }
 
-    issue(hostname, &cert_path, &key_path).await?;
+    issue(hostname, &cert_path, &key_path, tailscale).await?;
     restrict(&key_path, 0o600)?;
     inspect(hostname, &cert_path, &key_path)
         .ok_or_else(|| anyhow::anyhow!("tailscale wrote a certificate we cannot parse"))
@@ -198,8 +193,13 @@ fn inspect(hostname: &str, cert_path: &Path, key_path: &Path) -> Option<Material
     })
 }
 
-async fn issue(hostname: &str, cert_path: &Path, key_path: &Path) -> Result<()> {
-    let bin = tailscale_bin().context("tailscale is not installed at a known location")?;
+async fn issue(
+    hostname: &str,
+    cert_path: &Path,
+    key_path: &Path,
+    tailscale: Option<PathBuf>,
+) -> Result<()> {
+    let bin = tailscale.context("tailscale is not installed where this daemon looks for it")?;
     let output = tokio::time::timeout(
         CERT_TIMEOUT,
         tokio::process::Command::new(&bin)
