@@ -799,13 +799,11 @@ async fn agent_availability(
     if *agent == AgentKind::Claude {
         return match claude_probe(environment, claude_bin).await {
             Err((_, detail)) => unavailable(detail),
-            Ok(ready) => AgentAvailability {
-                agent: agent.clone(),
-                available: true,
-                detail: (ready.signed_in == Some(false)).then(signed_out),
-                models: claude_models(known, environment, &ready).await,
-                signed_in: ready.signed_in,
-            },
+            Ok(ready) => startable_claude(
+                ready.signed_in,
+                claude_models(known, environment, &ready).await,
+                &this_computer(),
+            ),
         };
     }
     let launcher = match crate::state::codex_launcher() {
@@ -882,7 +880,10 @@ pub(crate) async fn claude_preflight(
         .await
         .map_err(|(reason, detail)| failed(reason, detail))?;
     if ready.signed_in == Some(false) {
-        return Err(failed(StartFailure::LaunchFailed, signed_out()));
+        return Err(failed(
+            StartFailure::LaunchFailed,
+            signed_out(&this_computer()),
+        ));
     }
     Ok(ready)
 }
@@ -894,8 +895,24 @@ fn this_computer() -> String {
 }
 
 /// The sentence a signed-out Claude Code's start is refused with.
-fn signed_out() -> String {
-    format!("Claude Code on {} isn't signed in.", this_computer())
+fn signed_out(computer: &str) -> String {
+    format!("Claude Code on {computer} isn't signed in.")
+}
+
+/// What the list says of a Claude Code a start can run: its models and its sign-in,
+/// and, signed out, the sentence its start is refused with.
+fn startable_claude(
+    signed_in: Option<bool>,
+    models: Vec<AgentModel>,
+    computer: &str,
+) -> AgentAvailability {
+    AgentAvailability {
+        agent: AgentKind::Claude,
+        available: true,
+        detail: (signed_in == Some(false)).then(|| signed_out(computer)),
+        models,
+        signed_in,
+    }
 }
 
 /// Find the claude a start runs ([`claude_path`]) and ask it its version and its
@@ -1289,6 +1306,10 @@ async fn codex_signed_in(environment: &HashMap<OsString, OsString>, launcher: &P
 /// zsh and bash run interactive and login (`-lic`), which is what reads the files
 /// a new terminal reads. Any other shell, or none in `$SHELL`, runs `/bin/sh -lc`:
 /// a written miss, so a fish user gets the system shell's environment.
+///
+/// What those files print with no newline at its end, as a terminal's shell
+/// integration prints its escape codes, is ended with one before `args` run, so
+/// the first line `args` print is theirs alone.
 fn login_shell_command(
     environment: &HashMap<OsString, OsString>,
     args: &[&OsStr],
@@ -1308,7 +1329,7 @@ fn login_shell_command(
         .env_clear()
         .envs(environment.iter())
         .arg(flags)
-        .arg("exec \"$@\"")
+        .arg("printf '\\n'; exec \"$@\"")
         .arg("codeconnect-start")
         .args(args);
     command
@@ -3149,6 +3170,33 @@ esac"#;
         assert_eq!(std::fs::read_to_string(&seen).unwrap(), "unset");
     }
 
+    /// **What the user's shell start-up prints with no newline at its end does not
+    /// reach the probe**: iTerm2's shell integration prints its escape codes so in
+    /// every interactive shell. The PATH, the version and the sign-in are read as
+    /// claude gave them.
+    #[tokio::test]
+    async fn start_up_output_with_no_newline_does_not_reach_the_probe() {
+        let rig = recording("start-up-output");
+        let profile = home_in(&rig.env).join(".profile");
+        let read = std::fs::read_to_string(&profile).unwrap();
+        std::fs::write(
+            &profile,
+            format!("printf '\\033]1337;ShellIntegrationVersion=23;shell=sh\\007'\n{read}"),
+        )
+        .unwrap();
+        let ready = claude_probe(&rig.env, None).await.unwrap();
+        assert_eq!(
+            (ready.path, ready.version.as_str(), ready.signed_in),
+            (rig.claude.clone(), "2.1.268", Some(true))
+        );
+        rig.claude_says("auth", AUTH_SIGNED_OUT);
+        rig.claude_says("auth_exit", "1");
+        assert_eq!(
+            claude_probe(&rig.env, None).await.unwrap().signed_in,
+            Some(false)
+        );
+    }
+
     /// **A model reaches the launcher as one argument**, `--model=<value>` after
     /// `--no-attach`, so nothing in the value is read as a flag of its own or runs;
     /// and Claude Code's own `default` reaches it as no flag at all.
@@ -3237,23 +3285,25 @@ esac"#;
         .unwrap();
     }
 
-    /// A project list whose agents carry what this build reads from the agents'
-    /// own recorded answers (Claude Code signed out, Codex with an API key), and a
-    /// start that names one of the models. From the recordings and fixed values,
-    /// so the fixture is the same on every machine.
+    /// A project list whose agents carry what this build makes of the agents' own
+    /// recorded answers (Claude Code signed out, Codex with an API key), and a start
+    /// that names one of the models. From the recordings and fixed values, the
+    /// computer named "this computer", so the fixture is the same on every machine.
     fn derived_minor_33_wire() -> serde_json::Value {
-        let available = |agent: AgentKind, recorded: &str| {
-            let offer = offer_from(&agent, &said(recorded)).unwrap();
-            AgentAvailability {
-                signed_in: match agent {
-                    AgentKind::Claude => auth_reading(Some(1), AUTH_SIGNED_OUT.as_bytes()),
-                    _ => offer.signed_in,
-                },
-                agent,
-                available: true,
-                detail: None,
-                models: offer.models,
-            }
+        let claude = startable_claude(
+            auth_reading(Some(1), AUTH_SIGNED_OUT.as_bytes()),
+            offer_from(&AgentKind::Claude, &said(CLAUDE_SIGNED_OUT))
+                .unwrap()
+                .models,
+            "this computer",
+        );
+        let codex_offer = offer_from(&AgentKind::Codex, &said(CODEX_API_KEY)).unwrap();
+        let codex = AgentAvailability {
+            agent: AgentKind::Codex,
+            available: true,
+            detail: None,
+            models: codex_offer.models,
+            signed_in: codex_offer.signed_in,
         };
         serde_json::json!({
             "projects": serde_json::to_value(ServerMessage::Projects {
@@ -3265,10 +3315,7 @@ esac"#;
                     git_branch: Some("main".into()),
                     exists: true,
                 }],
-                agents: vec![
-                    available(AgentKind::Claude, CLAUDE_SIGNED_OUT),
-                    available(AgentKind::Codex, CODEX_API_KEY),
-                ],
+                agents: vec![claude, codex],
             })
             .unwrap(),
             "start_session_request": serde_json::to_value(ClientMessage::StartSession {
