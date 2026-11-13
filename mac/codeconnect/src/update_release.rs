@@ -64,18 +64,22 @@ const PLATFORM: &str = "linux-x86_64";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const PLATFORM: &str = "linux-aarch64";
 
-/// The two archives a release carries.
+/// The three archives a release carries.
 ///
-/// **tmux has an archive of its own.** Every released updater takes the core
-/// archive by its exact name and refuses one holding anything beyond its four
-/// files, so tmux beside them would make the release uninstallable for every
-/// machine that has not updated yet. A second name is one they never ask for.
+/// **tmux and the agent host each have an archive of their own.** Every
+/// released updater takes the core archive by its exact name and refuses one
+/// holding anything beyond its four files, so either beside them would make
+/// the release uninstallable for every machine that has not updated yet. A
+/// name of its own is one they never ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
     /// The three binaries and their licence.
     Core,
     /// CodeConnect's own tmux and the notices of what it is built from.
     Tmux,
+    /// The agent host ccd runs for each Claude run, and the notices of what it
+    /// is built from.
+    AgentHost,
 }
 
 impl Archive {
@@ -84,6 +88,7 @@ impl Archive {
         match self {
             Archive::Core => format!("codeconnect-{version}-{PLATFORM}.tar.gz"),
             Archive::Tmux => format!("codeconnect-{version}-tmux-{PLATFORM}.tar.gz"),
+            Archive::AgentHost => format!("codeconnect-{version}-agent-host-{PLATFORM}.tar.gz"),
         }
     }
 
@@ -103,9 +108,11 @@ impl Archive {
         match self {
             // The licence travels with the binaries because the licence says
             // it must: a binaries-only archive is a distribution without its
-            // notice. The same holds for tmux and what it is built from.
+            // notice. The same holds for tmux, the agent host and what they are
+            // built from.
             Archive::Core => &["codeconnect", "ccd", "cc-hook", "LICENSE"],
             Archive::Tmux => &[TMUX_BINARY, "THIRD_PARTY_NOTICES"],
+            Archive::AgentHost => &[AGENT_HOST_BINARY, "AGENT_HOST_NOTICES"],
         }
     }
 }
@@ -115,6 +122,9 @@ pub const SHIPPED_BINARIES: [&str; 3] = ["codeconnect", "ccd", "cc-hook"];
 
 /// CodeConnect's own tmux, as it is named in `bin`.
 pub const TMUX_BINARY: &str = protocol::tmux::BUNDLED_TMUX;
+
+/// The agent host, as it is named in `bin`, where ccd runs it from.
+pub const AGENT_HOST_BINARY: &str = "cc-agent-host";
 
 /// Pick one archive and its checksum out of a release, or say what is missing.
 ///
@@ -673,6 +683,10 @@ mod tests {
             Archive::Tmux.checksum_name("1.2.3"),
             "codeconnect-1.2.3-tmux-macos-universal.tar.gz.sha256"
         );
+        assert_eq!(
+            Archive::AgentHost.name("1.2.3"),
+            "codeconnect-1.2.3-agent-host-macos-universal.tar.gz"
+        );
     }
 
     /// The names linux-build.yml packages and release.yml signs, spelled out.
@@ -691,6 +705,10 @@ mod tests {
             Archive::Tmux.signature_name("1.2.3"),
             "codeconnect-1.2.3-tmux-linux-aarch64.tar.gz.sha256.sig"
         );
+        assert_eq!(
+            Archive::AgentHost.name("1.2.3"),
+            "codeconnect-1.2.3-agent-host-linux-aarch64.tar.gz"
+        );
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -707,6 +725,10 @@ mod tests {
         assert_eq!(
             Archive::Tmux.signature_name("1.2.3"),
             "codeconnect-1.2.3-tmux-linux-x86_64.tar.gz.sha256.sig"
+        );
+        assert_eq!(
+            Archive::AgentHost.name("1.2.3"),
+            "codeconnect-1.2.3-agent-host-linux-x86_64.tar.gz"
         );
     }
 
@@ -794,5 +816,21 @@ mod tests {
                 .contains("unexpected")
         );
         assert!(validate_members(&tmux_members(&exact), "1.2.3", Archive::Core).is_err());
+    }
+
+    /// The members linux-build.yml and release.yml pack, spelled out.
+    #[test]
+    fn an_agent_host_archive_holds_exactly_the_host_and_its_notices() {
+        let exact = [
+            "codeconnect-1.2.3/cc-agent-host",
+            "codeconnect-1.2.3/AGENT_HOST_NOTICES",
+        ];
+        assert!(validate_members(&tmux_members(&exact), "1.2.3", Archive::AgentHost).is_ok());
+        assert!(
+            validate_members(&tmux_members(&exact[..1]), "1.2.3", Archive::AgentHost)
+                .unwrap_err()
+                .contains("AGENT_HOST_NOTICES")
+        );
+        assert!(validate_members(&tmux_members(&exact), "1.2.3", Archive::Tmux).is_err());
     }
 }

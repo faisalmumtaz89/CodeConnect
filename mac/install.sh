@@ -19,6 +19,14 @@ echo "building release binaries…"
 cargo build --release --manifest-path "$here/Cargo.toml" \
     --bin codeconnect --bin ccd --bin cc-hook
 
+echo "building the agent host…"
+# ccd runs it from beside itself for every Claude run started from the app. Its
+# build fetches the Bun it pins and signs a macOS executable with the
+# entitlements it needs, so it is installed as built, never re-signed here.
+host_out="$(mktemp -d)"
+trap 'rm -rf "$host_out"' EXIT
+"$here/agent-host/build.sh" "$host_out"
+
 mkdir -p "$bin"
 for binary in codeconnect ccd cc-hook; do
     rm -f "$bin/$binary"
@@ -29,6 +37,13 @@ for binary in codeconnect ccd cc-hook; do
         exit 1
     }
 done
+rm -f "$bin/cc-agent-host" "$bin/AGENT_HOST_NOTICES"
+cp "$host_out"/cc-agent-host-* "$bin/cc-agent-host"
+cp "$host_out/AGENT_HOST_NOTICES" "$bin/AGENT_HOST_NOTICES"
+"$here/agent-host/check.sh" "$bin/cc-agent-host" >/dev/null || {
+    echo "installed cc-agent-host does not run" >&2
+    exit 1
+}
 
 echo "installed to $bin"
 echo

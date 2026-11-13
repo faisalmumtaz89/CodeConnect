@@ -752,11 +752,12 @@ fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
     };
     let core = select(Archive::Core)?;
     let tmux = select(Archive::Tmux)?;
+    let host = select(Archive::AgentHost)?;
 
     println!("codeconnect {installed_text} installed; fetching {latest_text}\u{2026}");
 
     with_work_dir(root, |work| {
-        install_release(&core, &tmux, &latest_text, work, &live, root, deps)
+        install_release(&core, &tmux, &host, &latest_text, work, root, deps)
     })?;
 
     println!("codeconnect {latest_text} installed.");
@@ -856,8 +857,8 @@ fn ensure_tmux_at(root: &std::path::Path, version: &str, deps: &UpdateDeps) -> R
 }
 
 /// `codeconnect install-staged <dir>`: install the release binaries the
-/// website installer downloaded and verified into `<dir>`, with their tmux,
-/// exactly as `codeconnect update` installs a release. Run as the staged
+/// website installer downloaded and verified into `<dir>`, with their tmux and
+/// agent host, exactly as `codeconnect update` installs a release. Run as the staged
 /// `codeconnect` itself, so the version being installed is the one running.
 pub fn run_install_staged(args: &[String]) -> Result<()> {
     let [from] = args else {
@@ -899,9 +900,10 @@ fn install_staged_at(
         })
     };
     let tmux = select(Archive::Tmux)?;
+    let host = select(Archive::AgentHost)?;
     #[cfg(target_os = "macos")]
     with_work_dir(root, |work| {
-        install_set(from, &tmux, version, work, &root.join("bin"), root, deps)
+        install_set(from, &tmux, &host, version, work, root, deps)
     })?;
     // A Linux binary carries no signature of its own, so the binaries the
     // installer handed over cannot be proven here; the release's are fetched
@@ -912,7 +914,7 @@ fn install_staged_at(
         let _ = from;
         let core = select(Archive::Core)?;
         with_work_dir(root, |work| {
-            install_release(&core, &tmux, version, work, &root.join("bin"), root, deps)
+            install_release(&core, &tmux, &host, version, work, root, deps)
         })?;
     }
     Ok(())
@@ -1177,31 +1179,58 @@ fn install_tmux(
 fn install_release(
     core: &crate::update_release::ReleaseAssets,
     tmux: &crate::update_release::ReleaseAssets,
+    host: &crate::update_release::ReleaseAssets,
     version: &str,
     work: &std::path::Path,
-    live: &std::path::Path,
     root: &std::path::Path,
     deps: &UpdateDeps,
 ) -> Result<()> {
     let from = fetch_and_unpack(core, version, Archive::Core, work, deps)?;
-    install_set(&from, tmux, version, work, live, root, deps)
+    install_set(&from, tmux, host, version, work, root, deps)
 }
 
-/// Install the release binaries in `from`, with the release's tmux, as one
-/// set: each binary proven, all staged with whatever else `bin` holds,
-/// exchanged into place in one step, proven where they now live, and the
-/// managed daemon restarted onto them.
+/// Download the agent host for `version`, prove it, and stage it with its
+/// notices. It has no version line to check (its one argument is a run
+/// folder): the archive's exact name in this release's listing binds it to
+/// `version`, the archive is proven as every archive is, and on macOS the
+/// binary's own signature and both architectures are proven too.
+fn stage_agent_host(
+    assets: &crate::update_release::ReleaseAssets,
+    version: &str,
+    work: &std::path::Path,
+    staged: &std::path::Path,
+    deps: &UpdateDeps,
+) -> Result<()> {
+    let from = fetch_and_unpack(assets, version, Archive::AgentHost, work, deps)?;
+    #[cfg(target_os = "macos")]
+    {
+        let candidate = from.join(crate::update_release::AGENT_HOST_BINARY);
+        (deps.verify_signature)(&candidate)?;
+        crate::update_install::is_universal(&candidate)?;
+    }
+    for file in Archive::AgentHost.files() {
+        std::fs::copy(from.join(file), staged.join(file))
+            .with_context(|| format!("staging {file}"))?;
+    }
+    Ok(())
+}
+
+/// Install the release binaries in `from`, with the release's tmux and agent
+/// host, as one set into `<root>/bin`: each binary proven, all staged with
+/// whatever else `bin` holds, exchanged into place in one step, proven where
+/// they now live, and the managed daemon restarted onto them.
 fn install_set(
     from: &std::path::Path,
     tmux: &crate::update_release::ReleaseAssets,
+    host: &crate::update_release::ReleaseAssets,
     version: &str,
     work: &std::path::Path,
-    live: &std::path::Path,
     root: &std::path::Path,
     deps: &UpdateDeps,
 ) -> Result<()> {
     use crate::update_install as install;
 
+    let live = &root.join("bin");
     let staged = fresh_staging(root)?;
 
     // **One build across all three, not three binaries that agree on a
@@ -1241,6 +1270,7 @@ fn install_set(
     // `codeconnect`, already proven to be CodeConnect's build of it.
     let required = (deps.ask)(&from.join("codeconnect"), "--tmux-version")?;
     stage_tmux(tmux, version, &required, work, &staged, deps)?;
+    stage_agent_host(host, version, work, &staged, deps)?;
     install::carry_over_strangers(live, &staged, &crate::update_release::SHIPPED_BINARIES)?;
     install::sync_tree(&staged)?;
     // A first install has no `bin` yet, and an exchange needs both sides.
@@ -2078,6 +2108,13 @@ mod tests {
         bytes
     }
 
+    /// A fixture `cc-agent-host`: nothing to ask it, only where it came from.
+    fn fixture_host(origin: &str, arm64_only: bool) -> Vec<u8> {
+        let mut bytes = fat_header(arm64_only);
+        bytes.extend_from_slice(format!("\nFROM:{origin}\n").as_bytes());
+        bytes
+    }
+
     fn fat_header(arm64_only: bool) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xcafe_babe_u32.to_be_bytes());
@@ -2201,6 +2238,8 @@ mod tests {
             fixture_tmux(TMUX_LINE, "live", false),
         );
         std::fs::write(live.join("THIRD_PARTY_NOTICES"), b"the live notices").unwrap();
+        place_binary(&live.join("cc-agent-host"), fixture_host("live", false));
+        std::fs::write(live.join("AGENT_HOST_NOTICES"), b"the live host notices").unwrap();
         std::fs::write(live.join("stranger.txt"), b"not ours to judge").unwrap();
 
         let fixtures = root.join("fixtures");
@@ -2218,10 +2257,12 @@ mod tests {
             fixture_tmux(TMUX_LINE, "release", false),
         );
         std::fs::write(dir.join("THIRD_PARTY_NOTICES"), b"the release notices").unwrap();
+        place_binary(&dir.join("cc-agent-host"), fixture_host("release", false));
+        std::fs::write(dir.join("AGENT_HOST_NOTICES"), b"the release host notices").unwrap();
 
         let mut by_url = BTreeMap::new();
         let mut listed = Vec::new();
-        for archive in [Archive::Core, Archive::Tmux] {
+        for archive in [Archive::Core, Archive::Tmux, Archive::AgentHost] {
             package(&fixtures, version, archive);
             for name in [
                 archive.name(version),
@@ -2567,8 +2608,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_refused_signature_on_any_of_the_four_stops_everything() {
-        for call in 1..=4 {
+    fn a_refused_signature_on_any_of_the_five_stops_everything() {
+        for call in 1..=5 {
             let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
             let before = snapshot(&fixture.live);
             let ran = run(
@@ -2648,7 +2689,7 @@ mod tests {
     /// listing states are the originals; every edit here keeps them small.
     fn repackage(fixture: &Rig, version: &str) {
         let fixtures = fixture.root.join("fixtures");
-        for archive in [Archive::Core, Archive::Tmux] {
+        for archive in [Archive::Core, Archive::Tmux, Archive::AgentHost] {
             package(&fixtures, version, archive);
         }
     }
@@ -2684,7 +2725,7 @@ mod tests {
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
 
-        // Exactly the four assets the release named, each under the ceiling
+        // Exactly the six assets the release named, each under the ceiling
         // that protects its kind of file — nothing else, nothing unbounded.
         let downloads: Vec<&String> = ran
             .events
@@ -2693,6 +2734,7 @@ mod tests {
             .collect();
         let core = Archive::Core.name(&newer());
         let tmux = Archive::Tmux.name(&newer());
+        let host = Archive::AgentHost.name(&newer());
         let max = crate::update_release::MAX_ARCHIVE_BYTES;
         assert_eq!(
             downloads,
@@ -2701,10 +2743,12 @@ mod tests {
                 &format!("download https://release.invalid/{core}.sha256 (max 4096)"),
                 &format!("download https://release.invalid/{tmux} (max {max})"),
                 &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
+                &format!("download https://release.invalid/{host} (max {max})"),
+                &format!("download https://release.invalid/{host}.sha256 (max 4096)"),
             ]
         );
 
-        // The signature judgment landed on the four unpacked candidates —
+        // The signature judgment landed on the five unpacked candidates —
         // each exactly once, never on a live path, never on the same file
         // twice while another goes unjudged.
         let verifies: Vec<&String> = ran
@@ -2718,7 +2762,8 @@ mod tests {
                 "verify staged/codeconnect",
                 "verify staged/ccd",
                 "verify staged/cc-hook",
-                "verify staged/cc-tmux"
+                "verify staged/cc-tmux",
+                "verify staged/cc-agent-host"
             ]
         );
         // And per binary, judged before it is ever run: running first would
@@ -2788,6 +2833,12 @@ mod tests {
             "the release's tmux replaced the one installed before"
         );
         assert_eq!(after["THIRD_PARTY_NOTICES"], b"the release notices");
+        assert_eq!(
+            line_after(&fixture.live.join("cc-agent-host"), "FROM:").unwrap(),
+            "release",
+            "the release's agent host replaced the one installed before"
+        );
+        assert_eq!(after["AGENT_HOST_NOTICES"], b"the release host notices");
         assert_eq!(
             after["stranger.txt"], b"not ours to judge",
             "a file the release does not ship survives the exchange"
@@ -2970,43 +3021,58 @@ mod tests {
         assert_eq!(snapshot(&fixture.live), before);
     }
 
-    /// A release without the tmux archive is refused before anything is
-    /// downloaded: installing its binaries alone would leave a machine that
-    /// cannot start a session.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn a_release_without_its_tmux_is_refused_before_any_download() {
-        let mut fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
-        let tmux = Archive::Tmux.name(&newer());
-        let mut release: serde_json::Value = serde_json::from_slice(&fixture.body).unwrap();
-        release["assets"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|asset| !asset["name"].as_str().unwrap().starts_with(&tmux));
-        fixture.body = serde_json::to_vec(&release).unwrap();
+    fn a_thin_agent_host_in_the_release_is_refused() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let dir = fixture
+            .root
+            .join("fixtures")
+            .join(format!("codeconnect-{}", newer()));
+        place_binary(&dir.join("cc-agent-host"), fixture_host("release", true));
+        repackage(&fixture, &newer());
 
         let before = snapshot(&fixture.live);
         let ran = run(&fixture, Faults::default());
-        let said = ran.outcome.unwrap_err().to_string();
-        assert!(said.contains(&tmux), "{said}");
-        assert!(!ran.events.iter().any(|event| event.starts_with("download")));
+        assert!(ran.outcome.is_err());
         assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    /// A release without the tmux archive, or without the agent host's, is
+    /// refused before anything is downloaded: installing its binaries alone
+    /// would leave a machine that cannot start a session, or no Claude run.
+    #[test]
+    fn a_release_without_its_tmux_or_agent_host_is_refused_before_any_download() {
+        for archive in [Archive::Tmux, Archive::AgentHost] {
+            let mut fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+            let missing = archive.name(&newer());
+            let mut release: serde_json::Value = serde_json::from_slice(&fixture.body).unwrap();
+            release["assets"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|asset| !asset["name"].as_str().unwrap().starts_with(&missing));
+            fixture.body = serde_json::to_vec(&release).unwrap();
+
+            let before = snapshot(&fixture.live);
+            let ran = run(&fixture, Faults::default());
+            let said = ran.outcome.unwrap_err().to_string();
+            assert!(said.contains(&missing), "{said}");
+            assert!(!ran.events.iter().any(|event| event.starts_with("download")));
+            assert_eq!(snapshot(&fixture.live), before);
+        }
     }
 
     // ------------------------------------------------------------- Linux
 
-    /// A refused signature over either archive's checksum stops the update
+    /// A refused signature over any archive's checksum stops the update
     /// before that checksum is read, with nothing changed: the refusal is the
     /// signature's even when the checksum itself is also wrong.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_refused_checksum_signature_on_either_archive_stops_everything() {
-        for call in 1..=2 {
+    fn a_refused_checksum_signature_on_any_archive_stops_everything() {
+        for call in 1..=3 {
             let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
-            let archive = if call == 1 {
-                Archive::Core
-            } else {
-                Archive::Tmux
-            };
+            let archive = [Archive::Core, Archive::Tmux, Archive::AgentHost][call - 1];
             let name = archive.name(&newer());
             std::fs::write(
                 fixture
@@ -3029,19 +3095,17 @@ mod tests {
             assert!(!ran.events.contains(&"restart".to_string()));
             // Nothing from the refused archive ran. The core archive is
             // judged and its binaries probed before the tmux archive is
-            // fetched, so a refused tmux signature comes after those.
-            let from_refused = if call == 1 {
-                "probe staged/"
-            } else {
-                "ask staged/cc-tmux"
-            };
-            assert!(
-                !ran.events
-                    .iter()
-                    .any(|event| event.starts_with(from_refused)),
-                "call {call}: {:?}",
-                ran.events
-            );
+            // fetched, so a refused tmux signature comes after those. Nothing
+            // runs the agent host; that it stays out of `bin` is the snapshot.
+            if let Some(from_refused) = ["probe staged/", "ask staged/cc-tmux"].get(call - 1) {
+                assert!(
+                    !ran.events
+                        .iter()
+                        .any(|event| event.starts_with(from_refused)),
+                    "call {call}: {:?}",
+                    ran.events
+                );
+            }
             assert_eq!(snapshot(&fixture.live), before);
         }
     }
@@ -3058,6 +3122,7 @@ mod tests {
 
         let core = Archive::Core.name(&newer());
         let tmux = Archive::Tmux.name(&newer());
+        let host = Archive::AgentHost.name(&newer());
         let max = crate::update_release::MAX_ARCHIVE_BYTES;
         let downloads: Vec<&String> = ran
             .events
@@ -3073,6 +3138,9 @@ mod tests {
                 &format!("download https://release.invalid/{tmux} (max {max})"),
                 &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
                 &format!("download https://release.invalid/{tmux}.sha256.sig (max 64)"),
+                &format!("download https://release.invalid/{host} (max {max})"),
+                &format!("download https://release.invalid/{host}.sha256 (max 4096)"),
+                &format!("download https://release.invalid/{host}.sha256.sig (max 64)"),
             ]
         );
         let at = |needle: &str| {
@@ -3083,6 +3151,7 @@ mod tests {
         };
         let core_judged = at(&format!("authenticate {core}.sha256"));
         let tmux_judged = at(&format!("authenticate {tmux}.sha256"));
+        let host_judged = at(&format!("authenticate {host}.sha256"));
         for run in [
             "probe staged/codeconnect",
             "probe staged/ccd",
@@ -3109,7 +3178,7 @@ mod tests {
             "probe live/cc-hook",
             "ask live/cc-tmux -V",
         ] {
-            assert!(tmux_judged < last(smoke), "every judgment before `{smoke}`");
+            assert!(host_judged < last(smoke), "every judgment before `{smoke}`");
             assert!(last(smoke) < last("restart"), "restart waits for `{smoke}`");
         }
         assert_eq!(ran.events.last().map(String::as_str), Some("restart"));
@@ -3119,9 +3188,15 @@ mod tests {
                 format!("{binary} {} (bbbbbbbbbbbb)", newer())
             );
         }
+        for binary in ["cc-tmux", "cc-agent-host"] {
+            assert_eq!(
+                line_after(&fixture.live.join(binary), "FROM:").unwrap(),
+                "release"
+            );
+        }
         assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-            "release"
+            snapshot(&fixture.live)["AGENT_HOST_NOTICES"],
+            b"the release host notices"
         );
     }
 
@@ -3301,10 +3376,11 @@ mod tests {
     }
 
     /// A first install: no `bin` at all. The binaries come from the
-    /// installer's directory, tmux from the same release, and the whole set
-    /// lands in one exchange, proven before the daemon is touched.
+    /// installer's directory, tmux and the agent host from the same release,
+    /// and the whole set lands in one exchange, proven before the daemon is
+    /// touched.
     #[test]
-    fn a_first_install_lands_the_binaries_and_their_tmux_together() {
+    fn a_first_install_lands_the_binaries_their_tmux_and_agent_host_together() {
         let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
         std::fs::remove_dir_all(&fixture.live).unwrap();
 
@@ -3315,8 +3391,10 @@ mod tests {
         assert_eq!(
             installed,
             [
+                "AGENT_HOST_NOTICES",
                 "LICENSE",
                 "THIRD_PARTY_NOTICES",
+                "cc-agent-host",
                 "cc-hook",
                 "cc-tmux",
                 "ccd",
@@ -3324,13 +3402,18 @@ mod tests {
             ]
         );
         assert_eq!(
+            line_after(&fixture.live.join("cc-agent-host"), "FROM:").unwrap(),
+            "release"
+        );
+        assert_eq!(
             ran.events
                 .iter()
                 .filter(|event| event.starts_with("download"))
                 .count(),
-            if cfg!(target_os = "macos") { 2 } else { 6 },
-            "macOS fetches only the tmux archive and its checksum; Linux fetches \
-             the release's own core archive too, each with its signature: {:?}",
+            if cfg!(target_os = "macos") { 4 } else { 9 },
+            "macOS fetches the tmux and agent host archives with their checksums; \
+             Linux fetches the release's own core archive too, each with its \
+             signature: {:?}",
             ran.events
         );
         for smoke in [
