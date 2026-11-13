@@ -33,6 +33,7 @@ struct PairingView: View {
     @State private var showManualEntry = false
     @State private var openMachineID: String?
     @State private var pairingStartedAt: Date?
+    @State private var showFolders = false
 
     var body: some View {
         Group {
@@ -402,6 +403,7 @@ struct PairingView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                     machinesSection
+                    foldersSection
                     aboutSection
                 }
                 .padding(.horizontal, CC.space.md)
@@ -421,6 +423,7 @@ struct PairingView: View {
                     MachineScreen().environment(machine)
                 }
             }
+            .navigationDestination(isPresented: $showFolders) { FoldersView() }
             .sheet(isPresented: $showManualEntry) {
                 repairSheet
             }
@@ -488,6 +491,22 @@ struct PairingView: View {
                             .foregroundStyle(CC.text.tertiary)
                     }
                 }
+            }
+        }
+    }
+
+    /// The way to the one pane that changes a folder's trust answer after it is
+    /// given (decision 168). Behind its own row, so Settings stays a list of
+    /// computers and the folders, kept per computer, are grouped there.
+    private var foldersSection: some View {
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
+            CCSectionHeader("Agents")
+            CCCard(padding: 0) {
+                CCRow(
+                    "Folders",
+                    subtitle: "Which folders agents may load scripts, tools and instructions from.",
+                    separator: false,
+                    action: { showFolders = true })
             }
         }
     }
@@ -919,6 +938,187 @@ struct MachineScreen: View {
             Text(
                 "This iPhone forgets \(model.machineName ?? "this computer"). To use it again, show a new code on it and scan it (codeconnect.sh/support shows how)."
             )
+        }
+    }
+}
+
+// MARK: - Folders
+
+/// Settings › Folders: the one place a folder's "trust this folder?" answer is
+/// changed after it is given. Each computer keeps its own answers, so they are
+/// grouped by the computer that keeps them; an answer is set, flipped or
+/// forgotten here, and the computer's own list comes back with every change
+/// (decision 168).
+struct FoldersView: View {
+    @Environment(Machines.self) private var machines
+
+    /// Only computers this phone is connected to: a folder's answer is read from
+    /// and written to its own computer, so an offline one has nothing to offer
+    /// here.
+    private var connected: [AppModel] {
+        machines.models.filter { $0.machineID != nil && $0.linkHealth.level != .offline }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CC.space.lg) {
+                CCProse(
+                    "Agents load the scripts, tools and instructions of folders you trust. "
+                        + "In other folders they start with nothing from the folder.",
+                    style: CC.type.callout, color: CC.text.secondary
+                )
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, CC.space.md)
+
+                if connected.isEmpty {
+                    Text("Connect to a computer to manage its folders.")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, CC.space.md)
+                } else {
+                    ForEach(connected, id: \.machineID) { machine in
+                        FolderMachineSection(model: machine)
+                    }
+                }
+            }
+            .padding(.vertical, CC.space.md)
+        }
+        .background(CC.color.bg)
+        .ccNavigationChrome()
+        .navigationTitle("Folders")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// One connected computer's remembered folders, loaded from and changed on that
+/// computer. The answer the computer sends back after a change is the new truth,
+/// so every list/set/forget replaces the rows outright.
+private struct FolderMachineSection: View {
+    let model: AppModel
+
+    /// nil while the computer hasn't answered yet; `[]` once it has, with none.
+    @State private var answers: [FolderAnswer]?
+    @State private var failed = false
+    /// Paths with a change in flight, so a row's buttons wait rather than firing
+    /// a second change over the first.
+    @State private var changing: Set<String> = []
+
+    private var computerName: String { model.machineName ?? "This computer" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            CCSectionHeader(computerName)
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.xs)
+            content
+        }
+        .task(id: model.machineID) { await load() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let answers {
+            if answers.isEmpty {
+                Text("No folders yet. CodeConnect asks the first time an agent starts in a folder.")
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, CC.space.md)
+            } else {
+                CCCard(padding: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(answers.enumerated()), id: \.element.path) { index, folder in
+                            folderRow(folder)
+                            if index < answers.count - 1 {
+                                CCHairline().padding(.leading, CC.space.md)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, CC.space.md)
+                // Once for the list, not once per row: Forget's help is the same
+                // sentence on every folder.
+                Text("Forgetting a folder asks again the next time an agent starts there.")
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, CC.space.md)
+                    .padding(.top, CC.space.xs)
+            }
+        } else if failed {
+            Text("Couldn’t read folders from \(computerName).")
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, CC.space.md)
+        } else {
+            HStack(spacing: CC.space.sm) {
+                CCProgressRing()
+                Text("Reading folders…")
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, CC.space.md)
+        }
+    }
+
+    private func folderRow(_ folder: FolderAnswer) -> some View {
+        let trusted = folder.trust == .trusted
+        return VStack(alignment: .leading, spacing: CC.space.sm) {
+            CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
+                Text(verbatim: folder.path)
+                    .ccType(CC.type.monoSmall)
+                    .foregroundStyle(CC.text.primary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                // A plain tone label, not a badge: it keeps the decided case
+                // ("Not trusted") and wraps rather than truncating at the
+                // accessibility sizes.
+                Text(trusted ? "Trusted" : "Not trusted")
+                    .ccType(CC.type.footnote.weight(.semibold))
+                    .foregroundStyle(trusted ? CC.color.success : CC.color.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: CC.space.xs) {
+                CCButton(
+                    trusted ? "Don’t Trust" : "Trust",
+                    variant: .secondary, size: .sm,
+                    action: { change(folder.path, to: trusted ? .notTrusted : .trusted) })
+                CCButton("Forget", variant: .ghost, size: .sm, action: { forget(folder.path) })
+                Spacer(minLength: 0)
+            }
+            .disabled(changing.contains(folder.path))
+        }
+        .padding(CC.space.md)
+    }
+
+    @MainActor
+    private func load() async {
+        failed = false
+        do { answers = try await model.connection.listFolderTrust() }
+        catch { failed = true }
+    }
+
+    @MainActor
+    private func change(_ path: String, to trust: FolderTrust) {
+        guard changing.insert(path).inserted else { return }
+        Task {
+            defer { changing.remove(path) }
+            do { answers = try await model.connection.setFolderTrust(path: path, trust: trust) }
+            catch { failed = true }
+        }
+    }
+
+    @MainActor
+    private func forget(_ path: String) {
+        guard changing.insert(path).inserted else { return }
+        Task {
+            defer { changing.remove(path) }
+            do { answers = try await model.connection.forgetFolderTrust(path: path) }
+            catch { failed = true }
         }
     }
 }

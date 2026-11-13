@@ -11,6 +11,12 @@ struct StartingSessionView: View {
     let onLive: (_ key: String, _ focusComposer: Bool) -> Void
     /// Back to choosing, from a start that failed.
     let onChooseAgain: () -> Void
+    /// The folder question was answered: a fresh start carries the answer, and
+    /// its request id opens as this one did.
+    let onAnswer: (_ newRequestID: String) -> Void
+    /// Back from the folder question: reopen the start form with the computer,
+    /// folder, agent and typed message still in it.
+    let onBackToForm: (SessionStart) -> Void
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -22,6 +28,8 @@ struct StartingSessionView: View {
             if let start {
                 if case .failed(let reason, let detail) = start.outcome {
                     failure(start, reason: reason, detail: detail)
+                } else if case .needsTrust(let path) = start.outcome {
+                    trustQuestion(start, path: path)
                 } else {
                     starting(start)
                 }
@@ -32,12 +40,36 @@ struct StartingSessionView: View {
         .ccNavigationChrome()
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        // The folder question's own Back returns to the form, not up the stack.
+        .navigationBarBackButtonHidden(asksTrust)
         .toolbar {
             if let start {
                 ToolbarItem(placement: .principal) { StartBarTitle(start: start) }
+                if asksTrust {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { onBackToForm(start) } label: {
+                            HStack(spacing: CC.space.xxs) {
+                                CCIcon("arrow-left", size: 16, weight: .semibold)
+                                Text("Back").ccType(CC.type.body)
+                            }
+                            .foregroundStyle(CC.text.primary)
+                            .fixedSize()
+                            .ccHitTarget()
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Back")
+                        .accessibilityIdentifier("trust-back")
+                    }
+                }
             }
         }
         .onChange(of: liveKey) { _, key in if let key { onLive(key, start?.prompt == nil) } }
+    }
+
+    /// The folder question is up: the start came back `needsTrust`.
+    private var asksTrust: Bool {
+        if case .needsTrust = start?.outcome { return true }
+        return false
     }
 
     /// The new session's key once the fleet lists it.
@@ -94,6 +126,26 @@ struct StartingSessionView: View {
                     }
                     .padding(.leading, TimelineSpine.content)
                 }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, CC.space.md)
+            .padding(.top, CC.space.xl)
+        }
+    }
+
+    // MARK: Folder question
+
+    /// The start came back `needsTrust`: nothing ran, the folder keeps no answer
+    /// to "trust this folder?", and the start carried none. The question is shown
+    /// here, before anything runs; an answer re-sends the start carrying it (a
+    /// fresh start, its own request id), and Back returns to the form.
+    private func trustQuestion(_ start: SessionStart, path: String) -> some View {
+        ScrollView {
+            TrustFolderCard(path: path, computerName: start.machineName) { trust in
+                onAnswer(
+                    model.startSession(
+                        start.project, place: start.place, agent: start.agent,
+                        model: start.model, prompt: start.prompt ?? "", trust: trust))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, CC.space.md)

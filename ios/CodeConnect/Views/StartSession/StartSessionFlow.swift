@@ -3,6 +3,19 @@ import SwiftUI
 
 // MARK: - 2 · Steps
 
+/// What reopening the start flow needs to put every earlier answer back: the
+/// folder question's Back returns here, so the typed first message and the
+/// computer, folder, agent and place survive instead of being lost to a fresh
+/// flow (decision 168, placement 1B). Built from the `SessionStart` the question
+/// stands on.
+struct StartSeed {
+    let context: StartContext
+    let project: StartProject
+    let place: StartPlace
+    let agent: StartAgent
+    let message: String
+}
+
 /// New session, one question a screen: which computer, which folder (a recent
 /// one, or browsed to as in a terminal), which agent, and in a repository
 /// which branch; then Start, with an optional first message. A tap on an
@@ -42,6 +55,29 @@ struct StartStepsSheet: View {
     /// The computer tapped on the first step, held from then on: a link that
     /// drops later neither takes it away nor hands its choices to another.
     @State private var chosen: StartContext?
+
+    init(
+        contexts: [StartContext], seed: StartSeed? = nil,
+        onStarted: @escaping (String) -> Void, onClose: @escaping () -> Void
+    ) {
+        self.contexts = contexts
+        self.onStarted = onStarted
+        self.onClose = onClose
+        guard let seed else { return }
+        // Reopened from the folder question's Back: land on Ready with the
+        // computer, folder, agent, place and typed message as they were, and a
+        // trail that still lets every "Change" step back to its own screen. The
+        // branch screen is in the trail only for a repository, which is the one
+        // place the Ready summary offers a Branch row to revisit.
+        _chosen = State(initialValue: seed.context)
+        _project = State(initialValue: seed.project)
+        _agent = State(initialValue: seed.agent)
+        _place = State(initialValue: seed.place)
+        _message = State(initialValue: seed.message)
+        let isRepo = seed.context.git(seed.project.path).map { $0 != nil } ?? seed.context.branchAhead(seed.project)
+        let steps: [Screen] = [.computer, .folder, .agent] + (isRepo ? [.branch] : []) + [.start]
+        _trail = State(initialValue: steps)
+    }
 
     /// The chosen computer. Every step after the first is drawn only once one
     /// is chosen (`content`), so it is always there when read.
@@ -646,5 +682,69 @@ struct StartStepRow: View {
         .padding(.vertical, CC.space.sm)
         .frame(minHeight: CC.size.rowMin)
         .contentShape(Rectangle())
+    }
+}
+
+/// The folder-trust question (decision 168): shown when a start comes back
+/// `needsTrust` — nothing ran, and the folder has no kept answer. The question,
+/// the folder's path in code style, what each answer does, the two answers, and
+/// where to change it later. An answer re-sends the start carrying it.
+struct TrustFolderCard: View {
+    let path: String
+    let computerName: String
+    let onAnswer: (FolderTrust) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: CC.space.lg) {
+            VStack(alignment: .leading, spacing: CC.space.sm) {
+                Text("Do you trust the authors of the files in this folder?")
+                    .ccType(CC.type.title)
+                    .foregroundStyle(CC.text.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // Free-standing, the block would step its text out to the content
+                // column and hang its border, landing the path a second edge in
+                // from the title; declaring the inset the card already carries
+                // lands its text on the title's edge instead.
+                CCMonoBlock(path, lineLimit: 2, truncation: .head, isSmall: true)
+                    .ccColumnInset(CC.space.md)
+            }
+
+            CCProse(
+                "If you do, the agent loads the folder’s own scripts, tools and "
+                    + "instructions, and its scripts can run on \(computerName) without "
+                    + "asking you. If you don’t, the agent starts with nothing from the folder.",
+                style: CC.type.body, color: CC.text.secondary
+            )
+            .fixedSize(horizontal: false, vertical: true)
+
+            CCCard(padding: 0) {
+                VStack(spacing: 0) {
+                    answer(
+                        "Yes, I trust the authors",
+                        "Load the folder’s scripts, tools and instructions",
+                        .trusted, id: "trust-yes")
+                    CCHairline().padding(.leading, CC.space.md)
+                    answer(
+                        "No, I don’t trust the authors",
+                        "Start with nothing from the folder",
+                        .notTrusted, id: "trust-no")
+                }
+            }
+
+            Text("Asked once for this folder. You can change it in Settings › Folders.")
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One answer: its label and, under it, what it does. A tap re-sends the
+    /// start with the answer, as the flow's rows move on.
+    private func answer(_ title: String, _ sublabel: String, _ trust: FolderTrust, id: String) -> some View {
+        Button { onAnswer(trust) } label: {
+            StartStepRow(title: title, detail: sublabel)
+        }
+        .buttonStyle(StartRowStyle())
+        .accessibilityIdentifier(id)
     }
 }
