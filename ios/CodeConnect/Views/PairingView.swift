@@ -952,11 +952,13 @@ struct MachineScreen: View {
 struct FoldersView: View {
     @Environment(Machines.self) private var machines
 
-    /// Only computers this phone is connected to: a folder's answer is read from
-    /// and written to its own computer, so an offline one has nothing to offer
-    /// here.
+    /// Only computers whose link is actually up: a folder's answer is read from
+    /// and written to its own computer, and a request to one still connecting is
+    /// refused. A computer enters this list the moment its handshake lands, and
+    /// its section loads then — so opening Folders mid-connect no longer sticks
+    /// on a read failure the connection has since outgrown.
     private var connected: [AppModel] {
-        machines.models.filter { $0.machineID != nil && $0.linkHealth.level != .offline }
+        machines.models.filter { $0.machineID != nil && $0.connection.phase.isConnected }
     }
 
     var body: some View {
@@ -1000,6 +1002,10 @@ private struct FolderMachineSection: View {
     /// nil while the computer hasn't answered yet; `[]` once it has, with none.
     @State private var answers: [FolderAnswer]?
     @State private var failed = false
+    /// The Kit's own words from a set/forget that came back an error, kept until
+    /// the list is reopened or a change succeeds — the one source both apps show,
+    /// so a person who taps Trust and sees the row unchanged learns why.
+    @State private var changeError: String?
     /// Paths with a change in flight, so a row's buttons wait rather than firing
     /// a second change over the first.
     @State private var changing: Set<String> = []
@@ -1042,6 +1048,14 @@ private struct FolderMachineSection: View {
                 Text("Forgetting a folder asks again the next time an agent starts there.")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, CC.space.md)
+                    .padding(.top, CC.space.xs)
+            }
+            if let changeError {
+                Text(changeError)
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.color.danger)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, CC.space.md)
                     .padding(.top, CC.space.xs)
@@ -1098,6 +1112,7 @@ private struct FolderMachineSection: View {
     @MainActor
     private func load() async {
         failed = false
+        changeError = nil
         do { answers = try await model.connection.listFolderTrust() }
         catch { failed = true }
     }
@@ -1107,8 +1122,12 @@ private struct FolderMachineSection: View {
         guard changing.insert(path).inserted else { return }
         Task {
             defer { changing.remove(path) }
-            do { answers = try await model.connection.setFolderTrust(path: path, trust: trust) }
-            catch { failed = true }
+            do {
+                answers = try await model.connection.setFolderTrust(path: path, trust: trust)
+                changeError = nil
+            } catch {
+                changeError = error.localizedDescription
+            }
         }
     }
 
@@ -1117,8 +1136,12 @@ private struct FolderMachineSection: View {
         guard changing.insert(path).inserted else { return }
         Task {
             defer { changing.remove(path) }
-            do { answers = try await model.connection.forgetFolderTrust(path: path) }
-            catch { failed = true }
+            do {
+                answers = try await model.connection.forgetFolderTrust(path: path)
+                changeError = nil
+            } catch {
+                changeError = error.localizedDescription
+            }
         }
     }
 }
