@@ -582,7 +582,7 @@ pub enum DeleteOutcome {
     NotFound,
 }
 
-/// A Claude run ccd started, as its start request finds it again.
+/// A run ccd started, of either agent, as its start request finds it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedRun {
     pub session_uid: String,
@@ -662,7 +662,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "mail_sent",
     "mail_wake",
     "mail_runs",
-    "claude_hosts",
+    "run_hosts",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -2438,13 +2438,14 @@ impl Store {
         Ok(rows)
     }
 
-    /// The Claude run ccd started for the app's start request `request_id`, if any.
+    /// The run ccd started, for either agent, for the app's start request `request_id`,
+    /// if any.
     pub fn hosted_run_for_request(&self, request_id: &str) -> Result<Option<HostedRun>> {
         let conn = self.read();
         Ok(conn
             .query_row(
                 "SELECT h.session_uid, s.cwd, s.lifecycle
-                   FROM claude_hosts AS h JOIN sessions AS s USING(session_uid)
+                   FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
                   WHERE h.request_id = ?1",
                 params![request_id],
                 hosted_run_from,
@@ -2452,21 +2453,18 @@ impl Store {
             .optional()?)
     }
 
-    /// Write a new hosted Claude run's row and its `claude_hosts` row in one
-    /// transaction, before anything for it is spawned (H1). If `request_id`
-    /// already has a run, nothing is written and that run is returned, so a
-    /// repeated start never makes a second one.
-    pub fn begin_claude_run(
-        &self,
-        row: &SessionRow,
-        request_id: &str,
-    ) -> Result<Option<HostedRun>> {
+    /// Write a new hosted run's row, in its agent's table, and its `run_hosts` row in
+    /// one transaction, before anything for it is spawned (H1). If `request_id`
+    /// already has a run, of either agent, nothing is written and that run is
+    /// returned, so a repeated start never makes a second one.
+    pub fn begin_run(&self, row: &SessionRow, request_id: &str) -> Result<Option<HostedRun>> {
+        let (table, _) = session_tables_for(&row.agent);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = tx
             .query_row(
                 "SELECT h.session_uid, s.cwd, s.lifecycle
-                   FROM claude_hosts AS h JOIN sessions AS s USING(session_uid)
+                   FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
                   WHERE h.request_id = ?1",
                 params![request_id],
                 hosted_run_from,
@@ -2476,10 +2474,13 @@ impl Store {
             return Ok(existing);
         }
         tx.execute(
-            "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
-                                  claude_session_id, transcript_path, lifecycle,
-                                  created_at, updated_at, agent)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            // The table name is a compile-time literal from `session_tables_for`.
+            &format!(
+                "INSERT INTO {table}(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                     claude_session_id, transcript_path, lifecycle,
+                                     created_at, updated_at, agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+            ),
             params![
                 row.session_uid,
                 row.session_id,
@@ -2495,7 +2496,7 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO claude_hosts(session_uid, request_id) VALUES (?1, ?2)",
+            "INSERT INTO run_hosts(session_uid, request_id) VALUES (?1, ?2)",
             params![row.session_uid, request_id],
         )?;
         tx.execute(
@@ -2510,7 +2511,7 @@ impl Store {
     pub fn record_host(&self, session_uid: &str, host: &ProcessIdentity) -> Result<()> {
         let conn = self.write();
         let changed = conn.execute(
-            "UPDATE claude_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4
+            "UPDATE run_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4
               WHERE session_uid = ?1",
             params![
                 session_uid,
@@ -2539,7 +2540,7 @@ impl Store {
         let seq = i64::try_from(seq).context("a host sequence number past i64")?;
         let conn = self.write();
         let changed = conn.execute(
-            "UPDATE claude_hosts SET cursor = ?5
+            "UPDATE run_hosts SET cursor = ?5
               WHERE session_uid = ?1 AND host_pid = ?2
                 AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
             params![
@@ -2628,7 +2629,7 @@ impl Store {
             return Ok(DeleteOutcome::NotFound);
         };
         let ccd_hosted: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claude_hosts WHERE session_uid = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM run_hosts WHERE session_uid = ?1)",
             params![session_uid],
             |row| row.get(0),
         )?;
@@ -2639,7 +2640,7 @@ impl Store {
         // make it immortal. "The daemon cannot say — you may remove it" is the
         // honest contract; Claude Code's own transcript, the authoritative
         // record, is untouched either way. Hosted rows keep the strict rule, and
-        // a run ccd started has no tmux at all: its `claude_hosts` row is what
+        // a run ccd started has no tmux at all: its `run_hosts` row is what
         // makes it hosted.
         let unhosted = tmux_socket.is_empty() && !ccd_hosted;
         let ended = lifecycle == lifecycle_str(Lifecycle::Exited)
@@ -5915,12 +5916,12 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             updated_at      TEXT    NOT NULL
         );
 
-        -- A Claude run ccd hosts: the app's start request it answers, its agent
-        -- host's kernel identity (null until the host has written host.json),
-        -- and the highest host message whose effects are committed. The row
-        -- is written with the run's `sessions` row, before anything is spawned,
-        -- so a repeated request finds the run instead of starting another.
-        CREATE TABLE IF NOT EXISTS claude_hosts(
+        -- A run ccd hosts, of either agent: the app's start request it answers,
+        -- its host's kernel identity (null until the host has written host.json),
+        -- and the highest host message whose effects are committed. The row is
+        -- written with the run's own session row, before anything is spawned, so
+        -- a repeated request finds the run instead of starting another.
+        CREATE TABLE IF NOT EXISTS run_hosts(
             session_uid     TEXT PRIMARY KEY,
             request_id      TEXT    NOT NULL UNIQUE,
             host_pid        INTEGER,
@@ -12503,7 +12504,7 @@ mod tests {
         row.tmux_session.clear();
         row.tmux_socket.clear();
         row.lifecycle = Lifecycle::Starting;
-        assert_eq!(store.begin_claude_run(&row, request_id).unwrap(), None);
+        assert_eq!(store.begin_run(&row, request_id).unwrap(), None);
         session
     }
 
@@ -12514,7 +12515,7 @@ mod tests {
         let mut second = session_row(&key("BB", "run-BB"));
         second.lifecycle = Lifecycle::Starting;
         let existing = store
-            .begin_claude_run(&second, "req-1")
+            .begin_run(&second, "req-1")
             .unwrap()
             .expect("the first run");
         assert_eq!(existing.session_uid, first.uid);

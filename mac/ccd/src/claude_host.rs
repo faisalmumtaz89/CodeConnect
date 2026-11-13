@@ -18,7 +18,6 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,10 +96,13 @@ pub(crate) fn answer_for(run: HostedRun) -> StartSessionResult {
 
 /// Start `run`: its row, its folder, its host, the first attach and `start`.
 pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionResult {
-    let uid = match protocol::uid::new() {
-        Ok(uid) => uid,
-        Err(err) => return failed(format!("could not name the run: {err}")),
-    };
+    // The run and its first message are named together, before the row: the start's
+    // uuid is the one claude stamps on that message.
+    let (uid, start_uuid) =
+        match protocol::uid::new().and_then(|uid| Ok((uid, protocol::uid::uuid_v4()?))) {
+            Ok(names) => names,
+            Err(err) => return failed(format!("could not name the run: {err}")),
+        };
     let now = protocol::time::now_rfc3339();
     let row = SessionRow {
         session_uid: uid.clone(),
@@ -117,16 +119,12 @@ pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionRes
         codex_thread_id: None,
         codex_socket: None,
     };
-    match daemon
-        .db
-        .begin_claude_run(row, run.request_id.to_string())
-        .await
-    {
+    match daemon.db.begin_run(row, run.request_id.to_string()).await {
         Ok(Some(existing)) => return answer_for(existing),
         Ok(None) => {}
         Err(err) => return failed(format!("could not record the run: {err:#}")),
     }
-    match bring_up(daemon, &uid, &run).await {
+    match bring_up(daemon, &uid, &start_uuid, &run).await {
         // A start in a new worktree does not know its folder until claude reports it.
         Ok(()) => StartSessionResult::Started {
             session_uid: uid,
@@ -153,44 +151,30 @@ fn failed(detail: String) -> StartSessionResult {
 }
 
 /// The run's folder, its host spawned and admitted, attached, and `start` sent.
-async fn bring_up(daemon: &Arc<Daemon>, uid: &str, run: &Run<'_>) -> Result<(), String> {
+async fn bring_up(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    start_uuid: &str,
+    run: &Run<'_>,
+) -> Result<(), String> {
     let dir = run_dir(run.root, uid);
     let log = make_run_dir(run.root, &dir)
         .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?;
-    let log_err = log
-        .try_clone()
-        .map_err(|err| format!("could not open the run's log: {err}"))?;
-    let mut command = crate::start_session::login_shell_command(
+    let mut child = crate::start_session::spawn_detached(
         run.environment,
         &[run.host_bin.as_os_str(), dir.as_os_str()],
-    );
-    command
-        .env(protocol::ENV_SESSION_UID, uid)
-        .current_dir(run.cwd)
-        .stdin(Stdio::null())
-        // A file, never a pipe: the host outlives this ccd, and a pipe would break
-        // under its next write.
-        .stdout(log)
-        .stderr(log_err);
-    // SAFETY: `setsid` is async-signal-safe and touches nothing of the parent's.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("could not run the login shell: {err}"))?;
+        Path::new(run.cwd),
+        uid,
+        log,
+    )
+    .map_err(|err| format!("could not run the login shell: {err}"))?;
     let spawned = child.id();
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
-    let attached = attach(daemon, uid, run, &dir, spawned, &mut child, deadline).await;
-    // Reaped while this ccd lives; after it, the system adopts the host.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
+    let attached = attach(
+        daemon, uid, start_uuid, run, &dir, spawned, &mut child, deadline,
+    )
+    .await;
+    crate::start_session::reap(child);
     attached
 }
 
@@ -208,9 +192,11 @@ fn make_run_dir(root: &Path, dir: &Path) -> io::Result<std::fs::File> {
         .open(dir.join("host.log"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn attach(
     daemon: &Arc<Daemon>,
     uid: &str,
+    start_uuid: &str,
     run: &Run<'_>,
     dir: &Path,
     spawned: Option<u32>,
@@ -281,7 +267,7 @@ async fn attach(
         _ => return Err("the agent host's first message was not its state".into()),
     }
     let start = ToHost::Start {
-        uuid: protocol::uid::uuid_v4().map_err(|err| format!("could not name the start: {err}"))?,
+        uuid: start_uuid.to_string(),
         options: start_options(uid, run),
         prompt: run.prompt.to_string(),
     };
@@ -554,7 +540,7 @@ mod tests {
         rusqlite::Connection::open(rig.root.join("events.db"))
             .unwrap()
             .query_row(
-                "SELECT cursor FROM claude_hosts WHERE session_uid = ?1",
+                "SELECT cursor FROM run_hosts WHERE session_uid = ?1",
                 [uid],
                 |row| row.get(0),
             )
@@ -800,11 +786,12 @@ mod tests {
         stop(&dir);
     }
 
-    /// The host gets the start's own environment, the one its claude check read, with
-    /// only the run's uid added: a sign-in variable arrives as given, and nothing sets
-    /// a Claude config folder.
+    /// The host gets the run's environment as it was given, with only the run's uid
+    /// added: a sign-in variable arrives unchanged, and nothing sets a Claude config
+    /// folder. (That the claude check read this same map is the arm's test,
+    /// `start_session::tests::the_check_and_the_host_see_one_environment`.)
     #[tokio::test]
-    async fn the_host_gets_the_environment_the_check_read() {
+    async fn the_host_gets_its_runs_environment_as_given() {
         let mut rig = rig();
         rig.environment.insert(
             OsString::from("ANTHROPIC_API_KEY"),
@@ -861,7 +848,7 @@ mod tests {
                 rusqlite::Connection::open(rig.root.join("events.db"))
                 .unwrap()
                 .execute(
-                    "UPDATE claude_hosts SET host_start_usec = host_start_usec + 1 WHERE session_uid = ?1",
+                    "UPDATE run_hosts SET host_start_usec = host_start_usec + 1 WHERE session_uid = ?1",
                     [&uid],
                 )
                 .unwrap();
@@ -927,10 +914,11 @@ mod tests {
     }
 
     /// Against the real agent host (mac/agent-host/build.sh's `cc-agent-host`), through
-    /// the login shell: the recorded pid and birth are the host's own, it leads a session
-    /// of its own, its first state is committed, and it is still running after its 30 s
-    /// no-start exit would have ended it, so `start` reached it. Ignored and gated:
-    /// `CODECONNECT_TEST_AGENT_HOST` names the built host.
+    /// zsh's login shell (`-lic`), as a zsh user's start runs it: the recorded pid and
+    /// birth are the host's own, it leads a session of its own, its first state is
+    /// committed, and it is still running after its 30 s no-start exit would have ended
+    /// it, so `start` reached it. Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names
+    /// the built host.
     #[tokio::test]
     #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
     async fn the_real_host_is_admitted_attached_and_kept_by_start() {
@@ -938,7 +926,9 @@ mod tests {
             std::env::var("CODECONNECT_TEST_AGENT_HOST")
                 .expect("CODECONNECT_TEST_AGENT_HOST names the built agent host"),
         );
-        let rig = rig();
+        let mut rig = rig();
+        rig.environment
+            .insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
         let cwd = rig.root.to_str().unwrap().to_string();
         let result = start(&rig.daemon, run(&rig, "req-1", &cwd, &host)).await;
         let uid = started_uid(&result);
@@ -951,7 +941,7 @@ mod tests {
         let stored: (i32, i64, i64) = rusqlite::Connection::open(rig.root.join("events.db"))
             .unwrap()
             .query_row(
-                "SELECT host_pid, host_start_sec, host_start_usec FROM claude_hosts
+                "SELECT host_pid, host_start_sec, host_start_usec FROM run_hosts
                   WHERE session_uid = ?1",
                 [&uid],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

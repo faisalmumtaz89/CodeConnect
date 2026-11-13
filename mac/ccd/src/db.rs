@@ -246,12 +246,12 @@ impl Db {
             .await
     }
 
-    pub async fn begin_claude_run(
+    pub async fn begin_run(
         &self,
         row: SessionRow,
         request_id: String,
     ) -> Result<Option<crate::store::HostedRun>> {
-        self.run(move |store| store.begin_claude_run(&row, &request_id))
+        self.run(move |store| store.begin_run(&row, &request_id))
             .await
     }
 

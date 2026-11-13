@@ -377,8 +377,8 @@ pub struct Config {
     pub codex_bin: Option<String>,
 
     /// Explicit path to the agent host (`cc-agent-host`) ccd runs for each Claude
-    /// run. Unset, it is the one beside ccd's own executable, where the app and the
-    /// installer put it.
+    /// run. Unset, it is the one beside ccd's own executable, where the Mac app
+    /// installs it.
     #[serde(default)]
     pub agent_host_bin: Option<String>,
 
