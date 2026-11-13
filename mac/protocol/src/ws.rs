@@ -189,11 +189,12 @@ pub enum ClientMessage {
     /// Deliberately the only destructive verb the phone has, and deliberately
     /// narrow: `session_uid`, never a tmux name, because a name is handed to the
     /// next run and a phone that deleted "cc-1" could destroy a session it never
-    /// saw. A **hosted** run is refused unless proven `exited`; an **adopted**
-    /// one (empty `tmux_session` — CodeConnect never launched it, so no proof of
-    /// its end can ever exist) is accepted at any lifecycle, and its deletion
-    /// also stops observation of that conversation until a new session start
-    /// re-adopts it.
+    /// saw. A **hosted** run (in tmux, or through the agent host ccd started for
+    /// it) is refused until it has ended: `exited`, or `failed` for a start whose
+    /// host never came up. An **adopted** one (empty `tmux_session` and no host of
+    /// ccd's — CodeConnect never launched it, so no proof of its end can ever
+    /// exist) is accepted at any lifecycle, and its deletion also stops
+    /// observation of that conversation until a new session start re-adopts it.
     ///
     /// It removes CodeConnect's own record, not the conversation: Claude Code
     /// keeps its transcript under `~/.claude/projects`, so `claude --resume` still
