@@ -168,6 +168,15 @@ test('an initialize claude answers with an error: refused, the query closed, its
   expect(await exitWithin(host, 3000)).toBe(0);
 }, 10_000);
 
+test('a refused start sends no SDK line, even one claude wrote before refusing: only its end, then the host exits', async () => {
+  const { host, ccd, outcome } = await run(trustedStart, { before_init: [sessionQueued], init_error: true });
+  expect(outcome.status).toBe('refused');
+  await ccd.line("claude's end", (line) => line.type === 'exited');
+  expect(ccd.lines.map((line) => line.type)).toStrictEqual(['state', 'outcome', 'exited']);
+  ccd.ackAll();
+  expect(await exitWithin(host, 3000)).toBe(0);
+}, 10_000);
+
 test('a claude that is not there: the start is refused with the reason, and the host exits once that is acknowledged', async () => {
   const { host, ccd, outcome } = await run(trustedStart, {}, { claude: '/nonexistent/claude' });
   expect(outcome.status).toBe('refused');
