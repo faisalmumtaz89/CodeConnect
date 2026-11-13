@@ -409,6 +409,23 @@ public enum TimelineBuilder {
                                         detail: nil,
                                         severity: notification.severity))))
                     }
+                } else if event.source == .codex, let text = event.userText,
+                    text == MailNudge.act || text == MailNudge.show {
+                    // ccd files a Codex mail wake (protocol::ipc MAIL_NUDGE_*) as the turn's
+                    // user message, but it is not the person speaking — so it draws as the
+                    // mail notice, like `/clear` above, never a `you:` bubble. `.taskReport`
+                    // (not `.other`) keeps a mail-woken run Running: Codex emits no
+                    // turn-start event, so the wake line is the only activity until the
+                    // agent's first reply.
+                    items.append(
+                        event.item(
+                            .notice(
+                                NoticeItem(
+                                    kind: .taskReport,
+                                    symbol: "chat-text",
+                                    title: "Reading CodeConnect mail",
+                                    detail: nil,
+                                    severity: .info))))
                 } else if event.isPersonsWords, let text = event.userText {
                     items.append(event.item(.userMessage(text)))
                 }
