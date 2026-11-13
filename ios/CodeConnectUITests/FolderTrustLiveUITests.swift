@@ -77,7 +77,12 @@ final class FolderTrustLiveUITests: XCTestCase {
             let field = messageField(app)
             if field.waitForExistence(timeout: 8) { field.tap(); field.typeText(message) }
         }
-        XCTAssertTrue(app.buttons["start-go"].waitForExistence(timeout: 20), "the Ready step with Start")
+        // The Ready step is reached: its Start is the bar's start-go, or — at the
+        // accessibility sizes where a focused message pill hides the bar — the
+        // pill's own send (start-message-button).
+        XCTAssertTrue(
+            app.buttons["start-go"].waitForExistence(timeout: 20) || app.buttons["start-message-button"].exists,
+            "the Ready step (Start bar, or the pill's send when a focused message hides it)")
     }
 
     /// Scenarios 1 + 2: a never-seen folder asks, an answer starts, no second ask.
@@ -111,14 +116,17 @@ final class FolderTrustLiveUITests: XCTestCase {
         shot(app, "2b-no-second-ask")
     }
 
-    /// Live re-render of the sheet-step question at whatever size the simulator
-    /// is set to. No first message — so the Ready step's Start is always present
-    /// (at the accessibility sizes a focused message pill replaces it) — then
-    /// shoot the question with its round Back and both answers.
+    /// Live re-render of the sheet-step question at whatever size the simulator is
+    /// set to. Starts with a first message (a message-less start is refused, so the
+    /// question would never come), then starts via the control the size presents —
+    /// the Ready bar's start-go, or, at the accessibility sizes where a focused
+    /// message pill hides the bar, the pill's own send — and shoots the question
+    /// with its round Back and both answers.
     func testRenderQuestion() throws {
         let app = try launch()
-        reachReady(app, folder: "proj-a", message: nil)
-        app.buttons["start-go"].tap()
+        reachReady(app, folder: "proj-a", message: "render the folder question")
+        let pillSend = app.buttons["start-message-button"]
+        if pillSend.exists { pillSend.tap() } else { app.buttons["start-go"].tap() }
         XCTAssertTrue(app.buttons["trust-yes"].waitForExistence(timeout: 25), "the folder question")
         XCTAssertTrue(app.buttons["start-back"].exists, "the sheet's round Back on the question")
         XCTAssertTrue(app.buttons["trust-no"].exists, "both answers present")
