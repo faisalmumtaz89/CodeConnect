@@ -2555,6 +2555,61 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Commit the start's outcome, message `seq` from the host `host`, in one
+    /// transaction: the cursor, as [`Store::commit_cursor`] advances it, with the
+    /// SDK's initialize answer (`initialize`, as JSON) on a done start; then the
+    /// run's lifecycle, `starting` to `lifecycle` (`Live` or `Failed`), only while it
+    /// is `starting`, so a run already ended keeps its end. `false`, with nothing
+    /// written, when the cursor does not move, and then the caller must not
+    /// acknowledge `seq` (H3).
+    pub fn commit_outcome(
+        &self,
+        session_uid: &str,
+        host: &ProcessIdentity,
+        seq: u64,
+        lifecycle: Lifecycle,
+        initialize: Option<&str>,
+    ) -> Result<bool> {
+        let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE run_hosts SET cursor = ?5, initialize = ?6
+              WHERE session_uid = ?1 AND host_pid = ?2
+                AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
+            params![
+                session_uid,
+                host.pid,
+                host.birth.start_sec,
+                host.birth.start_usec,
+                seq,
+                initialize
+            ],
+        )?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        let now = protocol::time::now_rfc3339();
+        for table in SESSION_TABLES {
+            tx.execute(
+                // A compile-time list in this file; nothing a caller supplies
+                // reaches the statement text.
+                &format!(
+                    "UPDATE {table} SET lifecycle = ?2, updated_at = ?3
+                      WHERE session_uid = ?1 AND lifecycle = ?4"
+                ),
+                params![
+                    session_uid,
+                    lifecycle_str(lifecycle),
+                    now,
+                    lifecycle_str(Lifecycle::Starting)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The answer kept for the folder whose real path is `path`.
     pub fn folder_trust(&self, path: &str) -> Result<Option<Trust>> {
         let trusted = self
@@ -5974,7 +6029,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
 
         -- A run ccd hosts, of either agent: the app's start request it answers,
         -- its host's kernel identity (null until the host has written host.json),
-        -- and the highest host message whose effects are committed. The row is
+        -- the highest host message whose effects are committed, and the SDK's
+        -- initialize answer from the start's outcome (JSON, null until a start
+        -- is done): the run's facts before its first turn's init. The row is
         -- written with the run's own session row, before anything is spawned, so
         -- a repeated request finds the run instead of starting another.
         CREATE TABLE IF NOT EXISTS run_hosts(
@@ -5983,7 +6040,8 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             host_pid        INTEGER,
             host_start_sec  INTEGER,
             host_start_usec INTEGER,
-            cursor          INTEGER NOT NULL DEFAULT 0
+            cursor          INTEGER NOT NULL DEFAULT 0,
+            initialize      TEXT
         );
 
         -- A deletion is a decision, and this is its record. A uid here was

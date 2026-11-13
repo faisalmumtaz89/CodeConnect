@@ -278,6 +278,20 @@ impl Db {
             .await
     }
 
+    pub async fn commit_outcome(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        lifecycle: Lifecycle,
+        initialize: Option<String>,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.commit_outcome(&session_uid, &host, seq, lifecycle, initialize.as_deref())
+        })
+        .await
+    }
+
     /// Remove one ended run. Small next to a prune, and off the runtime for the
     /// same reason: it is still a multi-table transaction on the write
     /// connection, and the phone is waiting on the answer.

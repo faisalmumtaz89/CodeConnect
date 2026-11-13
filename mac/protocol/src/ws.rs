@@ -190,8 +190,9 @@ pub enum ClientMessage {
     /// narrow: `session_uid`, never a tmux name, because a name is handed to the
     /// next run and a phone that deleted "cc-1" could destroy a session it never
     /// saw. A **hosted** run (in tmux, or through the agent host ccd started for
-    /// it) is refused until it has ended: `exited`, or `failed` for a start whose
-    /// host never came up. An **adopted** one (empty `tmux_session` and no host of
+    /// it) is refused until it has ended: `exited`, or `failed` for a start that
+    /// never began (its host did not come up, or its start was refused). An
+    /// **adopted** one (empty `tmux_session` and no host of
     /// ccd's — CodeConnect never launched it, so no proof of its end can ever
     /// exist) is accepted at any lifecycle, and its deletion also stops
     /// observation of that conversation until a new session start re-adopts it.
@@ -979,8 +980,10 @@ pub enum StartSessionResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// No session was started, or (`launch_failed`) one was launched but never
-    /// reached the fleet; `detail` says which. It is human text, safe to show verbatim.
+    /// No session was started, or (`launch_failed`) one was launched but did not
+    /// finish starting; `detail` says which. It is human text, safe to show verbatim.
+    /// A Claude run whose host lost its link after ccd sent it `start`, before saying
+    /// how the start went, stays in the fleet as `starting`.
     Failed {
         reason: StartFailure,
         detail: String,
