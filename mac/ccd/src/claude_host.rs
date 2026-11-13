@@ -13,6 +13,8 @@
 //!
 //! The lines are [`protocol::host`]'s; the host is mac/agent-host.
 
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -61,6 +63,9 @@ pub(crate) struct Run<'a> {
     pub host_bin: &'a Path,
     /// The `codeconnect` binary, which runs the run's mail server.
     pub codeconnect: &'a Path,
+    /// The start's environment, the one its claude check read: the host and claude
+    /// get it as it is, with only `CODECONNECT_SESSION_UID` added.
+    pub environment: &'a HashMap<OsString, OsString>,
 }
 
 /// The run's folder: `<root>/runs/<uid>/`.
@@ -155,8 +160,10 @@ async fn bring_up(daemon: &Arc<Daemon>, uid: &str, run: &Run<'_>) -> Result<(), 
     let log_err = log
         .try_clone()
         .map_err(|err| format!("could not open the run's log: {err}"))?;
-    let mut command =
-        crate::start_session::login_shell_command(&[run.host_bin.as_os_str(), dir.as_os_str()]);
+    let mut command = crate::start_session::login_shell_command(
+        run.environment,
+        &[run.host_bin.as_os_str(), dir.as_os_str()],
+    );
     command
         .env(protocol::ENV_SESSION_UID, uid)
         .current_dir(run.cwd)
@@ -409,6 +416,8 @@ mod tests {
     struct Rig {
         root: PathBuf,
         daemon: Arc<Daemon>,
+        /// What a start gives its host: a home of the rig's own and the system shell.
+        environment: HashMap<OsString, OsString>,
     }
 
     impl Drop for Rig {
@@ -421,8 +430,18 @@ mod tests {
         let uid = protocol::uid::new().unwrap();
         let root = PathBuf::from(format!("/tmp/cch2.{}", &uid[16..]));
         std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("home")).unwrap();
         let daemon = daemon_on(&root);
-        Rig { root, daemon }
+        let environment = HashMap::from([
+            (OsString::from("HOME"), root.join("home").into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        Rig {
+            root,
+            daemon,
+            environment,
+        }
     }
 
     /// A daemon on the store in `root`, as a restarted ccd opens it again.
@@ -472,6 +491,7 @@ mod tests {
             claude_path: "/nonexistent/claude",
             host_bin,
             codeconnect: Path::new("/nonexistent/codeconnect"),
+            environment: &rig.environment,
         }
     }
 
@@ -778,6 +798,42 @@ mod tests {
             .await
             .expect("the link reads detached once its connection ends");
         stop(&dir);
+    }
+
+    /// The host gets the start's own environment, the one its claude check read, with
+    /// only the run's uid added: a sign-in variable arrives as given, and nothing sets
+    /// a Claude config folder.
+    #[tokio::test]
+    async fn the_host_gets_the_environment_the_check_read() {
+        let mut rig = rig();
+        rig.environment.insert(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("sk-test-marker"),
+        );
+        let host = rig.root.join("env-host");
+        std::fs::write(&host, "#!/bin/sh\nenv > \"$1/env.txt\"\n").unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let result = start(&rig.daemon, run(&rig, "req-1", &cwd, &host)).await;
+        assert!(
+            matches!(result, StartSessionResult::Failed { .. }),
+            "{result:?}"
+        );
+        let dir = runs(&rig).pop().unwrap();
+        let uid = dir.file_name().unwrap().to_str().unwrap().to_string();
+        let seen = std::fs::read_to_string(dir.join("env.txt")).unwrap();
+        let lines: Vec<&str> = seen.lines().collect();
+        assert!(
+            lines.contains(&"ANTHROPIC_API_KEY=sk-test-marker"),
+            "{seen}"
+        );
+        assert!(
+            lines.contains(&format!("CODECONNECT_SESSION_UID={uid}").as_str()),
+            "{seen}"
+        );
+        assert!(!seen.contains("CLAUDE_CONFIG_DIR"), "{seen}");
+        let home = format!("HOME={}", rig.root.join("home").display());
+        assert!(lines.contains(&home.as_str()), "{seen}");
     }
 
     /// A state whose commit changes nothing (the run's recorded host is another) is

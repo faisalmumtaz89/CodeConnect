@@ -1076,9 +1076,15 @@ the login shell's `PATH`, and asks that claude itself its `--version` and
 `auth status` from the login shell. It is `agent_missing` when no claude is found,
 and `launch_failed` when it is older than 2.1.268, does not say its version, or is
 signed out (`auth status` exits 1 with `loggedIn` false). `auth status` is read for
-`loggedIn` only; nothing else it prints is kept. It runs `codeconnect <agent> --no-attach -- <prompt>` there through
-the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
-otherwise), every value an argument of its own. The shell starts from the
+`loggedIn` only; nothing else it prints is kept. A Claude Code start then writes
+its run (`starting`, under its `request_id`) before anything runs, makes the run's
+folder `runs/<uid>/` under the CodeConnect folder (0700), and runs the agent host,
+`cc-agent-host <run folder>`, through the user's login shell in a session of its
+own, so it outlives the daemon; the host runs that claude with the first message.
+A Codex start runs `codeconnect codex --no-attach -- <prompt>` there through
+the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
+otherwise, every value an argument of its own, and the check and the run read the
+same environment. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
 with its `PATH` (`launchctl setenv`'s, or launchd's default) and `XPC_SERVICE_NAME=0`,
 `XPC_FLAGS=0x0`; on Linux the systemd user manager's, read whole. Either way the
@@ -1088,7 +1094,10 @@ started by hand has the session's environment already and uses its own; so
 does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
 it names an encoding (`LC_ALL`, `LC_CTYPE`, `LANG`), `LC_CTYPE` is the platform's
 UTF-8 (`UTF-8`, or `C.UTF-8` on Linux), as a UTF-8 terminal sets it; the user's
-own startup files run after and win. The launcher writes what it
+own startup files run after and win. A Claude Code start is answered `started`
+once its host is attached and has the start, and is listed from the moment its row
+is written; a start that does not get that far is `failed`, and so is its row.
+For a Codex start, the launcher writes what it
 started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
 answers `start_session_result` with the session's uid, or `failed` with
 `agent_missing`, `folder_missing` or `launch_failed` and a detail, once the
@@ -1097,7 +1106,8 @@ launcher has finished (a launcher still running after 80 s is killed). A
 `sessions` lists it: within the same 80 s, or `launch_failed` saying it may
 still be running. The same
 `request_id` again, on any connection, gets the first answer and starts
-nothing; the daemon forgets them when it restarts.
+nothing. A Claude Code start's is found again after the daemon restarts, from
+its row; a Codex start's is forgotten then.
 `>= 29` lets that start pick a branch or worktree (`start_worktree`), and never
 switches the folder's own branch. `get_project_git {path}` reads a listed
 folder's (from `>= 30`, any absolute folder's) repository, without writing, fetching or running a hook:
@@ -1176,9 +1186,10 @@ answer that says signed in is kept until the agent's `--version` changes or the
 daemon restarts; any other answer is asked again at the next list, except a
 signed-out Codex's, asked again only once `codex login status`, which starts
 nothing, says it is signed in. An agent that does not answer within the check's
-10 s offers no models. `start_session`'s `model` is given to the agent as one
-argument, `--model=<value>`, after `--no-attach`; absent, or Claude Code's
-`default`, the agent gets no `--model` and starts with the model its settings name.
+10 s offers no models. `start_session`'s `model` is given to the agent: to Claude
+Code's host as the run's model, and to Codex as one argument, `--model=<value>`,
+after `--no-attach`. Absent, or Claude Code's `default`, the agent gets none and
+starts with the model its settings name.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
