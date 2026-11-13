@@ -28,7 +28,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 
 - An iPhone with iOS 17 or later.
 - A Mac with macOS 13 or later (Apple silicon or Intel), or a Linux computer (x86_64 or arm64) with OpenSSL 3.
-- [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://github.com/openai/codex) already working in your terminal. CodeConnect runs the `claude` and `codex` your shell runs.
+- [Claude Code](https://code.claude.com/docs/en/setup) 2.1.268 or later, signed in, or [Codex](https://github.com/openai/codex), already working in your terminal. CodeConnect runs the `claude` and `codex` your shell runs.
 - [Tailscale](https://tailscale.com/download) on both, signed in to the same Tailscale account; a computer on another account pairs with a code. Tailscale is the default; your local network also works, without encryption or the live terminal ([how](https://codeconnect.sh/support)).
 
 ## Install

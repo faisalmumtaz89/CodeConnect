@@ -1372,67 +1372,23 @@ fn token(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Find the `claude` the caller's shell would run, never `codeconnect` itself.
-///
-/// The first executable of [`claude_candidates`], and a guard against resolving to
-/// this binary (which a shell alias like `alias claude=codeconnect claude` would
-/// otherwise cause, producing an infinite spawn loop that is very confusing from the
-/// inside).
+/// Find the `claude` the caller's shell would run, never `codeconnect` itself: the
+/// first runnable of [`protocol::claude_bin::candidates`], from this process's `PATH`.
 fn resolve_claude_bin(config: &Config) -> Result<PathBuf> {
-    let candidates = claude_candidates(
-        config,
+    let candidates = protocol::claude_bin::candidates(
+        config.claude_bin.as_deref(),
         std::env::var_os("CODECONNECT_CLAUDE_BIN").map(PathBuf::from),
         &protocol::home_dir(),
         protocol::tmux::path_hits("claude"),
     );
     let current = std::env::current_exe().ok();
-    for candidate in candidates {
-        if !protocol::tmux::is_executable_file(&candidate) {
-            continue;
-        }
-        if is_same_file(&candidate, current.as_deref()) {
-            continue;
-        }
-        return Ok(candidate);
-    }
-    bail!(
-        "could not find the claude binary: install Claude Code \
-         (https://code.claude.com/docs/en/setup), or set claude_bin in \
-         ~/.codeconnect/config.json"
-    )
-}
-
-/// The ordered candidate list, pure so the precedence is unit-tested without touching
-/// the process environment: config `claude_bin`, then the `CODECONNECT_CLAUDE_BIN`
-/// override, then every `claude` on `PATH` in the order the shell tries them — so the
-/// claude a session runs is the one typing `claude` runs — and the well-known install
-/// locations last, for a `PATH` that has none.
-fn claude_candidates(
-    config: &Config,
-    env_override: Option<PathBuf>,
-    home: &std::path::Path,
-    path_hits: Vec<PathBuf>,
-) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(configured) = &config.claude_bin {
-        candidates.push(PathBuf::from(configured));
-    }
-    if let Some(env) = env_override {
-        candidates.push(env);
-    }
-    candidates.extend(path_hits);
-    candidates.push(home.join(".local/bin/claude"));
-    candidates.push(home.join(".claude/local/claude"));
-    candidates.push(PathBuf::from("/opt/homebrew/bin/claude"));
-    candidates.push(PathBuf::from("/usr/local/bin/claude"));
-    candidates
-}
-
-fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) -> bool {
-    let Some(current) = current else { return false };
-    match (candidate.canonicalize(), current.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
+    match protocol::claude_bin::first_runnable(candidates, current.as_deref()) {
+        Some(claude) => Ok(claude),
+        None => bail!(
+            "could not find the claude binary: install Claude Code \
+             (https://code.claude.com/docs/en/setup), or set claude_bin in \
+             ~/.codeconnect/config.json"
+        ),
     }
 }
 
@@ -1576,35 +1532,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_candidate_order_is_config_env_path_wellknown() {
-        let config = Config {
-            claude_bin: Some("/from/config/claude".into()),
-            ..Config::default()
-        };
-        assert_eq!(
-            claude_candidates(
-                &config,
-                Some(PathBuf::from("/from/env/claude")),
-                std::path::Path::new("/home/u"),
-                vec![
-                    PathBuf::from("/first/on/path/claude"),
-                    PathBuf::from("/second/on/path/claude"),
-                ],
-            ),
-            vec![
-                PathBuf::from("/from/config/claude"),
-                PathBuf::from("/from/env/claude"),
-                PathBuf::from("/first/on/path/claude"),
-                PathBuf::from("/second/on/path/claude"),
-                PathBuf::from("/home/u/.local/bin/claude"),
-                PathBuf::from("/home/u/.claude/local/claude"),
-                PathBuf::from("/opt/homebrew/bin/claude"),
-                PathBuf::from("/usr/local/bin/claude"),
-            ]
-        );
-    }
-
-    #[test]
     fn resolves_the_claude_the_shell_would_run_on_this_machine() {
         if !on_path("claude") || std::env::var_os("CODECONNECT_CLAUDE_BIN").is_some() {
             eprintln!("skipped: no `claude` on PATH, or an override names another");
@@ -1641,19 +1568,6 @@ mod tests {
         };
         let path = resolve_claude_bin(&config).expect("must fall back");
         assert!(path.is_file());
-    }
-
-    #[test]
-    fn same_file_detection_handles_symlinks_and_absence() {
-        assert!(is_same_file(
-            std::path::Path::new("/bin/sh"),
-            Some(std::path::Path::new("/bin/sh"))
-        ));
-        assert!(!is_same_file(std::path::Path::new("/bin/sh"), None));
-        assert!(!is_same_file(
-            std::path::Path::new("/bin/sh"),
-            Some(std::path::Path::new("/bin/echo"))
-        ));
     }
 
     /// An argv as the dispatch receives it, so a test reads like the command
