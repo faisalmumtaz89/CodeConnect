@@ -167,7 +167,7 @@ pub struct ResolvedCodex {
 ///   * **The pgid-reuse gap**, a benign within-boot pid/pgid-reuse TOCTOU: the
 ///     custodian's group kill can land on an unrelated same-uid process that
 ///     inherited a recycled group id, with nobody attacking anything
-///     (`codex_custodian::group_warrant` carries the measurement). Closing it
+///     (`protocol::proc_identity::group_warrant` carries the measurement). Closing it
 ///     needs env-nonce provenance via `KERN_PROCARGS2`.
 ///   * **The unpinned launcher subordinates**, a benign package update: when the
 ///     `codex` found is a launcher — npm's, bun's or pnpm's script, or mise's
