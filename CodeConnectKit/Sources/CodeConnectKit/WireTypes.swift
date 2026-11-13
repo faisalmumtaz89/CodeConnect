@@ -1518,7 +1518,7 @@ public enum InterruptResult: Decodable, Sendable, Hashable {
         }
     }
 
-    /// The daemon's own sentence, shown verbatim wherever it exists.
+    /// The reason received from the daemon, shown verbatim wherever it exists.
     var reason: String? {
         switch self {
         case .rejected(let reason), .indeterminate(let reason): return reason
