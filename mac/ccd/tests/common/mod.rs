@@ -23,7 +23,7 @@ impl Home {
         std::fs::write(
             dir.join("config.json"),
             format!(
-                r#"{{"ws_port":{port},"ws_bind":"127.0.0.1","ws_loopback":false,"push_enabled":false}}"#
+                r#"{{"ws_port":{port},"ws_bind":"127.0.0.1","ws_loopback":false,"push_enabled":false,"tailscale_bin":"/nonexistent/tailscale"}}"#
             ),
         )
         .unwrap();
