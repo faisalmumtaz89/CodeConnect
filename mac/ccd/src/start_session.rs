@@ -892,12 +892,9 @@ pub(crate) async fn claude_preflight(
     Ok(ready)
 }
 
-/// Find the claude a start runs and ask it its version and its sign-in, each from
-/// the user's login shell in `environment`: config.json's `claude_bin` when it is
-/// set, else what `command -v claude` finds there, else `~/.local/bin/claude`,
-/// where Anthropic's installer puts it whether or not it is on the PATH. Each is
-/// run itself, never through `codeconnect`. An error is the refusal's reason and
-/// its sentence.
+/// Find the claude a start runs ([`claude_path`]) and ask it its version and its
+/// sign-in, each from the user's login shell in `environment`. Each is run itself,
+/// never through `codeconnect`. An error is the refusal's reason and its sentence.
 async fn claude_probe(
     environment: &HashMap<OsString, OsString>,
     claude_bin: Option<&str>,
@@ -942,30 +939,33 @@ async fn claude_probe(
     })
 }
 
-/// Where the claude a start runs is: config.json's `claude_bin`, the login shell's
-/// `command -v claude`, or `~/.local/bin/claude`; `None` unless it is a program.
+/// Where the claude a start runs is: the claude the launcher finds, from the same
+/// list ([`protocol::claude_bin`]) with the login shell's `PATH`: config.json's
+/// `claude_bin`, every `claude` on that `PATH`, then the well-known install
+/// locations; the first that is a program and not the launcher itself.
 async fn claude_path(
     environment: &HashMap<OsString, OsString>,
     claude_bin: Option<&str>,
 ) -> Option<PathBuf> {
-    let found = match claude_bin {
-        Some(configured) => Some(PathBuf::from(configured)),
-        None => probe_output(
-            environment,
-            &[
-                OsStr::new("/bin/sh"),
-                OsStr::new("-c"),
-                OsStr::new("command -v claude"),
-            ],
-        )
-        .await
-        .filter(|output| output.status.success())
-        .and_then(|output| last_line(&output.stdout))
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute()),
-    };
-    let path = found.unwrap_or_else(|| home_in(environment).join(".local/bin/claude"));
-    protocol::tmux::is_executable_file(&path).then_some(path)
+    let home = home_in(environment);
+    let path_hits = probe_output(
+        environment,
+        &[
+            OsStr::new("/bin/sh"),
+            OsStr::new("-c"),
+            OsStr::new("printf '%s\\n' \"$PATH\""),
+        ],
+    )
+    .await
+    .filter(|output| output.status.success())
+    .and_then(|output| last_line(&output.stdout))
+    .map(|path| protocol::tmux::hits_on(OsStr::new(&path), Some(&home), "claude"))
+    .unwrap_or_default();
+    let launcher = crate::state::codex_launcher().ok();
+    protocol::claude_bin::first_runnable(
+        protocol::claude_bin::candidates(claude_bin, None, &home, path_hits),
+        launcher.as_deref(),
+    )
 }
 
 /// Whether `claude auth status` says the claude at `path` is signed in: exit 0 with
@@ -2899,11 +2899,25 @@ esac"#;
         assert_eq!(asked(&rig, "codex login status"), 0);
     }
 
+    /// A claude in one of the list's system locations, which no rig can take away:
+    /// a test that needs claude missing would find it, and run it.
+    fn system_claude() -> Option<PathBuf> {
+        let home = Path::new("/nonexistent-home");
+        protocol::claude_bin::candidates(None, None, home, Vec::new())
+            .into_iter()
+            .filter(|candidate| !candidate.starts_with(home))
+            .find(|candidate| candidate.exists())
+    }
+
     /// **A claude that cannot be found is not available, and its start is
     /// `agent_missing`, with nothing launched**: none on the login shell's PATH and
-    /// none in `~/.local/bin`.
+    /// none in the install locations.
     #[tokio::test]
     async fn a_claude_that_is_not_there_is_missing() {
+        if let Some(claude) = system_claude() {
+            eprintln!("skipped: {} is a claude no rig can hide", claude.display());
+            return;
+        }
         let rig = recording("no-claude");
         std::fs::remove_file(&rig.claude).unwrap();
         let listed =
@@ -2927,31 +2941,48 @@ esac"#;
         assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
     }
 
-    /// **The claude a start runs is config.json's `claude_bin` when it is set, else
-    /// the login shell's, else `~/.local/bin/claude`**, where Anthropic's installer
-    /// puts it whether or not it is on the PATH.
+    /// **The claude a start runs is the one the launcher finds, from its list in its
+    /// order**: config.json's `claude_bin` (passed over when it is not a program),
+    /// the login shell's PATH, `~/.local/bin/claude`, where Anthropic's installer puts
+    /// it whether or not it is on the PATH, then the legacy local install
+    /// `~/.claude/local/claude`, which its installer reached by an alias, not the PATH.
     #[tokio::test]
-    async fn the_claude_a_start_runs_is_the_configured_then_the_shells_then_local_bin() {
+    async fn the_claude_a_start_runs_is_the_one_the_launchers_list_finds() {
         let rig = recording("which-claude");
-        assert_eq!(claude_probe(&rig.env, None).await.unwrap().path, rig.claude);
-        let local = home_in(&rig.env).join(".local/bin");
-        std::fs::create_dir_all(&local).unwrap();
-        std::fs::rename(&rig.claude, local.join("claude")).unwrap();
-        assert_eq!(
-            claude_probe(&rig.env, None).await.unwrap().path,
-            local.join("claude")
-        );
+        let home = home_in(&rig.env);
+        let copy_to = |at: PathBuf| {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::copy(&rig.claude, &at).unwrap();
+            at
+        };
+        let local = copy_to(home.join(".local/bin/claude"));
+        let legacy = copy_to(home.join(".claude/local/claude"));
         let (configured, _) = test_claude(&rig.root.join("configured"));
         std::fs::write(
             format!("{}.version", configured.display()),
             "2.1.300 (Claude Code)\n",
         )
         .unwrap();
-        let ready = claude_probe(&rig.env, configured.to_str()).await.unwrap();
+        let not_a_program = rig.root.join("not-a-program");
+        std::fs::write(&not_a_program, "2.1.300 (Claude Code)\n").unwrap();
+        let found = |claude_bin: Option<PathBuf>| {
+            let env = rig.env.clone();
+            async move {
+                let claude_bin = claude_bin.map(|path| path.display().to_string());
+                claude_probe(&env, claude_bin.as_deref()).await.unwrap()
+            }
+        };
+        let ready = found(Some(configured.clone())).await;
         assert_eq!(
             (ready.path, ready.version.as_str()),
             (configured, "2.1.300")
         );
+        assert_eq!(found(Some(not_a_program)).await.path, rig.claude);
+        assert_eq!(found(None).await.path, rig.claude);
+        std::fs::remove_file(&rig.claude).unwrap();
+        assert_eq!(found(None).await.path, local);
+        std::fs::remove_file(&local).unwrap();
+        assert_eq!(found(None).await.path, legacy);
     }
 
     /// **Below 2.1.268 Claude Code is refused with the floor sentence, in the list
