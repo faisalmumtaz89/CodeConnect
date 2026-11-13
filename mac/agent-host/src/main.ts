@@ -5,9 +5,9 @@
 // it, the host removes a socket file a dead host left, and listens. It exits 4 if no `start` arrives within 30 s.
 //
 // The first `start` runs the run's one query() (start.ts); a later one is ignored. claude stays in the host's process
-// group (H2). The start's outcome carries the initialize answer, or the reason the start failed; every message the
-// query yields follows as `sdk`; claude's end is the last message, `exited`. Once the run is over and ccd has
-// acknowledged everything, the host exits 0.
+// group (H2). The start's outcome carries the initialize answer, or the reason the start failed. After an answer,
+// every message the query yields follows as `sdk`; after a refusal, none does. claude's end is the last message,
+// `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
@@ -75,19 +75,25 @@ function begin(start: Start): void {
       },
     },
   });
+  // Whether claude answered initialize.
   const outcome = run.initializationResult().then(
-    (answer) => link.send({ type: 'outcome', uuid: start.uuid, status: 'done', initialize: initializeAnswer(answer) }),
+    (answer) => {
+      link.send({ type: 'outcome', uuid: start.uuid, status: 'done', initialize: initializeAnswer(answer) });
+      return true;
+    },
     (error) => {
       link.send({ type: 'outcome', uuid: start.uuid, status: 'refused', detail: oneLine(error) });
       run.close();
+      return false;
     },
   );
   void (async () => {
     // The outcome is the run's first line to ccd. claude can write the first message's own lines before it answers
-    // initialize; they wait for it.
-    await outcome;
+    // initialize; they wait for it, and a refused start sends none of them.
+    const answered = await outcome;
     try {
       for await (const message of run) {
+        if (!answered) continue;
         facts = noteMessage(facts, message);
         link.send({ type: 'sdk', message });
       }
