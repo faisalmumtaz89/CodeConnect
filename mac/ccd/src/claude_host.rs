@@ -1303,8 +1303,9 @@ mod tests {
     /// have ended it (claude's init is unacknowledged, so the host keeps it). A start
     /// whose claude is missing is refused, naming it, and its run is `failed`. So is one
     /// whose claude starts and dies at initialize, and its host then ends, its claude's
-    /// end acknowledged. Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names the built
-    /// host.
+    /// end acknowledged. A claude that writes a line before its initialize answer still
+    /// gives a started, live run: the host sends the outcome first. Ignored and gated:
+    /// `CODECONNECT_TEST_AGENT_HOST` names the built host.
     #[tokio::test]
     #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
     async fn the_real_host_is_admitted_attached_and_kept_by_start() {
@@ -1414,6 +1415,49 @@ mod tests {
         // SAFETY: kill(2) of the process group this test's host leads (its recorded pid),
         // which holds the host and its stand-in claude.
         unsafe { libc::kill(-pid, libc::SIGTERM) };
+
+        // Claude's own lines before its initialize answer, as a slow answer lets the
+        // first message's lines come first: the host sends the start's outcome before
+        // any of them, so the start is answered started and the run is live.
+        let session = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/claude/sdk-session-0.3.322.jsonl"),
+        )
+        .unwrap();
+        let queued = session.lines().next().unwrap();
+        let (early, _) = stand_in_claude(
+            &rig,
+            &host,
+            "early",
+            serde_json::json!({"before_init": [queued]}),
+        );
+        let early_start = start(
+            &rig.daemon,
+            Run {
+                claude_path: early.to_str().unwrap(),
+                ..run(&rig, "req-3", &cwd, &host)
+            },
+        )
+        .await;
+        let early_run = rig
+            .daemon
+            .db
+            .hosted_run_for_request("req-3".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let early_kept = kept(&rig, &early_run.session_uid).0;
+        let early_host =
+            read_host_file(&run_dir(&rig.root, &early_run.session_uid).join("host.json"))
+                .unwrap()
+                .host_pid;
+        // SAFETY: kill(2) of the process group this test's early host leads.
+        unsafe { libc::kill(-early_host, libc::SIGTERM) };
         assert!(alive, "the host ended within 31 s: start never reached it");
+        assert!(
+            matches!(&early_start, StartSessionResult::Started { .. }),
+            "a line before the outcome: {early_start:?}"
+        );
+        assert_eq!(early_kept, "live", "a line before the outcome");
     }
 }
