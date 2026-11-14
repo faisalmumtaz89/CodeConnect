@@ -4,10 +4,10 @@ import SwiftUI
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
 /// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. Lazy, so
-/// a run thousands of rows long builds only what is near the screen. It opens at the newest row and moves for one
-/// reason only: new rows are followed while the newest is on screen. A reader who went up stays where they are as rows
-/// land below; when a page of earlier history lands above, the row they were at is brought back to the top. Reaching
-/// the top pages back on its own, as the iPhone does.
+/// a run thousands of rows long builds only what is near the screen. It opens at the newest row and follows new rows
+/// until the reader scrolls away from the end; a reader who went up stays where they are as rows land below, and is
+/// followed again once they come back to the end. When a page of earlier history lands above, the row they were at is
+/// brought back to the top. Reaching the top pages back on its own, as the iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
@@ -15,6 +15,7 @@ struct Conversation: View {
     /// when it was taken. A tool call's row keeps its place when a page brings the call.
     @State private var heldRow: String?
     @State private var heldFirst: String?
+    @State private var follow = Follow()
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
@@ -44,8 +45,8 @@ struct Conversation: View {
             }
             // When the column's first place changes (a page of earlier history landed, the window was set afresh, or
             // Kit's rebuild changed the first row) and the held row is still there, it is brought back to the top. A
-            // page landing takes the reader to the end, where the follow keeps them; the restore is dispatched past this
-            // update and has run after both in every measured landing, an order SwiftUI does not promise.
+            // page landing takes the reader to the end; the restore is dispatched past this update and has run after
+            // that move in every measured landing, an order SwiftUI does not promise.
             .onChange(of: places.first) {
                 if let heldRow, places.contains(heldRow) {
                     DispatchQueue.main.async { proxy.scrollTo(heldRow, anchor: .top) }
@@ -57,13 +58,29 @@ struct Conversation: View {
             // At the bottom from the first frame, so nothing above the newest row is passed over on the way.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.bottom, for: .alignment)
-            // A reader at the end is scrolled back to it when the column grows or the scroll view shrinks. Each time is
-            // one scroll, which, unlike a bottom anchor, does not come back as rows change, so a reader who went up
-            // stays where they are.
+            // While following, the column growing or the scroll view shrinking scrolls to the end: one scroll each time,
+            // which, unlike a bottom anchor, does not come back as rows change. A move up while the column keeps its
+            // height stops it, unless it is the first change reported after that scroll, which is taken as the scroll
+            // settling, whoever made it: during a burst that scroll can stop short of the end, and the view stays there,
+            // still following, until the column grows again. Reaching the end starts it again; that is tested first, so
+            // a taller scroll view that moves the view up to its new end keeps following. Rows or a page landing leave
+            // it as it is.
             .onScrollGeometryChange(for: ScrollGeometry.self) { $0 } action: { old, new in
+                let settling = follow.settling
+                follow.settling = false
+                if new.contentSize.height == old.contentSize.height, new.contentOffset.y != old.contentOffset.y {
+                    if Self.atEnd(new) {
+                        follow.following = true
+                    } else if new.contentOffset.y < old.contentOffset.y, !settling {
+                        follow.following = false
+                    }
+                }
                 let endMoved = new.contentSize.height > old.contentSize.height
                     || new.containerSize.height < old.containerSize.height
-                if Self.atEnd(old), endMoved { proxy.scrollTo(Self.end, anchor: .bottom) }
+                if follow.following, endMoved {
+                    follow.settling = true
+                    proxy.scrollTo(Self.end, anchor: .bottom)
+                }
             }
             .accessibilityIdentifier("session.conversation")
         }
@@ -80,6 +97,14 @@ struct Conversation: View {
         geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height
             >= geometry.contentSize.height - 2
     }
+}
+
+/// Whether the column follows new rows, kept in a reference so its writes, many in one scroll, never update the view.
+private final class Follow {
+    var following = true
+    /// The follow's own scroll to the end is under way: the first change reported after it is taken as that scroll
+    /// settling, whoever made it.
+    var settling = false
 }
 
 /// The row above the first: once it is really on screen and Kit can page, it asks for the page before; while that
