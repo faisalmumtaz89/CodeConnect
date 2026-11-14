@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -201,7 +200,7 @@ async fn bring_up(
     deadline: Instant,
 ) -> Result<oneshot::Receiver<Begun>, String> {
     let dir = run_dir(run.root, uid);
-    let log = make_run_dir(run.root, &dir)
+    let log = crate::start_session::make_run_dir(run.root, &dir)
         .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?;
     let mut child = crate::start_session::spawn_detached(
         run.environment,
@@ -220,20 +219,6 @@ async fn bring_up(
     attached
 }
 
-/// `runs/` and the run's own folder, both 0700, the folder made here and only here,
-/// and its `host.log` (0600), which the host's output goes to.
-fn make_run_dir(root: &Path, dir: &Path) -> io::Result<std::fs::File> {
-    protocol::fsperm::private_dir(&root.join("runs"))?;
-    std::fs::DirBuilder::new()
-        .mode(protocol::fsperm::DIR_MODE)
-        .create(dir)?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(protocol::fsperm::FILE_MODE)
-        .open(dir.join("host.log"))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn attach(
     daemon: &Arc<Daemon>,
@@ -249,7 +234,7 @@ async fn attach(
         if let Some(record) = read_host_file(&dir.join("host.json")) {
             break record;
         }
-        give_up_if_ended(
+        crate::start_session::give_up_if_ended(
             dir,
             child,
             deadline,
@@ -291,7 +276,12 @@ async fn attach(
                     io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
                 ) =>
             {
-                give_up_if_ended(dir, child, deadline, "the agent host did not listen")?;
+                crate::start_session::give_up_if_ended(
+                    dir,
+                    child,
+                    deadline,
+                    "the agent host did not listen",
+                )?;
                 tokio::time::sleep(POLL).await;
             }
             Err(err) => return Err(format!("could not reach the agent host: {err}")),
@@ -360,28 +350,6 @@ fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
 /// `host.json` once it is whole: the host creates it before it writes it.
 fn read_host_file(path: &Path) -> Option<HostFile> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-}
-
-/// An error once the host has ended (with what it last said) or the start's time is up.
-fn give_up_if_ended(
-    dir: &Path,
-    child: &mut tokio::process::Child,
-    deadline: Instant,
-    waiting: &str,
-) -> Result<(), String> {
-    if let Ok(Some(status)) = child.try_wait() {
-        let said = std::fs::read(dir.join("host.log"))
-            .ok()
-            .and_then(|log| crate::start_session::last_line(&log));
-        return Err(said.unwrap_or_else(|| format!("the agent host ended ({status})")));
-    }
-    if Instant::now() >= deadline {
-        return Err(format!(
-            "{waiting} within {} s",
-            crate::start_session::START_TIMEOUT.as_secs()
-        ));
-    }
-    Ok(())
 }
 
 async fn send(write: &mut OwnedWriteHalf, message: &ToHost) -> Result<(), String> {
@@ -583,7 +551,7 @@ async fn link(
 
 /// What became of a dead host's group.
 #[derive(Debug, PartialEq, Eq)]
-enum Ladder {
+pub(crate) enum Ladder {
     /// Signalled as the ladder says, or no member was left to signal.
     Done,
     /// The warrant was refused, so nothing was signalled.
@@ -597,7 +565,8 @@ enum Ladder {
 /// while members remain and the warrant still holds. Never SIGKILL first: claude ends its
 /// Bash tool's own session on SIGTERM. A host that is a zombie whose birth cannot be read (on
 /// macOS) is waited out first: its group is warranted only once it is reaped and its pid free.
-async fn stop_group(host: ProcessIdentity, boot: BootIdentity) -> Ladder {
+/// A Codex start that fails runs it on its app-server's group, whose leader may still be alive.
+pub(crate) async fn stop_group(host: ProcessIdentity, boot: BootIdentity) -> Ladder {
     let waited = Instant::now() + ZOMBIE_WAIT;
     loop {
         match group_warrant(&host, boot) {

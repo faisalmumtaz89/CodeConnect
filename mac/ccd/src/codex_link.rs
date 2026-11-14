@@ -135,9 +135,8 @@ use futures_util::{SinkExt, StreamExt};
 use protocol::event::SessionKey;
 use protocol::ipc::RegisterSession;
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::codex_adapter::{CodexAdapter, ResumeSeed};
 use crate::state::Daemon;
@@ -145,14 +144,6 @@ use crate::state::Daemon;
 // they live with the ledger. `store::replayed_answer_sentence` is the one place that
 // turns either of them into words an operator reads.
 use crate::store::{ANSWER_DELIVERED, ANSWER_LOST};
-
-/// How long a dial of `ccd.sock` may take before it counts as a failed attempt.
-const CONNECT_BUDGET: Duration = Duration::from_secs(10);
-
-/// How long the WebSocket upgrade may take once the socket is connected. Separate
-/// from the dial: `connect()` returning only means something accepted, and a peer
-/// that accepts and then never speaks would otherwise hold this task for ever.
-const UPGRADE_BUDGET: Duration = Duration::from_secs(15);
 
 /// How long any single write to the leg may block. A peer that stops reading
 /// applies backpressure, and an unbounded write parks the task where no other
@@ -280,17 +271,6 @@ const ADOPTION_RETRIES: u32 = 5;
 /// still be answerable, while evicting the oldest is what stops one stale name riding
 /// every future connection and buying a resume nobody will reply to.
 const OWED_RECOVERY_DEPTH: usize = ADOPTION_RETRIES as usize;
-
-/// Byte-based WebSocket bounds. A single notification reaches multi-MB
-/// (a `plugin/list` reply measures 10.4 MB on codex 0.153.4), so the ceiling is on
-/// bytes and generous enough that a legitimate large frame is never rejected.
-fn ws_config() -> WebSocketConfig {
-    WebSocketConfig {
-        max_message_size: Some(64 << 20),
-        max_frame_size: Some(64 << 20),
-        ..Default::default()
-    }
-}
 
 /// The per-session **control-link fact** a Codex registration carries: where the
 /// broker's ccd leg is, which visit the registration speaks for, and the thread it
@@ -3575,22 +3555,9 @@ async fn serve_connection(
     composes: &mut tokio::sync::mpsc::UnboundedReceiver<ComposeRequest>,
     open_composes: &OpenComposes,
 ) -> Result<()> {
-    let stream = tokio::time::timeout(CONNECT_BUDGET, UnixStream::connect(&link.socket))
-        .await
-        .with_context(|| format!("dialling {} timed out", link.socket.display()))?
-        .with_context(|| format!("dialling {}", link.socket.display()))?;
     // ccd is the WebSocket *client* to the broker's ccd leg, the same handshake the
-    // broker itself performs against the app-server. Bounded separately from the
-    // dial: `connect()` returning only proves something accepted the socket, and a
-    // peer that accepts and then never completes the upgrade would hold this task
-    // open indefinitely.
-    let (mut ws, _resp) = tokio::time::timeout(
-        UPGRADE_BUDGET,
-        tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(ws_config())),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("the ccd leg's WebSocket upgrade stalled for {UPGRADE_BUDGET:?}"))?
-    .context("the ccd leg refused the WebSocket handshake")?;
+    // broker itself performs against the app-server.
+    let mut ws = crate::codex_client::dial(&link.socket).await?;
 
     // **The target and the binding are different things.** A thread id carried in
     // — from the registration's hint or from a previous connection — says what to
@@ -11357,7 +11324,11 @@ mod tests {
         drop_at_frame: DropAtFrame,
         burst_valve: BurstValve,
     ) -> Result<()> {
-        let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
+        let mut ws = tokio_tungstenite::accept_async_with_config(
+            stream,
+            Some(crate::codex_client::ws_config()),
+        )
+        .await?;
         // Which scripts force a reconnect: only the one whose subject IS the reconnect
         // arc. Every other script holds its connection, so "no further resume" cannot be
         // a reconnect in disguise.

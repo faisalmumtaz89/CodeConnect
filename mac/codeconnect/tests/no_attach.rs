@@ -1,4 +1,4 @@
-//! `codeconnect claude|codex --no-attach`, run as the daemon runs it: no terminal at
+//! `codeconnect claude|codex --no-attach`, run with no terminal at
 //! all, stdin from nowhere, the outcome in the file `CODECONNECT_LAUNCH_RESULT`
 //! names. It hosts the session a terminal start hosts, at 120x40, with the model
 //! it was given and the first prompt after `--` exactly as given; a missing agent or

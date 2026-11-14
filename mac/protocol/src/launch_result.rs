@@ -1,6 +1,6 @@
-//! What a `codeconnect <agent> --no-attach` started, told to the daemon that ran it.
+//! What a `codeconnect <agent> --no-attach` started, told to the process that ran it.
 //!
-//! The daemon names a file in [`ENV_LAUNCH_RESULT`]; the launcher writes one
+//! That process names a file in [`ENV_LAUNCH_RESULT`]; the launcher writes one
 //! [`LaunchResult`] there as one JSON line and exits. The launcher's stdout and
 //! stderr carry whatever the user's shell startup prints, so they are only ever
 //! the detail of a failure, never the result.

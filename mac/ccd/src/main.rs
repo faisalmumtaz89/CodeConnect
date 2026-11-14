@@ -13,6 +13,8 @@ mod claude_host;
 mod claude_waiter;
 mod codex_adapter;
 mod codex_approval;
+mod codex_client;
+mod codex_host;
 mod codex_link;
 /// The gated live gate for the control link — a real codex, a real coordinator, a
 /// real broker. Test-only, and never built into the daemon.

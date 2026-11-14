@@ -9110,9 +9110,8 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// The session a fixture's stub launcher reports, registered in `cwd` as its
-    /// supervisor would have done by the time the start is answered. Filed long ago,
-    /// so the project list's order and dates are the fixture's own.
+    /// The session a fixture's start outcome names, in `cwd`. Filed long ago, so the
+    /// project list's order and dates are the fixture's own.
     fn register_stub_session(store: &crate::store::Store, cwd: String) {
         let filed = store
             .upsert_session(&crate::store::SessionRow {
@@ -9138,7 +9137,9 @@ mod tests {
     /// sends.** The fixture is what minor 28 emitted, kept as it was: the phone's
     /// tests read its copy under `ios/` as an older Mac. This build may add a
     /// field a minor-28 phone ignores, and nothing else, so every value the
-    /// fixture holds must be in this build's wire unchanged.
+    /// fixture holds must be in this build's wire unchanged. Its start outcomes are set,
+    /// not started ([`derived_minor_28_wire`]): this build checks their shape, not
+    /// what a start answers today.
     #[tokio::test]
     async fn the_minor_28_wire_fixture_is_still_in_what_this_build_emits() {
         const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-28-wire.json");
@@ -9182,8 +9183,9 @@ mod tests {
     }
 
     /// **The branch and worktree wire a minor-29 daemon sends, emitted by this
-    /// build.** The phone's tests read the copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`).
+    /// build**, but for its start outcomes, which are set, not started
+    /// ([`derived_minor_29_wire`]). The phone's tests read the copy under `ios/`
+    /// (byte-identical, by `fixtures/check-duplicated-fixtures.sh`).
     #[tokio::test]
     async fn the_minor_29_wire_fixture_is_what_this_build_emits() {
         const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-29-wire.json");
@@ -9213,7 +9215,8 @@ mod tests {
         .unwrap();
     }
 
-    /// **The folder wire a minor-30 daemon sends, emitted by this build.** The
+    /// **The folder wire a minor-30 daemon sends, emitted by this build**, but for
+    /// its start outcomes, which are set, not started ([`derived_minor_30_wire`]). The
     /// phone's tests read the copy under `ios/` (byte-identical, by
     /// `fixtures/check-duplicated-fixtures.sh`).
     #[tokio::test]
@@ -9346,7 +9349,9 @@ mod tests {
 
     /// A folder's folders, a new folder, a start in a folder no session has run in,
     /// and that folder's repository, as a paired phone receives them over a live
-    /// socket; and each refusal of a relative path.
+    /// socket; and each refusal of a relative path. The start's outcomes are set, not
+    /// started: a start runs an agent, and these are the frames the apps decode, as
+    /// the launcher route answered them.
     ///
     /// Made afresh under `/tmp/ccd-minor-30`, written as that path wherever it
     /// really is (`/private/tmp/…` on a Mac), so the fixture is the same on every
@@ -9376,18 +9381,6 @@ mod tests {
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "first"]);
-        let launcher = root.join("codeconnect");
-        let (_, claude_env) = crate::start_session::test_claude(&root.join("claude-rig"));
-        std::fs::write(
-            &launcher,
-            "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-1\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("755")
-            .arg(&launcher)
-            .status()
-            .unwrap();
         let canonical = root.canonicalize().unwrap().display().to_string();
         let at = |folder: &std::path::Path| {
             folder
@@ -9443,26 +9436,6 @@ mod tests {
         )
         .await;
 
-        let start = |path: String| {
-            let (db, launcher, env) = (&server.daemon.db, launcher.clone(), &claude_env);
-            async move {
-                crate::start_session::launch(
-                    db,
-                    None,
-                    Ok(launcher),
-                    root,
-                    &path,
-                    &AgentKind::Claude,
-                    None,
-                    None,
-                    None,
-                    env,
-                    None,
-                    Some(protocol::host::Trust::Trusted),
-                )
-                .await
-            }
-        };
         let reply = |result: protocol::ws::StartSessionResult| {
             serde_json::to_value(ServerMessage::StartSessionResult {
                 request_id: "r1".into(),
@@ -9493,8 +9466,14 @@ mod tests {
                 trust: None,
             })
             .unwrap(),
-            "start_session_unlisted_started": reply(start(at(&src.join("new-app"))).await),
-            "start_session_relative_failed": reply(start("src/new-app".into()).await),
+            "start_session_unlisted_started": reply(protocol::ws::StartSessionResult::Started {
+                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                cwd: Some(at(&src.join("new-app"))),
+            }),
+            "start_session_relative_failed": reply(protocol::ws::StartSessionResult::Failed {
+                reason: protocol::ws::StartFailure::LaunchFailed,
+                detail: "\"src/new-app\" is not an absolute path".into(),
+            }),
             "get_project_git_unlisted_request": get_project_git_unlisted_request,
             "project_git_unlisted": project_git_unlisted,
             "get_project_git_relative_refused": get_project_git_relative_refused,
@@ -9504,8 +9483,9 @@ mod tests {
     }
 
     /// A repository's worktrees and branches as a paired phone receives them over
-    /// a live socket, and a start in each kind of worktree as `start_session`
-    /// answers it, from a stub launcher.
+    /// a live socket, and the `start_session_result` of a start in each kind of
+    /// worktree. The outcomes are set, not started: a start runs an agent, and these
+    /// are the frames the apps decode, as the launcher route answered them.
     ///
     /// The repository is made afresh under `/tmp/ccd-minor-29`, and the folder
     /// git reports (`/private/tmp/…` on a Mac) is written as that path, so the
@@ -9565,19 +9545,6 @@ mod tests {
                 .to_string()
                 .replacen("/tmp/ccd-minor-29", &canonical, 1)
         };
-        let launcher = root.join("codeconnect");
-        let (_, claude_env) = crate::start_session::test_claude(&root.join("claude-rig"));
-        std::fs::write(
-            &launcher,
-            "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-4\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("755")
-            .arg(&launcher)
-            .status()
-            .unwrap();
-
         let (server, _device) = live_server(protocol::config::Config::default()).await;
         for cwd in [at(&app), at(&notes)] {
             let filed = server
@@ -9619,26 +9586,6 @@ mod tests {
             <[serde_json::Value; 2]>::try_from(answers).unwrap();
         let get_project_git_request = get_project_git(at(&app));
 
-        let start = |path: String, agent: AgentKind, worktree: StartWorktree| {
-            let (db, launcher, env) = (&server.daemon.db, launcher.clone(), &claude_env);
-            async move {
-                crate::start_session::launch(
-                    db,
-                    None,
-                    Ok(launcher),
-                    root,
-                    &path,
-                    &agent,
-                    None,
-                    Some(&worktree),
-                    None,
-                    env,
-                    None,
-                    Some(protocol::host::Trust::Trusted),
-                )
-                .await
-            }
-        };
         let reply = |request_id: &str, result: StartSessionResult| {
             serde_json::to_value(ServerMessage::StartSessionResult {
                 request_id: request_id.into(),
@@ -9646,6 +9593,15 @@ mod tests {
             })
             .unwrap()
         };
+        let started = |cwd: Option<String>| StartSessionResult::Started {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            cwd,
+        };
+        let refused = |detail: String| StartSessionResult::Failed {
+            reason: protocol::ws::StartFailure::LaunchFailed,
+            detail,
+        };
+        let worktrees = app.join(".claude/worktrees");
         let request = |agent: AgentKind, worktree: StartWorktree| {
             serde_json::to_value(ClientMessage::StartSession {
                 request_id: "r1".into(),
@@ -9674,47 +9630,28 @@ mod tests {
             "start_session_existing_request": request(AgentKind::Claude, existing()),
             "start_session_branch_request": request(AgentKind::Codex, branch()),
             "start_session_new_request": request(AgentKind::Claude, new()),
-            "start_existing_started": reply(
-                "r1",
-                start(at(&app), AgentKind::Claude, existing()).await
-            ),
+            "start_existing_started": reply("r1", started(Some(at(&review)))),
             "start_branch_started": reply(
                 "r2",
-                start(at(&app), AgentKind::Codex, branch()).await
+                started(Some(at(&worktrees.join("feature+search"))))
             ),
-            "start_new_claude_started": reply(
-                "r3",
-                start(at(&app), AgentKind::Claude, new()).await
-            ),
-            "start_new_codex_started": reply(
-                "r4",
-                start(at(&app), AgentKind::Codex, new()).await
-            ),
+            "start_new_claude_started": reply("r3", started(None)),
+            "start_new_codex_started": reply("r4", started(Some(at(&worktrees.join("fix-login"))))),
             "start_new_codex_failed_exists": reply(
                 "r5",
-                start(at(&app), AgentKind::Codex, new()).await
+                refused("fatal: a branch named 'fix-login' already exists".into())
             ),
             "start_new_failed_invalid_name": reply(
                 "r6",
-                start(
-                    at(&app),
-                    AgentKind::Claude,
-                    StartWorktree::New {
-                        name: "fix login;".into(),
-                    }
+                refused(
+                    "\"fix login;\" is not a valid worktree name: use only letters, digits, \
+                     dots, underscores and dashes"
+                        .into()
                 )
-                .await
             ),
             "start_branch_failed_checked_out": reply(
                 "r7",
-                start(
-                    at(&app),
-                    AgentKind::Claude,
-                    StartWorktree::Branch {
-                        branch: "old-spike".into(),
-                    }
-                )
-                .await
+                refused(format!("old-spike is already checked out in {}", at(&gone)))
             ),
         });
         let _ = std::fs::remove_dir_all(root);
@@ -9722,8 +9659,9 @@ mod tests {
     }
 
     /// The handshake and project list as a paired phone receives them over a
-    /// live socket, and each start outcome as `start_session` answers it, from
-    /// a stub launcher standing in for `codeconnect <agent> --no-attach`.
+    /// live socket, and each start outcome as a `start_session_result`. The outcomes
+    /// are set, not started: a start runs an agent, and these are the frames the
+    /// apps decode, as the launcher route answered them.
     ///
     /// Fixed paths under `/tmp/ccd-minor-28`, so the fixture is the same on every
     /// machine. Which agents can start is set rather than checked: a check asks
@@ -9731,7 +9669,7 @@ mod tests {
     /// the list starts for the next list asks the fixture's own claude.
     async fn derived_minor_28_wire() -> serde_json::Value {
         use protocol::agent::AgentKind;
-        use protocol::ws::{AgentAvailability, StartSessionResult};
+        use protocol::ws::{AgentAvailability, StartFailure, StartSessionResult};
 
         let _env = crate::ProcessEnvRead::take();
 
@@ -9746,24 +9684,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(init.success());
-        let launcher = root.join("codeconnect");
-        let (claude, claude_env) = crate::start_session::test_claude(&root.join("claude-rig"));
-        std::fs::write(
-            &launcher,
-            r#"#!/bin/sh
-case "$1:$4" in
-claude:fail) echo 'Error: creating tmux session cc-3' >&2; exit 1 ;;
-claude:*) printf '{"uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_name":"cc-3","agent":"claude"}\n' > "$CODECONNECT_LAUNCH_RESULT" ;;
-codex:*) printf '{"error":"agent_missing","detail":"could not find the codex binary: install Codex"}\n' > "$CODECONNECT_LAUNCH_RESULT"; exit 1 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("755")
-            .arg(&launcher)
-            .status()
-            .unwrap();
+        let (claude, _) = crate::start_session::test_claude(&root.join("claude-rig"));
 
         let (server, _device) = live_server(protocol::config::Config {
             claude_bin: Some(claude.display().to_string()),
@@ -9828,27 +9749,6 @@ esac
             .unwrap();
         let projects = next_json(&mut phone).await.unwrap();
 
-        let start = |path: &std::path::Path, agent: AgentKind, prompt: Option<&'static str>| {
-            let (db, launcher, env) = (&server.daemon.db, launcher.clone(), &claude_env);
-            let path = path.display().to_string();
-            async move {
-                crate::start_session::launch(
-                    db,
-                    None,
-                    Ok(launcher),
-                    root,
-                    &path,
-                    &agent,
-                    prompt,
-                    None,
-                    None,
-                    env,
-                    None,
-                    Some(protocol::host::Trust::Trusted),
-                )
-                .await
-            }
-        };
         let reply = |request_id: &str, result: StartSessionResult| {
             serde_json::to_value(ServerMessage::StartSessionResult {
                 request_id: request_id.into(),
@@ -9856,12 +9756,20 @@ esac
             })
             .unwrap()
         };
+        let started = StartSessionResult::Started {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            cwd: None,
+        };
+        let failed = |reason: StartFailure, detail: &str| StartSessionResult::Failed {
+            reason,
+            detail: detail.into(),
+        };
         let starts = crate::start_session::Starts::default();
-        let first = starts
-            .once("r-repeat", start(&app, AgentKind::Claude, None))
-            .await;
+        let first = starts.once("r-repeat", async { started.clone() }).await;
         let again = starts
-            .once("r-repeat", start(&app, AgentKind::Claude, None))
+            .once("r-repeat", async {
+                failed(StartFailure::LaunchFailed, "a second start ran")
+            })
             .await;
 
         serde_json::json!({
@@ -9878,21 +9786,24 @@ esac
             })
             .unwrap(),
             "projects": projects,
-            "start_started": reply(
-                "r1",
-                start(&app, AgentKind::Claude, Some("fix the tests")).await
-            ),
+            "start_started": reply("r1", started),
             "start_failed_folder_missing": reply(
                 "r2",
-                start(&gone, AgentKind::Claude, None).await
+                failed(
+                    StartFailure::FolderMissing,
+                    &format!("{} no longer exists", gone.display())
+                )
             ),
             "start_failed_agent_missing": reply(
                 "r3",
-                start(&notes, AgentKind::Codex, None).await
+                failed(
+                    StartFailure::AgentMissing,
+                    "could not find the codex binary: install Codex"
+                )
             ),
             "start_failed_launch_failed": reply(
                 "r4",
-                start(&notes, AgentKind::Claude, Some("fail")).await
+                failed(StartFailure::LaunchFailed, "creating tmux session cc-3")
             ),
             "start_repeat": [reply("r-repeat", first), reply("r-repeat", again)],
         })
