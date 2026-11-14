@@ -626,7 +626,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         [`ws::ServerMessage::StartSessionResult`] — one start, idempotent by
 ///         `request_id`, answered with the new session's uid or why it failed.
 ///       - [`launch_result`] — between this computer's own processes: how
-///         `codeconnect <agent> --no-attach` tells the daemon what it started.
+///         `codeconnect <agent> --no-attach` tells the process that ran it what it
+///         started.
 ///
 ///     A daemon below 28 answers both requests `bad_request`, so a client sends
 ///     them only when the capability is advertised.

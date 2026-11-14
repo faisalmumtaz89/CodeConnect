@@ -1,6 +1,5 @@
 //! `codeconnect claude|codex --no-attach [--model=<model>] [--worktree=<name>] [-- <prompt>]`: start
-//! the session a terminal start would, without showing it. The daemon runs this for a session the
-//! phone starts, through the user's login shell in the project's folder.
+//! the session a terminal start would, without showing it.
 //!
 //! There is no terminal to take a size or a `TERM` from, so the session starts at
 //! [`SIZE`] until a terminal attaches (the phone's, or `codeconnect attach` on the

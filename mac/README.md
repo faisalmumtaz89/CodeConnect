@@ -1121,8 +1121,24 @@ then sends SIGTERM to the host's process group, and SIGKILL 5 s later only while
 remain, each under a warrant: the same boot, and the host's pid free or still its own. The
 run is then `exited`, "Stopped: its process ended". A ccd restart does not re-attach a hosted
 run: its host keeps running, and its later messages stay in it.
-A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
-the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
+A Codex start that goes on is checked the same way: the daemon finds the codex the
+launcher would run, from the same list as `codex_bin` without `CODECONNECT_CODEX_BIN`,
+and asks it its `--version`. It is `agent_missing` when none is found, and
+`launch_failed` when it is older than 0.167.0 or does not say its version. It then
+writes its run (`starting`, under its `request_id`), makes the run's folder as
+above, and runs, through the user's login shell in a session of its own, a
+`/bin/sh` line that claims the run (from the run's folder it writes its own pid to
+`as.pid`, never over one already there) and becomes `<codex> -c projects=<list>
+app-server --listen unix://<run folder>/as.sock`. The list is every folder from the
+repository's top down to the start's, by its real path, or that folder alone outside
+git, each `trust_level = "untrusted"`. The run's process is that one pid throughout,
+recorded with the birth time the kernel gives it. The daemon connects over `as.sock`,
+sends `initialize` and `initialized`, and answers started with the folder; the run
+stays `starting`, and the first message is not yet sent: no thread is started on it
+yet. A start that fails once codex is launched (codex ends, does not listen or does not
+initialize within 80 s) is `failed`, and so is its run, whose process group then gets
+SIGTERM, and SIGKILL 5 s later only while members remain, under the same warrant.
+Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
 same environment. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
@@ -1136,18 +1152,10 @@ it names an encoding (`LC_ALL`, `LC_CTYPE`, `LANG`), `LC_CTYPE` is the platform'
 UTF-8 (`UTF-8`, or `C.UTF-8` on Linux), as a UTF-8 terminal sets it; the user's
 own startup files run after and win. A Claude Code start is listed from the moment
 its row is written, and is answered from its host's outcome, as above; a start that
-fails before its host has the start is `failed`, and so is its row.
-For a Codex start, the launcher writes what it
-started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
-answers `start_session_result` with the session's uid, or `failed` with
-`agent_missing`, `folder_missing` or `launch_failed` and a detail, once the
-launcher has finished (a launcher still running after 80 s is killed). A
-`started` is sent only once the session is in `sessions`, so the phone's next
-`sessions` lists it: within the same 80 s, or `launch_failed` saying it may
-still be running. The same
+fails before its host has the start is `failed`, and so is its row. A Codex start
+is listed from the moment its row is written too. The same
 `request_id` again, on any connection, gets the first answer and starts
-nothing. A Claude Code start's is found again after the daemon restarts, from
-its row; a Codex start's is forgotten then.
+nothing, and after the daemon restarts it is found again from its run's row.
 `>= 29` lets that start pick a branch or worktree (`start_worktree`), and never
 switches the folder's own branch. `get_project_git {path}` reads a listed
 folder's (from `>= 30`, any absolute folder's) repository, without writing, fetching or running a hook:
@@ -1161,8 +1169,8 @@ and makes the worktree itself, and Codex, whose `--worktree` cannot run hosted,
 gets one in the same place on a branch named as typed (`git worktree add -b
 <name>`), from the folder's current commit. Not Claude's `worktree-` prefix:
 a later `claude --worktree <name>` that reopens a branch so named deletes it on a
-clean exit, commits and all. Git runs in the user's login shell, as the launcher
-does. `started` carries the folder the session started in, `cwd`, except for
+clean exit, commits and all. `git worktree add` runs in the user's login shell, as
+the agent does. `started` carries the folder the session started in, `cwd`, except for
 a new Claude worktree, whose folder the fleet shows once Claude is in it.
 CodeConnect never removes a worktree it made.
 `>= 30` lets the phone browse the computer's folders, as a terminal can `cd`
@@ -1233,10 +1241,10 @@ every list. A signed-out Codex's answer is asked again only once `codex login
 status`, which starts nothing, says it is signed in; that status does not count a
 model provider of the user's own, so one set up while the daemon runs is offered
 once Codex is updated or the daemon restarts. An agent that does not answer
-within the check's 10 s offers no models. `start_session`'s `model` is given to the
-agent: to Claude Code's host as the run's model, and to Codex as one argument,
-`--model=<value>`, after `--no-attach`. Absent, or Claude Code's `default`, the
-agent gets none and starts with the model its settings name.
+within the check's 10 s offers no models. `start_session`'s `model` is given to Claude
+Code's host as the run's model; absent, or Claude Code's own `default`, it gets none
+and starts with the model its settings name. A Codex run starts no thread yet, so its
+model is not yet used.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

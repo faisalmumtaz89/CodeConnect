@@ -112,6 +112,27 @@ pub async fn branch(cwd: &str, configured_bin: Option<&str>, timeout: Duration) 
     (out.ok && !name.is_empty()).then(|| name.to_string())
 }
 
+/// The top folder of the work tree `cwd` is in, as git names it; `None` outside a
+/// repository, or when git cannot answer within `timeout`.
+pub async fn toplevel(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Option<PathBuf> {
+    let git = git_bin(configured_bin)?;
+    let out = run(
+        &git,
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    let top = out.stdout.trim_end_matches('\n');
+    (out.ok && !out.stdout_truncated && !top.is_empty()).then(|| PathBuf::from(top))
+}
+
 /// A working tree as the session list shows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeFacts {

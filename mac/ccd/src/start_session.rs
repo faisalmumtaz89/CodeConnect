@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,6 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use protocol::agent::AgentKind;
 use protocol::host::Trust;
-use protocol::launch_result::{LaunchResult, ENV_LAUNCH_RESULT};
 use protocol::ws::{
     AgentAvailability, AgentModel, ClientMessage, CreateFolderResult, FolderContents, Project,
     ProjectGit, ServerMessage, StartFailure, StartSessionResult, StartWorktree, Worktree,
@@ -27,21 +27,15 @@ use tokio::sync::watch;
 
 use crate::state::Daemon;
 
-/// How long the launcher may run before it is taken to be hung and killed.
-///
-/// The launcher gives up on its own after 75 s (a Codex start can take eleven
-/// seconds when nothing is wrong), so while it runs its answer is the one that
-/// counts; this is only the backstop for one that never ends.
+/// How long a start's run may take to come up, and a `git worktree add` to end, before
+/// the start is given up: the backstop for one that never does.
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(80);
-
-/// How often a start that has run looks again for its session in the fleet.
-const LISTED_POLL: Duration = Duration::from_millis(50);
 
 /// How long one folder's git branch may take.
 const BRANCH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long one git read for a project's worktrees and branches may take.
-const GIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const GIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest worktree name, as Claude Code's `--worktree` takes it.
 const MAX_WORKTREE_NAME_BYTES: usize = 64;
@@ -140,42 +134,42 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             // One environment per start: the check and the run it starts read the
             // same login shell, since `auth status` turns on variables alone.
             let environment = phone_environment();
-            if agent == AgentKind::Claude {
-                let start = claude_start(
-                    daemon,
-                    crate::state::codex_launcher(),
-                    &state_dir,
-                    &request_id,
-                    &path,
-                    prompt.as_deref().unwrap_or_default(),
-                    worktree.as_ref(),
-                    model.as_deref(),
-                    &environment,
-                    trust,
-                );
-                return ServerMessage::StartSessionResult {
-                    result: daemon.starts.once(&request_id, start).await,
-                    request_id,
-                };
-            }
-            let launch = launch(
-                &daemon.db,
-                daemon.config.git_bin.as_deref(),
-                crate::state::codex_launcher(),
-                &state_dir,
-                &path,
-                &agent,
-                prompt.as_deref(),
-                worktree.as_ref(),
-                model.as_deref(),
-                &environment,
-                daemon.config.claude_bin.as_deref(),
-                trust,
-            );
-            ServerMessage::StartSessionResult {
-                result: daemon.starts.once(&request_id, launch).await,
-                request_id,
-            }
+            let prompt = prompt.as_deref().unwrap_or_default();
+            let result = match agent {
+                AgentKind::Claude => {
+                    let start = claude_start(
+                        daemon,
+                        crate::state::codex_launcher(),
+                        &state_dir,
+                        &request_id,
+                        &path,
+                        prompt,
+                        worktree.as_ref(),
+                        model.as_deref(),
+                        &environment,
+                        trust,
+                    );
+                    daemon.starts.once(&request_id, start).await
+                }
+                AgentKind::Codex => {
+                    let start = codex_start(
+                        daemon,
+                        &state_dir,
+                        &request_id,
+                        &path,
+                        prompt,
+                        worktree.as_ref(),
+                        &environment,
+                        trust,
+                    );
+                    daemon.starts.once(&request_id, start).await
+                }
+                AgentKind::Unsupported(name) => failed(
+                    StartFailure::LaunchFailed,
+                    format!("{name} cannot be started from the phone"),
+                ),
+            };
+            ServerMessage::StartSessionResult { result, request_id }
         }
         _ => unreachable!(
             "handle_client passes only get_project_git, list_folder, create_folder, \
@@ -311,145 +305,75 @@ fn failed(reason: StartFailure, detail: String) -> StartSessionResult {
     StartSessionResult::Failed { reason, detail }
 }
 
-/// Run `codeconnect <agent> --no-attach [--model=<model>] [--worktree=<name>]
-/// [-- <prompt>]` through the user's login shell, in `path` or the worktree
-/// `worktree` names, and read what it started from its result line, a file in
-/// `state_dir`. The model is one argument, so no value of it can be read as
-/// another flag; Claude Code's own `default` is no flag at all, so the agent
-/// starts with the model its settings name, as typed in a terminal.
-///
-/// `started` is answered only once the session is in the fleet ([`listed`]): the
-/// launcher reports a Claude start as soon as it has spawned the supervisor, which
-/// registers a moment later, and the phone looks for the new session in the very
-/// next `sessions` it asks for.
-///
-/// A Claude Code start is refused before anything runs when [`claude_preflight`]
-/// refuses it: missing, below the floor, its version unread, or signed out. Every
-/// command runs from `environment` ([`phone_environment`]).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn launch(
-    db: &crate::db::Db,
-    git_bin: Option<&str>,
-    launcher: Result<PathBuf, String>,
-    state_dir: &Path,
-    path: &str,
-    agent: &AgentKind,
-    prompt: Option<&str>,
-    worktree: Option<&StartWorktree>,
-    model: Option<&str>,
-    environment: &HashMap<OsString, OsString>,
-    claude_bin: Option<&str>,
-    trust: Option<Trust>,
-) -> StartSessionResult {
-    if let Some(refusal) = refusal(agent, path, prompt) {
-        return refusal;
-    }
-    if let Some(asked) = folder_question(db, path, trust).await {
-        return asked;
-    }
-    if *agent == AgentKind::Claude {
-        if let Err(refusal) = claude_preflight(environment, claude_bin).await {
-            return refusal;
-        }
-    }
-    let launcher = match launcher {
-        Ok(launcher) => launcher,
-        Err(why) => return failed(StartFailure::LaunchFailed, why),
-    };
-    let place = match worktree {
-        None => Place {
-            cwd: path.to_string(),
-            known: true,
-            flag: None,
-        },
-        Some(worktree) => match place(environment, git_bin, path, agent, worktree).await {
-            Ok(place) => place,
-            Err(why) => return failed(StartFailure::LaunchFailed, why),
-        },
-    };
-    let result_path = match protocol::uid::new() {
-        Ok(uid) => state_dir.join(format!("launch-{uid}.json")),
-        Err(err) => {
-            return failed(
-                StartFailure::LaunchFailed,
-                format!("could not name the launch: {err}"),
-            )
-        }
-    };
-    let mut args: Vec<&OsStr> = vec![
-        launcher.as_os_str(),
-        OsStr::new(agent.as_str()),
-        OsStr::new("--no-attach"),
-    ];
-    let model = model
-        .filter(|model| *model != "default")
-        .map(|model| format!("--model={model}"));
-    if let Some(model) = &model {
-        args.push(OsStr::new(model));
-    }
-    if let Some(flag) = &place.flag {
-        args.push(OsStr::new(flag));
-    }
-    if let Some(prompt) = prompt {
-        args.extend([OsStr::new("--"), OsStr::new(prompt)]);
-    }
-    let mut command = login_shell_command(environment, &args);
-    command
-        .current_dir(&place.cwd)
-        .env(ENV_LAUNCH_RESULT, &result_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
-    let output = tokio::time::timeout_at(deadline, command.output()).await;
-    let written = LaunchResult::read_from(&result_path);
-    let _ = std::fs::remove_file(&result_path);
-    match (written, output) {
-        (Ok(LaunchResult::Started { uid, .. }), _) => match listed(db, &uid, deadline).await {
-            Ok(()) => StartSessionResult::Started {
-                session_uid: uid,
-                cwd: place.known.then_some(place.cwd),
-            },
-            Err(why) => failed(StartFailure::LaunchFailed, why),
-        },
-        (Ok(LaunchResult::Failed { error, detail }), _) => failed(error, detail),
-        (Err(_), Err(_)) => failed(
+/// The answer for a start whose request id already has a run (H1): that run's, or
+/// why the runs could not be read. `None` lets the start go on.
+async fn existing_run(db: &crate::db::Db, request_id: &str) -> Option<StartSessionResult> {
+    match db.hosted_run_for_request(request_id.to_string()).await {
+        Ok(Some(run)) => Some(crate::claude_host::answer_for(run)),
+        Ok(None) => None,
+        Err(err) => Some(failed(
             StartFailure::LaunchFailed,
-            format!(
-                "the session did not finish starting within {} s",
-                START_TIMEOUT.as_secs()
-            ),
-        ),
-        (Err(_), Ok(Err(err))) => failed(
-            StartFailure::LaunchFailed,
-            format!("could not run the login shell: {err}"),
-        ),
-        (Err(_), Ok(Ok(output))) => failed(
-            StartFailure::LaunchFailed,
-            last_line(&output.stderr)
-                .or_else(|| last_line(&output.stdout))
-                .unwrap_or_else(|| {
-                    format!(
-                        "the launcher ended ({}) without saying what it started",
-                        output.status
-                    )
-                }),
-        ),
+            format!("could not read this computer's runs: {err:#}"),
+        )),
     }
 }
 
-/// The refusals a start gets before anything is run: an agent the phone cannot
-/// start, a first message past the limit, a path that is not absolute, and a folder
-/// that is gone or that this daemon may not reach.
-fn refusal(agent: &AgentKind, path: &str, prompt: Option<&str>) -> Option<StartSessionResult> {
-    if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
-        return Some(failed(
-            StartFailure::LaunchFailed,
-            format!("{} cannot be started from the phone", agent.as_str()),
-        ));
+/// A Codex start: the run its request already has (H1), or the start's checks, then its
+/// row and its app-server ([`crate::codex_host`]). The checks come before the row, so a
+/// start they refuse leaves none: the cheap refusals, the folder question and the codex
+/// check, all before the place, the one step that can change the repository. ccd makes
+/// a Codex worktree itself, a new one included.
+#[allow(clippy::too_many_arguments)]
+async fn codex_start(
+    daemon: &Arc<Daemon>,
+    root: &Path,
+    request_id: &str,
+    path: &str,
+    prompt: &str,
+    worktree: Option<&StartWorktree>,
+    environment: &HashMap<OsString, OsString>,
+    trust: Option<Trust>,
+) -> StartSessionResult {
+    if let Some(answer) = existing_run(&daemon.db, request_id).await {
+        return answer;
     }
-    if prompt.is_some_and(|prompt| prompt.len() > protocol::ws::MAX_COMPOSE_BYTES) {
+    if let Some(refusal) = refusal(path, prompt) {
+        return refusal;
+    }
+    if let Some(asked) = folder_question(&daemon.db, path, trust).await {
+        return asked;
+    }
+    let ready = match codex_probe(environment, daemon.config.codex_bin.as_deref()).await {
+        Ok(ready) => ready,
+        Err((reason, detail)) => return failed(reason, detail),
+    };
+    let git_bin = daemon.config.git_bin.as_deref();
+    let cwd = match worktree {
+        None => path.to_string(),
+        Some(worktree) => match place(environment, git_bin, path, worktree).await {
+            Ok(cwd) => cwd,
+            Err(why) => return failed(StartFailure::LaunchFailed, why),
+        },
+    };
+    crate::codex_host::start(
+        daemon,
+        crate::codex_host::Run {
+            root,
+            request_id,
+            cwd: &cwd,
+            codex: &ready.path,
+            git_bin,
+            environment,
+        },
+    )
+    .await
+}
+
+/// The refusals a start gets before anything is run: a first message past the limit,
+/// a path that is not absolute, and a folder that is gone or that this daemon may not
+/// reach.
+fn refusal(path: &str, prompt: &str) -> Option<StartSessionResult> {
+    if prompt.len() > protocol::ws::MAX_COMPOSE_BYTES {
         return Some(failed(
             StartFailure::LaunchFailed,
             "the first message is longer than 8 KiB".into(),
@@ -526,21 +450,10 @@ async fn claude_start(
     environment: &HashMap<OsString, OsString>,
     trust: Option<Trust>,
 ) -> StartSessionResult {
-    match daemon
-        .db
-        .hosted_run_for_request(request_id.to_string())
-        .await
-    {
-        Ok(Some(run)) => return crate::claude_host::answer_for(run),
-        Ok(None) => {}
-        Err(err) => {
-            return failed(
-                StartFailure::LaunchFailed,
-                format!("could not read this computer's runs: {err:#}"),
-            )
-        }
+    if let Some(answer) = existing_run(&daemon.db, request_id).await {
+        return answer;
     }
-    if let Some(refusal) = refusal(&AgentKind::Claude, path, Some(prompt)) {
+    if let Some(refusal) = refusal(path, prompt) {
         return refusal;
     }
     if let Some(asked) = folder_question(&daemon.db, path, trust).await {
@@ -577,12 +490,11 @@ async fn claude_start(
             environment,
             daemon.config.git_bin.as_deref(),
             path,
-            &AgentKind::Claude,
             worktree,
         )
         .await
         {
-            Ok(place) => (place.cwd, None),
+            Ok(cwd) => (cwd, None),
             Err(why) => return failed(StartFailure::LaunchFailed, why),
         },
     };
@@ -602,29 +514,6 @@ async fn claude_start(
         },
     )
     .await
-}
-
-/// Wait until the session `uid` is one the fleet lists (its row, which `sessions`
-/// reads), or until `deadline`, the start's own: the launcher's time left over.
-async fn listed(
-    db: &crate::db::Db,
-    uid: &str,
-    deadline: tokio::time::Instant,
-) -> Result<(), String> {
-    loop {
-        match tokio::time::timeout_at(deadline, db.get_session(uid.to_string())).await {
-            Ok(Ok(Some(_))) => return Ok(()),
-            Ok(Ok(None)) => {}
-            Ok(Err(err)) => return Err(format!("could not read this computer's sessions: {err}")),
-            Err(_) => break,
-        }
-        tokio::time::sleep(LISTED_POLL).await;
-    }
-    Err(format!(
-        "the session was launched but did not reach this computer's sessions within {} s; \
-         it may still be running",
-        START_TIMEOUT.as_secs()
-    ))
 }
 
 /// Whether the phone may name `path`, for a listing, a new folder, a start or a git
@@ -713,25 +602,14 @@ pub(crate) fn system_words(err: &std::io::Error) -> String {
     }
 }
 
-/// Where a start runs.
-struct Place {
-    /// The folder the launcher runs in.
-    cwd: String,
-    /// The session runs in `cwd`; false when the agent makes its own folder.
-    known: bool,
-    /// The one flag the agent is handed before the prompt.
-    flag: Option<String>,
-}
-
 /// The folder for a start in `worktree`, making the worktree first when it is
 /// new. Every check reads the repository afresh, and every refusal says why.
 async fn place(
     environment: &HashMap<OsString, OsString>,
     git_bin: Option<&str>,
     path: &str,
-    agent: &AgentKind,
     worktree: &StartWorktree,
-) -> Result<Place, String> {
+) -> Result<String, String> {
     let entries = crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
         .await
         .ok_or_else(|| format!("{path} is not in a git repository"))?;
@@ -739,11 +617,7 @@ async fn place(
         .first()
         .map(|entry| entry.path.clone())
         .ok_or_else(|| format!("git listed no worktrees for {path}"))?;
-    let made = |cwd: PathBuf| Place {
-        cwd: cwd.display().to_string(),
-        known: true,
-        flag: None,
-    };
+    let made = |cwd: PathBuf| cwd.display().to_string();
     match worktree {
         StartWorktree::Existing { path: wanted } => {
             match entries.iter().find(|entry| &entry.path == wanted) {
@@ -776,13 +650,6 @@ async fn place(
         }
         StartWorktree::New { name } => {
             check_worktree_name(name)?;
-            if matches!(agent, AgentKind::Claude) {
-                return Ok(Place {
-                    cwd: path.to_string(),
-                    known: false,
-                    flag: Some(format!("--worktree={name}")),
-                });
-            }
             // The branch is the name as typed. Claude's own `worktree-` prefix marks a
             // branch Claude deletes on a clean exit, commits and all, should a later
             // `claude --worktree <name>` reopen this one.
@@ -1668,6 +1535,40 @@ pub(crate) fn reap(mut child: tokio::process::Child) {
     });
 }
 
+/// `runs/` and the run's own folder, both 0700, the folder made here and only here,
+/// and its `host.log` (0600), which the run's output goes to.
+pub(crate) fn make_run_dir(root: &Path, dir: &Path) -> std::io::Result<std::fs::File> {
+    protocol::fsperm::private_dir(&root.join("runs"))?;
+    std::fs::DirBuilder::new()
+        .mode(protocol::fsperm::DIR_MODE)
+        .create(dir)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(protocol::fsperm::FILE_MODE)
+        .open(dir.join("host.log"))
+}
+
+/// An error once the run's [`spawn_detached`] child has ended (with what it last said
+/// in the run's `host.log`) or the start's time is up.
+pub(crate) fn give_up_if_ended(
+    dir: &Path,
+    child: &mut tokio::process::Child,
+    deadline: tokio::time::Instant,
+    waiting: &str,
+) -> Result<(), String> {
+    if let Ok(Some(status)) = child.try_wait() {
+        let said = std::fs::read(dir.join("host.log"))
+            .ok()
+            .and_then(|log| last_line(&log));
+        return Err(said.unwrap_or_else(|| format!("the agent host ended ({status})")));
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(format!("{waiting} within {} s", START_TIMEOUT.as_secs()));
+    }
+    Ok(())
+}
+
 /// What CodeConnect's own service definition sets for the daemon alone.
 const SERVICE_ONLY: [&str; 2] = ["CODECONNECT_LOG", "CODECONNECT_SERVICE"];
 
@@ -1877,64 +1778,91 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// A folder for one test: a project folder, a stub launcher whose
-    /// `--no-attach` runs `body`, and a ready Claude Code ([`test_claude`]) with the
-    /// environment every command of the test runs in.
+    /// What the rig's stand-in agent host says as it ends, a start's answer once its
+    /// checks have let it through to a Claude run.
+    const HOST_SAYS: &str = "the stand-in host ends here";
+
+    /// What the rig's stand-in codex says as it ends, a start's answer once its checks
+    /// have let it through to a Codex run.
+    const CODEX_SAYS: &str = "the stand-in codex ends here";
+
+    /// A folder for one test, short and under `/tmp` so a run's socket fits `sun_path`:
+    /// a project folder; a stub `codeconnect` running `body`, which the probe tests also
+    /// run as a stand-in agent; a ready Claude Code ([`test_claude`]) with the environment
+    /// every command of the test runs in; and a daemon over the rig's store whose starts
+    /// run stand-ins for the agent host and for codex. Each stand-in keeps its runs, its
+    /// folder (the host) or its arguments (codex), then ends saying [`HOST_SAYS`] or
+    /// [`CODEX_SAYS`].
     struct Rig {
         root: PathBuf,
         db: crate::db::Db,
+        daemon: Arc<Daemon>,
         project: PathBuf,
         launcher: PathBuf,
         claude: PathBuf,
         env: HashMap<OsString, OsString>,
+        requests: std::sync::atomic::AtomicUsize,
     }
 
     impl Rig {
         fn new(tag: &str, body: &str) -> Rig {
-            let root = std::env::temp_dir().join(format!(
-                "ccd-start-{tag}-{}-{}",
-                std::process::id(),
-                protocol::time::now_unix_ms()
-            ));
+            let uid = protocol::uid::new().unwrap();
+            let root = PathBuf::from(format!("/tmp/ccs-{tag}.{}", &uid[20..]));
             let project = root.join("my app");
             std::fs::create_dir_all(&project).unwrap();
             let store = Arc::new(crate::store::Store::open(&root.join("events.db")).unwrap());
-            let at = protocol::time::now_rfc3339();
-            // The session the stub launchers report, registered as its supervisor
-            // would have done by the time the start is answered.
-            let filed = store
-                .upsert_session(&crate::store::SessionRow {
-                    session_uid: STUB_UID.into(),
-                    session_id: "cc-1".into(),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd: project.display().to_string(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: at.clone(),
-                    updated_at: at,
-                    agent: AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
-                .unwrap();
-            assert!(matches!(filed, crate::store::SessionUpsert::Present));
-            let launcher = root.join("codeconnect");
-            std::fs::write(&launcher, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::process::Command::new("chmod")
-                .arg("755")
-                .arg(&launcher)
-                .status()
-                .unwrap();
+            let program = |name: &str, script: String| {
+                let path = root.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+                std::process::Command::new("chmod")
+                    .arg("755")
+                    .arg(&path)
+                    .status()
+                    .unwrap();
+                path
+            };
+            let launcher = program("codeconnect", body.to_string());
+            let host = program(
+                "stand-in-host",
+                format!("echo run >> \"$0.runs\"; pwd -P > \"$0.cwd\"; echo '{HOST_SAYS}'; exit 1"),
+            );
+            let codex = program(
+                "stand-in-codex",
+                format!(
+                    "printf 'HOME=%s PATH=%s XPC_SERVICE_NAME=%s X2_MARKER=%s\\n' \"${{HOME-unset}}\" \
+                     \"${{PATH-unset}}\" \"${{XPC_SERVICE_NAME-unset}}\" \"${{X2_MARKER-unset}}\" >> \"$0.env\"\n\
+                     [ \"$1\" = --version ] && {{ echo 'codex-cli 0.167.0'; exit 0; }}\n\
+                     echo run >> \"$0.runs\"; printf '%s\\0' \"$@\" > \"$0.argv\"; echo '{CODEX_SAYS}'; exit 1"
+                ),
+            );
             let (claude, env) = test_claude(&root.join("claude-rig"));
+            let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
+            Box::leak(Box::new(transcript_rx));
+            let daemon = Daemon::new(
+                protocol::config::Config {
+                    claude_bin: Some(claude.display().to_string()),
+                    codex_bin: Some(codex.display().to_string()),
+                    agent_host_bin: Some(host.display().to_string()),
+                    ..Default::default()
+                },
+                Arc::clone(&store),
+                Arc::new(crate::apns::LoggingPushSender::new()),
+                crate::state::Endpoint {
+                    host: "test.ts.net".into(),
+                    port: 8787,
+                    tls: false,
+                },
+                transcript_tx,
+            );
             Rig {
                 db: crate::db::Db::new(store),
+                daemon,
                 root,
                 project,
                 launcher,
                 claude,
                 env,
+                requests: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -1949,75 +1877,90 @@ mod tests {
             std::fs::read_to_string(format!("{}.argv", self.claude.display())).unwrap_or_default()
         }
 
-        async fn start(&self, path: &str, prompt: Option<&str>) -> StartSessionResult {
-            launch(
-                &self.db,
-                None,
-                Ok(self.launcher.clone()),
-                &self.root,
-                path,
-                &AgentKind::Claude,
-                prompt,
-                None,
-                None,
-                &self.env,
-                None,
-                Some(protocol::host::Trust::Trusted),
-            )
-            .await
+        /// A start of `agent` in `path` with the first message `prompt`, in `worktree`,
+        /// giving `trust` as the folder's answer, through the agent's own arm
+        /// ([`claude_start`] or [`codex_start`]) under `request_id`.
+        async fn start_request(
+            &self,
+            request_id: &str,
+            agent: AgentKind,
+            path: &str,
+            prompt: &str,
+            worktree: Option<&StartWorktree>,
+            trust: Option<Trust>,
+        ) -> StartSessionResult {
+            match agent {
+                AgentKind::Codex => {
+                    codex_start(
+                        &self.daemon,
+                        &self.root,
+                        request_id,
+                        path,
+                        prompt,
+                        worktree,
+                        &self.env,
+                        trust,
+                    )
+                    .await
+                }
+                _ => {
+                    claude_start(
+                        &self.daemon,
+                        Ok(self.launcher.clone()),
+                        &self.root,
+                        request_id,
+                        path,
+                        prompt,
+                        worktree,
+                        None,
+                        &self.env,
+                        trust,
+                    )
+                    .await
+                }
+            }
         }
 
-        /// A start in `path` with a first message, giving `trust` as the folder's
+        /// [`Rig::start_request`] under a request id of its own.
+        async fn start_as(
+            &self,
+            agent: AgentKind,
+            path: &str,
+            prompt: &str,
+            worktree: Option<&StartWorktree>,
+            trust: Option<Trust>,
+        ) -> StartSessionResult {
+            let n = self
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.start_request(&format!("req-{n}"), agent, path, prompt, worktree, trust)
+                .await
+        }
+
+        /// A Claude start in `path`, its folder answered.
+        async fn start(&self, path: &str, prompt: Option<&str>) -> StartSessionResult {
+            let prompt = prompt.unwrap_or("fix the tests");
+            self.start_as(AgentKind::Claude, path, prompt, None, Some(Trust::Trusted))
+                .await
+        }
+
+        /// A Claude start in `path` with a first message, giving `trust` as the folder's
         /// answer, or none.
         async fn start_answering(&self, path: &str, trust: Option<Trust>) -> StartSessionResult {
-            launch(
-                &self.db,
-                None,
-                Ok(self.launcher.clone()),
-                &self.root,
-                path,
-                &AgentKind::Claude,
-                Some("fix the tests"),
-                None,
-                None,
-                &self.env,
-                None,
-                trust,
-            )
-            .await
+            self.start_as(AgentKind::Claude, path, "fix the tests", None, trust)
+                .await
         }
 
+        /// A start of `agent` in `path`'s `worktree`, its folder answered.
         async fn start_in(
             &self,
             path: &str,
             agent: AgentKind,
             worktree: StartWorktree,
         ) -> StartSessionResult {
-            self.start_with(path, agent, None, worktree).await
-        }
-
-        async fn start_with(
-            &self,
-            path: &str,
-            agent: AgentKind,
-            prompt: Option<&str>,
-            worktree: StartWorktree,
-        ) -> StartSessionResult {
-            launch(
-                &self.db,
-                None,
-                Ok(self.launcher.clone()),
-                &self.root,
-                path,
-                &agent,
-                prompt,
-                Some(&worktree),
-                None,
-                &self.env,
-                None,
-                Some(protocol::host::Trust::Trusted),
-            )
-            .await
+            let trust = Some(Trust::Trusted);
+            self.start_as(agent, path, "fix the tests", Some(&worktree), trust)
+                .await
         }
 
         /// The worktree on `branch`, as git lists it.
@@ -2083,23 +2026,41 @@ mod tests {
             .join("\n")
         }
 
-        fn launcher_runs(&self) -> usize {
-            std::fs::read_to_string(self.root.join("codeconnect.runs"))
-                .map(|runs| runs.lines().count())
-                .unwrap_or(0)
+        /// How many runs the starts reached: the stand-in host's and the stand-in codex's.
+        fn runs(&self) -> usize {
+            ["stand-in-host.runs", "stand-in-codex.runs"]
+                .iter()
+                .map(|name| {
+                    std::fs::read_to_string(self.root.join(name))
+                        .map(|runs| runs.lines().count())
+                        .unwrap_or(0)
+                })
+                .sum()
         }
 
-        fn launcher_cwd(&self) -> PathBuf {
-            let cwd = std::fs::read_to_string(self.root.join("codeconnect.cwd")).unwrap();
+        /// The folder the stand-in host last ran in, a Claude run's folder.
+        fn host_cwd(&self) -> PathBuf {
+            let cwd = std::fs::read_to_string(self.root.join("stand-in-host.cwd")).unwrap();
             PathBuf::from(cwd.trim())
         }
 
-        fn launcher_argv(&self) -> Vec<String> {
-            let argv = std::fs::read(self.root.join("codeconnect.argv")).unwrap();
+        /// The arguments the stand-in codex was last launched with.
+        fn codex_argv(&self) -> Vec<String> {
+            let argv = std::fs::read(self.root.join("stand-in-codex.argv")).unwrap();
             argv.split(|byte| *byte == 0)
                 .filter(|arg| !arg.is_empty())
                 .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
                 .collect()
+        }
+
+        /// The folder the run of `request_id` was recorded to run in.
+        async fn run_cwd(&self, request_id: &str) -> String {
+            self.db
+                .hosted_run_for_request(request_id.to_string())
+                .await
+                .unwrap()
+                .expect("the start wrote its row")
+                .cwd
         }
 
         fn project(&self) -> String {
@@ -2435,52 +2396,10 @@ mod tests {
         assert!(!checked.contains("CLAUDE_CONFIG_DIR") && !hosted.contains("CLAUDE_CONFIG_DIR"));
     }
 
-    const STUB_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-
-    const STARTED: &str = r#"printf '{"uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_name":"cc-7","agent":"claude"}\n' > "$CODECONNECT_LAUNCH_RESULT""#;
-
-    /// **The prompt reaches the launcher as one literal argument, in the folder
-    /// asked for**, and nothing in it runs.
-    #[tokio::test]
-    async fn the_launcher_gets_the_folder_and_a_literal_prompt() {
-        let rig = Rig::new(
-            "argv",
-            &format!("pwd -P > \"$0.cwd\"; printf '%s\\0' \"$@\" > \"$0.argv\"; {STARTED}"),
-        );
-        let marker = rig.root.join("ran");
-        let prompt = format!(
-            "-p \"it's\" $(touch {m}) `touch {m}`; echo hi;\nline two;",
-            m = marker.display()
-        );
-        let result = rig.start(&rig.project(), Some(&prompt)).await;
-        assert_eq!(
-            result,
-            StartSessionResult::Started {
-                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
-                cwd: Some(rig.project()),
-            }
-        );
-        let argv = std::fs::read(rig.root.join("codeconnect.argv")).unwrap();
-        let argv: Vec<&[u8]> = argv.split(|byte| *byte == 0).collect();
-        assert_eq!(
-            argv,
-            [
-                b"claude".as_slice(),
-                b"--no-attach",
-                b"--",
-                prompt.as_bytes(),
-                b""
-            ]
-        );
-        let cwd = std::fs::read_to_string(rig.root.join("codeconnect.cwd")).unwrap();
-        assert_eq!(Path::new(cwd.trim()), rig.project.canonicalize().unwrap());
-        assert!(!marker.exists(), "nothing in the prompt may run");
-        let left: Vec<_> = std::fs::read_dir(&rig.root)
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("launch-"))
-            .collect();
-        assert!(left.is_empty(), "the result file is removed once read");
+    /// Whether `result` is a start its checks let through to its run: the run's
+    /// stand-in ended it, saying so.
+    fn reached(result: &StartSessionResult) -> bool {
+        matches!(result, StartSessionResult::Failed { detail, .. } if detail == HOST_SAYS || detail == CODEX_SAYS)
     }
 
     /// **The reason a launcher gives reads the same wherever it is shown**: its
@@ -2502,10 +2421,7 @@ mod tests {
     /// and gets its answer.
     #[tokio::test]
     async fn the_same_request_id_starts_one_session() {
-        let rig = Rig::new(
-            "once",
-            &format!("echo run >> \"$0.runs\"; sleep 1; {STARTED}"),
-        );
+        let rig = counting("once");
         let starts = Starts::default();
         let path = rig.project();
         let (first, second) = tokio::join!(
@@ -2515,14 +2431,13 @@ mod tests {
         let again = starts.once("r1", rig.start(&path, None)).await;
         assert_eq!(first, second);
         assert_eq!(first, again);
-        assert!(matches!(first, StartSessionResult::Started { .. }));
-        let runs = std::fs::read_to_string(rig.root.join("codeconnect.runs")).unwrap();
-        assert_eq!(runs.lines().count(), 1, "{runs}");
+        assert!(reached(&first), "{first:?}");
+        assert_eq!(rig.runs(), 1);
     }
 
-    /// A stub launcher that counts its runs, then starts.
+    /// A rig whose starts reach their stand-ins.
     fn counting(tag: &str) -> Rig {
-        Rig::new(tag, &format!("echo run >> \"$0.runs\"; {STARTED}"))
+        Rig::new(tag, "exit 1")
     }
 
     /// **A folder is asked about once.** The first start there, with no answer,
@@ -2539,27 +2454,21 @@ mod tests {
             .to_string();
         let asked = StartSessionResult::NeedsTrust { path: real.clone() };
         assert_eq!(rig.start_answering(&path, None).await, asked);
-        assert_eq!(rig.launcher_runs(), 0, "an unanswered start runs nothing");
+        assert_eq!(rig.runs(), 0, "an unanswered start runs nothing");
 
         let answered = rig.start_answering(&path, Some(Trust::NotTrusted)).await;
-        assert!(
-            matches!(answered, StartSessionResult::Started { .. }),
-            "{answered:?}"
-        );
+        assert!(reached(&answered), "{answered:?}");
         assert_eq!(
             rig.db.folder_trust(real.clone()).await.unwrap(),
             Some(Trust::NotTrusted)
         );
         let later = rig.start_answering(&path, None).await;
-        assert!(
-            matches!(later, StartSessionResult::Started { .. }),
-            "{later:?}"
-        );
-        assert_eq!(rig.launcher_runs(), 2);
+        assert!(reached(&later), "{later:?}");
+        assert_eq!(rig.runs(), 2);
 
         assert!(rig.db.forget_folder_trust(real.clone()).await.unwrap());
         assert_eq!(rig.start_answering(&path, None).await, asked);
-        assert_eq!(rig.launcher_runs(), 2, "asked again, and nothing ran");
+        assert_eq!(rig.runs(), 2, "asked again, and nothing ran");
     }
 
     /// **The folder question comes before the claude check.** A folder nobody has
@@ -2590,7 +2499,7 @@ mod tests {
             matches!(&answered, StartSessionResult::Failed { detail, .. } if detail.contains("isn’t signed in")),
             "{answered:?}"
         );
-        assert_eq!(rig.launcher_runs(), 0, "a signed-out claude's start ran");
+        assert_eq!(rig.runs(), 0, "a signed-out claude's start ran");
     }
 
     /// **A folder reached through a symlink is the same folder**: the answer given
@@ -2603,15 +2512,9 @@ mod tests {
         let through_link = rig
             .start_answering(&link.display().to_string(), Some(Trust::Trusted))
             .await;
-        assert!(
-            matches!(through_link, StartSessionResult::Started { .. }),
-            "{through_link:?}"
-        );
+        assert!(reached(&through_link), "{through_link:?}");
         let direct = rig.start_answering(&rig.project(), None).await;
-        assert!(
-            matches!(direct, StartSessionResult::Started { .. }),
-            "{direct:?}"
-        );
+        assert!(reached(&direct), "{direct:?}");
         let kept = rig.db.folder_trusts().await.unwrap();
         let real = std::fs::canonicalize(&rig.project).unwrap();
         assert_eq!(kept.len(), 1, "{kept:?}");
@@ -2635,10 +2538,7 @@ mod tests {
         let answered = starts
             .once("r2", rig.start_answering(&path, Some(Trust::Trusted)))
             .await;
-        assert!(
-            matches!(answered, StartSessionResult::Started { .. }),
-            "{answered:?}"
-        );
+        assert!(reached(&answered), "{answered:?}");
         assert_eq!(
             starts
                 .once("r1", rig.start_answering(&path, Some(Trust::Trusted)))
@@ -2651,11 +2551,10 @@ mod tests {
                 .await,
             answered
         );
-        assert_eq!(rig.launcher_runs(), 1);
+        assert_eq!(rig.runs(), 1);
     }
 
-    /// **Each failure says which one it is**, and none of them runs a launcher
-    /// that was not needed.
+    /// **Each failure says which one it is**, and none of them runs anything.
     #[tokio::test]
     async fn a_failed_start_says_why() {
         let reason = |result: StartSessionResult| match result {
@@ -2675,39 +2574,20 @@ mod tests {
         std::fs::write(&file, "").unwrap();
         let (why, _) = reason(rig.start(&file.display().to_string(), None).await);
         assert_eq!(why, StartFailure::FolderMissing);
-        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
+
+        let long = "x".repeat(protocol::ws::MAX_COMPOSE_BYTES + 1);
+        assert_eq!(
+            reason(rig.start(&rig.project(), Some(&long)).await),
+            (
+                StartFailure::LaunchFailed,
+                "the first message is longer than 8 KiB".into()
+            )
+        );
 
         std::fs::remove_dir_all(&rig.project).unwrap();
         let (why, _) = reason(rig.start(&rig.project(), None).await);
         assert_eq!(why, StartFailure::FolderMissing);
-
-        let rig = Rig::new(
-            "missing",
-            r#"printf '{"error":"agent_missing","detail":"could not find the claude binary"}\n' > "$CODECONNECT_LAUNCH_RESULT"; exit 1"#,
-        );
-        assert_eq!(
-            reason(rig.start(&rig.project(), None).await),
-            (
-                StartFailure::AgentMissing,
-                "could not find the claude binary".into()
-            )
-        );
-
-        let rig = Rig::new(
-            "broken",
-            "echo 'rc noise' >&2; echo 'Error: tmux refused' >&2; exit 1",
-        );
-        assert_eq!(
-            reason(rig.start(&rig.project(), None).await),
-            (StartFailure::LaunchFailed, "tmux refused".into())
-        );
-
-        let rig = Rig::new("long", STARTED);
-        let long = "x".repeat(protocol::ws::MAX_COMPOSE_BYTES + 1);
-        assert_eq!(
-            reason(rig.start(&rig.project(), Some(&long)).await).0,
-            StartFailure::LaunchFailed
-        );
+        assert_eq!(rig.runs(), 0, "a refused start runs nothing");
     }
 
     /// A folder that exists but cannot be reached is refused in the system's
@@ -2736,26 +2616,14 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
+        assert_eq!(rig.runs(), 0, "a refused start runs nothing");
     }
 
-    /// The stub launcher, keeping what it was run with, then starting.
+    /// A rig whose project is a repository ([`Rig::make_repository`]).
     fn recording(tag: &str) -> Rig {
-        let rig = Rig::new(
-            tag,
-            &format!(
-                "echo run >> \"$0.runs\"; pwd -P > \"$0.cwd\"; printf '%s\\0' \"$@\" > \"$0.argv\"; {STARTED}"
-            ),
-        );
+        let rig = counting(tag);
         rig.make_repository();
         rig
-    }
-
-    fn started_in(result: &StartSessionResult) -> Option<String> {
-        match result {
-            StartSessionResult::Started { cwd, .. } => cwd.clone(),
-            other => panic!("expected a start, got {other:?}"),
-        }
     }
 
     fn refusal(result: StartSessionResult) -> String {
@@ -2768,12 +2636,8 @@ mod tests {
         }
     }
 
-    fn canonical(path: &str) -> PathBuf {
-        Path::new(path).canonicalize().unwrap()
-    }
-
-    /// **An existing worktree is started in as it is**: the agent runs there, the
-    /// answer names it, and git is not written to.
+    /// **An existing worktree is started in as it is**: the run is recorded there, and
+    /// git is not written to.
     #[tokio::test]
     async fn an_existing_worktree_is_started_in_as_it_is() {
         let rig = recording("existing");
@@ -2781,17 +2645,22 @@ mod tests {
         let listed = git(&rig.project, &["worktree", "list", "--porcelain"]);
         let before = rig.main_state();
 
+        let worktree = StartWorktree::Existing {
+            path: existing.clone(),
+        };
+        let trust = Some(Trust::Trusted);
         let result = rig
-            .start_in(
-                &rig.project(),
+            .start_request(
+                "existing",
                 AgentKind::Codex,
-                StartWorktree::Existing {
-                    path: existing.clone(),
-                },
+                &rig.project(),
+                "fix the tests",
+                Some(&worktree),
+                trust,
             )
             .await;
-        assert_eq!(started_in(&result).as_deref(), Some(existing.as_str()));
-        assert_eq!(rig.launcher_cwd(), canonical(&existing));
+        assert!(reached(&result), "{result:?}");
+        assert_eq!(rig.run_cwd("existing").await, existing);
         assert_eq!(
             git(&rig.project, &["worktree", "list", "--porcelain"]),
             listed
@@ -2814,7 +2683,7 @@ mod tests {
             );
             assert!(detail.contains(says), "{detail}");
         }
-        assert_eq!(rig.launcher_runs(), 1, "a refused start runs nothing");
+        assert_eq!(rig.runs(), 1, "a refused start runs nothing");
     }
 
     /// **A branch gets a worktree of its own, on that branch, in Claude Code's
@@ -2838,9 +2707,9 @@ mod tests {
             let folder = Path::new(&main)
                 .join(".claude/worktrees")
                 .join(branch.replace('/', "+"));
-            assert_eq!(started_in(&result), Some(folder.display().to_string()));
+            assert!(reached(&result), "{result:?}");
             assert_eq!(git(&folder, &["symbolic-ref", "--short", "HEAD"]), branch);
-            assert_eq!(rig.launcher_cwd(), folder.canonicalize().unwrap());
+            assert_eq!(rig.host_cwd(), folder.canonicalize().unwrap());
         }
         let pwned = std::process::Command::new("find")
             .arg(&rig.root)
@@ -2868,7 +2737,7 @@ mod tests {
             );
             assert!(detail.contains(says), "{branch}: {detail}");
         }
-        assert_eq!(rig.launcher_runs(), BRANCHES.len());
+        assert_eq!(rig.runs(), BRANCHES.len());
     }
 
     /// **A new Codex worktree is made where Claude Code makes one, on a branch named
@@ -2886,50 +2755,102 @@ mod tests {
         let new = || StartWorktree::New {
             name: "fix/login".into(),
         };
-        let result = rig.start_in(&existing, AgentKind::Codex, new()).await;
+        let trust = Some(Trust::Trusted);
+        let result = rig
+            .start_request(
+                "new",
+                AgentKind::Codex,
+                &existing,
+                "fix it",
+                Some(&new()),
+                trust,
+            )
+            .await;
         let folder = Path::new(&main).join(".claude/worktrees/fix+login");
-        assert_eq!(started_in(&result), Some(folder.display().to_string()));
+        assert!(reached(&result), "{result:?}");
+        assert_eq!(rig.run_cwd("new").await, folder.display().to_string());
         assert_eq!(
             git(&folder, &["symbolic-ref", "--short", "HEAD"]),
             "fix/login"
         );
         assert_eq!(git(&folder, &["rev-parse", "HEAD"]), ahead);
-        assert_eq!(rig.launcher_cwd(), folder.canonicalize().unwrap());
 
         let detail = refusal(rig.start_in(&existing, AgentKind::Codex, new()).await);
         assert!(detail.contains("already exists"), "{detail}");
-        assert_eq!(rig.launcher_runs(), 1);
+        assert_eq!(rig.runs(), 1);
     }
 
-    /// **A new Claude worktree is Claude's own to make**: the launcher runs in the
-    /// folder with `--worktree=<name>` as one argument, ahead of the first prompt the
-    /// launcher only takes after it, and the daemon makes nothing.
+    /// **A repeated Codex start on a branch finds its run and makes no second worktree**:
+    /// the request id is looked up in the store before the place, so the repeat is the
+    /// run's own answer, not git's refusal of a branch checked out already.
+    #[tokio::test]
+    async fn a_repeated_codex_start_on_a_branch_finds_its_run() {
+        let rig = recording("repeat-branch");
+        let branch = StartWorktree::Branch {
+            branch: "feature/search".into(),
+        };
+        let (project, trust) = (rig.project(), Some(Trust::Trusted));
+        let start = || {
+            rig.start_request(
+                "r-branch",
+                AgentKind::Codex,
+                &project,
+                "fix it",
+                Some(&branch),
+                trust,
+            )
+        };
+        let first = start().await;
+        assert!(reached(&first), "{first:?}");
+        let again = start().await;
+        assert_eq!(
+            again,
+            failed(StartFailure::LaunchFailed, "did not start".into())
+        );
+        assert_eq!(rig.runs(), 1);
+    }
+
+    /// **A Codex start's check and its launch see one environment**, the start's own:
+    /// the codex check's `--version` and the launched codex run with the same HOME, PATH
+    /// and session variables, and a variable only the start's environment has.
+    #[tokio::test]
+    async fn a_codex_start_checks_and_launches_from_one_environment() {
+        let mut rig = counting("codex-env");
+        rig.env.insert("X2_MARKER".into(), "x2-env-marker".into());
+        let result = rig
+            .start_as(
+                AgentKind::Codex,
+                &rig.project(),
+                "fix it",
+                None,
+                Some(Trust::Trusted),
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let seen = std::fs::read_to_string(rig.root.join("stand-in-codex.env")).unwrap();
+        let lines: Vec<&str> = seen.lines().collect();
+        assert_eq!(lines.len(), 2, "the check and the launch: {seen}");
+        assert_eq!(lines[0], lines[1]);
+        assert!(lines[0].ends_with("X2_MARKER=x2-env-marker"), "{seen}");
+    }
+
+    /// **A new Claude worktree is Claude's own to make**: the run starts in the folder
+    /// it was asked in, and the daemon makes nothing.
     #[tokio::test]
     async fn a_new_claude_worktree_is_left_to_claude() {
         let rig = recording("new-claude");
         let before = rig.main_state();
         let result = rig
-            .start_with(
+            .start_in(
                 &rig.project(),
                 AgentKind::Claude,
-                Some("-p fix it"),
                 StartWorktree::New {
                     name: "-fix/login".into(),
                 },
             )
             .await;
-        assert_eq!(started_in(&result), None, "Claude chooses the folder");
-        assert_eq!(
-            rig.launcher_argv(),
-            [
-                "claude",
-                "--no-attach",
-                "--worktree=-fix/login",
-                "--",
-                "-p fix it"
-            ]
-        );
-        assert_eq!(rig.launcher_cwd(), rig.project.canonicalize().unwrap());
+        assert!(reached(&result), "{result:?}");
+        assert_eq!(rig.host_cwd(), rig.project.canonicalize().unwrap());
         assert!(!Path::new(&rig.main()).join(".claude").exists());
         assert_eq!(rig.main_state(), before);
     }
@@ -2968,7 +2889,7 @@ mod tests {
             }
         }
         assert!(check_worktree_name(&"x".repeat(MAX_WORKTREE_NAME_BYTES)).is_ok());
-        assert_eq!(rig.launcher_runs(), 0);
+        assert_eq!(rig.runs(), 0);
         assert!(!Path::new(&rig.main()).join(".claude").exists());
         assert_eq!(git(&rig.project, &["branch", "--list"]), branches);
     }
@@ -2976,7 +2897,7 @@ mod tests {
     /// **Outside a repository there is no worktree to pick**, and it says so.
     #[tokio::test]
     async fn a_folder_outside_a_repository_has_no_worktrees() {
-        let rig = Rig::new("plain", STARTED);
+        let rig = counting("plain");
         let detail = refusal(
             rig.start_in(
                 &rig.project(),
@@ -3208,8 +3129,9 @@ mod tests {
     }
 
     /// **A start runs in any folder, as a terminal can `cd` anywhere**, not only one
-    /// a session has run in, each name reaching the launcher as its folder and
-    /// nothing in it running; a relative path is refused before anything runs.
+    /// a session has run in, each name reaching the run as its folder and nothing in
+    /// it running: Claude's host runs in it, and codex is told its trust by its real
+    /// path, as one argument.
     #[tokio::test]
     async fn a_start_runs_in_any_folder() {
         let rig = recording("anywhere");
@@ -3218,44 +3140,33 @@ mod tests {
             let folder = rig.root.join(name);
             std::fs::create_dir(&folder).unwrap();
             let path = folder.display().to_string();
+            let real = folder.canonicalize().unwrap();
             for agent in [AgentKind::Claude, AgentKind::Codex] {
-                let result = launch(
-                    &rig.db,
-                    None,
-                    Ok(rig.launcher.clone()),
-                    &rig.root,
-                    &path,
-                    &agent,
-                    Some("x; $(touch PWNED) \"q\""),
-                    None,
-                    None,
-                    &rig.env,
-                    None,
-                    Some(protocol::host::Trust::Trusted),
-                )
-                .await;
-                assert_eq!(
-                    started_in(&result).as_deref(),
-                    Some(path.as_str()),
-                    "{name}"
-                );
-                assert_eq!(rig.launcher_cwd(), folder.canonicalize().unwrap(), "{name}");
-                assert_eq!(
-                    rig.launcher_argv(),
-                    [
-                        agent.as_str(),
-                        "--no-attach",
-                        "--",
-                        "x; $(touch PWNED) \"q\""
-                    ]
-                );
+                let request_id = format!("{name}-{}", agent.as_str());
+                let trust = Some(Trust::Trusted);
+                let prompt = "x; $(touch PWNED) \"q\"";
+                let result = rig
+                    .start_request(&request_id, agent.clone(), &path, prompt, None, trust)
+                    .await;
+                assert!(reached(&result), "{name}: {result:?}");
+                assert_eq!(rig.run_cwd(&request_id).await, path, "{name}");
+                if agent == AgentKind::Claude {
+                    assert_eq!(rig.host_cwd(), real, "{name}");
+                } else {
+                    let projects = serde_json::to_string(&real.display().to_string()).unwrap();
+                    let argv = rig.codex_argv();
+                    assert!(
+                        argv.iter().any(|arg| arg.contains(&projects)),
+                        "{name}: {argv:?}"
+                    );
+                }
             }
         }
         assert!(
             !marker.exists(),
             "nothing in a folder name or prompt may run"
         );
-        assert_eq!(rig.launcher_runs(), 6);
+        assert_eq!(rig.runs(), 6);
     }
 
     fn environment(pairs: &[(&str, &str)]) -> HashMap<OsString, OsString> {
@@ -3365,101 +3276,6 @@ mod tests {
             Some(&"0".into())
         );
         assert_eq!(session.get(OsStr::new("XPC_FLAGS")), Some(&"0x0".into()));
-    }
-
-    /// A session row for `uid`, as a supervisor's registration files it.
-    async fn register(db: &crate::db::Db, uid: &str) {
-        let at = protocol::time::now_rfc3339();
-        let filed = db
-            .upsert_session(crate::store::SessionRow {
-                session_uid: uid.into(),
-                session_id: "cc-8".into(),
-                tmux_session: "cc-8".into(),
-                tmux_socket: "codeconnect".into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: at.clone(),
-                updated_at: at,
-                agent: AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
-            .await
-            .unwrap();
-        assert!(matches!(filed, crate::store::SessionUpsert::Present));
-    }
-
-    /// **A start is answered once its session is listed, not before**: a
-    /// registration that lands later is waited for, one already there is not, and
-    /// one that never lands ends the start with a reason at the start's deadline.
-    #[tokio::test]
-    async fn a_start_is_answered_once_its_session_is_listed() {
-        let rig = Rig::new("listed", STARTED);
-        let late = protocol::uid::new().unwrap();
-        let soon = tokio::time::Instant::now() + Duration::from_secs(10);
-        let begun = std::time::Instant::now();
-        let (waited, ()) = tokio::join!(super::listed(&rig.db, &late, soon), async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            register(&rig.db, &late).await;
-        });
-        assert_eq!(waited, Ok(()));
-        assert!(
-            begun.elapsed() >= Duration::from_millis(300),
-            "{:?}",
-            begun.elapsed()
-        );
-
-        let begun = std::time::Instant::now();
-        assert_eq!(super::listed(&rig.db, STUB_UID, soon).await, Ok(()));
-        assert!(
-            begun.elapsed() < Duration::from_millis(200),
-            "{:?}",
-            begun.elapsed()
-        );
-
-        let never = protocol::uid::new().unwrap();
-        let short = tokio::time::Instant::now() + Duration::from_millis(400);
-        let why = super::listed(&rig.db, &never, short).await.unwrap_err();
-        assert!(
-            why.contains("did not reach this computer's sessions"),
-            "{why}"
-        );
-        assert!(tokio::time::Instant::now() <= short + Duration::from_millis(100));
-    }
-
-    /// **A Claude start is not answered before its supervisor has registered**: the
-    /// launcher reports the start as soon as it has spawned the supervisor, and the
-    /// answer waits for the registration that follows.
-    #[tokio::test]
-    async fn a_start_waits_for_its_supervisor_to_register() {
-        const LATE_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
-        let rig = Rig::new(
-            "late",
-            &format!(
-                r#"printf '{{"uid":"{LATE_UID}","session_name":"cc-7","agent":"claude"}}\n' > "$CODECONNECT_LAUNCH_RESULT""#
-            ),
-        );
-        let begun = std::time::Instant::now();
-        let project = rig.project();
-        let ((result, answered), ()) = tokio::join!(
-            async { (rig.start(&project, None).await, begun.elapsed()) },
-            async {
-                // Longer than the launcher itself takes (its login shell alone is
-                // about half a second), so an answer before it did not wait.
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                register(&rig.db, LATE_UID).await;
-            }
-        );
-        assert!(
-            matches!(&result, StartSessionResult::Started { session_uid, .. } if session_uid == LATE_UID),
-            "{result:?}"
-        );
-        assert!(
-            answered >= Duration::from_secs(2),
-            "answered after {answered:?}, before the registration"
-        );
     }
 
     const CLAUDE_SIGNED_OUT: &str =
@@ -3650,8 +3466,9 @@ esac"#;
             std::fs::read_to_string(format!("{}.asks", rig.launcher.display())).unwrap(),
             "app-server\n"
         );
+        let cwd = std::fs::read_to_string(format!("{}.cwd", rig.launcher.display())).unwrap();
         assert_eq!(
-            rig.launcher_cwd(),
+            Path::new(cwd.trim()),
             home_in(&rig.env).canonicalize().unwrap()
         );
     }
@@ -4104,7 +3921,7 @@ esac"#;
             ),
             "{result:?}"
         );
-        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
+        assert_eq!(rig.runs(), 0, "a refused start runs nothing");
     }
 
     /// **The claude a start runs is the one the launcher finds, from its list in its
@@ -4167,12 +3984,12 @@ esac"#;
         assert_eq!(listed.detail, Some(sentence.clone()));
         let result = rig.start(&rig.project(), Some("hi")).await;
         assert_eq!(result, failed(StartFailure::LaunchFailed, sentence));
-        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
+        assert_eq!(rig.runs(), 0, "a refused start runs nothing");
 
         rig.claude_says("version", "2.1.268 (Claude Code)\n");
         let result = rig.start(&rig.project(), Some("hi")).await;
-        assert!(started_in(&result).is_some(), "{result:?}");
-        assert_eq!(rig.launcher_runs(), 1);
+        assert!(reached(&result), "{result:?}");
+        assert_eq!(rig.runs(), 1);
     }
 
     /// **A claude whose `--version` fails, or names no version, is refused with
@@ -4190,7 +4007,7 @@ esac"#;
             let result = rig.start(&rig.project(), Some("hi")).await;
             assert_eq!(result, failed(StartFailure::LaunchFailed, sentence.clone()));
         }
-        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
+        assert_eq!(rig.runs(), 0, "a refused start runs nothing");
     }
 
     /// **A signed-out Claude Code shows as signed out in the list, and its start
@@ -4209,7 +4026,7 @@ esac"#;
         assert_eq!(listed.detail, Some(sentence.clone()));
         let result = rig.start(&rig.project(), Some("hi")).await;
         assert_eq!(result, failed(StartFailure::LaunchFailed, sentence));
-        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
+        assert_eq!(rig.runs(), 0, "a refused start runs nothing");
     }
 
     /// What a signed-in `auth status` prints, with an email and an organization
@@ -4292,9 +4109,9 @@ esac"#;
                 "{said:?} {exit}"
             );
             let result = rig.start(&rig.project(), Some("hi")).await;
-            assert!(started_in(&result).is_some(), "{result:?}");
+            assert!(reached(&result), "{result:?}");
         }
-        assert_eq!(rig.launcher_runs(), 4);
+        assert_eq!(rig.runs(), 4);
     }
 
     /// **The probe runs claude itself, never the launcher**, and adds no
@@ -4311,7 +4128,7 @@ esac"#;
         assert!(runs.lines().any(|run| run == "--version"), "{runs}");
         assert!(runs.lines().any(|run| run == "auth status"), "{runs}");
         assert!(runs.lines().any(|run| run.starts_with("-p ")), "{runs}");
-        assert_eq!(rig.launcher_runs(), 0, "the list runs no launcher");
+        assert_eq!(rig.runs(), 0, "the list starts no run");
         let seen = rig.root.join("config-dir-seen");
         std::fs::write(
             &rig.claude,
@@ -4350,66 +4167,6 @@ esac"#;
             claude_probe(&rig.env, None).await.unwrap().signed_in,
             Some(false)
         );
-    }
-
-    /// **A model reaches the launcher as one argument**, `--model=<value>` after
-    /// `--no-attach`, so nothing in the value is read as a flag of its own or runs;
-    /// and Claude Code's own `default` reaches it as no flag at all.
-    #[tokio::test]
-    async fn a_model_reaches_the_launcher_as_one_argument() {
-        let rig = Rig::new(
-            "model",
-            &format!("printf '%s\\0' \"$@\" > \"$0.argv\"; {STARTED}"),
-        );
-        let marker = rig.root.join("ran");
-        let model = format!("--resume $(touch {})", marker.display());
-        let result = launch(
-            &rig.db,
-            None,
-            Ok(rig.launcher.clone()),
-            &rig.root,
-            &rig.project(),
-            &AgentKind::Claude,
-            Some("hi"),
-            None,
-            Some(&model),
-            &rig.env,
-            None,
-            Some(protocol::host::Trust::Trusted),
-        )
-        .await;
-        assert!(
-            matches!(result, StartSessionResult::Started { .. }),
-            "{result:?}"
-        );
-        assert_eq!(
-            rig.launcher_argv(),
-            [
-                "claude".to_string(),
-                "--no-attach".into(),
-                format!("--model={model}"),
-                "--".into(),
-                "hi".into()
-            ]
-        );
-        assert!(!marker.exists(), "nothing in the model may run");
-
-        launch(
-            &rig.db,
-            None,
-            Ok(rig.launcher.clone()),
-            &rig.root,
-            &rig.project(),
-            &AgentKind::Claude,
-            None,
-            None,
-            Some("default"),
-            &rig.env,
-            None,
-            Some(protocol::host::Trust::Trusted),
-        )
-        .await;
-        assert_eq!(rig.launcher_argv(), ["claude", "--no-attach"]);
     }
 
     /// **The models a minor-33 daemon offers, and a start that picks one, emitted
