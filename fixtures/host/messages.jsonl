@@ -3,7 +3,7 @@
 {"dir":"to_host","message":{"options":{"claude_path":"/Users/person/.local/bin/claude","cwd":"/Users/person/project","mail":{"args":["mcp","--session-uid","01ABCDEFGHJKMNPQRSTVWXYZ00","--socket","/Users/person/.codeconnect/ccd.sock"],"command":"/Users/person/.codeconnect/bin/codeconnect"},"trust":"trusted","worktree":"feature-x"},"prompt":"fix the tests","type":"start","uuid":"c-start"}}
 {"dir":"to_host","message":{"options":{"claude_path":"/Users/person/.local/bin/claude","cwd":"/Users/person/project","mail":{"args":["mcp","--session-uid","01ABCDEFGHJKMNPQRSTVWXYZ00","--socket","/Users/person/.codeconnect/ccd.sock"],"command":"/Users/person/.codeconnect/bin/codeconnect"},"model":"opus","permission_mode":"acceptEdits","resume":"5f0c1e2a-0000-4000-8000-000000000001","trust":"not_trusted"},"prompt":"and the docs","type":"start","uuid":"c-continue"}}
 {"dir":"to_host","message":{"text":"also the README","type":"say","uuid":"c-say"}}
-{"dir":"to_host","message":{"decision":{"behavior":"allow","updated_input":{"command":"cargo test"}},"tool_use_id":"toolu_01","type":"answer","uuid":"c-allow"}}
+{"dir":"to_host","message":{"decision":{"behavior":"allow","updated_input":{"command":"cargo test"},"updated_permissions":[{"behavior":"allow","destination":"session","rules":[{"ruleContent":"cargo test","toolName":"Bash"}],"type":"addRules"}]},"tool_use_id":"toolu_01","type":"answer","uuid":"c-allow"}}
 {"dir":"to_host","message":{"decision":{"behavior":"deny","interrupt":true,"message":"Not now"},"tool_use_id":"toolu_02","type":"answer","uuid":"c-deny"}}
 {"dir":"to_host","message":{"effort":"high","model":"sonnet","type":"set_model","uuid":"c-model"}}
 {"dir":"to_host","message":{"mode":"plan","type":"set_mode","uuid":"c-mode"}}

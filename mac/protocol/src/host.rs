@@ -131,6 +131,11 @@ pub enum Decision {
     Allow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         updated_input: Option<Value>,
+        /// The SDK's `updatedPermissions` for "Allow for this session": claude's own allow
+        /// rules for this request, each with the session as its destination, never a settings
+        /// file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        updated_permissions: Option<Value>,
     },
     Deny {
         message: String,
@@ -348,6 +353,9 @@ mod tests {
                 tool_use_id: "toolu_01".into(),
                 decision: Decision::Allow {
                     updated_input: Some(json!({"command": "cargo test"})),
+                    updated_permissions: Some(json!([{"type": "addRules",
+                        "rules": [{"toolName": "Bash", "ruleContent": "cargo test"}],
+                        "behavior": "allow", "destination": "session"}])),
                 },
             }),
             to(ToHost::Answer {

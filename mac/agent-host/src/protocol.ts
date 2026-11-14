@@ -35,8 +35,10 @@ export interface StartOptions {
   mail: McpCommand;
 }
 
-/** An answer to a permission request, as the SDK's `PermissionResult` takes it. */
-export type Decision = { behavior: 'allow'; updated_input?: Json } | { behavior: 'deny'; message: string; interrupt?: boolean };
+/** An answer to a permission request, as the SDK's `PermissionResult` takes it. `updated_permissions` is its `updatedPermissions`: "Allow for this session"'s rules. */
+export type Decision =
+  | { behavior: 'allow'; updated_input?: Json; updated_permissions?: Json }
+  | { behavior: 'deny'; message: string; interrupt?: boolean };
 
 /** A line ccd sends the host. `attach` is the first line of every connection; every command carries ccd's uuid. */
 export type ToHost =

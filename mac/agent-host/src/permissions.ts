@@ -2,8 +2,10 @@
 // answered once by ccd's `answer`, and told back `done` only once the SDK has written the answer into claude's input,
 // so `done` means the answer reached claude. A request the SDK drops unanswered (an interrupt, the run's stop or its
 // end) is `withdrawn`; an answer to a request no longer open, or one the run ended before it could be written, is
-// `refused`. A question (AskUserQuestion) is one of them: ccd's answer to it carries the answers as its input.
-import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+// `refused`. A question (AskUserQuestion) is one of them: ccd's answer to it carries the answers as its input. An
+// "Allow for this session" answer carries claude's own rules for the request, ccd having made the session their
+// destination.
+import type { CanUseTool, PermissionResult, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 import type { Unsequenced } from './link.ts';
 import type { Json, PermissionRequest, ToHost } from './protocol.ts';
 
@@ -50,7 +52,13 @@ export function createPermissions(send: (body: Unsequenced) => void) {
     const decision = command.decision;
     held.resolve(
       decision.behavior === 'allow'
-        ? { behavior: 'allow', updatedInput: (decision.updated_input ?? held.request.input) as Record<string, unknown> }
+        ? {
+            behavior: 'allow',
+            updatedInput: (decision.updated_input ?? held.request.input) as Record<string, unknown>,
+            ...(decision.updated_permissions === undefined
+              ? {}
+              : { updatedPermissions: decision.updated_permissions as unknown as PermissionUpdate[] }),
+          }
         : { behavior: 'deny', message: decision.message, interrupt: decision.interrupt === true },
     );
   }

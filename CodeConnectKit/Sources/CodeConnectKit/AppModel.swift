@@ -3268,7 +3268,9 @@ public final class AppModel {
         // **The decision must match the agent, checked on the send path.**
         //
         // The two vocabularies are mutually exclusive and the Mac refuses each
-        // one aimed at the other by name. The view already picks the right
+        // one aimed at the other by name, but for a Claude card's
+        // `acceptForSession` where the card offers it (`allow_for_session`,
+        // minor 36). The view already picks the right
         // surface, but a view is not a guarantee: this closes the path itself,
         // so a deep link, a stale sheet or a future caller cannot transmit a
         // decision the daemon will only send back.

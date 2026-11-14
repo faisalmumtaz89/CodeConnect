@@ -687,9 +687,13 @@ old, Claude is asking at the Mac, or the phone can no longer answer it.
 
 A held card offers **Allow**, **Deny** and **Deny with a reason**. Deny with a
 reason is one answer, `{"type":"text","text":…}`, which the daemon returns to the
-agent that asked as its denial. "Always" is chosen at the Mac, where Claude's own
-dialog says exactly what it saves; the phone never offers rows read off the Mac's
-screen.
+agent that asked as its denial. In a run started in a terminal, "Always" is chosen
+at the Mac, where Claude's own dialog says exactly what it saves; the phone never
+offers rows read off the Mac's screen. A run started in an app has no dialog at the
+Mac: there the daemon marks a card whose request suggests an allow rule
+(`allow_for_session`, protocol minor 36), and its answer for "Allow for this session"
+is `option_id: "acceptForSession"`, which gives Claude that rule for this session
+only.
 
 A sent answer is recorded as sent to Claude, not confirmed (`indeterminate`, detail
 "Sent to Claude from a phone"; `AnswerOutcome.wasSentToClaude`), because Claude

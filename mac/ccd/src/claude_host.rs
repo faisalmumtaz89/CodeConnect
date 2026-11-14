@@ -4021,7 +4021,8 @@ mod tests {
         assert_eq!(
             decision,
             protocol::host::Decision::Allow {
-                updated_input: None
+                updated_input: None,
+                updated_permissions: None
             }
         );
         let AnswerResult::Applied { outcome } = result else {
@@ -4319,6 +4320,7 @@ mod tests {
         );
         let protocol::host::Decision::Allow {
             updated_input: Some(input),
+            updated_permissions: None,
         } = decision
         else {
             panic!("{decision:?}");
@@ -4464,6 +4466,322 @@ mod tests {
         stop(&played.dir);
     }
 
+    /// Claude's allow rule for the `ls` call, as it suggests one: for the folder's own
+    /// settings file.
+    fn allow_rule() -> serde_json::Value {
+        serde_json::json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "ls"}],
+                           "behavior": "allow", "destination": "localSettings"})
+    }
+
+    /// `update` with the session as its destination.
+    fn for_the_session_only(mut update: serde_json::Value) -> serde_json::Value {
+        update["destination"] = "session".into();
+        update
+    }
+
+    /// The answer an app sends for "Allow for this session".
+    fn allow_for_this_session() -> AnswerDecision {
+        AnswerDecision::OptionId {
+            option_id: "acceptForSession".into(),
+        }
+    }
+
+    /// The run `uid`'s card `request_id` as the apps read it.
+    fn filed_card(rig: &Rig, uid: &str, request_id: &str) -> serde_json::Value {
+        stored(rig, uid)
+            .into_iter()
+            .find(|event| {
+                event["kind"] == "approval_request"
+                    && event["payload"]["card"]["request_id"] == request_id
+            })
+            .expect("the card's event")["payload"]["card"]
+            .clone()
+    }
+
+    /// **B6 part 2b, G15: who is offered "Allow for this session".** A card whose request
+    /// carries claude's own allow rule offers it; one whose request has no allow rule, only
+    /// a deny rule or other suggestions, or says `suppressAlwaysAllowRule`, does not, and
+    /// the field is left out; nor does a question, whatever its suggestions.
+    #[tokio::test]
+    async fn only_a_card_with_claudes_allow_rule_offers_allow_for_this_session() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let mut deny = allow_rule();
+        deny["behavior"] = "deny".into();
+        let cases = [
+            (
+                "toolu_rule",
+                serde_json::json!({"suggestions": [allow_rule()]}),
+                true,
+            ),
+            (
+                "toolu_suppressed",
+                serde_json::json!({"suggestions": [allow_rule()], "suppressAlwaysAllowRule": true}),
+                false,
+            ),
+            (
+                "toolu_others",
+                serde_json::json!({"suggestions": [
+                    {"type": "addDirectories", "directories": ["/tmp/x"], "destination": "session"},
+                    {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}),
+                false,
+            ),
+            (
+                "toolu_deny",
+                serde_json::json!({"suggestions": [deny]}),
+                false,
+            ),
+            ("toolu_none", serde_json::json!({}), false),
+        ];
+        let mut seq = 3;
+        for (request_id, options, offered) in cases {
+            host_asks(&mut played, seq, request_id, options).await;
+            seq += 1;
+            let expected = offered.then_some(serde_json::Value::Bool(true));
+            assert_eq!(
+                filed_card(&rig, &uid, request_id).get("allow_for_session"),
+                expected.as_ref(),
+                "{request_id}"
+            );
+        }
+        host_asks_question(
+            &mut played,
+            seq,
+            "toolu_q",
+            serde_json::json!({"suggestions": [allow_rule()]}),
+        )
+        .await;
+        assert_eq!(
+            filed_card(&rig, &uid, "toolu_q").get("allow_for_session"),
+            None
+        );
+        stop(&played.dir);
+    }
+
+    /// **B6 part 2b, G16: what claude is sent for "Allow for this session".** Every allow
+    /// rule claude suggested, its rules as claude gave them and the session as its
+    /// destination, and nothing else: no deny rule, no rule replacement, no folder and no
+    /// mode. The answer is recorded as the app chose it, and a retry is a duplicate that
+    /// sends nothing.
+    #[tokio::test]
+    async fn allow_for_this_session_sends_claudes_allow_rules_for_the_session_only() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let project = serde_json::json!({"type": "addRules",
+            "rules": [{"toolName": "Bash", "ruleContent": "ls"}, {"toolName": "Read"}],
+            "behavior": "allow", "destination": "projectSettings"});
+        let mut deny = allow_rule();
+        deny["behavior"] = "deny".into();
+        let options = serde_json::json!({"suggestions": [
+            allow_rule(),
+            {"type": "addDirectories", "directories": ["/tmp/x"], "destination": "session"},
+            deny,
+            project.clone(),
+            {"type": "replaceRules", "rules": [{"toolName": "Bash"}], "behavior": "allow",
+             "destination": "localSettings"},
+            {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]});
+        host_asks(&mut played, 3, "toolu_1", options).await;
+        let Played {
+            lines, write, dir, ..
+        } = &mut played;
+        let (result, (_, decision)) = tokio::join!(
+            app_answers(&rig.daemon, &uid, "toolu_1", allow_for_this_session()),
+            host_settles(lines, write, 4, "done")
+        );
+        assert_eq!(
+            decision,
+            protocol::host::Decision::Allow {
+                updated_input: None,
+                updated_permissions: Some(serde_json::json!([
+                    for_the_session_only(allow_rule()),
+                    for_the_session_only(project)
+                ])),
+            }
+        );
+        let AnswerResult::Applied { outcome } = result else {
+            panic!("not applied: {result:?}");
+        };
+        assert_eq!(outcome.decision, allow_for_this_session());
+        let Some((_, recorded)) = rig
+            .daemon
+            .db
+            .get_answer(uid.clone(), "toolu_1".into())
+            .await
+            .unwrap()
+        else {
+            panic!("no answer recorded");
+        };
+        assert_eq!(recorded.decision, allow_for_this_session());
+        assert!(matches!(
+            app_answers(&rig.daemon, &uid, "toolu_1", allow_for_this_session()).await,
+            AnswerResult::Duplicate { .. }
+        ));
+        assert_eq!(next(lines).await, None, "nothing sent again");
+        stop(dir);
+    }
+
+    /// **B6 part 2b: "Allow for this session" only where the card offers it.** On a card
+    /// that does not offer it, and any other option id on one that does, the answer is
+    /// refused before any claim: no claim is recorded, nothing reaches the host (the first
+    /// answer it reads is the Allow that follows), and the cards stay open.
+    #[tokio::test]
+    async fn allow_for_this_session_is_refused_where_the_card_does_not_offer_it() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks(
+            &mut played,
+            3,
+            "toolu_plain",
+            serde_json::json!({"suggestions": [
+                {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}),
+        )
+        .await;
+        host_asks(
+            &mut played,
+            4,
+            "toolu_rule",
+            serde_json::json!({"suggestions": [allow_rule()]}),
+        )
+        .await;
+        let accept = AnswerDecision::OptionId {
+            option_id: "accept".into(),
+        };
+        for (request_id, decision) in [
+            ("toolu_plain", allow_for_this_session()),
+            ("toolu_rule", accept),
+        ] {
+            let result = app_answers(&rig.daemon, &uid, request_id, decision).await;
+            assert!(
+                matches!(&result, AnswerResult::Rejected { reason }
+                    if reason.contains("Nothing was sent")),
+                "{request_id}: {result:?}"
+            );
+            assert!(
+                rig.daemon
+                    .db
+                    .answer_claim(uid.clone(), request_id.into())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{request_id}: claimed"
+            );
+        }
+        let (_, mut pending) = cards(&rig.daemon, &uid).await;
+        pending.sort();
+        assert_eq!(pending, ["toolu_plain", "toolu_rule"]);
+        let Played { lines, write, .. } = &mut played;
+        let (result, (_, decision)) = tokio::join!(
+            app_answers(&rig.daemon, &uid, "toolu_plain", AnswerDecision::Allow),
+            host_settles(lines, write, 5, "done")
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        assert_eq!(
+            decision,
+            protocol::host::Decision::Allow {
+                updated_input: None,
+                updated_permissions: None
+            }
+        );
+        stop(&played.dir);
+    }
+
+    /// **"Allow for this session", as a minor-36 daemon sends it, emitted by this build.**
+    /// The phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_36_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-36-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_36_wire().await,
+            committed,
+            "the committed minor-36 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_36_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-36-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_36_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_36_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-36-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// claude 2.1.322's request for `touch m1.txt` (probe M1) with its three suggestions,
+    /// and the same call with no allow rule among them: the card each is filed as; the
+    /// answer an app sends for "Allow for this session"; and the daemon's refusal of that
+    /// answer on the card that does not offer it.
+    async fn derived_minor_36_wire() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let input = serde_json::json!({"command": "touch m1.txt"});
+        let rule = serde_json::json!({"type": "addRules",
+            "rules": [{"toolName": "Bash", "ruleContent": "touch m1.txt"}],
+            "behavior": "allow", "destination": "localSettings"});
+        let others = [
+            serde_json::json!({"type": "addDirectories", "directories": ["/tmp/ccd-minor-36/app"],
+                               "destination": "session"}),
+            serde_json::json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"}),
+        ];
+        let offered = [vec![rule], others.to_vec()].concat();
+        for (seq, tool_use_id, suggestions) in [
+            (3, "toolu_offered", offered),
+            (4, "toolu_not_offered", others.to_vec()),
+        ] {
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "permission", "seq": seq, "request": {
+                    "tool_use_id": tool_use_id, "tool_name": "Bash", "input": input,
+                    "options": {"suggestions": suggestions}}}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let hash = protocol::hash::approval_payload_hash("Bash", &input);
+        let refused = rig
+            .daemon
+            .answer(
+                "toolu_not_offered",
+                &hash,
+                allow_for_this_session(),
+                Some(&uid),
+                AnsweredOn::Iphone,
+            )
+            .await;
+        let wire = serde_json::json!({
+            "card_offering": filed_card(&rig, &uid, "toolu_offered"),
+            "card_not_offering": filed_card(&rig, &uid, "toolu_not_offered"),
+            "answer": serde_json::to_value(protocol::ws::ClientMessage::Answer {
+                request_id: "toolu_offered".into(),
+                payload_hash: hash,
+                decision: allow_for_this_session(),
+                session_id: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
+            })
+            .unwrap(),
+            "refused": serde_json::to_value(protocol::ws::ServerMessage::AnswerResult {
+                request_id: "toolu_not_offered".into(),
+                result: refused,
+            })
+            .unwrap(),
+        });
+        stop(&played.dir);
+        wire
+    }
+
     /// **B6 G11: a request too large to show** is refused at once: the host is answered
     /// deny with the reason claude reads, no card is raised, and the run goes on.
     #[tokio::test]
@@ -4509,17 +4827,24 @@ mod tests {
     }
 
     /// **B6 G5: cards across a restart.** A card open when ccd stopped is still held for
-    /// the apps, and answerable again once its host re-attaches; one whose request came
-    /// from a subagent still does not end the main turn when denied. An answer claimed and
-    /// never sent is released by the host's `state`, which still holds its request, so the
-    /// card is answerable.
+    /// the apps, and answerable again once its host re-attaches; its "Allow for this
+    /// session" sends the rules its own request suggested, read from the stored card, not
+    /// from the host's `state`. One whose request came from a subagent still does not end
+    /// the main turn when denied. An answer claimed and never sent is released by the
+    /// host's `state`, which still holds its request, so the card is answerable.
     #[tokio::test]
     async fn a_card_open_across_a_restart_is_answered_once_after_it() {
         let rig = rig();
         let mut played = live_run(&rig).await;
         let uid = played.uid.clone();
         let dir = played.dir.clone();
-        host_asks(&mut played, 3, "toolu_open", serde_json::json!({})).await;
+        host_asks(
+            &mut played,
+            3,
+            "toolu_open",
+            serde_json::json!({"suggestions": [allow_rule()]}),
+        )
+        .await;
         host_asks(
             &mut played,
             4,
@@ -4572,11 +4897,17 @@ mod tests {
             .iter()
             .any(|event| event["kind"] == "question_hold"));
         let (result, (_, decision)) = tokio::join!(
-            app_answers(&restarted, &uid, "toolu_open", AnswerDecision::Allow),
+            app_answers(&restarted, &uid, "toolu_open", allow_for_this_session()),
             host_settles(&mut lines, &mut write, 6, "done")
         );
         assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
-        assert!(matches!(decision, protocol::host::Decision::Allow { .. }));
+        assert_eq!(
+            decision,
+            protocol::host::Decision::Allow {
+                updated_input: None,
+                updated_permissions: Some(serde_json::json!([for_the_session_only(allow_rule())])),
+            }
+        );
         let (result, (_, decision)) = tokio::join!(
             app_answers(&restarted, &uid, "toolu_sub", AnswerDecision::Deny),
             host_settles(&mut lines, &mut write, 7, "done")
@@ -4596,15 +4927,22 @@ mod tests {
     /// before the host's outcome came: the app was told it is not confirmed, and the
     /// restarted ccd, holding nothing of it in memory, records it from the host's replayed
     /// outcome and the answer's claim, closes the card, and answers a retry as a duplicate.
+    /// The answer is "Allow for this session", and it is recorded as that choice.
     #[tokio::test]
     async fn an_answer_taken_before_a_restart_is_recorded_from_the_replay() {
         let rig = rig();
         let mut played = live_run(&rig).await;
         let uid = played.uid.clone();
         let dir = played.dir.clone();
-        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        host_asks(
+            &mut played,
+            3,
+            "toolu_1",
+            serde_json::json!({"suggestions": [allow_rule()]}),
+        )
+        .await;
         let (lost, uuid) = tokio::join!(
-            app_answers(&rig.daemon, &uid, "toolu_1", AnswerDecision::Allow),
+            app_answers(&rig.daemon, &uid, "toolu_1", allow_for_this_session()),
             async {
                 let Some(ToHost::Answer { uuid, .. }) = next(&mut played.lines).await else {
                     panic!("no answer");
@@ -4637,10 +4975,10 @@ mod tests {
         else {
             panic!("no answer recorded");
         };
-        assert_eq!(recorded.decision, AnswerDecision::Allow);
+        assert_eq!(recorded.decision, allow_for_this_session());
         assert!(!recorded.indeterminate);
         assert!(matches!(
-            app_answers(&restarted, &uid, "toolu_1", AnswerDecision::Allow).await,
+            app_answers(&restarted, &uid, "toolu_1", allow_for_this_session()).await,
             AnswerResult::Duplicate { .. }
         ));
         stop(&dir);

@@ -854,6 +854,7 @@ impl Run {
             identity_bound: true,
             // Held for the phone for the same reason.
             question_hold: Some(protocol::ws::QuestionHold::Held),
+            allow_for_session: false,
         };
         // The same two halves `ccd` files: the card the phone renders and
         // answers, and the hook that raised it.

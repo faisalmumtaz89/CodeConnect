@@ -11,12 +11,13 @@ public enum DecisionCard {
     /// in both directions: a Codex card answered with `allow`/`deny`/`option` is
     /// refused by name — *"a Codex card is answered by naming one of the options
     /// it offered; this decision names none of them, so nothing was sent"* — and
-    /// an `option_id` aimed at a Claude session is refused just as plainly. So
-    /// this is a fork, not an addition.
+    /// an `option_id` aimed at a Claude session is refused just as plainly, but for
+    /// `acceptForSession` on a card that offers it (`allow_for_session`, minor 36).
+    /// So this is a fork, not an addition.
     public enum AnswerSurface: Sendable, Hashable {
         /// Claude's card, held for the phone: Allow, Deny, and a denial with a
-        /// reason. "Always" is chosen at the Mac, where Claude's own dialog says
-        /// what it saves.
+        /// reason. In a run started in a terminal, "Always" is chosen at the Mac,
+        /// where Claude's own dialog says what it saves.
         case allowDeny
         /// A Codex card: **the option table and nothing else.** Every count,
         /// including two — the `> 2` rule that suppresses Claude's redundant

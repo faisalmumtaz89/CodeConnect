@@ -1153,10 +1153,17 @@ For such a run the model and effort sheets are refused ("Changing the model isn'
 available for this session yet.", and the same for the effort), and so are `/status`,
 `/usage`, `/cost` and `/clear` ("This isn't available for this session yet.").
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
-a card the apps answer: allow, deny, or deny with a reason. The answer goes to claude through
-the host, and the card closes as answered once the host has written it into claude's input;
-a request claude stops waiting on (End run, or claude's end) closes with nobody having
-answered. A card stays answerable across a ccd restart, and an answer sent just before one
+a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
+suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
+the app answers `option_id: "acceptForSession"`): claude gets its own allow rules for the call
+with the session as their destination, so they last only while this session runs and are never
+written to claude's settings; a mode change or a folder claude suggested with them is not sent.
+ccd decides that from the card it stored, and refuses the answer on a card that does not offer
+it, nothing sent. A command claude's own rule cannot match (one with arithmetic expansion or a
+redirect, for example) is asked about again, as when claude runs directly. The answer goes to
+claude through the host, and the card closes as answered once the host has written it into
+claude's input; a request claude stops waiting on (End run, or claude's end) closes with
+nobody having answered. A card stays answerable across a ccd restart, and an answer sent just before one
 is never sent twice: the host's replay says whether it reached claude. A request whose card
 would be too large for an app to show is refused at once, and claude is told why. A question
 claude asks (`AskUserQuestion`) is a card too, answered with the options picked (and any
@@ -1428,6 +1435,10 @@ to probe credentials.
   from a paired device: the Mac app's when its connection said hello as
   "CodeConnect Mac", an iPhone's otherwise. Absent on every other outcome, from
   an older daemon, and on an answer a restart settled. It chooses words only.
+* **`ApprovalCard.allow_for_session`** (minor 36) — `true` on a card from a run
+  started in an app whose request suggests an allow rule: the card offers "Allow for
+  this session", answered `option_id: "acceptForSession"`. Left out when false, so an
+  older app reads every card as before.
 * **`ApprovalCard.question_hold` / `identity_bound`** — see
   [Card identity](#card-identity). Before minor 22, `identity_bound` meant the
   prompt on screen had been fingerprinted for typing, announced by an

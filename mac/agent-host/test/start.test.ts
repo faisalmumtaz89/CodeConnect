@@ -326,6 +326,25 @@ test("an allow reaches claude's input with the request's input, and is answered 
   expect(state.pending).toStrictEqual([]);
 }, 10_000);
 
+test("an allow for the session reaches claude with ccd's rules as its updatedPermissions, and a plain allow with none", async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_s1'), ask('toolu_s2')] });
+  for (const id of ['toolu_s1', 'toolu_s2']) await ccd.line(`the permission ${id}`, (line) => line.type === 'permission' && line.request.tool_use_id === id);
+  const rules = [
+    { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'ls' }], behavior: 'allow', destination: 'session' },
+    { type: 'addRules', rules: [{ toolName: 'Read' }], behavior: 'allow', destination: 'session' },
+  ];
+  ccd.send({ type: 'answer', uuid: 'c-session', tool_use_id: 'toolu_s1', decision: { behavior: 'allow', updated_permissions: rules } });
+  ccd.send({ type: 'answer', uuid: 'c-plain', tool_use_id: 'toolu_s2', decision: { behavior: 'allow' } });
+  for (const uuid of ['c-session', 'c-plain']) {
+    expect((await ccd.line(`${uuid} answered`, (line) => line.type === 'outcome' && line.uuid === uuid)).status).toBe('done');
+  }
+  await waitFor('claude to read both allows', () => answersRead(stub(), 'req-toolu_s1').length === 1 && answersRead(stub(), 'req-toolu_s2').length === 1);
+  const session = answersRead(stub(), 'req-toolu_s1')[0].response.response;
+  expect(session).toMatchObject({ behavior: 'allow', updatedInput: { command: 'ls' } });
+  expect(session.updatedPermissions).toStrictEqual(rules);
+  expect(answersRead(stub(), 'req-toolu_s2')[0].response.response).not.toHaveProperty('updatedPermissions');
+}, 10_000);
+
 test('a deny reaches claude with its message, and interrupts only when ccd says so', async () => {
   const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_d1'), ask('toolu_d2')] });
   for (const id of ['toolu_d1', 'toolu_d2']) await ccd.line(`the permission ${id}`, (line) => line.type === 'permission' && line.request.tool_use_id === id);

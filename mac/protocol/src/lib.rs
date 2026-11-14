@@ -718,7 +718,18 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         client sends it only when the capability is advertised.
 ///       - [`event::Lifecycle::Stopping`] — the run was asked to end and has not yet.
 ///         A client from before 35 reads the word as `unknown`.
-pub const PROTOCOL_MINOR: u32 = 35;
+///   * `36` — **"Allow for this session" on a hosted Claude run's card.**
+///
+///     Additive:
+///       - [`ws::ApprovalCard::allow_for_session`] — the card offers it: a hosted
+///         run's approval whose request carries Claude's own allow rule. Left out
+///         when false, so a client from before 36 reads every card as it did.
+///       - The app answers it with [`ws::AnswerDecision::OptionId`]
+///         `"acceptForSession"`, the id a Codex card's session option already has.
+///         The daemon refuses it on a card that does not offer it, nothing sent, and
+///         on one that does it returns Claude's allow rules for this session only,
+///         never written to Claude's settings.
+pub const PROTOCOL_MINOR: u32 = 36;
 
 #[cfg(test)]
 mod ledger_tests {
