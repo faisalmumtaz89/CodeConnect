@@ -364,6 +364,10 @@ pub enum AuthOutcome {
     /// because telling an unauthenticated caller which of "wrong", "expired"
     /// and "already used" applies is a free oracle.
     Rejected(String),
+    /// A token that matches a pairing the computer has blocked (`revoked_at` set): the
+    /// device keeps its token, so the phone is told "revoked" and waits to be allowed
+    /// again, not sent to pair with a new code.
+    Revoked,
 }
 
 /// What `codeconnect revoke` did.
@@ -11557,14 +11561,19 @@ impl Daemon {
                 }
             }
             return match self.db.device_by_token_hash(token_hash).await {
-                Ok(Some(device)) => {
+                Ok(crate::store::TokenAuth::Active(device)) => {
                     let _ = self
                         .db
                         .touch_device(device.device_id.clone(), protocol::time::now_rfc3339())
                         .await;
-                    AuthOutcome::Device(Box::new(device))
+                    AuthOutcome::Device(device)
                 }
-                Ok(None) => AuthOutcome::Rejected("token matches no device".into()),
+                Ok(crate::store::TokenAuth::Revoked) => AuthOutcome::Revoked,
+                Ok(crate::store::TokenAuth::Missing) => {
+                    AuthOutcome::Rejected("token matches no device".into())
+                }
+                // A lookup that errored is not a block: stay "unauthorized" so a transient
+                // database fault cannot read as "this device is blocked".
                 Err(err) => AuthOutcome::Rejected(format!("device lookup failed: {err:#}")),
             };
         }
@@ -14088,7 +14097,7 @@ mod tests {
             daemon
                 .authenticate(STATIC_TOKEN, Some(&token), None, None, Ok("n3"))
                 .await,
-            AuthOutcome::Rejected(_)
+            AuthOutcome::Revoked
         ));
         assert!(matches!(
             hello_through_tailscale(&daemon, Some("n3")).await,
@@ -14473,7 +14482,7 @@ mod tests {
                     Err(protocol::tailnet::Refusal::Unknown)
                 )
                 .await,
-            AuthOutcome::Rejected(_)
+            AuthOutcome::Revoked
         ));
         // Still listed, so "revoked on the 3rd" survives as a fact.
         let devices = daemon.list_devices().await.unwrap();

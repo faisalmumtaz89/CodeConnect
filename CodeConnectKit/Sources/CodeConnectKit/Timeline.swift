@@ -136,6 +136,22 @@ public struct TimelineItem: Sendable, Hashable, Identifiable {
         if case .approval(let item) = content, item.isPending { return item }
         return nil
     }
+
+    /// Each row's place in a column that keeps the reader's row while a page of earlier history lands, in the order of
+    /// `items`. A tool call is one row built from whichever of its events the loaded window holds (its call, the
+    /// transcript's `tool_use`, or its result alone), and its id is that event's, so the id changes when the page brings
+    /// the call; its place is the call itself (`toolUseID`), the same before and after. Every other row is placed by its
+    /// id: a tool row with no `toolUseID`, a second row of a call already placed (two results drawn while their call is
+    /// not loaded), and anything that is not a tool. Unique within `items`.
+    public static func places(_ items: [TimelineItem]) -> [String] {
+        var calls: Set<String> = []
+        return items.map { item in
+            guard case .tool(let tool) = item.content, let call = tool.toolUseID, calls.insert(call).inserted else {
+                return item.id
+            }
+            return "tool.\(call)"
+        }
+    }
 }
 
 // MARK: - Builder

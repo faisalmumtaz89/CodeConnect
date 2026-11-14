@@ -441,6 +441,17 @@ pub enum DeviceLookup {
     Ambiguous(Vec<String>),
 }
 
+/// The handshake's verdict on a presented token, from one read of the devices table.
+#[derive(Debug)]
+pub enum TokenAuth {
+    /// A live pairing: this token admits this device.
+    Active(Box<DeviceRow>),
+    /// A pairing the computer has blocked. The token is kept; `unblock_device` readmits it.
+    Revoked,
+    /// No device carries this token.
+    Missing,
+}
+
 /// Outcome of writing to the answers ledger.
 #[derive(Debug, Clone)]
 pub enum LedgerWrite {
@@ -4012,21 +4023,27 @@ impl Store {
         Ok(restored)
     }
 
-    /// Authenticate a presented token. Revoked devices are excluded in SQL, so
-    /// there is no path where a caller forgets to check.
-    pub fn device_by_token_hash(&self, token_hash: &str) -> Result<Option<DeviceRow>> {
+    /// Authenticate a presented token in one read: the active device it names, a pairing the
+    /// computer has blocked (the device keeps its token and `unblock_device` readmits it), or
+    /// no device. One read, so an unblock landing between two reads cannot mislabel a
+    /// now-valid token, and no caller can forget to check `revoked_at`.
+    pub fn device_by_token_hash(&self, token_hash: &str) -> Result<TokenAuth> {
         let conn = self.read();
         let row = conn
             .query_row(
                 "SELECT device_id, name, created_at, last_seen_at, revoked_at,
                         tailnet_node, paired_before_nodes
                    FROM devices
-                  WHERE token_hash = ?1 AND revoked_at IS NULL",
+                  WHERE token_hash = ?1",
                 params![token_hash],
                 device_row_from,
             )
             .optional()?;
-        Ok(row)
+        Ok(match row {
+            Some(device) if device.revoked_at.is_some() => TokenAuth::Revoked,
+            Some(device) => TokenAuth::Active(Box::new(device)),
+            None => TokenAuth::Missing,
+        })
     }
 
     /// Is this device still allowed to act?
@@ -13434,12 +13451,22 @@ mod tests {
             .unwrap();
     }
 
+    /// The active device a token authenticates as, or `None` when it is revoked or unknown:
+    /// the shape the handshake's `device_by_token_hash` once returned, for tests that only
+    /// care whether the token still admits a device. Tests that distinguish revoked from
+    /// unknown match `TokenAuth` directly.
+    fn auth(store: &Store, token_hash: &str) -> Option<DeviceRow> {
+        match store.device_by_token_hash(token_hash).unwrap() {
+            TokenAuth::Active(device) => Some(*device),
+            TokenAuth::Revoked | TokenAuth::Missing => None,
+        }
+    }
+
     #[test]
     fn a_device_token_authenticates_until_it_is_revoked() {
         let (store, _path) = temp_store();
         add_device(&store, "d1a2b3c4", "iPhone", "token-hash-1");
-        let found = store.device_by_token_hash("token-hash-1").unwrap().unwrap();
-        assert_eq!(found.name, "iPhone");
+        assert_eq!(auth(&store, "token-hash-1").unwrap().name, "iPhone");
 
         assert_eq!(
             store
@@ -13447,18 +13474,28 @@ mod tests {
                 .unwrap(),
             ["d1a2b3c4"]
         );
+        // A revoked token is recognised as the blocked pairing it still holds, not as a
+        // missing one: the device keeps its token so Unblock can readmit it, and the
+        // handshake tells it "revoked" (wait) rather than "unauthorized" (pair anew).
         assert!(
-            store
-                .device_by_token_hash("token-hash-1")
-                .unwrap()
-                .is_none(),
-            "a revoked token must not authenticate"
+            matches!(
+                store.device_by_token_hash("token-hash-1").unwrap(),
+                TokenAuth::Revoked
+            ),
+            "a revoked token is recognised as revoked, and does not authenticate"
         );
         // Revoking twice is a no-op, not an error.
         assert!(store
             .revoke_device("d1a2b3c4", &protocol::time::now_rfc3339())
             .unwrap()
             .is_empty());
+        // Unblock readmits the same token — the pairing it already held, no new code.
+        store.unblock_device("d1a2b3c4").unwrap();
+        assert_eq!(
+            auth(&store, "token-hash-1").unwrap().name,
+            "iPhone",
+            "an unblocked token authenticates again on its held pairing"
+        );
     }
 
     // ------------------------------------------------- Tailscale sign-in
@@ -13653,7 +13690,7 @@ mod tests {
         store.revoke_device("a", NOW).unwrap();
         assert_eq!(store.unblock_device("a").unwrap(), 2);
         for id in ["a", "b"] {
-            let device = store.device_by_token_hash(&format!("hash-{id}")).unwrap();
+            let device = auth(&store, &format!("hash-{id}"));
             assert_eq!(device.map(|d| d.device_id).as_deref(), Some(id));
         }
         assert!(
@@ -13714,8 +13751,14 @@ mod tests {
     fn an_unknown_token_authenticates_nothing() {
         let (store, _path) = temp_store();
         add_device(&store, "d1", "iPhone", "token-hash-1");
-        assert!(store.device_by_token_hash("wrong").unwrap().is_none());
-        assert!(store.device_by_token_hash("").unwrap().is_none());
+        assert!(matches!(
+            store.device_by_token_hash("wrong").unwrap(),
+            TokenAuth::Missing
+        ));
+        assert!(matches!(
+            store.device_by_token_hash("").unwrap(),
+            TokenAuth::Missing
+        ));
     }
 
     #[test]
@@ -13792,7 +13835,7 @@ mod tests {
         drop(store);
 
         let store = Store::open(&path).unwrap();
-        assert!(store.device_by_token_hash("t1").unwrap().is_some());
+        assert!(auth(&store, "t1").is_some());
         assert_eq!(
             store.consume_pairing_code("hash-r", now).unwrap(),
             PairingConsume::Consumed
@@ -14271,9 +14314,7 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(
-            store
-                .device_by_token_hash("hash-phone")
-                .unwrap()
+            auth(&store, "hash-phone")
                 .expect("the phone is still paired")
                 .device_id,
             "phone"
@@ -14331,10 +14372,7 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
 
-        let device = store
-            .device_by_token_hash("hash-a")
-            .unwrap()
-            .expect("the device token must still authenticate");
+        let device = auth(&store, "hash-a").expect("the device token must still authenticate");
         assert_eq!(device.device_id, "d1");
         assert_eq!(device.name, "iPhone");
         assert_eq!(device.created_at, "2026-08-01T00:00:00.000Z");
@@ -14562,7 +14600,7 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(store.list_devices().unwrap().len(), 1);
-        assert!(store.device_by_token_hash("hash-a").unwrap().is_some());
+        assert!(auth(&store, "hash-a").is_some());
     }
 
     #[test]
@@ -14605,10 +14643,7 @@ mod tests {
         // The rollback itself.
         let store = Store::open(&path).unwrap();
 
-        let device = store
-            .device_by_token_hash("hash-a")
-            .unwrap()
-            .expect("the device token must still authenticate");
+        let device = auth(&store, "hash-a").expect("the device token must still authenticate");
         assert_eq!(device.device_id, "d1");
         assert_eq!(device.name, "iPhone");
         // This build writes through the wider tables without knowing they are
@@ -14706,7 +14741,7 @@ mod tests {
             store.consume_pairing_code("hash-c", now).unwrap(),
             PairingConsume::Consumed
         );
-        assert!(store.device_by_token_hash("hash-a").unwrap().is_some());
+        assert!(auth(&store, "hash-a").is_some());
         drop(store);
 
         let conn = Connection::open(&path).unwrap();
@@ -15947,7 +15982,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.list_devices().unwrap().len(), HOSTILE_DEVICES.len());
         // The revoked row is still a row and still refuses to authenticate.
-        assert!(store.device_by_token_hash("hash-plain").unwrap().is_some());
+        assert!(auth(&store, "hash-plain").is_some());
         assert!(!store.device_is_active("d-revoked").unwrap());
         // The code that was in flight when the column went is still redeemable.
         assert_eq!(
@@ -16064,7 +16099,7 @@ mod tests {
             store.consume_pairing_code("code-new", now).unwrap(),
             PairingConsume::Consumed
         );
-        assert!(store.device_by_token_hash("hash-plain").unwrap().is_some());
+        assert!(auth(&store, "hash-plain").is_some());
         drop(store);
 
         let mut conn = Connection::open(&path).unwrap();
@@ -16467,14 +16502,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store
-                .device_by_token_hash("hash-new")
-                .unwrap()
+            auth(&store, "hash-new")
                 .expect("the phone that just paired must authenticate")
                 .device_id,
             "d-new"
         );
-        assert!(store.device_by_token_hash("hash-plain").unwrap().is_some());
+        assert!(auth(&store, "hash-plain").is_some());
     }
 
     /// The refusal reaches an operator at startup, and the daemon starts anyway.

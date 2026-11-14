@@ -2765,6 +2765,7 @@ struct LinkHealthSheet: View {
         case .connecting: return "Connecting"
         case .offline: return "Offline"
         case .rejected: return "Pair again"
+        case .blocked: return "Blocked"
         }
     }
 
