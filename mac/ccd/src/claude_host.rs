@@ -2314,7 +2314,8 @@ mod tests {
     /// zsh's login shell (`-lic`), as a zsh user's start runs it, with the host's
     /// stand-in claude: the recorded pid and birth are the host's own, it leads a session
     /// of its own, the start's outcome makes the run `live` with the initialize answer's
-    /// models kept, claude's init is filed as the run's first event (G8), and the host is
+    /// models kept and none of the claude.ai connectors' commands (G5, the initialize
+    /// column: the answer carries one, which the host leaves out), claude's init is filed as the run's first event (G8), and the host is
     /// still running after its 30 s no-start exit would have ended it (claude keeps
     /// running, so the host does). A start
     /// whose claude is missing is refused, naming it, and its run is `failed`. So is one
@@ -2334,7 +2335,31 @@ mod tests {
         rig.environment
             .insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (claude, models) = stand_in_claude(&rig, &host, "ready", serde_json::json!({}));
+        // The recorded initialize answer, with one made-up row of a claude.ai connector's
+        // command, as an account with connectors lists it.
+        let mut connected: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../fixtures/claude/initialize-api-key-2.1.319.jsonl"),
+            )
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+        )
+        .unwrap();
+        let recorded = connected["response"]["response"]["commands"].clone();
+        connected["response"]["response"]["commands"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name": "claude.ai Example:prompt (MCP)",
+                                     "description": "a connected service", "argumentHint": ""}));
+        let (claude, models) = stand_in_claude(
+            &rig,
+            &host,
+            "ready",
+            serde_json::json!({"init": connected.to_string()}),
+        );
         let session = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/claude/sdk-session-0.3.322.jsonl"),
@@ -2424,7 +2449,9 @@ mod tests {
         );
         let (lifecycle, initialize) = kept(&rig, &uid);
         assert_eq!(lifecycle, "live");
-        assert_eq!(initialize.unwrap()["models"], models);
+        let initialize = initialize.unwrap();
+        assert_eq!(initialize["models"], models);
+        let stored_commands = initialize["commands"].clone();
         let record = read_host_file(&run_dir(&rig.root, &uid).join("host.json")).unwrap();
         let pid = record.host_pid;
         let stored: (i32, i64, i64) = rusqlite::Connection::open(rig.root.join("events.db"))
@@ -2461,6 +2488,10 @@ mod tests {
         // which holds the host and its stand-in claude.
         unsafe { libc::kill(-pid, libc::SIGTERM) };
         // Checked once the host is stopped, so a failing check leaves no host behind.
+        assert_eq!(
+            stored_commands, recorded,
+            "the stored commands are the recorded ones, the connector's left out"
+        );
         assert_eq!(filed.len(), 1, "claude's init is the run's one event");
         assert_eq!(filed[0]["kind"], "session_start");
         assert_eq!(filed[0]["source"], "sdk");

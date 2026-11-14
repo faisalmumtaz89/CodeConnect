@@ -111,6 +111,23 @@ test("the start's outcome carries the commands, the models and only the account'
   }
 }, 10_000);
 
+test("the start's outcome leaves out the claude.ai connectors' commands, which name the account's connected services, and keeps every other command", async () => {
+  // Made up: no recorded answer comes from an account with connectors. The rows take the form claude 2.1.322's shipped
+  // text gives them (the SDK's pinned build, checked against bun.lock, never run), not a live answer's: a person's own
+  // command, a claude.ai connector's prompt and an MCP server's prompt.
+  const own = { name: 'review-diff', description: 'Review the diff (user)', argumentHint: '' };
+  const connector = { name: 'claude.ai Marker Connector 7f3a:search (MCP)', description: 'A connector command', argumentHint: '' };
+  const prompt = { name: 'notes:summarize (MCP)', description: 'Summarize the notes', argumentHint: '' };
+  const answer = JSON.parse(markedInit);
+  answer.response.response.commands = [...answer.response.response.commands, own, connector, prompt];
+  const { dir, outcome, ccd } = await run(trustedStart, { init: JSON.stringify(answer), after_user: [sessionInit] });
+  expect(outcome.initialize.commands).toStrictEqual([...recorded.response.response.commands, own, prompt]);
+  await ccd.line("the stand-in's init", (line) => line.type === 'sdk');
+  for (const text of [JSON.stringify(ccd.lines), readFileSync(join(dir, 'host.json'), 'utf8'), readFileSync(join(dir, 'host.log'), 'utf8')]) {
+    expect(text).not.toContain(connector.name);
+  }
+}, 10_000);
+
 test("every message the query yields reaches ccd untouched, and the state then names the init's session, model and mode", async () => {
   const { ccd } = await run(trustedStart, { after_user: [sessionInit] });
   const sdk = await ccd.line("the stand-in's init", (line) => line.type === 'sdk');

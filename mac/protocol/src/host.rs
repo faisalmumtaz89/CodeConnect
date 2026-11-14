@@ -206,7 +206,9 @@ pub enum OutcomeStatus {
 /// The SDK's initialize answer, as far as ccd keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitializeAnswer {
-    /// The SDK's command list, as it gives it.
+    /// The SDK's command list, as it gives it but for the claude.ai connectors' commands
+    /// (named `claude.ai <connector>:<prompt> (MCP)`), which the host leaves out: they name
+    /// the account's connected services.
     pub commands: Vec<Value>,
     /// The SDK's model list, as it gives it.
     pub models: Vec<Value>,
