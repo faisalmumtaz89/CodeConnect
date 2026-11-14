@@ -1219,7 +1219,13 @@ An app ends a live Codex run with `stop_run` as it ends a Claude run: the run be
 process group SIGTERM, so Codex finishes and exits, and the run ends `exited`, "Stopped".
 An app-server that has not exited 10 s later gets the same ladder (a second SIGTERM, then
 SIGKILL 5 s later while members remain), and a ccd restart starts that 10 s again for a run
-still stopping. An app's Stop (`interrupt`) stops the turn it names through the same link,
+still stopping. Codex runs each command in a process group of its own, which outlives the
+app-server, so the run's link records those groups: when it attaches, every second while a
+turn runs, at each turn's end, and before End run's SIGTERM. Once ccd sees that the
+app-server has exited, whether by End run or by dying, it sends SIGKILL to each recorded
+group that still has members, under the warrant every other group signal uses (the same
+boot, and the group's leader either gone or still the process recorded).
+An app's Stop (`interrupt`) stops the turn it names through the same link,
 and is answered when that turn ends: `aborted` with the turn when Codex ended it
 interrupted, or, if the turn finished on its own first, a sentence saying so. A card the
 turn was waiting on closes. A retry with the same request id is answered from the first,
@@ -1780,10 +1786,11 @@ fails the suite instead of failing silently in production.
   seconds ccd takes to restart, ccd cannot show what the change is, so it tells Codex it
   could not read the request: Codex does not make the change, and no card appears. A
   command asked then does get a card.
-* **On a Codex run started from an app, a command Codex started can outlive an End run
-  that had to force Codex's app-server to stop.** End run asks Codex to finish and exit.
-  An app-server that has not exited 10 s later is ended by force, and a command it had
-  started, which runs in a process group of its own, can go on running.
+* **On a Codex run started from an app, a command ccd did not record can go on running
+  after Codex's app-server has gone.** ccd ends the commands it recorded (see End run
+  above). It misses one started since its last check that the app-server's death cuts off,
+  one that leaves its process group itself, and every command of an app-server that dies
+  while ccd has no link to the run: while ccd restarts, or after a reconnect that failed.
 * **On a Codex run started from an app, End run can show "stopping" for up to a minute
   after Codex has gone, when ccd has no connection to the run.** That happens when ccd
   restarts while the run is stopping, or when End run follows a reconnect that failed.

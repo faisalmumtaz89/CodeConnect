@@ -165,6 +165,10 @@ pub fn current_identity() -> Option<ProcessIdentity> {
 ///     reuse → **Gone**; a birth read that *fails while the pid exists* is
 ///     **Unknown**.
 ///   * any other `kill` errno → **Unknown**.
+///
+/// **Not monotonic while a process dies.** Around its exit a dying process can read `Gone`,
+/// then `Unknown`, then `Gone` again (seen on macOS as Codex's app-server died), so a caller
+/// acts on a `Gone` when it reads it and never reads again to confirm it.
 pub fn liveness(identity: &ProcessIdentity) -> Liveness {
     let exists = unsafe { libc::kill(identity.pid, 0) };
     if exists != 0 {
@@ -275,7 +279,13 @@ fn read_stat(pid: i32) -> Option<Vec<String>> {
 /// boot, as seconds and microseconds. `None` when the process does not exist.
 #[cfg(target_os = "linux")]
 pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
-    let ticks: i64 = read_stat(pid)?.get(19)?.parse().ok()?;
+    stat_birth(&read_stat(pid)?)
+}
+
+/// The birth identity in a `/proc/<pid>/stat` line's fields ([`read_stat`]).
+#[cfg(target_os = "linux")]
+fn stat_birth(fields: &[String]) -> Option<BirthIdentity> {
+    let ticks: i64 = fields.get(19)?.parse().ok()?;
     // SAFETY: `sysconf` reads a constant of the running system.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as i64;
     Some(BirthIdentity {
@@ -479,6 +489,89 @@ fn birth_matches(identity: &ProcessIdentity) -> GroupWarrant {
     }
 }
 
+/// One process-table entry: its pid, parent, process group and birth identity.
+struct Entry {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    birth: BirthIdentity,
+}
+
+/// The groups a process group's members started and that lead themselves: each process whose parent is a member of
+/// `group` and whose own group id is its pid, other than `group` itself. This is how Codex runs a command, a shell
+/// snapshot or an MCP server: in a group of its own, as a child of the app-server, which B3's ladder on the
+/// app-server's group never reaches. Read from one scan of the process table; a process that cannot be described is
+/// left out.
+pub fn tool_groups(group: i32) -> Vec<ProcessIdentity> {
+    led_by_members(group, &process_table())
+}
+
+fn led_by_members(group: i32, table: &[Entry]) -> Vec<ProcessIdentity> {
+    let members: std::collections::HashSet<i32> = table
+        .iter()
+        .filter(|entry| entry.pgid == group)
+        .map(|entry| entry.pid)
+        .collect();
+    table
+        .iter()
+        .filter(|entry| {
+            entry.pgid == entry.pid && entry.pid != group && members.contains(&entry.ppid)
+        })
+        .map(|entry| ProcessIdentity {
+            pid: entry.pid,
+            birth: entry.birth,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn process_table() -> Vec<Entry> {
+    // SAFETY: with no buffer, proc_listallpids only reports how many pids there are.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    // Room for processes started between the two calls.
+    let mut pids: Vec<libc::pid_t> = vec![0; count as usize + 64];
+    let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    // SAFETY: the buffer holds `size` bytes, and proc_listallpids writes at most that, returning how many pids.
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
+    pids.truncate(listed.max(0) as usize);
+    pids.into_iter()
+        .filter(|&pid| pid > 0)
+        .filter_map(|pid| {
+            let info = read_bsdinfo(pid)?;
+            Some(Entry {
+                pid,
+                ppid: info.pbi_ppid as i32,
+                pgid: info.pbi_pgid as i32,
+                birth: BirthIdentity {
+                    start_sec: info.pbi_start_tvsec as i64,
+                    start_usec: info.pbi_start_tvusec as i64,
+                },
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_table() -> Vec<Entry> {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter_map(|pid| {
+            let fields = read_stat(pid)?;
+            Some(Entry {
+                pid,
+                ppid: fields.get(1)?.parse().ok()?,
+                pgid: fields.get(2)?.parse().ok()?,
+                birth: stat_birth(&fields)?,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +730,70 @@ mod tests {
         let a = monotonic_now_nanos().expect("monotonic clock readable");
         let b = monotonic_now_nanos().expect("monotonic clock readable");
         assert!(b >= a, "CLOCK_MONOTONIC is monotonic: {a} then {b}");
+    }
+
+    /// **X8-2: the groups a run's members started and lead themselves.** The run's group is 100: its leader, and a
+    /// member under it (the npm launcher's app-server). Listed: a group led by a child of the leader (the native
+    /// app-server's command) and one led by a child of the other member. Not listed: a process in the run's own group,
+    /// a group led by a grandchild under a tool, and an unrelated group.
+    #[test]
+    fn the_groups_led_by_children_of_a_groups_members_are_listed() {
+        let birth = BirthIdentity {
+            start_sec: 1,
+            start_usec: 2,
+        };
+        let entry = |pid, ppid, pgid| Entry {
+            pid,
+            ppid,
+            pgid,
+            birth,
+        };
+        let table = [
+            entry(600, 200, 600),
+            entry(100, 1, 100),
+            entry(101, 100, 100),
+            entry(200, 100, 200),
+            entry(300, 101, 300),
+            entry(400, 100, 100),
+            entry(500, 1, 500),
+        ];
+        let mut listed: Vec<i32> = led_by_members(100, &table)
+            .iter()
+            .map(|id| id.pid)
+            .collect();
+        listed.sort();
+        assert_eq!(listed, vec![200, 300]);
+    }
+
+    /// **X8-2, live:** a child of this test that leads its own group is listed under this test's group, with its birth
+    /// identity, and a child left in this test's group is not.
+    #[test]
+    fn a_child_leading_its_own_group_is_found_in_the_process_table() {
+        use std::os::unix::process::CommandExt;
+        let own_group = read_pgid(std::process::id() as i32).expect("this test's group");
+        let mut leading = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut staying = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let listed = tool_groups(own_group);
+        let leading_id = ProcessIdentity {
+            pid: leading.id() as i32,
+            birth: read_birth_identity(leading.id() as i32).unwrap(),
+        };
+        let staying_pid = staying.id() as i32;
+        let _ = leading.kill();
+        let _ = staying.kill();
+        let _ = leading.wait();
+        let _ = staying.wait();
+        assert!(
+            listed.contains(&leading_id),
+            "{listed:?} lacks {leading_id:?}"
+        );
+        assert!(listed.iter().all(|id| id.pid != staying_pid), "{listed:?}");
     }
 }
