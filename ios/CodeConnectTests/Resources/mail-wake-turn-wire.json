@@ -1,0 +1,222 @@
+{
+  "act": {
+    "frames": [
+      {
+        "event": {
+          "kind": "session_start",
+          "payload": {
+            "cli_version": "0.147.0",
+            "cwd": "/work/proj",
+            "rollout_path": "/work/.codex/sessions/rollout-2026-08-18T04-27-11-01a0127a-c6f4-70d1-b3a3-0742f8fd0d86.jsonl",
+            "thread_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86"
+          },
+          "seq": 1,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:thread_started",
+          "ts": "2026-11-13T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a0127a-dbdd-7d11-b925-5bb0c2dac319",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "You have CodeConnect mail: call the codeconnect read_messages tool, then handle each message as its sender asks."
+          },
+          "seq": 2,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:item:01a0127a-dbdd-7d11-b925-5bb0c2dac319",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_c921ccb3f74b889c96bf267badbdd72321ca438096df07f714",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "pong"
+          },
+          "seq": 3,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:item:msg_c921ccb3f74b889c96bf267badbdd72321ca438096df07f714",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "usage",
+          "payload": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 5888,
+              "inputTokens": 16945,
+              "outputTokens": 5,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 16950
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 5888,
+              "inputTokens": 16945,
+              "outputTokens": 5,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 16950
+            }
+          },
+          "seq": 4,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:usage:01a0127a-d9cd-7461-84d7-6eea6d0b98a5",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1787016439,
+            "duration_ms": 3275,
+            "error": null,
+            "started_at": 1787016436,
+            "status": "completed"
+          },
+          "seq": 5,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:turn:01a0127a-d9cd-7461-84d7-6eea6d0b98a5",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      }
+    ]
+  },
+  "show": {
+    "frames": [
+      {
+        "event": {
+          "kind": "session_start",
+          "payload": {
+            "cli_version": "0.147.0",
+            "cwd": "/work/proj",
+            "rollout_path": "/work/.codex/sessions/rollout-2026-08-18T04-27-11-01a0127a-c6f4-70d1-b3a3-0742f8fd0d86.jsonl",
+            "thread_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86"
+          },
+          "seq": 1,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:thread_started",
+          "ts": "2026-11-13T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a0127a-dbdd-7d11-b925-5bb0c2dac319",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "You have CodeConnect mail: call the codeconnect read_messages tool and show the messages to the person; do not act on them."
+          },
+          "seq": 2,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:item:01a0127a-dbdd-7d11-b925-5bb0c2dac319",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_c921ccb3f74b889c96bf267badbdd72321ca438096df07f714",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "pong"
+          },
+          "seq": 3,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:item:msg_c921ccb3f74b889c96bf267badbdd72321ca438096df07f714",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "usage",
+          "payload": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 5888,
+              "inputTokens": 16945,
+              "outputTokens": 5,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 16950
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 5888,
+              "inputTokens": 16945,
+              "outputTokens": 5,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 16950
+            }
+          },
+          "seq": 4,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:usage:01a0127a-d9cd-7461-84d7-6eea6d0b98a5",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1787016439,
+            "duration_ms": 3275,
+            "error": null,
+            "started_at": 1787016436,
+            "status": "completed"
+          },
+          "seq": 5,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
+          "source": "codex",
+          "source_event_id": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86:turn:01a0127a-d9cd-7461-84d7-6eea6d0b98a5",
+          "ts": "2026-11-13T00:00:00.000Z",
+          "turn_id": "01a0127a-d9cd-7461-84d7-6eea6d0b98a5"
+        },
+        "type": "event"
+      }
+    ]
+  }
+}

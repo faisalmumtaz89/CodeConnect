@@ -9792,6 +9792,43 @@ impl Daemon {
         }
     }
 
+    /// H8, once at start, before any socket is open. A `starting` hosted Claude run with no
+    /// recorded host becomes `failed`: the ccd that began it never sent its `start`. Every
+    /// hosted Claude run whose recorded host is alive, whatever its lifecycle, is attached again
+    /// from its cursor ([`crate::claude_host::attach_run`]), each in a task of its own, its
+    /// runs' folders in `root`: a run going on gets the rest of its messages, and a host
+    /// whose run has ended is drained, so it can exit. A host gone is the liveness
+    /// watch's ([`Self::watch_hosted_runs`]).
+    pub async fn recover_hosted_runs(self: &Arc<Self>, root: &std::path::Path) {
+        match self.db.fail_unhosted_starts().await {
+            Ok(0) => {}
+            Ok(failed) => crate::log_info!(
+                "{failed} hosted run(s) had no host recorded when ccd stopped, so they did not start"
+            ),
+            Err(err) => crate::log_error!("could not fail the hosted runs with no host: {err:#}"),
+        }
+        let recorded = match self.db.recorded_hosts().await {
+            Ok(recorded) => recorded,
+            Err(err) => {
+                crate::log_error!("could not read the hosted runs to attach again: {err:#}");
+                return;
+            }
+        };
+        for watch in recorded {
+            if protocol::proc_identity::liveness(&watch.host)
+                != protocol::proc_identity::Liveness::Alive
+            {
+                continue;
+            }
+            tokio::spawn(crate::claude_host::attach_run(
+                Arc::clone(self),
+                root.to_path_buf(),
+                watch.session_uid,
+                watch.host,
+            ));
+        }
+    }
+
     /// The run `session_uid`'s connection to its agent host has ended.
     pub(crate) async fn host_link_detached(&self, session_uid: &str) {
         self.inner.lock().await.host_links.remove(session_uid);
@@ -12542,8 +12579,14 @@ mod tests {
             clearings, 1,
             "and its ending is said exactly once: {logged:?}"
         );
+        // The sink is process-global, so another test's line can land in this window
+        // (`crate::log::capture`): what the quiet passes must not write is a recovery
+        // line, and that is what is counted.
         assert_eq!(
-            logged.len(),
+            logged
+                .iter()
+                .filter(|l| l.contains("codex recovery:"))
+                .count(),
             2,
             "the quiet passes on either side of it must write nothing at all: {logged:?}"
         );

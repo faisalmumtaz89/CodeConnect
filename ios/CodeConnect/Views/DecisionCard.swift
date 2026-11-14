@@ -1197,11 +1197,21 @@ struct DecisionCardView: View {
 
     /// Whether `actionBar` draws a bar: the read-only note's, or an
     /// answerable card's. Every other branch draws nothing.
+    /// A kept-but-closed card (`.sentUnconfirmed`) that still needs its queue
+    /// control — see `queueControlOnlyShown`.
+    private var showsQueueControlOnly: Bool {
+        guard let attempt else { return false }
+        return Self.queueControlOnlyShown(
+            isTerminal: attempt.isTerminal, settlesCard: attempt.settlesCard,
+            hasComeBack: comeBackToThis != nil)
+    }
+
     private var drawsActionBar: Bool {
         Self.readOnlyNoteInPinnedBar(
             isAccessibilitySize: typeSize.isAccessibilitySize,
             isActionable: isActionable, isAnswerable: isAnswerable)
             || (isActionable && isAnswerable)
+            || showsQueueControlOnly
     }
 
     @ViewBuilder
@@ -1273,6 +1283,25 @@ struct DecisionCardView: View {
             // rather than against nothing.
             //
             // Nothing measures this bar's *width* any more — see `buttonRow`.
+        } else if showsQueueControlOnly, let comeBackToThis {
+            // `.sentUnconfirmed`: the answer is sent but unconfirmed, so the
+            // answer controls are closed — re-answering is the collision this
+            // state exists to stop — while the card stays on the Deck because
+            // the agent is still blocked. The queue control is not an answer, so
+            // it survives, exactly as it does on a Codex card: without it the
+            // Deck (no swipe, button-only) has no way past this card to the ones
+            // waiting behind it.
+            CCActionBar {
+                CCButton(
+                    "Come back to this", icon: "arrow-u-down-left", variant: .ghost,
+                    size: .md, fullWidth: true, haptic: nil
+                ) {
+                    comeBackToThis()
+                }
+                .accessibilityIdentifier("deck-later")
+                .accessibilityHint(
+                    "Moves this decision to the back of the queue. It stays unanswered.")
+            }
         }
     }
 
@@ -1347,6 +1376,21 @@ struct DecisionCardView: View {
     /// `isActionable` the view computes, matching every other surface's methodology.
     static func subordinateControlsShown(isAccessibilitySize: Bool, isActionable: Bool) -> Bool {
         isAccessibilitySize && isActionable
+    }
+
+    /// Whether the card draws **only** the queue control and no answer. True for
+    /// a terminal attempt that does not settle the card — only `.sentUnconfirmed`:
+    /// its answer controls are closed (re-answering could collide with the one
+    /// already sent) yet the card stays on the Deck because the agent is still
+    /// blocked. The Deck has no swipe and advances only by button, so without
+    /// `Come back to this` the reader could not reach the cards waiting behind
+    /// this one. Gated on there being one to reach (`hasComeBack`), so a lone
+    /// waiting card draws no orphan control. Static and pure, tested off the same
+    /// `isTerminal`/`settlesCard` the view computes, like every other gate here.
+    static func queueControlOnlyShown(isTerminal: Bool, settlesCard: Bool, hasComeBack: Bool)
+        -> Bool
+    {
+        isTerminal && !settlesCard && hasComeBack
     }
 
     /// `Deny with a reason` and, in the Deck, `Come back to this`. Both are
@@ -1600,7 +1644,9 @@ struct DecisionCardView: View {
                 withAnimation(CC.motion.small) { authNotice = message }
             case .answered(let result):
                 authNotice = nil
-                if result.isTerminal { onSettled?() }
+                // `.sentUnconfirmed` closes the controls but must NOT settle the
+                // card off the Deck — the agent may still be blocked waiting.
+                if result.settlesCard { onSettled?() }
             }
         }
     }
@@ -1616,7 +1662,7 @@ struct DecisionCardView: View {
     private static func report(_ attempt: AnswerAttempt) {
         switch attempt {
         case .applied: CCHaptic.success.fire()
-        case .indeterminate, .duplicate, .answeredAtKeyboard: CCHaptic.warning.fire()
+        case .indeterminate, .duplicate, .answeredAtKeyboard, .sentUnconfirmed: CCHaptic.warning.fire()
         case .staleCard, .rejected, .failed: CCHaptic.failure.fire()
         }
     }

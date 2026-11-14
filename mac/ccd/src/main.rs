@@ -176,6 +176,9 @@ async fn main() -> Result<()> {
     // would otherwise be told a card it can still see is unknown, and a
     // mutation left in flight by the last process could be typed a second time.
     daemon.recover().await;
+    // The hosts of Claude runs outlive ccd: each one still running is attached again, in a
+    // task started before the listeners.
+    daemon.recover_hosted_runs(&protocol::root_dir()).await;
 
     let socket_path = protocol::socket_path();
     let ipc = tokio::spawn(ipc_server::serve(Arc::clone(&daemon), socket_path.clone()));

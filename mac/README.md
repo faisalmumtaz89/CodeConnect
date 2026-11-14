@@ -1119,8 +1119,12 @@ transaction, the run `exited` and its `SessionEnd` carrying the exit code and an
 also ends when its host is gone, seen when the run's link ends or by the liveness tick. ccd
 then sends SIGTERM to the host's process group, and SIGKILL 5 s later only while members
 remain, each under a warrant: the same boot, and the host's pid free or still its own. The
-run is then `exited`, "Stopped: its process ended". A ccd restart does not re-attach a hosted
-run: its host keeps running, and its later messages stay in it.
+run is then `exited`, "Stopped: its process ended". A ccd restart attaches each Claude run's
+host again while it still runs, from the run's cursor: the host replays
+what was not acknowledged and the run goes on; a run still starting is sent its start again,
+which a host that has one ignores; and the host of a run that has ended is drained, so it
+exits. A host gone meanwhile is the liveness tick's, as above. A starting Claude run whose ccd
+died before it recorded the run's host becomes `failed`.
 A Codex start that goes on is checked the same way: the daemon finds the codex the
 launcher would run, from the same list as `codex_bin` without `CODECONNECT_CODEX_BIN`,
 and asks it its `--version`. It is `agent_missing` when none is found, and

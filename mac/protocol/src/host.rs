@@ -18,7 +18,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The version the host writes into `host.json`.
+/// The version the host writes into `host.json`. A new host is admitted only at this
+/// version, but a restarted ccd attaches a running host again without reading it: a change
+/// to this version brings with it, in the same change, the stop for a host still running
+/// the old one (P0 H9).
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
 
 /// `host.json`, created by the host exclusively, so a second host for the same run
@@ -206,7 +209,9 @@ pub enum OutcomeStatus {
 /// The SDK's initialize answer, as far as ccd keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitializeAnswer {
-    /// The SDK's command list, as it gives it.
+    /// The SDK's command list, as it gives it but for the claude.ai connectors' commands
+    /// (named `claude.ai <connector>:<prompt> (MCP)`), which the host leaves out: they name
+    /// the account's connected services.
     pub commands: Vec<Value>,
     /// The SDK's model list, as it gives it.
     pub models: Vec<Value>,

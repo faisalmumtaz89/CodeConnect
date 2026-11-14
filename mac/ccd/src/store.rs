@@ -601,6 +601,18 @@ pub struct WatchedHost {
     pub boot: Option<BootIdentity>,
 }
 
+/// What a link to a recorded host starts from ([`Store::hosted_link`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedLink {
+    pub lifecycle: Lifecycle,
+    /// The highest host message whose effects are committed.
+    pub cursor: u64,
+    /// The run's `start` line, as ccd sent or would send it.
+    pub start: Option<String>,
+    /// The uuid of the run's last SDK init, which its turn's later events carry.
+    pub turn: Option<String>,
+}
+
 fn watched_host_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<WatchedHost> {
     let boot = match (row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?) {
         (Some(boot_sec), Some(boot_usec)) => Some(BootIdentity {
@@ -2488,11 +2500,16 @@ impl Store {
             .optional()?)
     }
 
-    /// Write a new hosted run's row, in its agent's table, and its `run_hosts` row in
-    /// one transaction, before anything for it is spawned (H1). If `request_id`
-    /// already has a run, of either agent, nothing is written and that run is
-    /// returned, so a repeated start never makes a second one.
-    pub fn begin_run(&self, row: &SessionRow, request_id: &str) -> Result<Option<HostedRun>> {
+    /// Write a new hosted run's row, in its agent's table, and its `run_hosts` row with
+    /// its `start` line in one transaction, before anything for it is spawned (H1). If
+    /// `request_id` already has a run, of either agent, nothing is written and that run
+    /// is returned, so a repeated start never makes a second one.
+    pub fn begin_run(
+        &self,
+        row: &SessionRow,
+        request_id: &str,
+        start: &str,
+    ) -> Result<Option<HostedRun>> {
         let (table, _) = session_tables_for(&row.agent);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2531,8 +2548,8 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO run_hosts(session_uid, request_id) VALUES (?1, ?2)",
-            params![row.session_uid, request_id],
+            "INSERT INTO run_hosts(session_uid, request_id, start) VALUES (?1, ?2, ?3)",
+            params![row.session_uid, request_id, start],
         )?;
         tx.execute(
             &format!("{RECORD_PROJECTS} VALUES (?1, ?2, ?3) {RECORD_PROJECTS_NEWEST}"),
@@ -2802,6 +2819,87 @@ impl Store {
                 watched_host_from,
             )
             .optional()?)
+    }
+
+    /// The recorded agent host of every hosted Claude run, whatever its lifecycle: what a
+    /// restarted ccd attaches again while the host is alive.
+    pub fn recorded_hosts(&self) -> Result<Vec<WatchedHost>> {
+        let (table, _) = session_tables_for(&AgentKind::Claude);
+        let conn = self.read();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
+                    h.boot_sec, h.boot_usec
+               FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
+              WHERE h.host_pid IS NOT NULL"
+        ))?;
+        let rows = stmt
+            .query_map([], watched_host_from)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Every `starting` hosted Claude run with no recorded host becomes `failed`: the ccd
+    /// that began it died before it recorded a host, so no `start` was ever sent. Only
+    /// before this ccd starts any run of its own. The number of runs failed.
+    pub fn fail_unhosted_starts(&self) -> Result<usize> {
+        let (table, _) = session_tables_for(&AgentKind::Claude);
+        Ok(self.write().execute(
+            &format!(
+                "UPDATE {table} SET lifecycle = ?1, updated_at = ?2
+                  WHERE lifecycle = ?3 AND session_uid IN
+                        (SELECT session_uid FROM run_hosts WHERE host_pid IS NULL)"
+            ),
+            params![
+                lifecycle_str(Lifecycle::Failed),
+                protocol::time::now_rfc3339(),
+                lifecycle_str(Lifecycle::Starting)
+            ],
+        )?)
+    }
+
+    /// What a link to the hosted run `session_uid`'s host starts from: the run's
+    /// lifecycle, its cursor, its stored `start`, and its turn, the uuid its last SDK
+    /// init stamped on its `SessionStart`. `None` when the run has no `run_hosts` row.
+    pub fn hosted_link(&self, session_uid: &str) -> Result<Option<HostedLink>> {
+        let conn = self.read();
+        let Some((lifecycle, cursor, start)) = conn
+            .query_row(
+                "SELECT s.lifecycle, h.cursor, h.start
+                   FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+                  WHERE h.session_uid = ?1",
+                params![session_uid],
+                |row| {
+                    Ok((
+                        parse_lifecycle(&row.get::<_, String>(0)?),
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let turn = conn
+            .query_row(
+                "SELECT turn_id FROM events
+                  WHERE session_uid = ?1 AND source = ?2 AND kind = ?3
+                  ORDER BY seq DESC LIMIT 1",
+                params![
+                    session_uid,
+                    protocol::event::Source::Sdk.as_str(),
+                    protocol::event::EventKind::SessionStart.as_str()
+                ],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(Some(HostedLink {
+            lifecycle,
+            cursor: cursor as u64,
+            start,
+            turn,
+        }))
     }
 
     /// The answer kept for the folder whose real path is `path`.
@@ -6266,7 +6364,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         -- initialize answer from the start's outcome (JSON, null until a start
         -- is done): the run's facts before its first turn's init. The row is
         -- written with the run's own session row, before anything is spawned, so
-        -- a repeated request finds the run instead of starting another.
+        -- a repeated request finds the run instead of starting another. `start`
+        -- is the run's `start` line, as ccd sends it, kept so a restarted ccd can
+        -- send it again to a host it never reached.
         CREATE TABLE IF NOT EXISTS run_hosts(
             session_uid     TEXT PRIMARY KEY,
             request_id      TEXT    NOT NULL UNIQUE,
@@ -6276,7 +6376,8 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             cursor          INTEGER NOT NULL DEFAULT 0,
             initialize      TEXT,
             boot_sec        INTEGER,
-            boot_usec       INTEGER
+            boot_usec       INTEGER,
+            start           TEXT
         );
 
         -- A deletion is a decision, and this is its record. A uid here was
@@ -12871,7 +12972,12 @@ mod tests {
         row.tmux_session.clear();
         row.tmux_socket.clear();
         row.lifecycle = Lifecycle::Starting;
-        assert_eq!(store.begin_run(&row, request_id).unwrap(), None);
+        assert_eq!(
+            store
+                .begin_run(&row, request_id, r#"{"type":"start"}"#)
+                .unwrap(),
+            None
+        );
         session
     }
 
@@ -12883,7 +12989,12 @@ mod tests {
         row.tmux_socket.clear();
         row.lifecycle = Lifecycle::Starting;
         row.agent = AgentKind::Codex;
-        assert_eq!(store.begin_run(&row, request_id).unwrap(), None);
+        assert_eq!(
+            store
+                .begin_run(&row, request_id, r#"{"thread":{},"turn":{}}"#)
+                .unwrap(),
+            None
+        );
         session
     }
 
@@ -12934,7 +13045,7 @@ mod tests {
         let mut second = session_row(&key("BB", "run-BB"));
         second.lifecycle = Lifecycle::Starting;
         let existing = store
-            .begin_run(&second, "req-1")
+            .begin_run(&second, "req-1", r#"{"type":"start"}"#)
             .unwrap()
             .expect("the first run");
         assert_eq!(existing.session_uid, first.uid);

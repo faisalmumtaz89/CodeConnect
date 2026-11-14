@@ -592,6 +592,98 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         }
     }
 
+    /// **T2-F1 (must-fail).** An answer that leaves the phone while the link
+    /// stalls throws `sentButUnanswered`: the frame went out but no outcome came
+    /// back. It may have landed, so re-answering could collide with it. The
+    /// controls must CLOSE (terminal), yet the card must NOT settle off the Deck
+    /// and the banner must NOT invite a retry — and the computer's own
+    /// `approval_resolved`, when it arrives, outranks this phone's "awaiting".
+    ///
+    /// Route `sentButUnanswered` back through the generic `.failed` catch and
+    /// the first guard reads `.failed`: that is the decision-flip this fix
+    /// closes (a non-terminal failure reopens the controls and says "Retrying
+    /// is safe", so the re-answer the daemon drops as a duplicate lands wrong).
+    func testSentButUnansweredClosesControlsKeepsCardAndYieldsToPersisted() async throws {
+        let model = AppModel(cache: EventCache())
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(extra: ["hook_only_approvals": .bool(true)]), minor: 22)
+        try ingest(requestEvent, into: model)
+        describeSessionAsClaude(model)
+        await settle(model)
+
+        // The send leaves the phone but no reply returns — the transport's own
+        // "sent, not proven sent".
+        model.connection.sendStub = { _ in throw ConnectionError.sentButUnanswered }
+
+        let pending = try XCTUnwrap(pendingItem(model))
+        let attempt = await model.answer(item: pending, decision: .allow)
+
+        // A distinct terminal state, never the retry-inviting `.failed`.
+        guard case .sentUnconfirmed = attempt else {
+            return XCTFail("a sent-but-unconfirmed answer must be .sentUnconfirmed, got \(attempt)")
+        }
+        XCTAssertTrue(
+            attempt.isTerminal, "the controls close — re-answering could collide with the one sent")
+        XCTAssertFalse(
+            attempt.settlesCard, "the card stays on the Deck until the computer confirms")
+
+        // The banner waits; it never says a retry is safe.
+        let banner = DecisionCard.resultBanner(for: attempt, on: .iPhone)
+        XCTAssertEqual(banner.message, "Waiting for your computer to confirm.")
+        let provenance = (banner.provenance ?? "")
+        XCTAssertFalse(
+            provenance.localizedCaseInsensitiveContains("retry")
+                || provenance.localizedCaseInsensitiveContains("safe"),
+            "a sent-but-unconfirmed answer must not invite a retry")
+
+        // The banner is shared Kit: on a Mac it must name the Mac, never "this
+        // phone" (the string is drawn by the Mac card too).
+        let macProvenance = DecisionCard.resultBanner(for: attempt, on: .mac).provenance ?? ""
+        XCTAssertTrue(
+            macProvenance.contains("this Mac"), "the shared banner names the device it is read on")
+        XCTAssertFalse(
+            macProvenance.contains("this phone"), "the banner must not say \"this phone\" on a Mac")
+
+        // The controls are withdrawn while the card is still live-backed.
+        XCTAssertFalse(
+            liveBarAvailable(model, attempt: attempt),
+            "a sent-but-unconfirmed answer withdraws the controls")
+
+        // The computer's own outcome, when it lands, outranks the phone's wait.
+        try ingest(resolvedIndeterminateEvent, into: model)
+        await settle(model)
+        guard case .persisted = liveBanner(model, attempt: attempt) else {
+            return XCTFail(
+                "the computer's own approval_resolved must outrank the phone's awaiting banner")
+        }
+    }
+
+    /// `.sentUnconfirmed` keeps the Deck's queue control although its answer
+    /// controls are closed: the Deck has no swipe and advances only by button,
+    /// so losing `Come back to this` would trap the reader on a card the agent
+    /// is still blocked behind. A card that settles off the Deck (any ordinary
+    /// terminal answer) needs no queue control, and a lone waiting card must not
+    /// draw an orphan one.
+    func testSentUnconfirmedKeepsTheDeckQueueControl() {
+        XCTAssertTrue(
+            DecisionCardView.queueControlOnlyShown(
+                isTerminal: true, settlesCard: false, hasComeBack: true),
+            "a kept-but-closed card with another behind it keeps Come back to this")
+        XCTAssertFalse(
+            DecisionCardView.queueControlOnlyShown(
+                isTerminal: true, settlesCard: false, hasComeBack: false),
+            "a lone waiting card draws no orphan queue control")
+        XCTAssertFalse(
+            DecisionCardView.queueControlOnlyShown(
+                isTerminal: true, settlesCard: true, hasComeBack: true),
+            "an ordinary terminal answer settles off the Deck, so no queue control")
+        XCTAssertFalse(
+            DecisionCardView.queueControlOnlyShown(
+                isTerminal: false, settlesCard: false, hasComeBack: true),
+            "an open card uses its real action bar, not this gate")
+    }
+
     // MARK: the stale/unbacked class
 
     /// The session leaves the fleet while the sheet is open (a live refresh drops

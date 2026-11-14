@@ -48,8 +48,20 @@ export function firstMessage(start: Start) {
 }
 
 /**
+ * How the initialize answer names a claude.ai connector's commands: `claude.ai <connector>:<prompt> (MCP)`, after the
+ * connector's server, which claude names `claude.ai <connector>`.
+ */
+const CONNECTOR_COMMAND = 'claude.ai ';
+
+function isConnectorCommand(command: Json): boolean {
+  return typeof command === 'object' && command !== null && !Array.isArray(command) && String(command.name).startsWith(CONNECTOR_COMMAND);
+}
+
+/**
  * The SDK's initialize answer as ccd keeps it. Of the account only which provider Claude uses, in a fresh object:
- * the email, the organization and every other account field never reach a line (H4, P1 22).
+ * the email, the organization and every other account field never reach a line (H4, P1 22). The claude.ai
+ * connectors' commands are left out for the same reason: they name the services the account has connected. A local
+ * MCP server named that way is left out with them.
  */
 export function initializeAnswer(answer: {
   commands: Json[];
@@ -57,7 +69,7 @@ export function initializeAnswer(answer: {
   account: { apiProvider?: string };
 }): InitializeAnswer {
   const provider = answer.account.apiProvider;
-  return { commands: answer.commands, models: answer.models, account: provider === undefined ? {} : { api_provider: provider } };
+  return { commands: answer.commands.filter((command) => !isConnectorCommand(command)), models: answer.models, account: provider === undefined ? {} : { api_provider: provider } };
 }
 
 /** The run's facts as the start names them, until an init says otherwise (H4). */

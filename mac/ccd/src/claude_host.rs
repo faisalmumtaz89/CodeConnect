@@ -10,7 +10,8 @@
 //! stays with a link task that commits and acknowledges each message in sequence
 //! order and stops at the first one it does not apply, which the host keeps, so
 //! nothing is acknowledged that was not stored. The start's outcome, committed by the
-//! link, makes the run `live` or `failed`, and the app's answer waits for it.
+//! link, makes the run `live` or `failed`, and the app's answer waits for it. A restarted
+//! ccd attaches each host still running again from its run's cursor ([`attach_run`]).
 //!
 //! The lines are [`protocol::host`]'s; the host is mac/agent-host.
 
@@ -128,6 +129,15 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
             Ok(names) => names,
             Err(err) => return failed(format!("could not name the run: {err}")),
         };
+    let start = ToHost::Start {
+        uuid: start_uuid.clone(),
+        options: start_options(&uid, &run),
+        prompt: run.prompt.to_string(),
+    };
+    let line = match serde_json::to_string(&start) {
+        Ok(line) => line,
+        Err(err) => return failed(format!("could not write the run's start: {err}")),
+    };
     let now = protocol::time::now_rfc3339();
     let row = SessionRow {
         session_uid: uid.clone(),
@@ -144,13 +154,17 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         codex_thread_id: None,
         codex_socket: None,
     };
-    match daemon.db.begin_run(row, run.request_id.to_string()).await {
+    match daemon
+        .db
+        .begin_run(row, run.request_id.to_string(), line)
+        .await
+    {
         Ok(Some(existing)) => return answer_for(existing),
         Ok(None) => {}
         Err(err) => return failed(format!("could not record the run: {err:#}")),
     }
     let deadline = Instant::now() + timeout;
-    let begun = match bring_up(daemon, &uid, &start_uuid, &run, deadline).await {
+    let begun = match bring_up(daemon, &uid, &start_uuid, &start, &run, deadline).await {
         Ok(begun) => begun,
         // Before `start` no claude can exist (the host exits by itself at 30 s), so the
         // run has failed.
@@ -196,6 +210,7 @@ async fn bring_up(
     daemon: &Arc<Daemon>,
     uid: &str,
     start_uuid: &str,
+    start: &ToHost,
     run: &Run<'_>,
     deadline: Instant,
 ) -> Result<oneshot::Receiver<Begun>, String> {
@@ -212,7 +227,7 @@ async fn bring_up(
     .map_err(|err| format!("could not run the login shell: {err}"))?;
     let spawned = child.id();
     let attached = attach(
-        daemon, uid, start_uuid, run, &dir, spawned, &mut child, deadline,
+        daemon, uid, start_uuid, start, &dir, spawned, &mut child, deadline,
     )
     .await;
     crate::start_session::reap(child);
@@ -224,7 +239,7 @@ async fn attach(
     daemon: &Arc<Daemon>,
     uid: &str,
     start_uuid: &str,
-    run: &Run<'_>,
+    start: &ToHost,
     dir: &Path,
     spawned: Option<u32>,
     child: &mut tokio::process::Child,
@@ -266,27 +281,15 @@ async fn attach(
         .await
         .map_err(|err| format!("could not record the agent host: {err:#}"))?;
 
-    let socket = dir.join("host.sock");
-    let stream = loop {
-        match UnixStream::connect(&socket).await {
-            Ok(stream) => break stream,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                crate::start_session::give_up_if_ended(
-                    dir,
-                    child,
-                    deadline,
-                    "the agent host did not listen",
-                )?;
-                tokio::time::sleep(POLL).await;
-            }
-            Err(err) => return Err(format!("could not reach the agent host: {err}")),
-        }
-    };
+    let stream = connect(&dir.join("host.sock"), || {
+        crate::start_session::give_up_if_ended(
+            dir,
+            child,
+            deadline,
+            "the agent host did not listen",
+        )
+    })
+    .await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     send(&mut write, &ToHost::Attach { after: 0 }).await?;
@@ -302,12 +305,7 @@ async fn attach(
             .map_err(|why| format!("could not commit the agent host's state: {why}"))?,
         _ => return Err("the agent host's first message was not its state".into()),
     }
-    let start = ToHost::Start {
-        uuid: start_uuid.to_string(),
-        options: start_options(uid, run),
-        prompt: run.prompt.to_string(),
-    };
-    send(&mut write, &start).await?;
+    send(&mut write, start).await?;
     daemon.host_link_attached(uid).await;
     // The link is a task of its own, so the start's answer timing out never ends it.
     let (begun, outcome) = oneshot::channel();
@@ -315,12 +313,123 @@ async fn attach(
         Arc::clone(daemon),
         uid.to_string(),
         host,
-        start_uuid.to_string(),
-        begun,
+        Linked {
+            start_uuid: start_uuid.to_string(),
+            lifecycle: Lifecycle::Starting,
+            turn: None,
+            resend: None,
+        },
+        Some(begun),
         lines,
         write,
     ));
     Ok(outcome)
+}
+
+/// A restarted ccd's link to the run `uid`'s recorded host `host`, alive when recovery
+/// found it (H8): its socket, waited for while the host is alive and not yet listening,
+/// as a new host's is; then `attach` from the run's cursor and the link, which reads from
+/// the store what the connection that started the run knew. A run still starting gets
+/// its stored `start` at the first `state`, once the replay is over. When it cannot
+/// connect, the run's host is checked as at the link's end ([`end_if_host_gone`]).
+pub(crate) async fn attach_run(
+    daemon: Arc<Daemon>,
+    root: PathBuf,
+    uid: String,
+    host: ProcessIdentity,
+) {
+    let linked = match daemon.db.hosted_link(uid.clone()).await {
+        Ok(Some(linked)) => linked,
+        Ok(None) => return,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its run to attach its host: {err:#}");
+            return;
+        }
+    };
+    let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
+    let connected = connect(&run_dir(&root, &uid).join("host.sock"), || {
+        if liveness(&host) != Liveness::Alive {
+            return Err("the agent host is no longer running".into());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the agent host did not listen within {} s",
+                crate::start_session::START_TIMEOUT.as_secs()
+            ));
+        }
+        Ok(())
+    })
+    .await;
+    let attached = match connected {
+        Ok(stream) => {
+            let (read, mut write) = stream.into_split();
+            send(
+                &mut write,
+                &ToHost::Attach {
+                    after: linked.cursor,
+                },
+            )
+            .await
+            .map(|()| (read, write))
+        }
+        Err(why) => Err(why),
+    };
+    let (read, write) = match attached {
+        Ok(halves) => halves,
+        Err(why) => {
+            crate::log_info!("{uid}: its agent host was not attached again: {why}");
+            end_if_host_gone(&daemon, &uid).await;
+            return;
+        }
+    };
+    daemon.host_link_attached(&uid).await;
+    let start = linked
+        .start
+        .as_deref()
+        .and_then(|line| serde_json::from_str::<ToHost>(line).ok());
+    let start_uuid = match &start {
+        Some(ToHost::Start { uuid, .. }) => uuid.clone(),
+        _ => String::new(),
+    };
+    let resend = start.filter(|_| linked.lifecycle == Lifecycle::Starting);
+    link(
+        daemon,
+        uid,
+        host,
+        Linked {
+            start_uuid,
+            lifecycle: linked.lifecycle,
+            turn: linked.turn,
+            resend,
+        },
+        None,
+        BufReader::new(read).lines(),
+        write,
+    )
+    .await;
+}
+
+/// Connect to a host's socket, waiting while it is not yet there or not yet listening,
+/// until `give_up` says why not to wait any longer.
+async fn connect(
+    socket: &Path,
+    mut give_up: impl FnMut() -> Result<(), String>,
+) -> Result<UnixStream, String> {
+    loop {
+        match UnixStream::connect(socket).await {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                give_up()?;
+                tokio::time::sleep(POLL).await;
+            }
+            Err(err) => return Err(format!("could not reach the agent host: {err}")),
+        }
+    }
 }
 
 /// The run's `query()` options.
@@ -420,27 +529,46 @@ async fn apply_sdk(
     }
 }
 
-/// The run's connection after `start`: each message committed, then acknowledged, in
-/// order. It applies the run's `state` and the outcome of `start_uuid`, which makes the
-/// run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
+/// What a link knows of its run when it begins: from the start that spawned the host, or,
+/// after a restart, from the store.
+struct Linked {
+    /// The uuid of the run's `start`, whose outcome makes the run `live` or `failed`.
+    start_uuid: String,
+    lifecycle: Lifecycle,
+    /// The uuid of the run's last SDK init, which its turn's later events carry.
+    turn: Option<String>,
+    /// The run's `start`, sent at the link's first `state` if no outcome has come by then.
+    resend: Option<ToHost>,
+}
+
+/// The run's connection to its host: each message committed, then acknowledged, in
+/// order. It applies the run's `state` and the outcome of the run's start, which makes
+/// the run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
 /// why the link ended if it ends first. A `live` run's SDK messages are its events
 /// ([`apply_sdk`]); the host sends none before the outcome. A `live` run's `exited` ends the
 /// run (H6, `Daemon::end_hosted_run`). After a refusal claude's `exited` changes nothing
-/// in the `failed` run and is applied so its host can end. It ends at the first message
-/// this daemon does not apply, which stays in the host with everything after it, or when
-/// the connection or a commit fails, and then checks the run's host ([`end_if_host_gone`]).
+/// in the `failed` run and is applied so its host can end. After a re-attach, the host
+/// replays what it kept and then sends its `state`, so the first `state` ends the replay
+/// (decision 1): a run still starting then gets its start again, which a host that
+/// already has one ignores (decision 2). It ends at the first message this daemon does
+/// not apply, which stays in the host with everything after it, or when the connection or
+/// a commit fails, and then checks the run's host ([`end_if_host_gone`]).
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
     host: ProcessIdentity,
-    start_uuid: String,
-    begun: oneshot::Sender<Begun>,
+    linked: Linked,
+    mut begun: Option<oneshot::Sender<Begun>>,
     mut lines: Lines<BufReader<OwnedReadHalf>>,
     mut write: OwnedWriteHalf,
 ) {
-    let mut begun = Some(begun);
-    let (mut live, mut refused) = (false, false);
-    let mut turn = None;
+    let Linked {
+        start_uuid,
+        lifecycle,
+        mut turn,
+        mut resend,
+    } = linked;
+    let (mut live, mut refused) = (lifecycle == Lifecycle::Live, lifecycle == Lifecycle::Failed);
     let ended = loop {
         let line = match lines.next_line().await {
             Ok(Some(line)) => line,
@@ -451,6 +579,11 @@ async fn link(
             Ok(FromHost::State { seq, .. }) => {
                 if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
                     break why;
+                }
+                if let Some(start) = resend.take().filter(|_| !live && !refused) {
+                    if let Err(why) = send(&mut write, &start).await {
+                        break why;
+                    }
                 }
             }
             Ok(FromHost::Outcome {
@@ -1775,6 +1908,332 @@ mod tests {
         );
     }
 
+    /// A restarted ccd on the rig's store: the connection that started the run is gone,
+    /// its host (the test) listens again at the run's socket, and a new daemon starts as
+    /// ccd's start does: `recover`, then the hosted runs. The host's side of the connection
+    /// the new daemon attached with.
+    async fn restart(rig: &Rig, dir: &Path) -> (Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf) {
+        let _ = std::fs::remove_file(dir.join("host.sock"));
+        let listener = UnixListener::bind(dir.join("host.sock")).unwrap();
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the restarted daemon attached the run's host")
+            .unwrap();
+        let (read, write) = stream.into_split();
+        (BufReader::new(read).lines(), write)
+    }
+
+    /// A run's row and its stored start, as a start writes them before anything is
+    /// spawned: what a ccd that died then leaves.
+    async fn begun(rig: &Rig, cwd: &str, host: &Path) -> (String, ToHost) {
+        let uid = protocol::uid::new().unwrap();
+        let start = ToHost::Start {
+            uuid: protocol::uid::uuid_v4().unwrap(),
+            options: start_options(&uid, &run(rig, "req-1", cwd, host)),
+            prompt: "fix the tests".into(),
+        };
+        let now = protocol::time::now_rfc3339();
+        let row = SessionRow {
+            session_uid: uid.clone(),
+            session_id: uid.clone(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: cwd.to_string(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Starting,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        let line = serde_json::to_string(&start).unwrap();
+        assert_eq!(
+            rig.daemon
+                .db
+                .begin_run(row, "req-1".into(), line)
+                .await
+                .unwrap(),
+            None
+        );
+        (uid, start)
+    }
+
+    /// **G1: a live run across a restart.** Its host outlives ccd. The restarted ccd
+    /// attaches it again from the run's cursor and files what the host replays, each
+    /// message once and in order, then claude's end, acknowledging through the attach's
+    /// new `state`. It sends no start.
+    #[tokio::test]
+    async fn a_restarted_daemon_attaches_a_live_runs_host_again() {
+        let rig = rig();
+        let played = live_run(&rig).await;
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        drop(played);
+        let (mut lines, mut write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
+        for (index, message) in capture().into_iter().take(3).enumerate() {
+            let seq = index as u64 + 3;
+            sdk(&mut write, seq, message).await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq }));
+        }
+        say(
+            &mut write,
+            serde_json::json!({"type": "exited", "seq": 6, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 6 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 7, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 7 }));
+        drop(write);
+        assert_eq!(next(&mut lines).await, None, "no start for a live run");
+        stop(&dir);
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        assert_eq!(cursor(&rig, &uid), 7);
+        let key = SessionKey::new(&uid, &uid);
+        let mut expected: Vec<String> = capture()
+            .iter()
+            .take(3)
+            .flat_map(|message| protocol::sdk_map::map(&key, None, message).events)
+            .map(|event| event.kind.as_str().to_string())
+            .collect();
+        expected.push("session_end".into());
+        let filed: Vec<String> = stored(&rig, &uid)
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(filed, expected);
+    }
+
+    /// **G1, a run still starting across a restart:** its start was sent and its outcome
+    /// not committed. The host replays the outcome before its new `state`, so by the end of
+    /// the replay the run is `live`, and it is not sent its start again.
+    #[tokio::test]
+    async fn a_starting_runs_replayed_outcome_is_applied_and_no_start_is_sent() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (result, played) = tokio::join!(
+            start_within(
+                &rig.daemon,
+                run(&rig, "req-1", &cwd, &host),
+                Duration::from_secs(2)
+            ),
+            play_to_start(&rig)
+        );
+        let uid = started_uid(&result);
+        let (dir, uuid) = (played.dir.clone(), played.start_uuid());
+        drop(played);
+        assert_eq!(kept(&rig, &uid).0, "starting");
+        let (mut lines, mut write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 1 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 2 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 3, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 3 }));
+        drop(write);
+        assert_eq!(
+            next(&mut lines).await,
+            None,
+            "no start once the outcome is in"
+        );
+        stop(&dir);
+        assert_eq!(kept(&rig, &uid).0, "live");
+    }
+
+    /// **G2: a start its host never had.** A ccd died after it recorded the run's host and
+    /// before it sent `start`, while the host was not yet listening. The restarted ccd waits
+    /// for the socket, attaches, and at the host's first `state` sends the stored start.
+    #[tokio::test]
+    async fn a_restarted_daemon_sends_a_start_its_host_never_had() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (uid, start) = begun(&rig, &cwd, &host).await;
+        let dir = run_dir(&rig.root, &uid);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut stub = std::process::Command::new(&host).arg(&dir).spawn().unwrap();
+        let pid = loop {
+            if let Some(record) = read_host_file(&dir.join("host.json")) {
+                break record.host_pid;
+            }
+            tokio::time::sleep(POLL).await;
+        };
+        rig.daemon
+            .db
+            .record_host(
+                uid.clone(),
+                ProcessIdentity {
+                    pid,
+                    birth: read_birth_identity(pid).unwrap(),
+                },
+                protocol::proc_identity::boot_identity(),
+            )
+            .await
+            .unwrap();
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        // The host listens only now, after the restarted ccd first tried its socket.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let listener = UnixListener::bind(dir.join("host.sock")).unwrap();
+        let accepted = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        stop(&dir);
+        let _ = stub.wait();
+        let (stream, _) = accepted
+            .expect("the restarted daemon attached the run's host")
+            .unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 0 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 1, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 1 }));
+        assert_eq!(next(&mut lines).await, Some(start));
+    }
+
+    /// **G3: a run with no host.** A ccd died after the run's row and before it recorded the
+    /// run's host, so no start was sent: the restarted ccd fails the run.
+    #[tokio::test]
+    async fn a_starting_run_with_no_recorded_host_fails_at_a_restart() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (uid, _) = begun(&rig, &cwd, &host).await;
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        assert_eq!(kept(&rig, &uid).0, "failed");
+    }
+
+    /// **G9: an end not acknowledged.** Claude's end is committed; the ack is lost with ccd.
+    /// The restarted ccd attaches the host again from the end's cursor, which the host takes
+    /// as the end's acknowledgement, so it can exit.
+    #[tokio::test]
+    async fn an_ended_runs_host_is_attached_again_to_drain_it() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        drop(played);
+        let (mut lines, write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 3 }));
+        // The host, drained, exits with nothing more to say.
+        drop(write);
+        assert_eq!(next(&mut lines).await, None);
+        stop(&dir);
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        assert_eq!(end_reason(&rig, &uid), Some(serde_json::Value::Null));
+    }
+
+    /// **G9, a refused start's end still to come:** the refusal is committed and claude's
+    /// `exited` is not. The restarted ccd's link knows from the store that the run failed,
+    /// so it applies the replayed `exited` and the new `state`, and the host can exit.
+    #[tokio::test]
+    async fn a_refused_runs_later_end_is_applied_after_a_restart() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (result, played) =
+            tokio::join!(start(&rig.daemon, run(&rig, "req-1", &cwd, &host)), async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "refused", "detail": "claude would not start"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        assert_eq!(result, failed("claude would not start".into()));
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        drop(played);
+        let (mut lines, mut write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 4, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 4 }));
+        drop(write);
+        assert_eq!(next(&mut lines).await, None, "no start for a refused run");
+        stop(&dir);
+        assert_eq!(kept(&rig, &uid).0, "failed");
+        assert_eq!(cursor(&rig, &uid), 4);
+        assert_eq!(
+            end_reason(&rig, &uid),
+            None,
+            "a run that never started has no end"
+        );
+    }
+
+    /// **G12: the turn across a restart.** A live run's first turn and the start of its
+    /// second, with the second's init, are filed, then ccd restarts. The rest of the second
+    /// turn, with no init of its own, is filed with the second init's uuid as its turn.
+    #[tokio::test]
+    async fn a_turn_begun_before_a_restart_keeps_its_id_after_it() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let capture = capture();
+        assert_eq!(capture[2]["subtype"], "init");
+        assert_eq!(capture[12]["subtype"], "init");
+        for (index, message) in capture.iter().take(17).enumerate() {
+            let seq = index as u64 + 3;
+            sdk(&mut played.write, seq, message.clone()).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        let before = stored(&rig, &uid).len();
+        drop(played);
+        let (mut lines, mut write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 19 }));
+        for (index, message) in capture.iter().enumerate().take(22).skip(17) {
+            assert_ne!(message["subtype"], "init");
+            let seq = index as u64 + 3;
+            sdk(&mut write, seq, message.clone()).await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq }));
+        }
+        stop(&dir);
+        let continued = stored(&rig, &uid).split_off(before);
+        assert!(!continued.is_empty(), "the rest of the turn is filed");
+        for event in continued {
+            assert_eq!(event["turn_id"], capture[12]["uuid"], "{event}");
+        }
+    }
+
     /// **G5:** nothing tied to the person's account reaches the store through the link:
     /// an init carrying claude.ai connectors, a result with its login's expiry, and a
     /// rate-limit message, each acknowledged, the last filing nothing at all.
@@ -2283,7 +2742,8 @@ mod tests {
     /// zsh's login shell (`-lic`), as a zsh user's start runs it, with the host's
     /// stand-in claude: the recorded pid and birth are the host's own, it leads a session
     /// of its own, the start's outcome makes the run `live` with the initialize answer's
-    /// models kept, claude's init is filed as the run's first event (G8), and the host is
+    /// models kept and none of the claude.ai connectors' commands (G5, the initialize
+    /// column: the answer carries one, which the host leaves out), claude's init is filed as the run's first event (G8), and the host is
     /// still running after its 30 s no-start exit would have ended it (claude keeps
     /// running, so the host does). A start
     /// whose claude is missing is refused, naming it, and its run is `failed`. So is one
@@ -2303,7 +2763,31 @@ mod tests {
         rig.environment
             .insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (claude, models) = stand_in_claude(&rig, &host, "ready", serde_json::json!({}));
+        // The recorded initialize answer, with one made-up row of a claude.ai connector's
+        // command, as an account with connectors lists it.
+        let mut connected: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../fixtures/claude/initialize-api-key-2.1.319.jsonl"),
+            )
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+        )
+        .unwrap();
+        let recorded = connected["response"]["response"]["commands"].clone();
+        connected["response"]["response"]["commands"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name": "claude.ai Example:prompt (MCP)",
+                                     "description": "a connected service", "argumentHint": ""}));
+        let (claude, models) = stand_in_claude(
+            &rig,
+            &host,
+            "ready",
+            serde_json::json!({"init": connected.to_string()}),
+        );
         let session = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/claude/sdk-session-0.3.322.jsonl"),
@@ -2393,7 +2877,9 @@ mod tests {
         );
         let (lifecycle, initialize) = kept(&rig, &uid);
         assert_eq!(lifecycle, "live");
-        assert_eq!(initialize.unwrap()["models"], models);
+        let initialize = initialize.unwrap();
+        assert_eq!(initialize["models"], models);
+        let stored_commands = initialize["commands"].clone();
         let record = read_host_file(&run_dir(&rig.root, &uid).join("host.json")).unwrap();
         let pid = record.host_pid;
         let stored: (i32, i64, i64) = rusqlite::Connection::open(rig.root.join("events.db"))
@@ -2430,6 +2916,10 @@ mod tests {
         // which holds the host and its stand-in claude.
         unsafe { libc::kill(-pid, libc::SIGTERM) };
         // Checked once the host is stopped, so a failing check leaves no host behind.
+        assert_eq!(
+            stored_commands, recorded,
+            "the stored commands are the recorded ones, the connector's left out"
+        );
         assert_eq!(filed.len(), 1, "claude's init is the run's one event");
         assert_eq!(filed[0]["kind"], "session_start");
         assert_eq!(filed[0]["source"], "sdk");
