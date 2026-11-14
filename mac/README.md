@@ -1141,8 +1141,9 @@ exits. A host gone meanwhile is the liveness tick's, as above. A starting run wh
 before it recorded the run's host becomes `failed`.
 An app's message to a live run (`send_text`) goes into claude's input through the run's
 host, as one more message from the person; the person's words, the start's prompt
-included, are filed once the host has taken them, and Claude folds a message sent mid-turn
-into that turn or runs it next. A retry with the same request id is answered from its
+included, are filed once the host has taken them. A message sent while one of Claude's
+tools is running reaches Claude with that tool's result; one sent at any other time in a
+turn runs as Claude's next turn. A retry with the same request id is answered from its
 first send, so nothing is sent twice.
 For such a run the model and effort sheets are refused ("Changing the model isn't
 available for this session yet.", and the same for the effort), and so are `/status`,
@@ -1154,7 +1155,8 @@ a request claude stops waiting on (End run, or claude's end) closes with nobody 
 answered. A card stays answerable across a ccd restart, and an answer sent just before one
 is never sent twice: the host's replay says whether it reached claude. A request whose card
 would be too large for an app to show is refused at once, and claude is told why. Claude's
-questions are not cards yet: claude is told so and asks in its reply instead.
+questions are not cards yet: claude is told so and asks in its reply instead. A shell command
+that only reads raises no card: claude runs it without asking, as it does when run directly.
 An app ends a live run with `stop_run`: the run becomes `stopping` and its host, if its link
 is attached, is sent `stop`, which interrupts claude, ends its input and closes the query;
 claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
@@ -1702,7 +1704,15 @@ fails the suite instead of failing silently in production.
 * **A permission request too large to show is refused.** In a session started from an
   app, a request whose details are too large for the app to show (a very large file
   write, for example) is refused at once rather than approved unseen. Claude is told
-  why, the call shows as refused in the timeline, and the session goes on.
+  why and the session goes on. A call in the main conversation shows as refused in the
+  timeline; a subagent's calls are not shown there, so its refusal is not either.
+* **An approval tapped in the first moment after ccd restarts may not stick.** While
+  ccd catches up with a session started from an app, which takes a fraction of a
+  second, an answer to one of its approval cards may reach Claude without being
+  recorded. The app then says the answer could not be confirmed and the card stays
+  open until the session ends. In that same moment, denying a subagent's request
+  also stops Claude's main reply. Nothing is ever allowed that the person did not
+  allow.
 * **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
   repaints the session from tmux's record of it, and tmux does not track kitty
   keyboard flags or focus reporting: an agent that turned them on when it started

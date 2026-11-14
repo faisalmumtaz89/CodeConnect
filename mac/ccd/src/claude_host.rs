@@ -4270,10 +4270,11 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **B6 G5: cards across a restart.** A card open when ccd stopped is answerable
-    /// again once its host re-attaches; one whose request came from a subagent still does
-    /// not end the main turn when denied. An answer claimed and never sent is released by
-    /// the host's `state`, which still holds its request, so the card is answerable.
+    /// **B6 G5: cards across a restart.** A card open when ccd stopped is still held for
+    /// the apps, and answerable again once its host re-attaches; one whose request came
+    /// from a subagent still does not end the main turn when denied. An answer claimed and
+    /// never sent is released by the host's `state`, which still holds its request, so the
+    /// card is answerable.
     #[tokio::test]
     async fn a_card_open_across_a_restart_is_answered_once_after_it() {
         let rig = rig();
@@ -4312,7 +4313,26 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
-        assert_eq!(cards(&restarted, &uid).await.1.len(), 2);
+        // Still held for the apps, which offer an answer only on a held card
+        // (DecisionCard.swift): no hold was ended across the restart.
+        let mut holds: Vec<_> = summary(&restarted, &uid)
+            .await
+            .pending
+            .into_iter()
+            .map(|card| (card.request_id, card.hold))
+            .collect();
+        holds.sort_by(|a, b| a.0.cmp(&b.0));
+        let held = Some(protocol::ws::QuestionHold::Held);
+        assert_eq!(
+            holds,
+            [
+                ("toolu_open".to_string(), held),
+                ("toolu_sub".to_string(), held)
+            ]
+        );
+        assert!(!stored(&rig, &uid)
+            .iter()
+            .any(|event| event["kind"] == "question_hold"));
         let (result, (_, decision)) = tokio::join!(
             app_answers(&restarted, &uid, "toolu_open", AnswerDecision::Allow),
             host_settles(&mut lines, &mut write, 6, "done")

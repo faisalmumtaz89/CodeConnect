@@ -313,7 +313,7 @@ test("claude's permission request reaches ccd once, with its tool, input and the
   expect(state.pending.map((request: any) => request.tool_use_id)).toStrictEqual(['toolu_p1']);
 }, 10_000);
 
-test("an allow reaches claude's input with the request's input, and only then is it answered done", async () => {
+test("an allow reaches claude's input with the request's input, and is answered done", async () => {
   const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_a1')] });
   await ccd.line('the permission', (line) => line.type === 'permission');
   ccd.send({ type: 'answer', uuid: 'c-allow', tool_use_id: 'toolu_a1', decision: { behavior: 'allow' } });
@@ -326,13 +326,18 @@ test("an allow reaches claude's input with the request's input, and only then is
   expect(state.pending).toStrictEqual([]);
 }, 10_000);
 
-test('a deny reaches claude with its message and whether it interrupts', async () => {
-  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_d1')] });
-  await ccd.line('the permission', (line) => line.type === 'permission');
+test('a deny reaches claude with its message, and interrupts only when ccd says so', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_d1'), ask('toolu_d2')] });
+  for (const id of ['toolu_d1', 'toolu_d2']) await ccd.line(`the permission ${id}`, (line) => line.type === 'permission' && line.request.tool_use_id === id);
   ccd.send({ type: 'answer', uuid: 'c-deny', tool_use_id: 'toolu_d1', decision: { behavior: 'deny', message: 'not that', interrupt: true } });
-  expect((await ccd.line('the deny answered', (line) => line.type === 'outcome' && line.uuid === 'c-deny')).status).toBe('done');
-  await waitFor('claude to read the deny', () => answersRead(stub(), 'req-toolu_d1').length === 1);
+  // A subagent's deny, or one with the person's reason: ccd sends no `interrupt`.
+  ccd.send({ type: 'answer', uuid: 'c-deny-on', tool_use_id: 'toolu_d2', decision: { behavior: 'deny', message: 'not this one' } });
+  for (const uuid of ['c-deny', 'c-deny-on']) {
+    expect((await ccd.line(`${uuid} answered`, (line) => line.type === 'outcome' && line.uuid === uuid)).status).toBe('done');
+  }
+  await waitFor('claude to read both denies', () => answersRead(stub(), 'req-toolu_d1').length === 1 && answersRead(stub(), 'req-toolu_d2').length === 1);
   expect(answersRead(stub(), 'req-toolu_d1')[0].response.response).toMatchObject({ behavior: 'deny', message: 'not that', interrupt: true });
+  expect(answersRead(stub(), 'req-toolu_d2')[0].response.response).toMatchObject({ behavior: 'deny', message: 'not this one', interrupt: false });
 }, 10_000);
 
 test('an answer to a request that is not open is refused, and nothing reaches claude', async () => {
