@@ -297,6 +297,18 @@ where
             )
             .await?
         }
+        // Not advertised (`stop_run` is false): answered as a daemon below minor 35
+        // answers it.
+        ClientMessage::StopRun { .. } => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    code: "bad_request".into(),
+                    message: "the demo daemon does not end runs".into(),
+                },
+            )
+            .await?
+        }
         ClientMessage::Sessions => {
             send(
                 sink,
@@ -553,6 +565,7 @@ fn capabilities() -> Capabilities {
         start_worktree: false,
         browse_folders: false,
         machine_stats: false,
+        stop_run: false,
     }
 }
 

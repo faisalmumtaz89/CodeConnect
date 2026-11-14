@@ -200,6 +200,7 @@ fn lifecycle_word(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
         Lifecycle::Starting => "starting",
         Lifecycle::Live => "live",
+        Lifecycle::Stopping => "stopping",
         Lifecycle::Exited => "exited",
         Lifecycle::Failed => "failed",
         Lifecycle::Unknown => "unknown",

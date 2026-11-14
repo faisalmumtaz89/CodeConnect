@@ -112,6 +112,30 @@ struct StartingSessionView: View {
                     }
                     .padding(.leading, TimelineSpine.content)
                 }
+                // While the computer has not answered, the reader can stop this
+                // phone resending the start — so a start whose computer went
+                // quiet is not left resending with no way out, and is not the
+                // one New reopens. It says only what it did: the computer may
+                // already have started it.
+                if start.outcome == nil, !start.retryStopped {
+                    VStack(alignment: .leading, spacing: CC.space.xs) {
+                        CCButton(
+                            "Stop retrying", icon: "x-circle", variant: .ghost, size: .md,
+                            fullWidth: true, haptic: nil
+                        ) {
+                            model.starter.stopRetrying(start.requestID)
+                            dismiss()
+                        }
+                        .accessibilityIdentifier("start-stop-retrying")
+                        Text(
+                            "No more sends from this \(HostDevice.current.noun); \(start.machineName) may already have started it."
+                        )
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, TimelineSpine.content)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, CC.space.md)

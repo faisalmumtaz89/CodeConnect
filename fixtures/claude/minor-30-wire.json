@@ -96,6 +96,7 @@
     "slash_composer_recovery": true,
     "start_session": true,
     "start_worktree": true,
+    "stop_run": true,
     "terminal_pty": true,
     "test_push": false,
     "tls": false,

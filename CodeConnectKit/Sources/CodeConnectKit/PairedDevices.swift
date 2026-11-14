@@ -60,7 +60,8 @@ public struct DeviceGroup: Hashable, Sendable, Identifiable {
     public var lastSeen: Date? { devices.compactMap { $0.lastSeenAt.flatMap(ISO8601.parse) }.max() }
     public var blockedAt: Date? { devices.compactMap { $0.revokedAt.flatMap(ISO8601.parse) }.max() }
 
-    /// The allowed groups, then the blocked ones, each most recently seen first.
+    /// The allowed groups, then the blocked ones, each in the order it was paired, oldest first: a device that keeps
+    /// reaching the computer moves its last-seen time, not its place in the list.
     public static func groups(_ devices: [PairedDevice]) -> (allowed: [DeviceGroup], blocked: [DeviceGroup]) {
         func grouped(_ devices: [PairedDevice]) -> [DeviceGroup] {
             var order: [String] = []
@@ -73,13 +74,18 @@ public struct DeviceGroup: Hashable, Sendable, Identifiable {
             return order.map { key in
                 DeviceGroup(devices: members[key]!.sorted { seen($0) > seen($1) })
             }
-            .sorted { ($0.lastSeen ?? .distantPast) > ($1.lastSeen ?? .distantPast) }
+            .sorted { paired($0) < paired($1) }
         }
         return (grouped(devices.filter { !$0.isBlocked }), grouped(devices.filter(\.isBlocked)))
     }
 
     private static func seen(_ device: PairedDevice) -> Date {
         device.lastSeenAt.flatMap(ISO8601.parse) ?? .distantPast
+    }
+
+    /// When the group's first pairing was made.
+    private static func paired(_ group: DeviceGroup) -> Date {
+        group.devices.compactMap { ISO8601.parse($0.createdAt) }.min() ?? .distantPast
     }
 
     // MARK: Words

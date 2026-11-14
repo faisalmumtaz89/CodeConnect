@@ -1288,8 +1288,12 @@ public final class AppModel {
     /// One send of one start. A send that fails, or a link that drops before
     /// the answer, is sent again by the next handshake under the same id.
     private func sendStart(_ requestID: String) {
-        guard let start = starter.starts[requestID], start.outcome == nil else { return }
         Task {
+            // The one send-eligibility check, where the send happens. A start
+            // answered or retry-stopped between this being scheduled and here is
+            // not sent — the first send and every reconnect resend alike.
+            guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped
+            else { return }
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
@@ -2229,7 +2233,7 @@ public final class AppModel {
             }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()
-        case .interruptResult, .composeResult:
+        case .interruptResult, .stopRunResult, .composeResult:
             // Awaited by the control that asked, correlated on the request id it
             // minted. Nothing here may act on one: a stop or a message is a
             // mutation somebody pressed, and its outcome belongs to that press.
@@ -3049,7 +3053,17 @@ public final class AppModel {
     private static func composeUnavailable(_ summary: SessionSummary, profile: DaemonProfile)
         -> String?
     {
-        CodexProse.composeUnavailable(
+        // While a card waits on a Codex run, a message must not be sent: it would
+        // steer the turn the card's answer then aborts, and the words would be
+        // lost with no row (R2T3-F1). The draft is kept; the reader answers the
+        // card first. Keyed on `summary.pending`, which names an open card even
+        // before its body is built, so the brief window where the built cards are
+        // empty does not let the lossy send through. Codex-only — Claude's typed
+        // text is not a steer, and its sends in this state keep their words.
+        if summary.isCodex, !summary.pending.isEmpty {
+            return "Answer the card first. Your draft will stay here."
+        }
+        return CodexProse.composeUnavailable(
             agent: summary.agent,
             daemonUnderstandsCompose: profile.composesToCodex,
             link: summary.codexLink)
@@ -3139,6 +3153,12 @@ public final class AppModel {
             controls.composeNotSent("This run is not in the fleet.")
             return nil
         }
+        // A card may have arrived and not yet been built into the shown state
+        // (ingest coalesces rebuilds), so rebuild before the send gate — the same
+        // re-check the approval-answer path does (`resolution(of:)`) — and
+        // `composeBlocked` reads `summary.pending`, which already names a card
+        // whose body has not loaded. One re-check on submit, no third guard.
+        states[key]?.rebuildNow()
         if let blocked = composeBlocked(for: key) {
             controls.composeNotSent(blocked)
             return nil

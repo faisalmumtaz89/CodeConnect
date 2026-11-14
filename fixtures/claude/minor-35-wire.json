@@ -1,0 +1,84 @@
+{
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "machine_stats": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "stop_run": true,
+    "terminal_pty": true,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "sessions": {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-11-14T07:00:00.000Z",
+        "cwd": "/tmp/ccd-minor-35/app",
+        "last_seq": 12,
+        "lifecycle": "stopping",
+        "link": "attached",
+        "project_label": "app",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-14T08:00:00.000Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  "stop_run_already_ended": {
+    "request_id": "stop-1",
+    "result": {
+      "status": "already_ended"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "stop_run_result"
+  },
+  "stop_run_refused": {
+    "request_id": "stop-1",
+    "result": {
+      "reason": "There is no such session on this computer.",
+      "status": "refused"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "stop_run_result"
+  },
+  "stop_run_request": {
+    "request_id": "stop-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "stop_run"
+  },
+  "stop_run_stopping": {
+    "request_id": "stop-1",
+    "result": {
+      "status": "stopping"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "stop_run_result"
+  }
+}

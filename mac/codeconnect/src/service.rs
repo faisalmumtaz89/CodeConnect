@@ -33,7 +33,8 @@
 //! after a clean exit, gives it an absolute program and `PATH`, and appends to the
 //! same two log files. Stopping it ends ccd alone (`KillMode=process`), as
 //! launchd ends only the job's own process group, so the helpers ccd starts to
-//! outlive it are left running. The unit sets `CODECONNECT_SERVICE` to the label,
+//! outlive it are left running; `uninstall` first asks ccd to end each Claude run whose
+//! agent host still runs, on both. The unit sets `CODECONNECT_SERVICE` to the label,
 //! which is how ccd knows this unit runs it.
 
 use std::collections::BTreeSet;
@@ -135,7 +136,7 @@ codeconnect daemon — the ccd LaunchAgent
   codeconnect daemon status                    plist, launchd job and live daemon
   codeconnect daemon restart                   restart the managed daemon
   codeconnect daemon folders                   let it open Desktop, Documents, Downloads
-  codeconnect daemon uninstall                 stop it and remove the LaunchAgent
+  codeconnect daemon uninstall                 end its Claude runs, stop it and remove the LaunchAgent
 
 Installing stops whatever ccd is running — its own job included, because the
 plist cannot be replaced under a live one. Sessions survive it: they live in
@@ -154,7 +155,7 @@ codeconnect daemon — the ccd systemd user unit
   codeconnect daemon install [--no-takeover]   write the unit and start it
   codeconnect daemon status                    unit, its state and live daemon
   codeconnect daemon restart                   restart the managed daemon
-  codeconnect daemon uninstall                 stop it and remove the unit
+  codeconnect daemon uninstall                 end its Claude runs, stop it and remove the unit
 
 Installing stops whatever ccd is running — its own unit's included, so the new
 definition is the one that runs. Sessions survive it: they live in tmux and
@@ -268,6 +269,79 @@ fn install(args: &[String]) -> Result<()> {
     }
 }
 
+/// How long `daemon uninstall` waits for ccd's answer to [`ClientFrame::StopHostedRuns`],
+/// which comes within 20 s, once each agent host has exited.
+const STOP_HOSTS_WITHIN: Duration = Duration::from_secs(25);
+
+/// `daemon uninstall`'s first step, before ccd goes: ask the daemon at `socket` to end
+/// every Claude run whose agent host still runs ([`ClientFrame::StopHostedRuns`]). A host
+/// outlives ccd by design, so one left would run on with no daemon. What to tell the
+/// person. When ccd cannot be asked, or its answer does not come, the agent hosts still
+/// running among the runs under `root` are named by pid, so the person can end them.
+fn stop_hosted_runs(socket: &Path, root: &Path) -> String {
+    let answer = match crate::daemon::DaemonLink::connect(socket, STOP_HOSTS_WITHIN) {
+        Ok(mut link) => link.request(&ClientFrame::StopHostedRuns),
+        Err(_) => {
+            return format!(
+                "ccd is not running, so the agent hosts it started were not stopped{}",
+                hosts_running(root)
+            )
+        }
+    };
+    match answer {
+        Ok(DaemonFrame::HostedRunsStopped { stopped, left }) if left.is_empty() => {
+            format!("ended {stopped} Claude run(s) and their agent hosts")
+        }
+        Ok(DaemonFrame::HostedRunsStopped { stopped, left }) => format!(
+            "ended {stopped} Claude run(s); agent hosts still running, pids {}: end them with \
+             `kill <pid>`",
+            left.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Ok(other) => format!(
+            "could not confirm the agent hosts were stopped (ccd answered {other:?}){}",
+            hosts_running(root)
+        ),
+        Err(err) => format!(
+            "could not confirm the agent hosts were stopped ({err:#}){}",
+            hosts_running(root)
+        ),
+    }
+}
+
+/// The agent hosts still running among the runs under `root`, each by the pid it wrote
+/// into its `host.json` and the name of the program that pid now runs: nothing when there
+/// are none, else "; agent hosts still running, pids …".
+fn hosts_running(root: &Path) -> String {
+    let pids: Vec<String> = std::fs::read_dir(root.join("runs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|run| {
+            let record = std::fs::read(run.path().join("host.json")).ok()?;
+            serde_json::from_slice::<protocol::host::HostFile>(&record).ok()
+        })
+        .filter(|record| {
+            crate::codex_host::child_image(record.host_pid).is_some_and(|image| {
+                image
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("cc-agent-host"))
+            })
+        })
+        .map(|record| record.host_pid.to_string())
+        .collect();
+    if pids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; agent hosts still running, pids {}: end them with `kill <pid>`",
+            pids.join(", ")
+        )
+    }
+}
+
 fn uninstall() -> Result<()> {
     // With no systemd manager there is no unit to remove, and a daemon started by
     // hand is not this command's to stop. A unit file present means a manager this
@@ -281,6 +355,10 @@ fn uninstall() -> Result<()> {
              shows its pid."
         );
     }
+    println!(
+        "{}",
+        stop_hosted_runs(&protocol::socket_path(), &protocol::root_dir())
+    );
     let plist = definition_path();
     stop_for_removal(&plist)?;
 
@@ -1396,6 +1474,102 @@ fn unit_specifiers(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder of this test's own, under the temporary folder.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cc-uninstall-{tag}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// **B7 G7 (b): uninstall's first step asks ccd to end the hosted runs** on the socket
+    /// it is given, and says what ccd answered.
+    #[test]
+    fn uninstall_first_asks_ccd_to_end_the_hosted_runs() {
+        use std::io::{BufRead, Write};
+        let dir = scratch("asked");
+        let socket = dir.join("ccd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // The stand-in ccd: the one line it is sent, or nothing if none comes within 5 s.
+        let daemon = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(5);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(_) if Instant::now() < until => {
+                        std::thread::sleep(Duration::from_millis(20))
+                    }
+                    Err(_) => return String::new(),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            let mut out = stream.try_clone().unwrap();
+            let mut line = String::new();
+            let _ = std::io::BufReader::new(stream).read_line(&mut line);
+            let answer = DaemonFrame::HostedRunsStopped {
+                stopped: 2,
+                left: vec![4242],
+            };
+            let _ = writeln!(out, "{}", serde_json::to_string(&answer).unwrap());
+            line
+        });
+        let said = stop_hosted_runs(&socket, &dir);
+        let asked = daemon.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(
+                serde_json::from_str::<ClientFrame>(asked.trim()),
+                Ok(ClientFrame::StopHostedRuns)
+            ),
+            "ccd was asked {asked:?}"
+        );
+        assert_eq!(
+            said,
+            "ended 2 Claude run(s); agent hosts still running, pids 4242: end them with \
+             `kill <pid>`"
+        );
+    }
+
+    /// **With no ccd to ask,** uninstall names the agent hosts still running among the
+    /// runs, by pid: a live process running a program named `cc-agent-host`, and neither
+    /// another live process nor a pid no process has.
+    #[test]
+    fn with_ccd_down_uninstall_names_the_agent_hosts_still_running() {
+        let dir = scratch("down");
+        let host_program = dir.join("cc-agent-host");
+        std::fs::copy("/bin/sleep", &host_program).unwrap();
+        let mut host = Command::new(&host_program).arg("60").spawn().unwrap();
+        let mut other = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        for (run, pid) in [
+            ("a", host.id() as i32),
+            ("b", other.id() as i32),
+            ("c", i32::MAX),
+        ] {
+            let folder = dir.join("runs").join(run);
+            std::fs::create_dir_all(&folder).unwrap();
+            let record = serde_json::json!({"protocol_version": 1, "host_pid": pid});
+            std::fs::write(folder.join("host.json"), record.to_string()).unwrap();
+        }
+        let said = stop_hosted_runs(&dir.join("no-ccd.sock"), &dir);
+        let host_pid = host.id();
+        for child in [&mut host, &mut other] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            said,
+            format!(
+                "ccd is not running, so the agent hosts it started were not stopped; agent \
+                 hosts still running, pids {host_pid}: end them with `kill <pid>`"
+            )
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

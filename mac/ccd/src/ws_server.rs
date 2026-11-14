@@ -1196,7 +1196,23 @@ where
         // A second hello does not re-authenticate, and there is nothing else for
         // it to do.
         ClientMessage::Hello { .. } => {}
-        ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
+        ClientMessage::Ping => {
+            send(sink, &ServerMessage::Pong).await?;
+            // Each ping is the device reaching this computer. The apps send one every ten
+            // seconds, so the Mac's list of devices reads a connected one as seen seconds
+            // ago, not as "Connected". Spawned, so the answer above never waits for the
+            // store.
+            if let Some(device_id) = device_id {
+                let daemon = Arc::clone(daemon);
+                let device_id = device_id.to_string();
+                tokio::spawn(async move {
+                    let _ = daemon
+                        .db
+                        .touch_device(device_id, protocol::time::now_rfc3339())
+                        .await;
+                });
+            }
+        }
         // Answered off the loop by `handle_client`, which never passes them here.
         ClientMessage::ListProjects
         | ClientMessage::GetProjectGit { .. }
@@ -1335,6 +1351,21 @@ where
                 limit.min(protocol::ws::MAX_HISTORY_PAGE),
                 request_id,
             ));
+        }
+        ClientMessage::StopRun {
+            session_id,
+            request_id,
+        } => {
+            let result = daemon.stop_run(&session_id).await;
+            send(
+                sink,
+                &ServerMessage::StopRunResult {
+                    session_id,
+                    request_id,
+                    result,
+                },
+            )
+            .await?;
         }
         ClientMessage::DeleteSession { session_uid } => {
             // **By uid, never by name.** `resolve` accepts a tmux name and maps it
@@ -3222,6 +3253,7 @@ fn capabilities(
         start_worktree: paired,
         browse_folders: paired,
         machine_stats: true,
+        stop_run: true,
     }
 }
 
@@ -4480,6 +4512,111 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].device_id, device);
         assert_eq!(stored[0].token, A_TOKEN);
+    }
+
+    /// The device's `last_seen_at`, as `codeconnect devices` and the Mac's Settings ›
+    /// Devices read it.
+    fn last_seen(store: &crate::store::Store, device: &str) -> Option<String> {
+        store
+            .list_devices()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.device_id == device)
+            .and_then(|row| row.last_seen_at)
+    }
+
+    /// The device's `last_seen_at` once it is later than `after`, waiting up to two
+    /// seconds; the last value read when it never is.
+    async fn last_seen_after(
+        store: &crate::store::Store,
+        device: &str,
+        after: &str,
+    ) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let seen = last_seen(store, device);
+            if seen.as_deref().is_some_and(|seen| seen > after)
+                || tokio::time::Instant::now() >= deadline
+            {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// **A connected device is seen at each ping, not only at its hello.** The apps
+    /// ping every ten seconds, and each ping is the device reaching this computer,
+    /// so its `last_seen_at`, which Settings › Devices shows as "Last seen … ago",
+    /// moves with them instead of growing from the hello for as long as the
+    /// connection lasts.
+    #[tokio::test]
+    async fn a_connected_device_is_seen_at_each_ping_and_not_only_at_its_hello() {
+        let (server, device) = live_server(protocol::config::Config::default()).await;
+        let (mut socket, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        let at_hello = last_seen(&server.store, &device).expect("the hello stamps the device");
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        socket
+            .send(Message::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut socket).await.expect("the ping is answered")["type"],
+            "pong"
+        );
+        let seen = last_seen_after(&server.store, &device, &at_hello).await;
+        assert!(
+            seen.as_deref().is_some_and(|seen| seen > at_hello.as_str()),
+            "a ping is the device reaching this computer: still {seen:?}, the hello's {at_hello}"
+        );
+    }
+
+    /// **A ping is answered while the store's writer is held.** The ping's touch waits
+    /// for the writer; its answer does not, because the Kit judges a link by its
+    /// answers and drops one silent for thirty seconds. Held here from a plain thread,
+    /// the writer delays only the touch, which lands once the writer is free.
+    #[tokio::test]
+    async fn a_ping_is_answered_while_the_stores_writer_is_held() {
+        let (server, device) = live_server(protocol::config::Config::default()).await;
+        let (mut socket, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        let at_hello = last_seen(&server.store, &device).expect("the hello stamps the device");
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let store = Arc::clone(&server.store);
+            std::thread::spawn(move || {
+                let _writer = store.hold_writer();
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            })
+        };
+        held_rx.recv().unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        socket
+            .send(Message::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        let answer = next_json_within(&mut socket, Duration::from_secs(2)).await;
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert_eq!(
+            answer.as_ref().map(|reply| reply["type"].clone()),
+            Some(serde_json::json!("pong")),
+            "the ping's answer waited for the store's writer: {answer:?}"
+        );
+        let seen = last_seen_after(&server.store, &device, &at_hello).await;
+        assert!(
+            seen.as_deref().is_some_and(|seen| seen > at_hello.as_str()),
+            "the touch lands once the writer is free: still {seen:?}, the hello's {at_hello}"
+        );
     }
 
     /// **A direct daemon accepts the registration an older phone sends** — that
@@ -9278,6 +9415,95 @@ mod tests {
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// **Ending a run, as a minor-35 daemon sends it, emitted by this build.** The
+    /// phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_35_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-35-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_35_wire().await,
+            committed,
+            "the committed minor-35 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_35_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-35-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_35_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_35_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-35-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The capabilities a paired phone is offered over a live socket, with `stop_run`;
+    /// the `stop_run` request and its three answers, the refusal as the daemon words an
+    /// unknown run; and a session list holding a run that is `stopping`.
+    async fn derived_minor_35_wire() -> serde_json::Value {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (_phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let answer = |result| {
+            serde_json::to_value(ServerMessage::StopRunResult {
+                session_id: uid.into(),
+                request_id: "stop-1".into(),
+                result,
+            })
+            .unwrap()
+        };
+        let stopping = protocol::event::SessionSummary {
+            session_uid: uid.into(),
+            session_id: uid.into(),
+            tmux_session: String::new(),
+            cwd: "/tmp/ccd-minor-35/app".into(),
+            lifecycle: protocol::event::Lifecycle::Stopping,
+            link: protocol::event::Link::Attached,
+            claude_session_id: None,
+            transcript_path: None,
+            last_seq: 12,
+            created_at: "2026-11-14T07:00:00.000Z".into(),
+            updated_at: "2026-11-14T08:00:00.000Z".into(),
+            blocked_on: Vec::new(),
+            project_label: crate::project_label::project_label("/tmp/ccd-minor-35/app"),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_link: protocol::event::CodexLink::None,
+            pending: Vec::new(),
+            model: None,
+            permission_mode: None,
+            git_branch: None,
+            diff_stat: None,
+        };
+        serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "stop_run_request": serde_json::to_value(ClientMessage::StopRun {
+                session_id: uid.into(),
+                request_id: "stop-1".into(),
+            })
+            .unwrap(),
+            "stop_run_stopping": answer(protocol::ws::StopRunResult::Stopping),
+            "stop_run_already_ended": answer(protocol::ws::StopRunResult::AlreadyEnded),
+            "stop_run_refused": answer(server.daemon.stop_run(uid).await),
+            "sessions": serde_json::to_value(ServerMessage::Sessions {
+                sessions: vec![stopping],
+            })
+            .unwrap(),
+        })
     }
 
     /// The capabilities a paired phone is offered over a live socket, the

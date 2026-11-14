@@ -324,6 +324,7 @@ public final class DaemonConnection {
     /// Keyed by the phone's own `request_id`, not by session: the reply echoes
     /// it back, and a phone may hold a stop and a message in flight on one run.
     private var interruptWaiters: [String: [Waiter<InterruptResult>]] = [:]
+    private var stopRunWaiters: [String: [Waiter<StopRunResult>]] = [:]
     private var composeWaiters: [String: [Waiter<ComposeResult>]] = [:]
     /// Which session each in-flight mutation was sent for, so the echoed
     /// `session_id` on its result can be checked rather than trusted.
@@ -1152,6 +1153,23 @@ public final class DaemonConnection {
                 session: session, requestID: requestID, turnID: turnID, payloadHash: payloadHash))
     }
 
+    /// **End a Claude run CodeConnect started** (`stop_run`, minor 35). No frame leaves
+    /// unless the daemon advertised `stop_run`: an older one cannot answer it.
+    /// `session` is the run's `session_uid`.
+    public func stopRun(session: String, requestID: String) async throws -> StopRunResult {
+        guard capabilities?.endsRuns == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) has an older CodeConnect that cannot end a run. Update CodeConnect on it, then try again."
+            )
+        }
+        mutationSessions[requestID] = session
+        defer { mutationSessions.removeValue(forKey: requestID) }
+        return try await request(
+            key: requestID,
+            store: \.stopRunWaiters,
+            send: .stopRun(session: session, requestID: requestID))
+    }
+
     /// **Say something to a Codex session.**
     ///
     /// The strictest gate in the app, and the reason is not politeness: a
@@ -1300,6 +1318,10 @@ public final class DaemonConnection {
         interruptWaiters = [:]
         for queue in interrupts.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
+        let stops = stopRunWaiters
+        stopRunWaiters = [:]
+        for queue in stops.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
         let composes = composeWaiters
         composeWaiters = [:]
         for queue in composes.values { for w in queue { w.continuation?.resume(throwing: error) } }
@@ -1410,6 +1432,10 @@ public final class DaemonConnection {
             guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "interrupt")
             else { break }
             deliver(store: \.interruptWaiters, key: requestID, value: result)
+        case .stopRunResult(let sessionID, let requestID, let result):
+            guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "stop")
+            else { break }
+            deliver(store: \.stopRunWaiters, key: requestID, value: result)
         case .composeResult(let sessionID, let requestID, let result):
             guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "compose")
             else { break }

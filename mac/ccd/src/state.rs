@@ -467,9 +467,9 @@ struct Inner {
     /// instead of evicting the first's supervisor.
     supervisors: HashMap<String, SupervisorHandle>,
     /// Hosted Claude runs whose agent host this daemon is attached to now, by
-    /// `session_uid` ([`crate::claude_host`]): what makes such a run's link read
-    /// attached, since it has no supervisor.
-    host_links: HashSet<String>,
+    /// `session_uid` ([`crate::claude_host`]), each with its link's way to send the host a
+    /// command: what makes such a run's link read attached, since it has no supervisor.
+    host_links: HashMap<String, tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -5540,8 +5540,8 @@ impl Daemon {
         {
             Ok(Some(crate::store::AnswerStatus::Settled(outcome))) => {
                 // **Branch on what the ledger recorded, not on the fact that it is
-                // terminal.** `lost` is the record that this phone's answer reached
-                // nothing; replaying it as "answered from a phone" tells the operator the
+                // terminal.** `lost` is the record that the earlier answer reached
+                // nothing; replaying it as "already answered" tells the operator the
                 // opposite of what happened, at the moment they are asking.
                 return AnswerResult::Rejected {
                     reason: crate::store::replayed_answer_sentence(&outcome),
@@ -9758,13 +9758,98 @@ impl Daemon {
         ))
     }
 
-    /// The run `session_uid`'s agent host is attached ([`crate::claude_host`]).
-    pub(crate) async fn host_link_attached(&self, session_uid: &str) {
+    /// The run `session_uid`'s agent host is attached ([`crate::claude_host`]), and
+    /// `commands` reaches it.
+    pub(crate) async fn host_link_attached(
+        &self,
+        session_uid: &str,
+        commands: tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>,
+    ) {
         self.inner
             .lock()
             .await
             .host_links
-            .insert(session_uid.to_string());
+            .insert(session_uid.to_string(), commands);
+    }
+
+    /// Send the run `session_uid`'s agent host `command` through its link. Whether a link
+    /// was attached to take it.
+    pub(crate) async fn send_to_host(
+        &self,
+        session_uid: &str,
+        command: protocol::host::ToHost,
+    ) -> bool {
+        match self.inner.lock().await.host_links.get(session_uid) {
+            Some(link) => link.send(command).is_ok(),
+            None => false,
+        }
+    }
+
+    /// [`ClientMessage::StopRun`](protocol::ws::ClientMessage::StopRun): end a Claude run
+    /// CodeConnect started ([`crate::claude_host::stop_run`]).
+    pub async fn stop_run(self: &Arc<Self>, session_ref: &str) -> protocol::ws::StopRunResult {
+        let refuse = |reason: &str| protocol::ws::StopRunResult::Refused {
+            reason: reason.to_string(),
+        };
+        let row = match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refuse("There is no such session on this computer."),
+            Err(err) => {
+                crate::log_error!(
+                    "stop for {}: session lookup failed: {err:#}",
+                    logged_session_ref(session_ref)
+                );
+                return refuse("This computer could not read its sessions.");
+            }
+        };
+        if row.agent != protocol::agent::AgentKind::Claude {
+            return refuse("Only a Claude run CodeConnect started can be ended from here.");
+        }
+        crate::claude_host::stop_run(self, &row.session_uid).await
+    }
+
+    /// [`ClientFrame::StopHostedRuns`](protocol::ipc::ClientFrame::StopHostedRuns), for
+    /// `codeconnect daemon uninstall`: every hosted Claude run whose host is alive is
+    /// stopped as [`Self::stop_run`] stops one, read again on each pass so a run that
+    /// turns live meanwhile is stopped too, until no host but a starting run's is left,
+    /// or `within` has passed. What it stopped, and the pids of the hosts still running.
+    pub async fn stop_hosted_runs(self: &Arc<Self>, within: Duration) -> (usize, Vec<u32>) {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut stopped = HashSet::new();
+        loop {
+            let alive: Vec<_> = match self.db.recorded_hosts().await {
+                Ok(recorded) => recorded
+                    .into_iter()
+                    .filter(|watch| {
+                        protocol::proc_identity::liveness(&watch.host)
+                            == protocol::proc_identity::Liveness::Alive
+                    })
+                    .collect(),
+                Err(err) => {
+                    crate::log_error!("could not read the hosted runs to stop them: {err:#}");
+                    Vec::new()
+                }
+            };
+            for watch in &alive {
+                if watch.lifecycle == Lifecycle::Live
+                    && crate::claude_host::stop_run(self, &watch.session_uid).await
+                        == protocol::ws::StopRunResult::Stopping
+                {
+                    stopped.insert(watch.session_uid.clone());
+                }
+            }
+            let waiting = alive
+                .iter()
+                .any(|watch| watch.lifecycle != Lifecycle::Starting);
+            if !waiting || tokio::time::Instant::now() >= deadline {
+                let left = alive
+                    .iter()
+                    .filter_map(|watch| u32::try_from(watch.host.pid).ok())
+                    .collect();
+                return (stopped.len(), left);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// H7 for a run whose link has ended: each hosted run that has not ended and whose host
@@ -9780,7 +9865,8 @@ impl Daemon {
                 return;
             }
         };
-        let attached = self.inner.lock().await.host_links.clone();
+        let attached: HashSet<String> =
+            self.inner.lock().await.host_links.keys().cloned().collect();
         for watch in watched {
             if attached.contains(&watch.session_uid) {
                 continue;
@@ -9797,8 +9883,10 @@ impl Daemon {
     /// hosted Claude run whose recorded host is alive, whatever its lifecycle, is attached again
     /// from its cursor ([`crate::claude_host::attach_run`]), each in a task of its own, its
     /// runs' folders in `root`: a run going on gets the rest of its messages, and a host
-    /// whose run has ended is drained, so it can exit. A host gone is the liveness
-    /// watch's ([`Self::watch_hosted_runs`]). Last, every Codex run still `starting` becomes
+    /// whose run has ended is drained, so it can exit. A run stopping is sent `stop` again
+    /// and its escalation starts again ([`crate::claude_host::escalate_stop`]), so a host
+    /// that cannot answer is still stopped. A host gone is the liveness watch's
+    /// ([`Self::watch_hosted_runs`]). Last, every Codex run still `starting` becomes
     /// `failed`, whatever became of its start, and each recorded app-server's group gets the
     /// ladder under its warrant, each in a task of its own: a start is never sent again.
     pub async fn recover_hosted_runs(self: &Arc<Self>, root: &std::path::Path) {
@@ -9821,6 +9909,12 @@ impl Daemon {
                 != protocol::proc_identity::Liveness::Alive
             {
                 continue;
+            }
+            if watch.lifecycle == Lifecycle::Stopping {
+                tokio::spawn(crate::claude_host::escalate_stop(
+                    Arc::clone(self),
+                    watch.session_uid.clone(),
+                ));
             }
             tokio::spawn(crate::claude_host::attach_run(
                 Arc::clone(self),
@@ -9870,7 +9964,7 @@ impl Daemon {
             // Positive liveness only: silence is `stale`, never `idle`. A hosted run's
             // link is its connection to its agent host, which is there or not.
             let link = match (attached, last_seen) {
-                _ if inner.host_links.contains(&row.session_uid) => Link::Attached,
+                _ if inner.host_links.contains_key(&row.session_uid) => Link::Attached,
                 (false, _) => Link::Detached,
                 (true, Some(ms)) if now - ms > config.stale_after_ms as i64 => Link::Stale,
                 (true, Some(_)) => Link::Attached,
@@ -27182,6 +27276,26 @@ mod tests {
         );
     }
 
+    /// **B7 G4: `stop_run` ends only a Claude run CodeConnect started.** A Codex run is
+    /// refused as a Codex run, and left as it was.
+    #[tokio::test]
+    async fn a_codex_run_is_not_ended_by_stop_run() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &uid, "cc-1").await;
+        let before = daemon.store.get_session(&uid).unwrap().unwrap().lifecycle;
+        assert_eq!(
+            daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Refused {
+                reason: "Only a Claude run CodeConnect started can be ended from here.".into()
+            }
+        );
+        assert_eq!(
+            daemon.store.get_session(&uid).unwrap().unwrap().lifecycle,
+            before
+        );
+    }
+
     fn six_nodes() -> protocol::tailnet::Tailnet {
         protocol::tailnet::Tailnet::parse(include_str!(
             "../../../fixtures/tailscale/status-six-nodes.json"
@@ -30646,39 +30760,28 @@ mod tests {
         );
     }
 
-    /// **A ledger replay says what the ledger actually recorded, and `lost` is not
-    /// "a phone answered".**
-    ///
-    /// `Settled` is the ledger's word for *terminal*, and it carries two very different
-    /// outcomes. `delivered` is a phone answer the broker confirmed went upstream.
-    /// `lost` is the opposite fact: this phone's answer forwarded ZERO bytes, something
-    /// else settled the request, and the card was left standing for that other terminal.
-    /// Replaying both as "already answered from a phone" tells the operator their tap was
-    /// applied when the whole record says it was not — and it is the sentence a second
-    /// tap on a lost card gets, which is exactly the moment they are asking.
+    /// The reason a second answer, from an iPhone, is refused with when the card's answer
+    /// claim is already settled `outcome`.
     ///
     /// The card is a real one, raised through the observer's own producer, and the ledger
     /// row is settled through the store's own primitive, so this is the replay path and
-    /// not a hand-built string.
-    ///
-    /// **Mutation:** collapse `replayed_answer_sentence` back to one format string over
-    /// `{outcome}` and the second assertion goes red — the operator is told a phone
-    /// answered a card no phone answer ever reached.
-    #[tokio::test]
-    async fn a_lost_answer_replays_as_a_loss_and_not_as_a_phone_answer() {
+    /// not a hand-built string. The claim stores no device, so the same row stands for an
+    /// answer from a phone, from the Mac app, or from a client on the static token.
+    async fn second_answer_after_a_settled_claim(outcome: &'static str) -> String {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
-        assert!(raise_codex_card(&daemon, uid, "req-lost", "item-lost").await);
+        assert!(raise_codex_card(&daemon, uid, "req-settled", "item-settled").await);
         let held = open_cards(&daemon, uid)
             .into_iter()
-            .find(|row| row.request_id == "req-lost")
+            .find(|row| row.request_id == "req-settled")
             .expect("the producer filed the card");
         let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
 
-        // The exact durable state a lost race leaves: a claim under this card's key,
-        // settled `lost`, with the card still standing for the winner's own terminal.
+        // The exact durable state the first answer left: a claim under this card's key,
+        // settled `outcome`; a `lost` one leaves the card standing for the winner's own
+        // terminal.
         let claimed = crate::store::ClaimedMaterial {
             thread_id: "th-1".into(),
             generation: 1,
@@ -30690,20 +30793,20 @@ mod tests {
         assert_eq!(
             daemon
                 .db
-                .claim_answer_mutation(uid.to_string(), "req-lost".into(), claimed, now.clone())
+                .claim_answer_mutation(uid.to_string(), "req-settled".into(), claimed, now.clone())
                 .await
                 .expect("the claim"),
             crate::store::MutationClaim::Claimed
         );
         assert!(daemon
             .db
-            .settle_answer_mutation(uid.to_string(), "req-lost".into(), "lost", now)
+            .settle_answer_mutation(uid.to_string(), "req-settled".into(), outcome, now)
             .await
             .expect("the settle"));
 
         let again = daemon
             .answer(
-                "req-lost",
+                "req-settled",
                 &card.payload_hash,
                 AnswerDecision::OptionId {
                     option_id: "accept".into(),
@@ -30713,21 +30816,53 @@ mod tests {
             )
             .await;
 
-        let AnswerResult::Rejected { reason } = &again else {
+        let AnswerResult::Rejected { reason } = again else {
             panic!("a terminal claim may never actuate again: {again:?}");
         };
-        assert!(
-            reason.contains("nothing was sent again"),
-            "the refusal must say nothing went out: {reason}"
+        reason
+    }
+
+    /// **A ledger replay says what the ledger actually recorded, and `lost` is not
+    /// "an answer reached Codex".**
+    ///
+    /// `Settled` is the ledger's word for *terminal*, and it carries two very different
+    /// outcomes. `delivered` is an answer the broker confirmed went upstream. `lost` is
+    /// the opposite fact: that answer forwarded ZERO bytes, something else settled the
+    /// request, and the card was left standing for that other terminal. Replaying both as
+    /// "already answered" tells the operator their tap was applied when the whole record
+    /// says it was not — and it is the sentence a second tap on a lost card gets, which is
+    /// exactly the moment they are asking.
+    ///
+    /// The sentence is pinned whole: the claim stores no device, so any wording that names
+    /// one is a guess. **Mutation:** put "a phone answer" back at the head of the `lost`
+    /// sentence and the assertion goes red.
+    #[tokio::test]
+    async fn a_lost_answer_replays_as_a_loss_and_not_as_a_phone_answer() {
+        let reason = second_answer_after_a_settled_claim(crate::store::ANSWER_LOST).await;
+        assert_eq!(
+            reason,
+            "an earlier answer to this card lost the race — something else answered it \
+             first — so nothing was sent again"
         );
-        assert!(
-            !reason.contains("answered from a phone"),
-            "no phone answer ever reached Codex for this card — `lost` is the record \
-             that it did not: {reason}"
-        );
-        assert!(
-            reason.contains("lost") || reason.contains("something else answered"),
-            "and the operator is told what actually happened to it: {reason}"
+    }
+
+    /// **A second answer to a card that was already answered is not told a phone answered
+    /// it.**
+    ///
+    /// Two devices answer one Codex card. The Mac app's answer is delivered first, and the
+    /// iPhone's comes second. The claim the first answer left stores no device, so the
+    /// refusal can say the card was answered and nothing was sent again, but not by whom:
+    /// "from a phone" was a guess, wrong whenever the Mac app answered.
+    ///
+    /// The sentence is pinned whole, so a wording that names any device fails. **Mutation:**
+    /// put "from a phone" (or "from the Mac app") in the `delivered` sentence and the
+    /// assertion goes red.
+    #[tokio::test]
+    async fn a_delivered_answer_replays_without_naming_a_device() {
+        let reason = second_answer_after_a_settled_claim(crate::store::ANSWER_DELIVERED).await;
+        assert_eq!(
+            reason,
+            "this card was already answered; nothing was sent again"
         );
     }
 
