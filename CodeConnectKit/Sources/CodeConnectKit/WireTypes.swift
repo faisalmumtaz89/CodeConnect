@@ -1483,17 +1483,6 @@ public enum CodexResolution: Decodable, Sendable, Hashable {
     }
 }
 
-// MARK: - Codex mutations
-
-/// What became of an `interrupt` — **four genuinely different pieces of news**,
-/// and `ws.rs` says so in its own words: the turn reached its aborted boundary /
-/// this exact ask already did that / nothing was actuated and here is why / the
-/// stop was issued and this daemon did not live to see what it did.
-///
-/// Collapsing any pair of them would make the phone claim something it was not
-/// told. Tagged on **`status`**, like every other result on this wire.
-///
-/// **Decode-only.** Nothing in the app constructs one to send.
 /// What became of one `stop_run` (minor 35).
 public enum StopRunResult: Decodable, Sendable, Hashable {
     /// The stop is accepted: the run is `stopping`, and reads ended once it has exited.
@@ -1522,6 +1511,17 @@ public enum StopRunResult: Decodable, Sendable, Hashable {
     }
 }
 
+// MARK: - Codex mutations
+
+/// What became of an `interrupt` — **four genuinely different pieces of news**,
+/// and `ws.rs` says so in its own words: the turn reached its aborted boundary /
+/// this exact ask already did that / nothing was actuated and here is why / the
+/// stop was issued and this daemon did not live to see what it did.
+///
+/// Collapsing any pair of them would make the phone claim something it was not
+/// told. Tagged on **`status`**, like every other result on this wire.
+///
+/// **Decode-only.** Nothing in the app constructs one to send.
 public enum InterruptResult: Decodable, Sendable, Hashable {
     /// The turn reached its aborted boundary. `turnID` is the one the phone
     /// itself named, so returning it discloses nothing.

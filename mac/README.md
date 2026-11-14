@@ -1124,11 +1124,11 @@ what was not acknowledged and the run goes on; a run still starting is sent its 
 which a host that has one ignores; and the host of a run that has ended is drained, so it
 exits. A host gone meanwhile is the liveness tick's, as above. A starting run whose ccd died
 before it recorded the run's host becomes `failed`.
-An app ends a live run with `stop_run`: the run becomes `stopping` and its host is sent
-`stop`, which interrupts claude, ends its input and closes the query; claude's end then ends
-the run `exited`, "Stopped", with no exit code, since the person asked for it. A host that
-has not exited 10 s after the stop has its group stopped by the same ladder, and the run
-ends "Stopped" too. A run still starting is refused, and one that has ended answers
+An app ends a live run with `stop_run`: the run becomes `stopping` and its host, if its link
+is attached, is sent `stop`, which interrupts claude, ends its input and closes the query;
+claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
+for it. A host that has not exited 10 s after the stop, told or not, has its group stopped by
+the same ladder, and the run ends "Stopped" too. A run still starting is refused, and one that has ended answers
 `already_ended`. A ccd restart sends a stopping run `stop` again and starts its 10 s again.
 A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`

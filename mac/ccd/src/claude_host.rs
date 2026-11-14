@@ -12,8 +12,9 @@
 //! nothing is acknowledged that was not stored. The start's outcome, committed by the
 //! link, makes the run `live` or `failed`, and the app's answer waits for it. A restarted
 //! ccd attaches each host still running again from its run's cursor ([`attach_run`]). An
-//! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop`, and a
-//! host that has not exited 10 s later is stopped by its group ([`escalate_stop`]).
+//! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop` if its link
+//! is attached, and a host that has not exited 10 s later is stopped by its group
+//! ([`escalate_stop`]).
 //!
 //! The lines are [`protocol::host`]'s; the host is mac/agent-host.
 
@@ -2903,6 +2904,43 @@ mod tests {
         );
     }
 
+    /// **B7 G6, a host that cannot answer across a restart.** A run is `stopping` and its
+    /// host SIGSTOPped when ccd restarts, with no escalation of the old ccd's running. The
+    /// recovered ccd's own escalation stops the host's group 10 s later, and the run ends
+    /// "Stopped".
+    #[tokio::test]
+    async fn a_stopping_runs_frozen_host_is_stopped_by_the_recovered_daemon() {
+        let rig = rig();
+        let host = stub_host_with_child(&rig);
+        let played = live_run_on(&rig, &host).await;
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        let (stub, child) = (pid_in(&dir, "stub.pid"), pid_in(&dir, "child.pid"));
+        force_lifecycle(&rig, &uid, "stopping");
+        drop(played);
+        // SAFETY: kill(2) of the stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(stub, libc::SIGSTOP) };
+        let (_lines, _write) = restart(&rig, &dir).await;
+        let mut ended = false;
+        for _ in 0..300 {
+            if kept(&rig, &uid).0 == "exited" {
+                ended = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let child_ran = running(child);
+        if !ended || child_ran {
+            // SAFETY: kill(2) of the group of the stand-in host this test started.
+            unsafe { libc::kill(-stub, libc::SIGKILL) };
+        }
+        assert!(ended, "the recovered daemon never ended the run");
+        assert!(!child_ran, "the host's group outlived it");
+        assert_eq!(
+            the_end(&rig, &uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
     /// **G4, the warrant.** A host gone is signalled only under the warrant, and its run
     /// ends either way:
     /// - a pid reused: the recorded host's pid is now a live process of another birth,
@@ -3264,10 +3302,42 @@ mod tests {
         assert_eq!(kept(&rig, &starting).0, "starting");
     }
 
+    /// **B7 G7 (a), a draining host.** A run whose row has ended while its host still runs,
+    /// until its claude ends 2 s later, is waited on: the answer comes only once that host
+    /// has exited, though nothing was stopped. Ignored and gated as the real-host test is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
+    async fn stopping_the_hosted_runs_waits_on_a_draining_host() {
+        let (host, rig) = real_host_rig();
+        let (uid, host_pid, claude_pid) = real_live_run(&rig, &host, "draining").await;
+        force_lifecycle(&rig, &uid, "exited");
+        let ends_claude = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            // SAFETY: kill(2) of the stand-in claude this test's run started, by its pid.
+            unsafe { libc::kill(claude_pid, libc::SIGTERM) };
+        });
+        let asked = Instant::now();
+        let (stopped, left) = rig.daemon.stop_hosted_runs(Duration::from_secs(20)).await;
+        let took = asked.elapsed();
+        // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+        let host_ran = unsafe { libc::kill(host_pid, 0) } == 0;
+        let _ = ends_claude.await;
+        if host_ran {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        assert!(
+            !host_ran,
+            "the answer came after {took:?} with the host still running"
+        );
+        assert!(took >= Duration::from_secs(2), "answered after {took:?}");
+        assert_eq!((stopped, left), (0, Vec::<u32>::new()));
+    }
+
     /// **B7 G2: End run mid-turn, with a real claude** (P1 5). A run on the real host whose
     /// claude, signed in by its own config, is writing a long answer is ended: the run ends
-    /// `exited` "Stopped" well before the escalation's 10 s, by claude's own exit, and the
-    /// host and claude are gone. Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names the
+    /// `exited` well before the escalation's 10 s, so by claude's own exit, and the host and
+    /// its group are gone. The end's payload is ccd's, whichever claude exits (G1). Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names the
     /// built host, `CODECONNECT_TEST_REAL_CLAUDE` the claude, and `CODECONNECT_TEST_RIG_DIR`
     /// a short folder the run's files go under; the host and claude get this test's own
     /// `HOME`, `USER`, `LOGNAME`, `PATH` and `CLAUDE_CONFIG_DIR`, so they run on that

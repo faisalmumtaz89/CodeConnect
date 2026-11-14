@@ -206,9 +206,9 @@ pub enum ClientMessage {
     /// **End a Claude run CodeConnect started** (minor 35), answered with
     /// [`ServerMessage::StopRunResult`].
     ///
-    /// A `live` run becomes [`crate::event::Lifecycle::Stopping`]: its agent host is sent
-    /// `stop`, which interrupts claude and ends its input, and a host that has not
-    /// exited 10 s later is stopped by its process group. The run then ends `exited`
+    /// A `live` run becomes [`crate::event::Lifecycle::Stopping`]: its agent host, if its
+    /// link is attached, is sent `stop`, which interrupts claude and ends its input, and a
+    /// host that has not exited 10 s later, told or not, is stopped by its process group. The run then ends `exited`
     /// with the reason "Stopped". Nothing is kept per `request_id`: a retry reads the
     /// run as it is, `stopping` while it stops and `already_ended` once it has.
     ///
