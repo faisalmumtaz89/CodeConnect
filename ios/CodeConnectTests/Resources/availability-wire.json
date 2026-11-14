@@ -1,0 +1,141 @@
+{
+  "below_the_floor": {
+    "agents": [
+      {
+        "agent": "codex",
+        "available": false,
+        "detail": "Codex 0.166.9 on this computer is older than 0.167.0, the oldest CodeConnect works with."
+      }
+    ],
+    "projects": [],
+    "type": "projects"
+  },
+  "signed_in": {
+    "agents": [
+      {
+        "agent": "codex",
+        "available": true,
+        "models": [
+          {
+            "detail": "Latest workhorse model for coding and everyday work.",
+            "label": "GPT-6.1-Sol",
+            "value": "gpt-6.1-sol"
+          },
+          {
+            "detail": "Frontier intelligence for the most demanding work.",
+            "label": "GPT-6-Astra",
+            "value": "gpt-6-astra"
+          },
+          {
+            "detail": "Previous generation workhorse model.",
+            "label": "GPT-6-Sol",
+            "value": "gpt-6-sol"
+          },
+          {
+            "detail": "Fast and affordable model for easier tasks.",
+            "label": "GPT-6-Luna",
+            "value": "gpt-6-luna"
+          },
+          {
+            "detail": "Older generation workhorse model.",
+            "label": "GPT-5.6-Sol",
+            "value": "gpt-5.6-sol"
+          },
+          {
+            "detail": "GPT-6.1 Terra Codex model.",
+            "label": "GPT-6.1 Terra",
+            "value": "gpt-6.1-terra"
+          },
+          {
+            "detail": "Older balanced model for straightforward work.",
+            "label": "GPT-5.6-Terra",
+            "value": "gpt-5.6-terra"
+          },
+          {
+            "detail": "Older fast and efficient model.",
+            "label": "GPT-5.6-Luna",
+            "value": "gpt-5.6-luna"
+          },
+          {
+            "detail": "Legacy coding model.",
+            "label": "GPT-5.5",
+            "value": "gpt-5.5"
+          }
+        ],
+        "signed_in": true
+      }
+    ],
+    "projects": [],
+    "type": "projects"
+  },
+  "signed_out": {
+    "agents": [
+      {
+        "agent": "codex",
+        "available": true,
+        "detail": "Codex on this computer isn’t signed in.",
+        "models": [
+          {
+            "detail": "Latest workhorse model for coding and everyday work.",
+            "label": "GPT-6.1-Sol",
+            "value": "gpt-6.1-sol"
+          },
+          {
+            "detail": "Frontier intelligence for the most demanding work.",
+            "label": "GPT-6-Astra",
+            "value": "gpt-6-astra"
+          },
+          {
+            "detail": "Previous generation workhorse model.",
+            "label": "GPT-6-Sol",
+            "value": "gpt-6-sol"
+          },
+          {
+            "detail": "Fast and affordable model for easier tasks.",
+            "label": "GPT-6-Luna",
+            "value": "gpt-6-luna"
+          },
+          {
+            "detail": "Older generation workhorse model.",
+            "label": "GPT-5.6-Sol",
+            "value": "gpt-5.6-sol"
+          },
+          {
+            "detail": "GPT-6.1 Terra Codex model.",
+            "label": "GPT-6.1 Terra",
+            "value": "gpt-6.1-terra"
+          },
+          {
+            "detail": "Older balanced model for straightforward work.",
+            "label": "GPT-5.6-Terra",
+            "value": "gpt-5.6-terra"
+          },
+          {
+            "detail": "Older fast and efficient model.",
+            "label": "GPT-5.6-Luna",
+            "value": "gpt-5.6-luna"
+          },
+          {
+            "detail": "Legacy coding model.",
+            "label": "GPT-5.5",
+            "value": "gpt-5.5"
+          }
+        ],
+        "signed_in": false
+      }
+    ],
+    "projects": [],
+    "type": "projects"
+  },
+  "version_unread": {
+    "agents": [
+      {
+        "agent": "codex",
+        "available": false,
+        "detail": "Codex on this computer didn’t report its version."
+      }
+    ],
+    "projects": [],
+    "type": "projects"
+  }
+}
