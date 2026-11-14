@@ -8,7 +8,8 @@ import Foundation
 ///
 /// Claude Code asks every such question through a `PermissionRequest`, so it
 /// arrives as an approval card. From protocol minor 21 the daemon answers it
-/// through Claude's own hook: the phone sends the choices as option indices and
+/// through Claude's own hook, or, for a run started from an app, through the
+/// run's agent host: the phone sends the choices as option indices and
 /// the daemon builds Claude's answer from the question it stored
 /// (`mac/ccd/src/question.rs`). Nothing is typed, and this card has no Allow.
 public struct QuestionCard: Sendable, Hashable {

@@ -372,17 +372,16 @@ test('an allow and a stop read together: the answer never reaches claude, so it 
   expect(answersRead(stub(), 'req-toolu_r1')).toStrictEqual([]);
 }, 10_000);
 
-test('a question claude asks is answered at once with a plain refusal, no interrupt, and never reaches ccd as a permission', async () => {
-  const { ccd, stub } = await run(trustedStart, {
-    after_user: [ask('toolu_q1', 'AskUserQuestion', { questions: [{ question: 'Tea or coffee?', header: 'Drink', options: [] }] })],
-  });
-  await waitFor('claude to read the refusal', () => answersRead(stub(), 'req-toolu_q1').length === 1);
-  expect(answersRead(stub(), 'req-toolu_q1')[0].response.response).toMatchObject({
-    behavior: 'deny',
-    message: "Questions from Claude can't be answered in the app yet, so this one was refused.",
-  });
-  expect(answersRead(stub(), 'req-toolu_q1')[0].response.response.interrupt).not.toBe(true);
-  expect(ccd.lines.filter((line) => line.type === 'permission')).toStrictEqual([]);
+test("a question claude asks reaches ccd as a permission, and its answers reach claude as the call's input", async () => {
+  const questions = [{ question: 'Tea or coffee?', header: 'Drink', options: [{ label: 'Tea', description: '' }, { label: 'Coffee', description: '' }], multiSelect: false }];
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_q1', 'AskUserQuestion', { questions })] });
+  const permission = await ccd.line('the question', (line) => line.type === 'permission');
+  expect(permission.request).toMatchObject({ tool_use_id: 'toolu_q1', tool_name: 'AskUserQuestion', input: { questions } });
+  const answered = { questions, answers: { 'Tea or coffee?': 'Tea' }, annotations: {} };
+  ccd.send({ type: 'answer', uuid: 'c-question', tool_use_id: 'toolu_q1', decision: { behavior: 'allow', updated_input: answered } });
+  expect((await ccd.line('the answers answered', (line) => line.type === 'outcome' && line.uuid === 'c-question')).status).toBe('done');
+  await waitFor('claude to read the answers', () => answersRead(stub(), 'req-toolu_q1').length === 1);
+  expect(answersRead(stub(), 'req-toolu_q1')[0].response.response).toMatchObject({ behavior: 'allow', updatedInput: answered });
 }, 10_000);
 
 test('stop ends the run: claude is asked to interrupt and ends, its end is the last line, and the host exits once ccd has it; a second stop does nothing', async () => {

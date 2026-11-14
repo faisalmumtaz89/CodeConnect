@@ -209,8 +209,11 @@ store by it.
 ## Card identity
 
 A Claude approval card is answered only through the `PermissionRequest` hook
-Claude holds for its own call, never by typing into the prompt on screen — see
+Claude holds for its own call, or, for a run started from an app, through the
+agent host's return to that call's `canUseTool` request, never by typing into the
+prompt on screen — see
 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#approving-something-safely).
+What follows in this section is the hook's.
 The card is joined to its call's `tool_use_id` by that call's `PreToolUse`,
 keyed by run, prompt, tool, input and background agent; a request with two open
 calls under one key joins neither, and its card is read-only. A call whose
@@ -1042,7 +1045,8 @@ well. `>= 21` answers Claude's `AskUserQuestion` from the phone: the
 `question_card` capability, `ApprovalCard.question_hold` (`held`, `at_mac`,
 `ended`, updated by `question_hold` events), and the `answers` and `decline`
 decisions; `allow` and `option` on a question card are refused for every client.
-`>= 22` answers every Claude card only through its own call's hook, and nothing
+`>= 22` answers every Claude card only through its own call's hook (or, for a run
+started from an app, through its agent host), and nothing
 is typed: the `hook_only_approvals` capability, `question_hold` on every Claude
 card, and `text` on a Claude approval as a denial with that reason. For every
 client, any `option` but `1` on an approval is refused, and so is any decision
@@ -1154,9 +1158,14 @@ the host, and the card closes as answered once the host has written it into clau
 a request claude stops waiting on (End run, or claude's end) closes with nobody having
 answered. A card stays answerable across a ccd restart, and an answer sent just before one
 is never sent twice: the host's replay says whether it reached claude. A request whose card
-would be too large for an app to show is refused at once, and claude is told why. Claude's
-questions are not cards yet: claude is told so and asks in its reply instead. A shell command
-that only reads raises no card: claude runs it without asking, as it does when run directly.
+would be too large for an app to show is refused at once, and claude is told why. A question
+claude asks (`AskUserQuestion`) is a card too, answered with the options picked (and any
+"Other" text or notes), which go back to claude as the call's input, or declined, which
+denies it, "Declined from iPhone" or "Declined from Mac", and stops the main conversation's
+turn but not a subagent's; nothing about how the terminal would draw its text keeps it from
+the apps, and an allow, an option or a reason on it is refused. Once the host confirms either
+answer, the card reads answered or declined. A shell command that only reads raises no card:
+claude runs it without asking, as it does when run directly.
 An app ends a live run with `stop_run`: the run becomes `stopping` and its host, if its link
 is attached, is sent `stop`, which interrupts claude, ends its input and closes the query;
 claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
@@ -1712,11 +1721,11 @@ fails the suite instead of failing silently in production.
   timeline; a subagent's calls are not shown there, so its refusal is not either.
 * **An approval tapped in the first moment after ccd restarts may not stick.** While
   ccd catches up with a session started from an app, which takes a fraction of a
-  second, an answer to one of its approval cards may reach Claude without being
-  recorded. The app then says the answer could not be confirmed and the card stays
-  open until the session ends. In that same moment, denying a subagent's request
-  also stops Claude's main reply. Nothing is ever allowed that the person did not
-  allow.
+  second, an answer to one of its approval or question cards may reach Claude
+  without being recorded. The app then says the answer could not be confirmed and
+  the card stays open until the session ends. In that same moment, denying a
+  subagent's request, or declining its question, also stops Claude's main reply.
+  Nothing is ever allowed that the person did not allow.
 * **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
   repaints the session from tmux's record of it, and tmux does not track kitty
   keyboard flags or focus reporting: an agent that turned them on when it started

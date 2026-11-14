@@ -10177,6 +10177,8 @@ impl Daemon {
         .then(|| option("suggestions").cloned())
         .flatten();
         let fork = option("agentID").is_some();
+        // A question takes answers, never an allow, as a hook's question card does.
+        let question = request.tool_name == protocol::hook::ASK_USER_QUESTION;
         let card = ApprovalCard {
             request_id: request_id.clone(),
             payload_hash: approval_payload_hash(&request.tool_name, &request.input),
@@ -10188,7 +10190,7 @@ impl Daemon {
             prompt_id: None,
             permission_mode: None,
             generation: 0,
-            identity_bound: true,
+            identity_bound: !question,
             question_hold: Some(QuestionHold::Held),
         };
         let payload = serde_json::json!({ "card": card });
@@ -10238,7 +10240,7 @@ impl Daemon {
                         rejected: false,
                         fork,
                         link: true,
-                        question: None,
+                        question: question.then(QuestionState::default),
                     });
                     true
                 }
@@ -10438,6 +10440,7 @@ impl Daemon {
         request_id: &str,
         payload_hash: &str,
         decision: &AnswerDecision,
+        answered_on: AnsweredOn,
     ) -> std::result::Result<(SessionKey, protocol::host::Decision), String> {
         let mut inner = self.inner.lock().await;
         let Some(entry) = inner
@@ -10449,7 +10452,7 @@ impl Daemon {
         if entry.card.payload_hash != payload_hash {
             return Err("stale payload_hash: the card you answered is out of date".into());
         }
-        let host_decision = host_decision(entry, decision)?;
+        let host_decision = host_decision(entry, decision, answered_on)?;
         entry.claimed = true;
         Ok((entry.session.clone(), host_decision))
     }
@@ -11966,11 +11969,36 @@ fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
 
 /// The host's decision for an answer to a hosted run's card, as [`hook_decision`]
 /// gives a hook's: allow; a deny, which also ends the main conversation's turn; or a
-/// deny with the person's reason. Nothing else reaches a hosted run's card yet.
+/// deny with the person's reason. A question takes only its answers, which go back
+/// as its input, or a decline, a deny that ends the main conversation's turn as a
+/// deny does. Nothing else reaches a hosted run's card yet.
 fn host_decision(
     entry: &PendingApproval,
     decision: &AnswerDecision,
+    answered_on: AnsweredOn,
 ) -> std::result::Result<protocol::host::Decision, String> {
+    if entry.question.is_some() {
+        return match decision {
+            AnswerDecision::Answers { answers } => {
+                crate::question::host_updated_input(&entry.card.tool_input, answers)
+                    .map(|input| protocol::host::Decision::Allow {
+                        updated_input: Some(input),
+                    })
+                    .map_err(|reason| format!("{reason}. Nothing was sent."))
+            }
+            AnswerDecision::Decline | AnswerDecision::Deny => Ok(protocol::host::Decision::Deny {
+                message: declined_from(answered_on).into(),
+                interrupt: !entry.fork,
+            }),
+            _ => Err(QUESTION_NEEDS_CARD.into()),
+        };
+    }
+    if matches!(
+        decision,
+        AnswerDecision::Answers { .. } | AnswerDecision::Decline
+    ) {
+        return Err(NOT_A_QUESTION.into());
+    }
     match decision {
         AnswerDecision::Allow | AnswerDecision::Option { index: 1 } => {
             Ok(protocol::host::Decision::Allow {
@@ -12133,15 +12161,17 @@ fn question_hook_decision(
         _ => Ok(HookDecision {
             interrupt: !entry.fork,
             decision: Decision::Deny,
-            reason: Some(
-                match answered_on {
-                    AnsweredOn::Iphone => "Declined from iPhone",
-                    AnsweredOn::Mac => "Declined from Mac",
-                }
-                .into(),
-            ),
+            reason: Some(declined_from(answered_on).into()),
             ..HookDecision::passthrough()
         }),
+    }
+}
+
+/// What claude reads when a question is declined: which kind of device declined it.
+fn declined_from(answered_on: AnsweredOn) -> &'static str {
+    match answered_on {
+        AnsweredOn::Iphone => "Declined from iPhone",
+        AnsweredOn::Mac => "Declined from Mac",
     }
 }
 

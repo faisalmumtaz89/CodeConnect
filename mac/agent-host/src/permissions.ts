@@ -2,15 +2,12 @@
 // answered once by ccd's `answer`, and told back `done` only once the SDK has written the answer into claude's input,
 // so `done` means the answer reached claude. A request the SDK drops unanswered (an interrupt, the run's stop or its
 // end) is `withdrawn`; an answer to a request no longer open, or one the run ended before it could be written, is
-// `refused`. A question (AskUserQuestion) is not held: the app does not answer question cards yet.
+// `refused`. A question (AskUserQuestion) is one of them: ccd's answer to it carries the answers as its input.
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { Unsequenced } from './link.ts';
 import type { Json, PermissionRequest, ToHost } from './protocol.ts';
 
 type Answer = Extract<ToHost, { type: 'answer' }>;
-
-/** What a question gets: Claude reads it and asks in its reply, which the person answers with a message. */
-export const QUESTION_REFUSAL = "Questions from Claude can't be answered in the app yet, so this one was refused.";
 
 export function createPermissions(send: (body: Unsequenced) => void) {
   // Open requests by tool-use id, each with its control request id and the SDK's resolver.
@@ -19,10 +16,6 @@ export function createPermissions(send: (body: Unsequenced) => void) {
   const writing = new Map<string, string>();
 
   const canUseTool: CanUseTool = (toolName, input, options) => {
-    if (toolName === 'AskUserQuestion') {
-      console.error(`${options.toolUseID}: ${QUESTION_REFUSAL}`);
-      return Promise.resolve({ behavior: 'deny', message: QUESTION_REFUSAL });
-    }
     const { signal, toolUseID, requestId, ...rest } = options;
     const request: PermissionRequest = {
       tool_use_id: toolUseID,
