@@ -3040,27 +3040,37 @@ public final class AppModel {
     public func composeUnavailable(for key: String) -> String? {
         guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
-        return Self.composeUnavailable(summary, profile: daemonProfile)
+        return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
     }
 
-    /// The same rule against the truth: what decides whether a message may leave.
+    /// What decides whether a message may leave — the truth summary (`summary(for:)`) for the pending
+    /// ref, and the shown card for `cardShown`, which the submit path's `rebuildNow` makes current first.
     private func composeBlocked(for key: String) -> String? {
         guard let summary = summary(for: key) else { return "This run is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
-        return Self.composeUnavailable(summary, profile: daemonProfile)
+        return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
     }
 
-    private static func composeUnavailable(_ summary: SessionSummary, profile: DaemonProfile)
-        -> String?
-    {
+    /// A card the reader can see on this run — built into the shown `pendingApprovals` from an
+    /// ingested approval_request, which leads `summary.pending` by a fleet round trip.
+    private func cardShown(for key: String) -> Bool {
+        !(shown(for: key)?.pendingApprovals.isEmpty ?? true)
+    }
+
+    private static func composeUnavailable(
+        _ summary: SessionSummary, profile: DaemonProfile, cardShown: Bool
+    ) -> String? {
         // While a card waits on a Codex run, a message must not be sent: it would
         // steer the turn the card's answer then aborts, and the words would be
         // lost with no row (R2T3-F1). The draft is kept; the reader answers the
-        // card first. Keyed on `summary.pending`, which names an open card even
-        // before its body is built, so the brief window where the built cards are
-        // empty does not let the lossy send through. Codex-only — Claude's typed
-        // text is not a steer, and its sends in this state keep their words.
-        if summary.isCodex, !summary.pending.isEmpty {
+        // card first. A card names itself on either of two clocks: `summary.pending`,
+        // which the fleet refresh fills, and the shown `pendingApprovals`, which an
+        // ingested approval_request builds a fleet round trip earlier. Blocking on
+        // EITHER closes both orders — the summary-first one and the live-event one
+        // app-qa first saw, where the card is on screen before the summary catches
+        // up. Codex-only — Claude's typed text is not a steer, and its sends keep
+        // their words.
+        if summary.isCodex, !summary.pending.isEmpty || cardShown {
             return "Answer the card first. Your draft will stay here."
         }
         return CodexProse.composeUnavailable(
@@ -3153,11 +3163,11 @@ public final class AppModel {
             controls.composeNotSent("This run is not in the fleet.")
             return nil
         }
-        // A card may have arrived and not yet been built into the shown state
-        // (ingest coalesces rebuilds), so rebuild before the send gate — the same
-        // re-check the approval-answer path does (`resolution(of:)`) — and
-        // `composeBlocked` reads `summary.pending`, which already names a card
-        // whose body has not loaded. One re-check on submit, no third guard.
+        // A card may have arrived as an event and not yet been built into the shown
+        // state (ingest coalesces rebuilds), so rebuild before the send gate — the
+        // same re-check the approval-answer path does — so `composeBlocked`'s
+        // `cardShown` sees the card the reader already sees even when `summary.pending`
+        // has not caught up. One re-check on submit, no third guard.
         states[key]?.rebuildNow()
         if let blocked = composeBlocked(for: key) {
             controls.composeNotSent(blocked)
