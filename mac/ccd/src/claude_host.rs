@@ -570,8 +570,9 @@ async fn apply_sdk(
         match signal {
             Signal::SessionId { id } => session_id = Some(id),
             Signal::Cwd { path } => cwd = Some(path),
-            // Deliveries and command lifecycles settle sends (B5); `/clear` keeps the
-            // session id, which the next init names.
+            // A send is settled by its host's outcome ([`apply_send_outcome`]), not by
+            // claude's deliveries or command lifecycles; `/clear` keeps the session id,
+            // which the next init names.
             Signal::Delivered { .. } | Signal::Lifecycle { .. } | Signal::Reset { .. } => {}
         }
     }
@@ -3244,13 +3245,14 @@ mod tests {
     /// **B5 G1 and G9: a second message, and the first.** The start's prompt is filed as
     /// the person's words when the run goes live. A message to the live run goes to its
     /// host as `say`; once the host has taken it, the words are filed with the outcome's
-    /// cursor and the app is told `sent`.
+    /// cursor, reach a subscribed connection, and the app is told `sent`.
     #[tokio::test]
     async fn a_message_to_a_live_run_reaches_its_host_and_the_persons_words_are_filed() {
         let rig = rig();
         let mut played = live_run(&rig).await;
         assert_eq!(words(&rig, &played.uid), ["fix the tests"]);
         let uid = played.uid.clone();
+        let mut broadcast = rig.daemon.events_tx.subscribe();
         let (result, (_, text)) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
             host_takes(&mut played, 3, "done")
@@ -3264,6 +3266,13 @@ mod tests {
         );
         assert_eq!(words(&rig, &uid), ["fix the tests", "and the docs"]);
         assert_eq!(cursor(&rig, &uid), 3);
+        let mut live = Vec::new();
+        while let Ok(event) = broadcast.try_recv() {
+            if event.session_uid == uid && event.kind == EventKind::UserMessage {
+                live.push(event.payload["text"].clone());
+            }
+        }
+        assert_eq!(live, [serde_json::json!("and the docs")], "broadcast live");
         stop(&played.dir);
     }
 
@@ -3422,6 +3431,15 @@ mod tests {
         assert_eq!(
             words(&rig, &uid),
             ["fix the tests", "why did /clear not run?"]
+        );
+        assert!(
+            rig.daemon
+                .db
+                .host_sends(uid.clone())
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing left claimed"
         );
         stop(&played.dir);
     }
@@ -4160,12 +4178,35 @@ mod tests {
         )
     }
 
+    /// G6's transcript check without a real claude: a message claude's transcript holds
+    /// twice, or not at all, is counted so, and no transcript is `None`; each fails G6's
+    /// "exactly once".
+    #[tokio::test]
+    async fn the_transcript_counts_a_message_held_twice_or_not_at_all() {
+        let rig = rig();
+        let project = rig.root.join("config/projects/a-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user = |text: &str| {
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
+                .to_string()
+        };
+        let reply =
+            serde_json::json!({"type": "assistant", "message": {"content": "twice"}}).to_string();
+        let lines = [user("once"), user("twice"), reply, user("twice")].join("\n");
+        std::fs::write(project.join("s1.jsonl"), lines).unwrap();
+        let config = rig.root.join("config");
+        let counts = transcript_counts(&config, "s1", &["once", "twice", "never"]);
+        assert_eq!(counts, Some(vec![1, 2, 0]));
+        assert_ne!(counts, Some(vec![1, 1, 1]));
+        assert_eq!(transcript_counts(&config, "s2", &["once"]), None);
+    }
+
     /// **B5 G6: messages mid-turn, with a real claude** (app-qa's rig). A run on the real
     /// host whose claude, signed in by its own config, is sent a message while it writes
     /// its first answer; once that has settled, it is asked to read a file, and sent
     /// another message as soon as that tool call is filed (Read needs no permission). Each
     /// message is `sent` and filed once as the person's words, the run settles with a turn
-    /// ended after the last, and claude's own transcript holds none of them twice. The
+    /// ended after the last, and claude's own transcript holds each exactly once. The
     /// order the run's events came in is printed. Then End run, as G2. Ignored and gated
     /// as G2 is.
     #[tokio::test]
@@ -4314,12 +4355,11 @@ mod tests {
         assert_eq!(words(&rig, &uid), expected, "each filed once, in order");
         assert!(first_settled && last_settled, "the run did not settle");
         assert!(tool_filed, "claude made no tool call");
-        if let Some(counts) = &transcript {
-            assert!(
-                counts.iter().all(|count| *count <= 1),
-                "a message reached claude twice: {counts:?}"
-            );
-        }
+        assert_eq!(
+            transcript,
+            Some(vec![1, 1, 1]),
+            "claude's transcript holds each message exactly once"
+        );
         assert!(ended, "the run never ended");
         assert!(
             host_gone && !group_left,

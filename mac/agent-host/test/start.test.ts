@@ -226,7 +226,7 @@ test("claude gets the host's environment: ccd's session uid, no CLAUDE_CONFIG_DI
   expect(env.CLAUDE_CODE_ENTRYPOINT).toBeDefined();
 }, 10_000);
 
-test("each say reaches claude's input after the first message, in order, marked as the person's and stamped with its uuid; its outcome comes once the SDK has taken it", async () => {
+test("each say reaches claude's input after the first message, in order, marked as the person's and stamped with its uuid, and is answered done", async () => {
   const { ccd, start, stub } = await run(trustedStart);
   ccd.send({ type: 'say', uuid: 'c-say-1', text: 'the second message' });
   ccd.send({ type: 'say', uuid: 'c-say-2', text: 'the third message' });
@@ -255,6 +255,26 @@ test('a say whose multibyte character is split across two writes on the socket a
   await ccd.line('the split say taken', (line) => line.type === 'outcome' && line.uuid === 'c-split');
   await waitFor('claude to read it', () => stdinOf(stub()).some((m) => m.uuid === 'c-split'));
   expect(stdinOf(stub()).find((m) => m.uuid === 'c-split').message.content).toBe(text);
+}, 10_000);
+
+test('a say still queued when the stop comes is refused, and never reaches claude', async () => {
+  const { ccd, stub } = await run(trustedStart);
+  // One write: the host reads the say and the stop together, so the say is still queued when the stop ends the input.
+  const say = JSON.stringify({ type: 'say', uuid: 'c-queued', text: 'queued' });
+  ccd.socket.write(`${say}\n${JSON.stringify({ type: 'stop', uuid: 'c-stop' })}\n`);
+  const outcome = await ccd.line('the queued say answered', (line) => line.type === 'outcome' && line.uuid === 'c-queued');
+  expect(outcome.status).toBe('refused');
+  await ccd.line("claude's end", (line) => line.type === 'exited');
+  expect(stdinOf(stub()).some((message) => message.uuid === 'c-queued')).toBe(false);
+}, 10_000);
+
+test("a say after claude's own end is refused, and never reaches claude", async () => {
+  const { ccd, stub } = await run(trustedStart, { exit_on_user: 3 });
+  await ccd.line("claude's end", (line) => line.type === 'exited');
+  ccd.send({ type: 'say', uuid: 'c-after-end', text: 'too late' });
+  const outcome = await ccd.line('the late say answered', (line) => line.type === 'outcome' && line.uuid === 'c-after-end');
+  expect(outcome.status).toBe('refused');
+  expect(stdinOf(stub()).some((message) => message.uuid === 'c-after-end')).toBe(false);
 }, 10_000);
 
 test('a say once the run is stopped is refused, and never reaches claude', async () => {
