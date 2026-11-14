@@ -1116,7 +1116,7 @@ also ends when its host is gone, seen when the run's link ends or by the livenes
 then sends SIGTERM to the host's process group, and SIGKILL 5 s later only while members
 remain, each under a warrant: the same boot, and the host's pid free or still its own. The
 run is then `exited`, "Stopped: its process ended". A ccd restart attaches each hosted run's
-host again while it still runs, before the listeners, from the run's cursor: the host replays
+host again while it still runs, from the run's cursor: the host replays
 what was not acknowledged and the run goes on; a run still starting is sent its start again,
 which a host that has one ignores; and the host of a run that has ended is drained, so it
 exits. A host gone meanwhile is the liveness tick's, as above. A starting run whose ccd died

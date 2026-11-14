@@ -2231,16 +2231,17 @@ mod tests {
         );
     }
 
-    /// **G12: the turn across a restart.** A live run's init and the start of its turn are
-    /// filed, then ccd restarts. The rest of the turn, with no init of its own, is filed
-    /// with the init's uuid as its turn.
+    /// **G12: the turn across a restart.** A live run's first turn and the start of its
+    /// second, with the second's init, are filed, then ccd restarts. The rest of the second
+    /// turn, with no init of its own, is filed with the second init's uuid as its turn.
     #[tokio::test]
     async fn a_turn_begun_before_a_restart_keeps_its_id_after_it() {
         let rig = rig();
         let mut played = live_run(&rig).await;
         let capture = capture();
         assert_eq!(capture[2]["subtype"], "init");
-        for (index, message) in capture.iter().take(5).enumerate() {
+        assert_eq!(capture[12]["subtype"], "init");
+        for (index, message) in capture.iter().take(17).enumerate() {
             let seq = index as u64 + 3;
             sdk(&mut played.write, seq, message.clone()).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
@@ -2249,8 +2250,8 @@ mod tests {
         let before = stored(&rig, &uid).len();
         drop(played);
         let (mut lines, mut write) = restart(&rig, &dir).await;
-        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 7 }));
-        for (index, message) in capture.iter().enumerate().take(9).skip(5) {
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 19 }));
+        for (index, message) in capture.iter().enumerate().take(22).skip(17) {
             assert_ne!(message["subtype"], "init");
             let seq = index as u64 + 3;
             sdk(&mut write, seq, message.clone()).await;
@@ -2260,7 +2261,7 @@ mod tests {
         let continued = stored(&rig, &uid).split_off(before);
         assert!(!continued.is_empty(), "the rest of the turn is filed");
         for event in continued {
-            assert_eq!(event["turn_id"], capture[2]["uuid"], "{event}");
+            assert_eq!(event["turn_id"], capture[12]["uuid"], "{event}");
         }
     }
 
