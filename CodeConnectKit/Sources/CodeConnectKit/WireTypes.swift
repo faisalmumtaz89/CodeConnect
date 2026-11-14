@@ -399,6 +399,9 @@ extension CodexLinkState: Codable {
 /// sent. Modelled on `AnswerDecision`: a tagged single-value string, with the
 /// unknown retained in its own case rather than folded into a known one.
 public enum AnswerPath: Sendable, Hashable {
+    /// Returned to Claude through a channel that confirms it: the hook Claude holds for the call, or, for a run
+    /// started in an agent host, the host's return to the SDK's `canUseTool` request. The value names the
+    /// confirmation, not the carrier.
     case hookReturn
     case sendKeys
     /// The Codex path (minor 16): the answer was written back as the response to

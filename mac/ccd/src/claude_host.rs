@@ -40,7 +40,10 @@ use protocol::proc_identity::{
     GroupWarrant, Liveness, ProcessIdentity,
 };
 use protocol::sdk_map::Signal;
-use protocol::ws::{SendTextResult, StartFailure, StartSessionResult, StopRunResult};
+use protocol::ws::{
+    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, ResolvedBy,
+    SendTextResult, StartFailure, StartSessionResult, StopRunResult,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
@@ -48,7 +51,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::state::Daemon;
-use crate::store::{HostedRun, SessionRow, TextClaim};
+use crate::store::{AnswerClaim, HostedRun, SessionRow, TextClaim};
 
 /// The agent host's file name, beside ccd's own executable.
 const HOST_BIN: &str = "cc-agent-host";
@@ -663,10 +666,13 @@ async fn link(
             }
         };
         match serde_json::from_str::<FromHost>(&line) {
-            Ok(FromHost::State { seq, .. }) => {
+            Ok(FromHost::State { seq, pending, .. }) => {
                 if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
                     break why;
                 }
+                // The end of a replay: the run's cards are put right against the
+                // requests the host still holds.
+                daemon.host_cards_reconcile(&uid, &pending).await;
                 if let Some(command) = resend.take() {
                     // A start goes again only while no outcome has come.
                     let due = !matches!(command, ToHost::Start { .. }) || (!live && !refused);
@@ -768,6 +774,35 @@ async fn link(
             Ok(FromHost::Exited { seq, .. }) if refused => {
                 if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
                     break why;
+                }
+            }
+            Ok(FromHost::Permission { seq, request }) if live => {
+                match daemon.host_card_asked(&uid, host, seq, request).await {
+                    Ok(true) => {
+                        if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                            break why;
+                        }
+                    }
+                    Ok(false) => {
+                        break format!("message {seq} is not past the run's cursor for this host")
+                    }
+                    Err(err) => break format!("{err:#}"),
+                }
+            }
+            Ok(FromHost::Withdrawn { seq, tool_use_id }) if live => {
+                match daemon
+                    .host_card_withdrawn(&uid, host, seq, &tool_use_id)
+                    .await
+                {
+                    Ok(true) => {
+                        if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                            break why;
+                        }
+                    }
+                    Ok(false) => {
+                        break format!("message {seq} is not past the run's cursor for this host")
+                    }
+                    Err(err) => break format!("{err:#}"),
                 }
             }
             Ok(_) => break "a message this daemon does not apply yet; the host keeps it".into(),
@@ -1096,6 +1131,124 @@ fn send_uuid(uid: &str, request_id: &str) -> String {
     protocol::uid::uuid_named(&format!("{uid}\0{request_id}"))
 }
 
+/// The uuid of the answer ccd sends a run's host for its card `request_id`: the same
+/// for a retry, and found again by a restarted ccd.
+pub(crate) fn answer_uuid(uid: &str, request_id: &str) -> String {
+    protocol::uid::uuid_named(&format!("{uid}\0answer\0{request_id}"))
+}
+
+/// An app's answer to the hosted run `uid`'s card `request_id`, after the ledger found
+/// none recorded: it goes to the run's host (`answer`), and is `Applied` once the host
+/// says it reached claude ([`apply_answer_outcome`] records it). Its claim is settled
+/// only by the host: an answer whose outcome has not come is never sent again, and is
+/// left for the host's replay or its `state` to settle.
+pub(crate) async fn answer(
+    daemon: &Daemon,
+    uid: &str,
+    request_id: &str,
+    payload_hash: &str,
+    decision: AnswerDecision,
+    answered_on: AnsweredOn,
+) -> AnswerResult {
+    let rejected = |reason: &str| AnswerResult::Rejected {
+        reason: reason.to_string(),
+    };
+    match daemon
+        .db
+        .answer_claim(uid.to_string(), request_id.to_string())
+        .await
+    {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return rejected(
+                "an answer to this card is still on its way to Claude; it will not be sent again",
+            )
+        }
+        Err(err) => {
+            crate::log_error!("{uid}: claim read failed: {err:#}");
+            return rejected("ledger unavailable");
+        }
+    }
+    let (session, host_decision) = match daemon
+        .claim_host_card(uid, request_id, payload_hash, &decision)
+        .await
+    {
+        Ok(claimed) => claimed,
+        Err(reason) => return AnswerResult::Rejected { reason },
+    };
+    let claim = AnswerClaim {
+        session_uid: uid.to_string(),
+        session_id: session.name.clone(),
+        request_id: request_id.to_string(),
+        payload_hash: payload_hash.to_string(),
+        decision: serde_json::to_string(&decision).unwrap_or_default(),
+        started_at: protocol::time::now_rfc3339(),
+    };
+    if let Err(err) = daemon.db.claim_answer(claim).await {
+        crate::log_error!("{uid}: could not claim the answer to {request_id}: {err:#}");
+        daemon.unclaim_host_card(uid, request_id).await;
+        return rejected("could not record that this answer is being applied; nothing was sent");
+    }
+    let uuid = answer_uuid(uid, request_id);
+    let outcome = AnswerOutcome {
+        request_id: request_id.to_string(),
+        session_id: session.name.clone(),
+        decision,
+        resolved_by: ResolvedBy::Phone,
+        answered_on: Some(answered_on),
+        applied_via: AnswerPath::HookReturn,
+        resolved_at: protocol::time::now_rfc3339(),
+        detail: None,
+        inferred: false,
+        indeterminate: false,
+    };
+    daemon.hold_host_answer(&uuid, outcome).await;
+    let taken = daemon.await_host_send(uid, &uuid).await;
+    let command = ToHost::Answer {
+        uuid: uuid.clone(),
+        tool_use_id: request_id.to_string(),
+        decision: host_decision,
+    };
+    if !daemon.send_to_host(uid, command).await {
+        daemon.host_send_taken(&uuid, false).await;
+        daemon.take_host_answer(&uuid).await;
+        if let Err(err) = daemon
+            .db
+            .release_answer_claim(uid.to_string(), request_id.to_string())
+            .await
+        {
+            crate::log_error!("{uid}: could not release the answer to {request_id}: {err:#}");
+        }
+        daemon.unclaim_host_card(uid, request_id).await;
+        return rejected(
+            "The computer is reconnecting to this session; nothing was sent. Try again in a \
+             moment.",
+        );
+    }
+    match tokio::time::timeout(SEND_WAIT, taken).await {
+        Ok(Ok(true)) => match daemon
+            .db
+            .get_answer(uid.to_string(), request_id.to_string())
+            .await
+        {
+            Ok(Some((_, outcome))) => AnswerResult::Applied { outcome },
+            _ => rejected("Claude has the answer, but this computer could not read its record"),
+        },
+        Ok(Ok(false)) => rejected("Claude was no longer asking, so the answer was not used."),
+        Ok(Err(_)) => rejected(
+            "The computer lost the session before the answer was confirmed; it may or may not \
+             have reached Claude, and it will not be sent again.",
+        ),
+        Err(_) => {
+            daemon.host_send_taken(&uuid, false).await;
+            rejected(
+                "The session did not confirm the answer in time; it may or may not have reached \
+                 Claude, and it will not be sent again.",
+            )
+        }
+    }
+}
+
 /// The person's words `text`, sent as the message `uuid` (the start's or a later
 /// send's), as the run's event.
 fn person_row(uid: &str, uuid: &str, text: &str) -> PendingEvent {
@@ -1112,7 +1265,7 @@ fn person_row(uid: &str, uuid: &str, text: &str) -> PendingEvent {
 /// uuid among the run's claimed sends, is settled with the person's words filed when the
 /// host took the message, or released when it refused it, in one transaction with the
 /// cursor; then acknowledged, and whoever waits for it is told. An outcome naming no
-/// claimed send moves only the cursor.
+/// claimed send is an answer's ([`apply_answer_outcome`]).
 async fn apply_send_outcome(
     daemon: &Daemon,
     uid: &str,
@@ -1147,10 +1300,72 @@ async fn apply_send_outcome(
                 Err(err) => return Err(format!("{err:#}")),
             }
         }
-        None => commit_and_ack(daemon, uid, host, seq, write).await?,
+        None => apply_answer_outcome(daemon, uid, host, seq, uuid, taken, write).await?,
     }
     daemon.host_send_taken(uuid, taken).await;
     Ok(())
+}
+
+/// The host's outcome for an answer ccd sent it: the answer it names, found by its uuid
+/// among the run's claimed answers, is recorded with its card closed when the host says
+/// it reached claude (`taken`), or released, its card answerable again, when the host
+/// refused it; in one transaction with the cursor, then acknowledged. The outcome this
+/// daemon held for it is recorded; a restarted daemon records one from the claim, which
+/// keeps no device. An outcome naming no claimed answer moves only the cursor.
+async fn apply_answer_outcome(
+    daemon: &Daemon,
+    uid: &str,
+    host: ProcessIdentity,
+    seq: u64,
+    uuid: &str,
+    taken: bool,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let claims = daemon
+        .db
+        .answer_claims_of(uid.to_string())
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    let Some(claim) = claims
+        .into_iter()
+        .find(|claim| answer_uuid(uid, &claim.request_id) == uuid)
+    else {
+        return commit_and_ack(daemon, uid, host, seq, write).await;
+    };
+    let held = daemon.take_host_answer(uuid).await;
+    let outcome = taken.then(|| {
+        let outcome = held.unwrap_or_else(|| AnswerOutcome {
+            request_id: claim.request_id.clone(),
+            session_id: claim.session_id.clone(),
+            decision: serde_json::from_str(&claim.decision).unwrap_or(AnswerDecision::Deny),
+            resolved_by: ResolvedBy::Phone,
+            answered_on: None,
+            applied_via: AnswerPath::HookReturn,
+            resolved_at: protocol::time::now_rfc3339(),
+            detail: None,
+            inferred: false,
+            indeterminate: false,
+        });
+        (claim.payload_hash.clone(), outcome)
+    });
+    match daemon
+        .commit_host_answer(uid, host, seq, &claim.request_id, outcome)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "message {seq} is not past the run's cursor for this host"
+            ))
+        }
+        Err(err) => return Err(format!("{err:#}")),
+    }
+    if taken {
+        daemon.answered_host_card(uid, &claim.request_id).await;
+    } else {
+        daemon.unclaim_host_card(uid, &claim.request_id).await;
+    }
+    send(write, &ToHost::Ack { seq }).await
 }
 
 /// H5's escalation for the run `uid`, sent `stop`: [`STOP_GRACE`] later, while it is still
@@ -1680,11 +1895,11 @@ mod tests {
         };
         assert_eq!(link().await, Some(protocol::event::Link::Attached));
 
-        // The host sends something this daemon does not apply yet, then a state: neither
-        // is acknowledged and the cursor stays, so the host keeps both.
+        // The host sends a line this daemon cannot read, then a state: neither is
+        // acknowledged and the cursor stays, so the host keeps both.
         say(
             &mut write,
-            serde_json::json!({"type": "withdrawn", "seq": 3, "tool_use_id": "toolu_1"}),
+            serde_json::json!({"type": "unknown_to_this_daemon", "seq": 3}),
         )
         .await;
         say(
@@ -2219,7 +2434,7 @@ mod tests {
     /// **G2b:** an SDK message is applied only in a live run. Before the start's outcome,
     /// and after a refusal, the host sends none (the outcome first; nothing but claude's
     /// end after a refusal), and one that came would file nothing and not be
-    /// acknowledged.
+    /// acknowledged: the link ends there (G5b), so the host keeps it.
     #[tokio::test]
     async fn an_sdk_message_outside_a_live_run_is_not_applied() {
         let rig = rig();
@@ -2230,6 +2445,15 @@ mod tests {
             let mut played = play_to_start(&rig).await;
             sdk(&mut played.write, 2, capture()[2].clone()).await;
             assert_eq!(next(&mut played.lines).await, None);
+            let mut ended = false;
+            for _ in 0..100 {
+                if summary(&rig.daemon, &played.uid).await.link != protocol::event::Link::Attached {
+                    ended = true;
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            assert!(ended, "the link stayed up past a message it does not apply");
             stop(&played.dir);
             played.uid
         });
@@ -2827,7 +3051,7 @@ mod tests {
     }
 
     /// A live run whose link has ended with its host still running: the host sent a
-    /// message this daemon does not apply yet. Its folder and uid.
+    /// line this daemon cannot read. Its folder and uid.
     async fn detached_run(rig: &Rig, host: &Path) -> (PathBuf, String) {
         let Played {
             dir,
@@ -2838,7 +3062,7 @@ mod tests {
         } = live_run_on(rig, host).await;
         say(
             &mut write,
-            serde_json::json!({"type": "withdrawn", "seq": 3, "tool_use_id": "toolu_1"}),
+            serde_json::json!({"type": "unknown_to_this_daemon", "seq": 3}),
         )
         .await;
         assert_eq!(next(&mut lines).await, None);
@@ -3659,6 +3883,531 @@ mod tests {
         stop(&dir);
     }
 
+    /// claude's permission request for one Bash call, as its host relays it.
+    fn bash_request(tool_use_id: &str, options: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"tool_use_id": tool_use_id, "tool_name": "Bash",
+                           "input": {"command": "ls"}, "options": options})
+    }
+
+    /// The hash a card for that call carries, a hook card's and a host card's alike.
+    fn bash_hash() -> String {
+        protocol::hash::approval_payload_hash("Bash", &serde_json::json!({"command": "ls"}))
+    }
+
+    /// The stand-in host relays the request `tool_use_id` as message `seq` and reads the ack.
+    async fn host_asks(
+        played: &mut Played,
+        seq: u64,
+        tool_use_id: &str,
+        options: serde_json::Value,
+    ) {
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "permission", "seq": seq,
+                               "request": bash_request(tool_use_id, options)}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// The app's answer to the card `request_id` of the run `uid`, from an iPhone.
+    async fn app_answers(
+        daemon: &Daemon,
+        uid: &str,
+        request_id: &str,
+        decision: AnswerDecision,
+    ) -> AnswerResult {
+        daemon
+            .answer(
+                request_id,
+                &bash_hash(),
+                decision,
+                Some(uid),
+                AnsweredOn::Iphone,
+            )
+            .await
+    }
+
+    /// The host's side of one answer, on `lines` and `write`: it reads the answer, answers
+    /// `status` as message `seq` and reads the ack. The answer's uuid and decision.
+    async fn host_settles(
+        lines: &mut Lines<BufReader<OwnedReadHalf>>,
+        write: &mut OwnedWriteHalf,
+        seq: u64,
+        status: &str,
+    ) -> (String, protocol::host::Decision) {
+        let Some(ToHost::Answer { uuid, decision, .. }) = next(lines).await else {
+            panic!("no answer reached the host");
+        };
+        say(
+            write,
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": status}),
+        )
+        .await;
+        assert_eq!(next(lines).await, Some(ToHost::Ack { seq }));
+        (uuid, decision)
+    }
+
+    /// The run's open cards, as the fleet lists them.
+    async fn cards(daemon: &Daemon, uid: &str) -> (Vec<String>, Vec<String>) {
+        let listed = summary(daemon, uid).await;
+        let pending = listed
+            .pending
+            .into_iter()
+            .map(|card| card.request_id)
+            .collect();
+        (listed.blocked_on, pending)
+    }
+
+    /// How many cards of the run `uid` are kept for a restart.
+    fn kept_cards(rig: &Rig, uid: &str) -> i64 {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM pending_approvals WHERE session_uid = ?1",
+                [uid],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// **B6 G1: a host's permission request is a card.** It is filed by the daemon with
+    /// the host's cursor before its ack, listed as pending and as what the run is blocked
+    /// on, with the hash a hook card of the same call carries, held for the apps, and kept
+    /// for a restart; and the link stays up for the next request.
+    #[tokio::test]
+    async fn a_hosts_permission_request_is_a_card_the_apps_can_answer() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        assert_eq!(cursor(&rig, &uid), 3);
+        assert_eq!(
+            cards(&rig.daemon, &uid).await,
+            (vec!["toolu_1".to_string()], vec!["toolu_1".to_string()])
+        );
+        let filed = stored(&rig, &uid);
+        let card = filed
+            .iter()
+            .find(|event| event["kind"] == "approval_request")
+            .expect("the card's event");
+        assert_eq!(card["source"], "daemon");
+        assert_eq!(card["source_event_id"], "perm:toolu_1");
+        assert_eq!(card["payload"]["card"]["payload_hash"], bash_hash());
+        assert_eq!(card["payload"]["card"]["question_hold"], "held");
+        assert_eq!(kept_cards(&rig, &uid), 1);
+        host_asks(&mut played, 4, "toolu_2", serde_json::json!({})).await;
+        assert_eq!(kept_cards(&rig, &uid), 2);
+        stop(&played.dir);
+    }
+
+    /// **B6 G2 and G6: allow.** The app's Allow goes to the host as `answer`; once the host
+    /// says it reached claude, the answer is recorded and its card closes in one
+    /// transaction with the cursor, and the app is told it applied, confirmed rather than
+    /// only sent. The same answer again is a duplicate.
+    #[tokio::test]
+    async fn an_allow_applies_once_the_host_says_it_reached_claude() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        let Played {
+            lines, write, dir, ..
+        } = &mut played;
+        let (result, (_, decision)) = tokio::join!(
+            app_answers(&rig.daemon, &uid, "toolu_1", AnswerDecision::Allow),
+            host_settles(lines, write, 4, "done")
+        );
+        assert_eq!(
+            decision,
+            protocol::host::Decision::Allow {
+                updated_input: None
+            }
+        );
+        let AnswerResult::Applied { outcome } = result else {
+            panic!("not applied: {result:?}");
+        };
+        assert!(!outcome.indeterminate);
+        assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
+        assert_eq!(outcome.answered_on, Some(AnsweredOn::Iphone));
+        assert_eq!(cards(&rig.daemon, &uid).await, (vec![], vec![]));
+        assert_eq!(kept_cards(&rig, &uid), 0);
+        assert_eq!(cursor(&rig, &uid), 4);
+        let resolved = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| event["kind"] == "approval_resolved")
+            .expect("the card's resolution");
+        assert_eq!(resolved["source_event_id"], "resolved:toolu_1");
+        assert!(matches!(
+            app_answers(&rig.daemon, &uid, "toolu_1", AnswerDecision::Allow).await,
+            AnswerResult::Duplicate { .. }
+        ));
+        assert_eq!(next(lines).await, None, "nothing sent again");
+        stop(dir);
+    }
+
+    /// **B6 G3: deny.** A deny of the main conversation's call also ends its turn; a
+    /// subagent's (`agentID`) does not; a deny with a reason carries it to claude and does
+    /// not end the turn.
+    #[tokio::test]
+    async fn a_deny_ends_the_main_turn_but_not_a_subagents_and_a_reason_reaches_claude() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let cases = [
+            (
+                "toolu_main",
+                serde_json::json!({}),
+                AnswerDecision::Deny,
+                true,
+                None,
+            ),
+            (
+                "toolu_sub",
+                serde_json::json!({"agentID": "agent-1"}),
+                AnswerDecision::Deny,
+                false,
+                None,
+            ),
+            (
+                "toolu_why",
+                serde_json::json!({}),
+                AnswerDecision::Text {
+                    text: "not that file".into(),
+                },
+                false,
+                Some("not that file"),
+            ),
+        ];
+        let mut seq = 3;
+        for (request_id, options, answer, interrupts, reason) in cases {
+            host_asks(&mut played, seq, request_id, options).await;
+            let Played { lines, write, .. } = &mut played;
+            let (result, (_, decision)) = tokio::join!(
+                app_answers(&rig.daemon, &uid, request_id, answer),
+                host_settles(lines, write, seq + 1, "done")
+            );
+            assert!(
+                matches!(result, AnswerResult::Applied { .. }),
+                "{request_id}"
+            );
+            let protocol::host::Decision::Deny { message, interrupt } = decision else {
+                panic!("{request_id}: not a deny");
+            };
+            assert_eq!(interrupt, interrupts, "{request_id}");
+            if let Some(reason) = reason {
+                assert!(message.ends_with(reason), "{request_id}: {message}");
+            }
+            seq += 2;
+        }
+        stop(&played.dir);
+    }
+
+    /// **B6 G4: withdrawn.** claude stops waiting on a request (End run, or its own end):
+    /// its card closes, nobody having answered, with no answer recorded, so a late answer
+    /// finds no card.
+    #[tokio::test]
+    async fn a_withdrawn_request_closes_its_card_with_nobody_answering() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "withdrawn", "seq": 4, "tool_use_id": "toolu_1"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(cards(&rig.daemon, &uid).await, (vec![], vec![]));
+        assert_eq!(kept_cards(&rig, &uid), 0);
+        let resolved = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| event["kind"] == "approval_resolved")
+            .expect("the card's closing");
+        assert_eq!(resolved["payload"]["resolved_by"], "timeout");
+        assert_eq!(
+            resolved["payload"]["detail"],
+            "the session ended before anyone answered"
+        );
+        assert_eq!(
+            rig.daemon
+                .db
+                .get_answer(uid.clone(), "toolu_1".into())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            app_answers(&rig.daemon, &uid, "toolu_1", AnswerDecision::Allow).await,
+            AnswerResult::Rejected {
+                reason: "unknown or already-resolved request".into()
+            }
+        );
+        assert_eq!(next(&mut played.lines).await, None, "nothing sent");
+        stop(&played.dir);
+    }
+
+    /// **B6 G4: the run ends with a card open.** claude's end closes its cards the same
+    /// way, nobody having answered, with no answer recorded and nothing labelled typed.
+    #[tokio::test]
+    async fn a_hosted_runs_end_closes_its_cards_with_nobody_answering() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let mut closed = false;
+        for _ in 0..100 {
+            if cards(&rig.daemon, &uid).await == (vec![], vec![]) {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        assert!(closed, "the card outlived its run");
+        let resolved = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| event["kind"] == "approval_resolved")
+            .expect("the card's closing");
+        assert_eq!(resolved["payload"]["resolved_by"], "timeout");
+        assert_ne!(resolved["payload"]["applied_via"], "send_keys");
+        assert_eq!(
+            rig.daemon
+                .db
+                .get_answer(uid.clone(), "toolu_1".into())
+                .await
+                .unwrap(),
+            None
+        );
+        stop(&played.dir);
+    }
+
+    /// **B6: an answer the host refuses** (claude stopped asking first) is not recorded,
+    /// its claim is let go, and the app is told why.
+    #[tokio::test]
+    async fn an_answer_the_host_refuses_is_not_recorded() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        let Played {
+            lines, write, dir, ..
+        } = &mut played;
+        let (result, _) = tokio::join!(
+            app_answers(&rig.daemon, &uid, "toolu_1", AnswerDecision::Allow),
+            host_settles(lines, write, 4, "refused")
+        );
+        assert_eq!(
+            result,
+            AnswerResult::Rejected {
+                reason: "Claude was no longer asking, so the answer was not used.".into()
+            }
+        );
+        assert!(rig
+            .daemon
+            .db
+            .answer_claim(uid.clone(), "toolu_1".into())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            rig.daemon
+                .db
+                .get_answer(uid.clone(), "toolu_1".into())
+                .await
+                .unwrap(),
+            None
+        );
+        stop(dir);
+    }
+
+    /// **B6 G11: a request too large to show** is refused at once: the host is answered
+    /// deny with the reason claude reads, no card is raised, and the run goes on.
+    #[tokio::test]
+    async fn a_request_too_large_to_show_is_refused_and_raises_no_card() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let huge = "x".repeat(600_000);
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "permission", "seq": 3, "request": {
+                "tool_use_id": "toolu_big", "tool_name": "Write",
+                "input": {"file_path": "/tmp/big", "content": huge}, "options": {}}}),
+        )
+        .await;
+        let mut acked = false;
+        let mut refusal = None;
+        for _ in 0..2 {
+            match next(&mut played.lines).await {
+                Some(ToHost::Ack { seq: 3 }) => acked = true,
+                Some(ToHost::Answer {
+                    tool_use_id,
+                    decision,
+                    ..
+                }) if tool_use_id == "toolu_big" => refusal = Some(decision),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(acked);
+        assert_eq!(
+            refusal,
+            Some(protocol::host::Decision::Deny {
+                message: "This request is too large to show in the app, so it was refused.".into(),
+                interrupt: false,
+            })
+        );
+        assert_eq!(cards(&rig.daemon, &uid).await, (vec![], vec![]));
+        assert!(!stored(&rig, &uid)
+            .iter()
+            .any(|event| event["kind"] == "approval_request"));
+        host_asks(&mut played, 4, "toolu_next", serde_json::json!({})).await;
+        stop(&played.dir);
+    }
+
+    /// **B6 G5: cards across a restart.** A card open when ccd stopped is still held for
+    /// the apps, and answerable again once its host re-attaches; one whose request came
+    /// from a subagent still does not end the main turn when denied. An answer claimed and
+    /// never sent is released by the host's `state`, which still holds its request, so the
+    /// card is answerable.
+    #[tokio::test]
+    async fn a_card_open_across_a_restart_is_answered_once_after_it() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let dir = played.dir.clone();
+        host_asks(&mut played, 3, "toolu_open", serde_json::json!({})).await;
+        host_asks(
+            &mut played,
+            4,
+            "toolu_sub",
+            serde_json::json!({"agentID": "agent-1"}),
+        )
+        .await;
+        // An answer claimed whose `answer` never reached the host.
+        rig.daemon
+            .db
+            .claim_answer(crate::store::AnswerClaim {
+                session_uid: uid.clone(),
+                session_id: uid.clone(),
+                request_id: "toolu_open".into(),
+                payload_hash: bash_hash(),
+                decision: serde_json::to_string(&AnswerDecision::Allow).unwrap(),
+                started_at: protocol::time::now_rfc3339(),
+            })
+            .await
+            .unwrap();
+        drop(played);
+        let (restarted, mut lines, mut write) = restarted(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 5, "pending": [
+                bash_request("toolu_open", serde_json::json!({})),
+                bash_request("toolu_sub", serde_json::json!({"agentID": "agent-1"}))]}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        // Still held for the apps, which offer an answer only on a held card
+        // (DecisionCard.swift): no hold was ended across the restart.
+        let mut holds: Vec<_> = summary(&restarted, &uid)
+            .await
+            .pending
+            .into_iter()
+            .map(|card| (card.request_id, card.hold))
+            .collect();
+        holds.sort_by(|a, b| a.0.cmp(&b.0));
+        let held = Some(protocol::ws::QuestionHold::Held);
+        assert_eq!(
+            holds,
+            [
+                ("toolu_open".to_string(), held),
+                ("toolu_sub".to_string(), held)
+            ]
+        );
+        assert!(!stored(&rig, &uid)
+            .iter()
+            .any(|event| event["kind"] == "question_hold"));
+        let (result, (_, decision)) = tokio::join!(
+            app_answers(&restarted, &uid, "toolu_open", AnswerDecision::Allow),
+            host_settles(&mut lines, &mut write, 6, "done")
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        assert!(matches!(decision, protocol::host::Decision::Allow { .. }));
+        let (result, (_, decision)) = tokio::join!(
+            app_answers(&restarted, &uid, "toolu_sub", AnswerDecision::Deny),
+            host_settles(&mut lines, &mut write, 7, "done")
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        assert!(matches!(
+            decision,
+            protocol::host::Decision::Deny {
+                interrupt: false,
+                ..
+            }
+        ));
+        stop(&dir);
+    }
+
+    /// **B6 G5: an answer the host took before a restart.** ccd died after sending it and
+    /// before the host's outcome came: the app was told it is not confirmed, and the
+    /// restarted ccd, holding nothing of it in memory, records it from the host's replayed
+    /// outcome and the answer's claim, closes the card, and answers a retry as a duplicate.
+    #[tokio::test]
+    async fn an_answer_taken_before_a_restart_is_recorded_from_the_replay() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let dir = played.dir.clone();
+        host_asks(&mut played, 3, "toolu_1", serde_json::json!({})).await;
+        let (lost, uuid) = tokio::join!(
+            app_answers(&rig.daemon, &uid, "toolu_1", AnswerDecision::Allow),
+            async {
+                let Some(ToHost::Answer { uuid, .. }) = next(&mut played.lines).await else {
+                    panic!("no answer");
+                };
+                drop(played);
+                uuid
+            }
+        );
+        assert!(matches!(lost, AnswerResult::Rejected { .. }), "{lost:?}");
+        let (restarted, mut lines, mut write) = restarted(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 3 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "outcome", "seq": 4, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 5, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        assert_eq!(cards(&restarted, &uid).await, (vec![], vec![]));
+        let Some((_, recorded)) = restarted
+            .db
+            .get_answer(uid.clone(), "toolu_1".into())
+            .await
+            .unwrap()
+        else {
+            panic!("no answer recorded");
+        };
+        assert_eq!(recorded.decision, AnswerDecision::Allow);
+        assert!(!recorded.indeterminate);
+        assert!(matches!(
+            app_answers(&restarted, &uid, "toolu_1", AnswerDecision::Allow).await,
+            AnswerResult::Duplicate { .. }
+        ));
+        stop(&dir);
+    }
+
     /// **G4, the warrant.** A host gone is signalled only under the warrant, and its run
     /// ends either way:
     /// - a pid reused: the recorded host's pid is now a live process of another birth,
@@ -3920,11 +4669,12 @@ mod tests {
         (uid, host_pid, claude_pid)
     }
 
-    /// Whether `pid` has stopped running, waiting up to `within` for it.
+    /// Whether `pid` has stopped running, waiting up to `within` for it. A negative `pid`
+    /// names a process group, gone once it has no member.
     async fn gone_within(pid: i32, within: Duration) -> bool {
         let until = Instant::now() + within;
         while Instant::now() < until {
-            // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+            // SAFETY: kill(2) with signal 0 only asks whether the process, or the group, exists.
             if unsafe { libc::kill(pid, 0) } != 0 {
                 return true;
             }
@@ -4150,6 +4900,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A real claude across a restart, then End run.** A run on the real host whose claude,
+    /// signed in by its own config, is writing a long answer when ccd stops: the first
+    /// daemon's runtime is shut down mid-turn, as a crash or an update ends ccd, and a second
+    /// daemon on the same store recovers it (`recover`, then `recover_hosted_runs`, in
+    /// main.rs's order). The run is live and attached again; End run on the restarted daemon
+    /// ends it `exited` before the escalation's 10 s, and the host and its group are gone.
+    /// Ignored and gated as G2 is: `CODECONNECT_TEST_AGENT_HOST`,
+    /// `CODECONNECT_TEST_REAL_CLAUDE`, `CODECONNECT_TEST_RIG_DIR`.
+    #[test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    fn a_real_claude_across_a_restart_is_ended_by_the_restarted_daemon() {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join("restart");
+        std::fs::create_dir(&root).unwrap();
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let cwd = root.to_str().unwrap().to_string();
+        let codeconnect = root.join("codeconnect");
+        // The first ccd: the run starts, and claude is mid-turn when ccd's runtime ends.
+        let first = tokio::runtime::Runtime::new().unwrap();
+        let (uid, host_pid) = first.block_on(async {
+            let daemon = daemon_on(&root);
+            let started = start(
+                &daemon,
+                Run {
+                    root: &root,
+                    request_id: "restart",
+                    cwd: &cwd,
+                    prompt: "Write a 2,000-word essay on the history of mechanical clocks.",
+                    model: None,
+                    worktree: None,
+                    trust: Trust::NotTrusted,
+                    claude_path: claude.to_str().unwrap(),
+                    host_bin: &host,
+                    codeconnect: &codeconnect,
+                    environment: &environment,
+                },
+            )
+            .await;
+            let uid = started_uid(&started);
+            let host_pid = read_host_file(&run_dir(&root, &uid).join("host.json"))
+                .unwrap()
+                .host_pid;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            (uid, host_pid)
+        });
+        drop(first);
+        // The restarted ccd, on the same store.
+        let second = tokio::runtime::Runtime::new().unwrap();
+        let (attached, ended_after) = second.block_on(async {
+            let daemon = daemon_on(&root);
+            daemon.recover().await;
+            daemon.recover_hosted_runs(&root).await;
+            let mut attached = false;
+            for _ in 0..100 {
+                if summary(&daemon, &uid).await.link == protocol::event::Link::Attached {
+                    attached = true;
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            let asked = Instant::now();
+            let answer = daemon.stop_run(&uid).await;
+            assert_eq!(
+                answer,
+                StopRunResult::Stopping,
+                "the restarted run is not live"
+            );
+            let mut ended_after = None;
+            for _ in 0..200 {
+                let lifecycle = daemon
+                    .db
+                    .hosted_link(uid.clone())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lifecycle;
+                if lifecycle == Lifecycle::Exited {
+                    ended_after = Some(asked.elapsed());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            (attached, ended_after)
+        });
+        let host_gone = second.block_on(gone_within(host_pid, Duration::from_secs(5)));
+        if !host_gone {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
+        let group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
+        println!(
+            "RESTART: attached again {attached}; ended {ended_after:?} after the stop; host gone {host_gone}; group left {group_left}"
+        );
+        assert!(
+            attached,
+            "the restarted daemon never attached the host again"
+        );
+        let ended_after = ended_after.expect("the run never ended");
+        assert!(
+            ended_after < STOP_GRACE,
+            "ended after {ended_after:?}: by the escalation, not by claude"
+        );
+        assert!(
+            host_gone && !group_left,
+            "host gone {host_gone}, group left {group_left}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Whether the run `uid` is settled after the person's last words: a turn has ended
     /// since them, and nothing new has been filed for 5 s. Waits 180 s at most.
     async fn settled_after_words(rig: &Rig, uid: &str) -> bool {
@@ -4174,9 +5048,11 @@ mod tests {
         false
     }
 
-    /// How often each of `texts` is a person's line in claude's own transcript of the
-    /// session `session_id` under `config` (`projects/*/<session_id>.jsonl`); `None` when
-    /// there is no such file.
+    /// How often each of `texts` reached claude, by its own transcript of the session
+    /// `session_id` under `config` (`projects/*/<session_id>.jsonl`): as a person's line, or
+    /// folded into a running tool's result, which claude 2.1.322 keeps as an `attachment` of
+    /// type `queued_command` with the words as its `prompt`. `None` when there is no such
+    /// file.
     fn transcript_counts(config: &Path, session_id: &str, texts: &[&str]) -> Option<Vec<usize>> {
         let name = format!("{session_id}.jsonl");
         let file = std::fs::read_dir(config.join("projects"))
@@ -4196,7 +5072,10 @@ mod tests {
                     lines
                         .iter()
                         .filter(|line| {
-                            line["type"] == "user" && line["message"]["content"] == *text
+                            (line["type"] == "user" && line["message"]["content"] == *text)
+                                || (line["type"] == "attachment"
+                                    && line["attachment"]["type"] == "queued_command"
+                                    && line["attachment"]["prompt"] == *text)
                         })
                         .count()
                 })
@@ -4204,9 +5083,11 @@ mod tests {
         )
     }
 
-    /// G6's transcript check without a real claude: a message claude's transcript holds
-    /// twice, or not at all, is counted so, and no transcript is `None`; each fails G6's
-    /// "exactly once".
+    /// G6's and G9's transcript check without a real claude: a message claude's transcript
+    /// holds twice, or not at all, is counted so, and no transcript is `None`; each fails
+    /// "exactly once". A message folded into a tool's result counts once, and the same words
+    /// both folded and as a person's line count twice. The folded line is app-qa's G9 (a)
+    /// transcript's, its ids and long fields cut; the queue's own lines never count.
     #[tokio::test]
     async fn the_transcript_counts_a_message_held_twice_or_not_at_all() {
         let rig = rig();
@@ -4216,14 +5097,41 @@ mod tests {
             serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
                 .to_string()
         };
+        let folded = |text: &str| {
+            serde_json::json!({"type": "attachment", "isSidechain": false,
+                "attachment": {"type": "queued_command", "prompt": text, "commandMode": "prompt",
+                               "origin": {"kind": "human"}, "humanTurn": true},
+                "renderedRole": "system"})
+            .to_string()
+        };
+        let queued = |operation: &str, text: &str| {
+            serde_json::json!({"type": "queue-operation", "operation": operation, "content": text})
+                .to_string()
+        };
         let reply =
             serde_json::json!({"type": "assistant", "message": {"content": "twice"}}).to_string();
-        let lines = [user("once"), user("twice"), reply, user("twice")].join("\n");
+        let lines = [
+            user("once"),
+            user("twice"),
+            reply,
+            user("twice"),
+            queued("enqueue", "folded"),
+            folded("folded"),
+            queued("remove", "folded"),
+            user("both"),
+            folded("both"),
+            queued("enqueue", "dropped"),
+        ]
+        .join("\n");
         std::fs::write(project.join("s1.jsonl"), lines).unwrap();
         let config = rig.root.join("config");
-        let counts = transcript_counts(&config, "s1", &["once", "twice", "never"]);
-        assert_eq!(counts, Some(vec![1, 2, 0]));
-        assert_ne!(counts, Some(vec![1, 1, 1]));
+        let counts = transcript_counts(
+            &config,
+            "s1",
+            &["once", "twice", "never", "folded", "both", "dropped"],
+        );
+        assert_eq!(counts, Some(vec![1, 2, 0, 1, 2, 0]));
+        assert_ne!(counts, Some(vec![1, 1, 1, 1, 1, 1]));
         assert_eq!(transcript_counts(&config, "s2", &["once"]), None);
     }
 
@@ -4392,6 +5300,537 @@ mod tests {
             host_gone && !group_left,
             "host gone {host_gone}, group left {group_left}"
         );
+    }
+
+    /// A run on the real host whose claude, signed in by its own config, is given `prompt`
+    /// in a folder of its own, `name`, under `CODECONNECT_TEST_RIG_DIR`, as G6's run is:
+    /// the rig, the run's uid and its host's pid.
+    async fn real_claude_run(name: &str, prompt: &str) -> (Rig, String, i32) {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join(name);
+        std::fs::create_dir(&root).unwrap();
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let rig = Rig {
+            daemon: daemon_on(&root),
+            root,
+            environment,
+        };
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let codeconnect = rig.root.join("codeconnect");
+        let started = start(
+            &rig.daemon,
+            Run {
+                root: &rig.root,
+                request_id: name,
+                cwd: &cwd,
+                prompt,
+                model: None,
+                worktree: None,
+                trust: Trust::NotTrusted,
+                claude_path: claude.to_str().unwrap(),
+                host_bin: &host,
+                codeconnect: &codeconnect,
+                environment: &rig.environment,
+            },
+        )
+        .await;
+        let uid = started_uid(&started);
+        let host_pid = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+            .unwrap()
+            .host_pid;
+        (rig, uid, host_pid)
+    }
+
+    /// The run `uid`'s first card, once claude has asked: its request id and the hash an
+    /// app answers it with, as its `approval_request` carries them. Waits 120 s at most.
+    async fn first_card(rig: &Rig, uid: &str) -> Option<(String, String)> {
+        for _ in 0..1200 {
+            let asked = stored(rig, uid)
+                .into_iter()
+                .find(|event| event["kind"] == "approval_request");
+            if let Some(event) = asked {
+                let card = &event["payload"]["card"];
+                return Some((
+                    card["request_id"].as_str()?.to_string(),
+                    card["payload_hash"].as_str()?.to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    }
+
+    /// The app's Allow of the card `card` of the run `uid`, from an iPhone.
+    async fn allow_from_app(
+        rig: &Rig,
+        uid: &str,
+        card: &Option<(String, String)>,
+    ) -> Option<AnswerResult> {
+        let (request_id, hash) = card.as_ref()?;
+        Some(
+            rig.daemon
+                .answer(
+                    request_id,
+                    hash,
+                    AnswerDecision::Allow,
+                    Some(uid),
+                    AnsweredOn::Iphone,
+                )
+                .await,
+        )
+    }
+
+    /// What G9's command wrote into the run's folder, `rang.txt`, if it ran. A command that
+    /// writes asks for permission; one that only reads runs without a card.
+    fn rang(rig: &Rig) -> Option<String> {
+        std::fs::read_to_string(rig.root.join("rang.txt")).ok()
+    }
+
+    /// The members of the process group `group`, each its pid and command, as pgrep
+    /// lists them.
+    fn group_members(group: i32) -> Vec<String> {
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-a", "-l", "-f", "-g", &group.to_string()])
+            .output()
+            .map(|listed| {
+                String::from_utf8_lossy(&listed.stdout)
+                    .lines()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Wait up to 10 s for the process group `group` to have no member: none left, or
+    /// each one still there, named before the group is ended.
+    async fn left_in_group(group: i32) -> Vec<String> {
+        if gone_within(-group, Duration::from_secs(10)).await {
+            return Vec::new();
+        }
+        let left = group_members(group);
+        // SAFETY: kill(2) of a process group this test's run started.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        left
+    }
+
+    /// End run on the run `uid`, as G2 sends it: the answer, whether the run then ended
+    /// `exited` within 20 s, whether its host `host_pid` is gone, and what is left in its
+    /// group ([`left_in_group`]).
+    async fn end_real_run(
+        rig: &Rig,
+        uid: &str,
+        host_pid: i32,
+    ) -> (StopRunResult, bool, bool, Vec<String>) {
+        let answer = rig.daemon.stop_run(uid).await;
+        let mut ended = false;
+        for _ in 0..200 {
+            let lifecycle = rig
+                .daemon
+                .db
+                .hosted_link(uid.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle;
+            if lifecycle == Lifecycle::Exited {
+                ended = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let host_gone = gone_within(host_pid, Duration::from_secs(5)).await;
+        (answer, ended, host_gone, left_in_group(host_pid).await)
+    }
+
+    /// **B6 G9 (a): an allowed command, and a message while it runs, with a real claude**
+    /// (app-qa's rig). claude asks to run a Bash command that sleeps 8 s, then writes a
+    /// file in the run's folder (a command that only reads runs without a card); the
+    /// iPhone's Allow is `Applied`; a message sent 2 s later, before the file is written, is
+    /// `sent` and filed once; the command writes what it was asked to; the run settles with
+    /// no card open, and claude got the message once ([`transcript_counts`]: sent while the
+    /// command runs, it reaches claude with the command's result). Then End run, as G2.
+    /// Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_runs_an_allowed_command_while_a_message_waits() {
+        let prompt = "Use the Bash tool to run exactly this command, once: sleep 8 && echo $((6*7))-rang > rang.txt";
+        let message = "Then say goodbye in one word.";
+        let (rig, uid, host_pid) = real_claude_run("g9a", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let answer = allow_from_app(&rig, &uid, &card).await;
+        // While the command sleeps.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let written_before = rang(&rig);
+        let sent = send_as_app(&rig.daemon, &uid, "g9a-1", message).await;
+        let settled = settled_after_words(&rig, &uid).await;
+        let written = rang(&rig);
+        let open = cards(&rig.daemon, &uid).await;
+        let config = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap());
+        let transcript = row_of(&rig, &uid)
+            .0
+            .and_then(|session_id| transcript_counts(&config, &session_id, &[message]));
+        println!(
+            "G9: allow: card {card:?}; answer {answer:?}; written before the message {written_before:?}; sent {sent:?}; settled {settled}; written {written:?}; open {open:?}; claude's transcript holds the message {transcript:?} times"
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!(
+            "G9: allow: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}"
+        );
+        assert!(card.is_some(), "claude asked nothing");
+        assert!(
+            matches!(answer, Some(AnswerResult::Applied { .. })),
+            "{answer:?}"
+        );
+        assert_eq!(
+            written_before, None,
+            "the command had written before the message was sent"
+        );
+        assert_eq!(
+            sent,
+            SendTextResult::Sent {
+                matched: message.to_string()
+            }
+        );
+        assert_eq!(
+            words(&rig, &uid),
+            vec![prompt.to_string(), message.to_string()],
+            "each filed once, in order"
+        );
+        assert_eq!(
+            written.as_deref(),
+            Some("42-rang\n"),
+            "the allowed command never wrote"
+        );
+        assert!(settled, "the run did not settle");
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert_eq!(transcript, Some(vec![1]), "claude got the message once");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
+    /// **B6 G9 (b): End run with a card open, with a real claude.** claude asks to run a
+    /// command, and the run is ended before anyone answers: it ends `exited`, the host and
+    /// its group are gone, the card closes once with nobody having answered, nothing is
+    /// left open, the command never ran, and an app's late Allow is refused. Ignored and
+    /// gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_ended_with_a_card_open_leaves_it_unanswered() {
+        let prompt =
+            "Use the Bash tool to run exactly this command, once: echo $((6*7))-rang > rang.txt";
+        let (rig, uid, host_pid) = real_claude_run("g9b", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        let closed: Vec<serde_json::Value> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "approval_resolved")
+            .map(|event| event["payload"].clone())
+            .collect();
+        let open = cards(&rig.daemon, &uid).await;
+        let late = allow_from_app(&rig, &uid, &card).await;
+        let written = rang(&rig);
+        println!(
+            "G9: end: card {card:?}; End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}; closed {closed:?}; open {open:?}; late answer {late:?}; written {written:?}"
+        );
+        assert!(card.is_some(), "claude asked nothing");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+        assert_eq!(closed.len(), 1, "closed once: {closed:?}");
+        assert_eq!(closed[0]["resolved_by"], "timeout", "nobody answered");
+        assert_eq!(closed[0]["answered_on"], serde_json::Value::Null);
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert!(
+            matches!(late, Some(AnswerResult::Rejected { .. })),
+            "{late:?}"
+        );
+        assert_eq!(written, None, "the command ran with nobody answering");
+    }
+
+    /// **B6 G9 (c): SIGTERM mid-command, with a real claude.** claude's allowed command,
+    /// a shell that writes its pid and sleeps 60 s, is running when the host's group is
+    /// sent SIGTERM: the host and the command's shell are gone within 10 s, and neither
+    /// the host's group nor the shell's has a member left 10 s later. What is left is
+    /// named, then ended by the pids and groups this run started. Ignored and gated as G2
+    /// is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_sent_sigterm_mid_command_leaves_nothing() {
+        let prompt =
+            "Use the Bash tool to run exactly this command, once: echo $$ > tool.pid && sleep 60";
+        let (rig, uid, host_pid) = real_claude_run("g9c", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let answer = allow_from_app(&rig, &uid, &card).await;
+        // The command's shell, once it has written its pid.
+        let mut shell = None;
+        for _ in 0..300 {
+            shell = std::fs::read_to_string(rig.root.join("tool.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            if shell.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // SAFETY: getpgid(2) only reads the group of the command's shell; getpgrp(2) this
+        // test's own.
+        let (shell_group, own_group) = unsafe {
+            (
+                shell
+                    .map(|pid| libc::getpgid(pid))
+                    .filter(|group| *group > 0),
+                libc::getpgrp(),
+            )
+        };
+        // SAFETY: kill(2) of the process group this test's host leads.
+        unsafe { libc::kill(-host_pid, libc::SIGTERM) };
+        let host_gone = gone_within(host_pid, Duration::from_secs(10)).await;
+        let shell_gone = match shell {
+            Some(pid) => gone_within(pid, Duration::from_secs(10)).await,
+            None => false,
+        };
+        let host_group_left = left_in_group(host_pid).await;
+        let shell_group_left = match shell_group {
+            Some(group) if group != own_group && group != host_pid => left_in_group(group).await,
+            _ => Vec::new(),
+        };
+        if let (false, Some(pid)) = (shell_gone, shell) {
+            // SAFETY: kill(2) of the shell this test's claude started, by its pid.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        println!(
+            "G9: sigterm: card {card:?}; answer {answer:?}; shell {shell:?} in group {shell_group:?}; host gone {host_gone}; shell gone {shell_gone}; left in the host's group {host_group_left:?}; left in the shell's group {shell_group_left:?}"
+        );
+        assert!(card.is_some(), "claude asked nothing");
+        assert!(
+            matches!(answer, Some(AnswerResult::Applied { .. })),
+            "{answer:?}"
+        );
+        assert!(shell.is_some(), "the command never started");
+        assert!(
+            host_gone && shell_gone && host_group_left.is_empty() && shell_group_left.is_empty(),
+            "host gone {host_gone}, shell gone {shell_gone}, left in the host's group {host_group_left:?}, left in the shell's group {shell_group_left:?}"
+        );
+    }
+
+    /// claude's `can_use_tool` request for the Bash call `toolu_rh`, as claude writes it.
+    fn claude_asks() -> String {
+        serde_json::json!({"type": "control_request", "request_id": "req-toolu_rh",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                        "input": {"command": "ls"}, "tool_use_id": "toolu_rh"}})
+        .to_string()
+    }
+
+    /// The control responses the stand-in `name` read for claude's request `toolu_rh`,
+    /// waiting up to 5 s for the first.
+    async fn answers_claude_read(rig: &Rig, name: &str) -> Vec<serde_json::Value> {
+        let read = || -> Vec<serde_json::Value> {
+            std::fs::read_to_string(rig.root.join(format!("stub-{name}.log")))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter_map(|entry| entry.get("stdin").cloned())
+                .filter(|message| {
+                    message["type"] == "control_response"
+                        && message["response"]["request_id"] == "req-toolu_rh"
+                })
+                .collect()
+        };
+        for _ in 0..100 {
+            let answers = read();
+            if !answers.is_empty() {
+                return answers;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        read()
+    }
+
+    /// Whether the run `uid` lists the card `toolu_rh`, waiting up to 5 s.
+    async fn carded(daemon: &Daemon, uid: &str) -> bool {
+        for _ in 0..100 {
+            if cards(daemon, uid).await.1 == ["toolu_rh"] {
+                return true;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        false
+    }
+
+    /// **B6 G2 on the real host.** The stand-in claude asks permission after the first
+    /// message; the real host holds the request and its card reaches the apps; the app's
+    /// Allow reaches claude's input once, as the SDK's own allow with the call's input, and
+    /// is confirmed. Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names the built host.
+    #[tokio::test]
+    #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
+    async fn a_real_hosts_permission_request_is_answered_from_the_app() {
+        let (host, rig) = real_host_rig();
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (claude, _) = stand_in_claude(
+            &rig,
+            &host,
+            "perm",
+            serde_json::json!({"after_user": [claude_asks()]}),
+        );
+        let started = start(
+            &rig.daemon,
+            Run {
+                claude_path: claude.to_str().unwrap(),
+                ..run(&rig, "perm", &cwd, &host)
+            },
+        )
+        .await;
+        let uid = started_uid(&started);
+        let host_pid = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+            .unwrap()
+            .host_pid;
+        let carded = carded(&rig.daemon, &uid).await;
+        let result = rig
+            .daemon
+            .answer(
+                "toolu_rh",
+                &bash_hash(),
+                AnswerDecision::Allow,
+                Some(&uid),
+                AnsweredOn::Mac,
+            )
+            .await;
+        let read = answers_claude_read(&rig, "perm").await;
+        // SAFETY: kill(2) of the process group this test's host leads.
+        unsafe { libc::kill(-host_pid, libc::SIGTERM) };
+        assert!(carded, "no card");
+        let AnswerResult::Applied { outcome } = result else {
+            panic!("not applied: {result:?}");
+        };
+        assert!(!outcome.indeterminate);
+        assert_eq!(read.len(), 1, "claude read the answer once: {read:?}");
+        assert_eq!(read[0]["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            read[0]["response"]["response"]["updatedInput"],
+            serde_json::json!({"command": "ls"})
+        );
+    }
+
+    /// **B6 G5 on the real host: a card across a ccd restart.** The run's first ccd stops
+    /// with the card open and an answer claimed that never reached the host. The restarted
+    /// ccd, on the same store, attaches the real host again; the host's `state` still holds
+    /// the request, so the claim is released and the card answerable; the app's Allow then
+    /// reaches claude's input once. Ignored and gated as G2 on the real host is.
+    #[test]
+    #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
+    fn a_card_open_across_a_real_restart_is_answered_once_after_it() {
+        let (host, rig) = real_host_rig();
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (claude, _) = stand_in_claude(
+            &rig,
+            &host,
+            "restart",
+            serde_json::json!({"after_user": [claude_asks()]}),
+        );
+        let first = tokio::runtime::Runtime::new().unwrap();
+        let (uid, host_pid, carded) = first.block_on(async {
+            let daemon = daemon_on(&rig.root);
+            let started = start(
+                &daemon,
+                Run {
+                    claude_path: claude.to_str().unwrap(),
+                    ..run(&rig, "restart", &cwd, &host)
+                },
+            )
+            .await;
+            let uid = started_uid(&started);
+            let host_pid = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+                .unwrap()
+                .host_pid;
+            let carded = carded(&daemon, &uid).await;
+            daemon
+                .db
+                .claim_answer(crate::store::AnswerClaim {
+                    session_uid: uid.clone(),
+                    session_id: uid.clone(),
+                    request_id: "toolu_rh".into(),
+                    payload_hash: bash_hash(),
+                    decision: serde_json::to_string(&AnswerDecision::Allow).unwrap(),
+                    started_at: protocol::time::now_rfc3339(),
+                })
+                .await
+                .unwrap();
+            (uid, host_pid, carded)
+        });
+        drop(first);
+        let second = tokio::runtime::Runtime::new().unwrap();
+        let (attached, result, read) = second.block_on(async {
+            let daemon = daemon_on(&rig.root);
+            daemon.recover().await;
+            daemon.recover_hosted_runs(&rig.root).await;
+            let mut attached = false;
+            for _ in 0..100 {
+                if summary(&daemon, &uid).await.link == protocol::event::Link::Attached {
+                    attached = true;
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            // The host's `state` ends the replay and releases the claim.
+            let mut result = None;
+            for _ in 0..100 {
+                let answer = daemon
+                    .answer(
+                        "toolu_rh",
+                        &bash_hash(),
+                        AnswerDecision::Allow,
+                        Some(&uid),
+                        AnsweredOn::Mac,
+                    )
+                    .await;
+                if matches!(answer, AnswerResult::Applied { .. }) {
+                    result = Some(answer);
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            (attached, result, answers_claude_read(&rig, "restart").await)
+        });
+        // SAFETY: kill(2) of the process group this test's host leads.
+        unsafe { libc::kill(-host_pid, libc::SIGTERM) };
+        assert!(carded, "no card before the restart");
+        assert!(
+            attached,
+            "the restarted daemon never attached the host again"
+        );
+        let Some(AnswerResult::Applied { outcome }) = result else {
+            panic!("never applied after the restart");
+        };
+        assert!(!outcome.indeterminate);
+        assert_eq!(read.len(), 1, "claude read the answer once: {read:?}");
+        assert_eq!(read[0]["response"]["response"]["behavior"], "allow");
     }
 
     /// Against the real agent host (mac/agent-host/build.sh's `cc-agent-host`), through

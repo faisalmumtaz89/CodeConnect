@@ -8,15 +8,18 @@
 // group (H2). The start's outcome carries the initialize answer, or the reason the start failed. After an answer,
 // every message the query yields follows as `sdk`; after a refusal, none does. A `say` is one more message from the
 // person, given to the query in the order ccd sent it, with its outcome `done` once the SDK has taken it; one the run
-// cannot take (before the start, or once its input has ended) is `refused`. `stop` ends the run (H5): the query is
-// interrupted, its input ended and the query closed, so claude exits; a second `stop` does nothing. claude's end is
-// the last message, `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
+// cannot take (before the start, or once its input has ended) is `refused`. claude's permission requests are held for
+// ccd's `answer` (permissions.ts), each answer told back once the SDK has written it into claude's input; the state
+// message lists those still open. `stop` ends the run (H5): the query is interrupted, its input ended and the query
+// closed, so claude exits; a second `stop` does nothing. claude's end is the last message, `exited`. Once the run is
+// over and ccd has acknowledged everything, the host exits 0.
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createLink } from './link.ts';
+import { createPermissions } from './permissions.ts';
 import { HOST_PROTOCOL_VERSION, type HostFile } from './protocol.ts';
 import {
   type Facts,
@@ -55,10 +58,18 @@ let facts: Facts = {};
 const link = createLink({
   start: begin,
   say: (command) => (say ? say(command) : refuse(command.uuid)),
+  answer: (command) =>
+    permissions
+      ? permissions.answer(command)
+      : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'the request is no longer open' }),
   stop: () => stop?.(),
   facts: () => facts,
+  pending: () => permissions?.pending() ?? [],
   drained: () => process.exit(0),
 });
+
+// The run's permission requests, once it has a query.
+let permissions: ReturnType<typeof createPermissions> | undefined;
 
 // A message the run cannot take: before its start, or once its input has ended.
 function refuse(uuid: string): void {
@@ -111,10 +122,13 @@ function begin(start: Start): void {
       link.send({ type: 'outcome', uuid: command.uuid, status: 'done' });
     }
   })();
+  const held = createPermissions((body) => link.send(body));
+  permissions = held;
   const run = query({
     prompt: input,
     options: {
       ...queryOptions(start.options),
+      canUseTool: held.canUseTool,
       // No `detached`: claude stays in the host's process group, whose id is the host's pid. Its stderr is the host's
       // own (host.log), so no unread pipe can stall it.
       spawnClaudeCodeProcess: (spawned) => {
@@ -127,6 +141,14 @@ function begin(start: Start): void {
         if (child.pid !== undefined) {
           claudeEnded = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
         }
+        // What the SDK writes into claude's input: an answer is told back once it is written there.
+        const stdin = child.stdin!;
+        const write = stdin.write.bind(stdin) as (...args: unknown[]) => boolean;
+        stdin.write = ((chunk: unknown, ...rest: unknown[]) => {
+          const flowing = write(chunk, ...rest);
+          held.written(chunk);
+          return flowing;
+        }) as typeof stdin.write;
         return child;
       },
     },
@@ -163,6 +185,7 @@ function begin(start: Start): void {
       console.error(`the query ended: ${oneLine(error)}`);
     }
     endInput();
+    held.ended();
     // claude's end comes after every message the query yielded. A claude that never started (no pid) has no end to
     // report.
     const ended = await claudeEnded;

@@ -475,6 +475,11 @@ struct Inner {
     /// message into claude's input, `false` once it refused it. Dropped when the run's
     /// link ends, so a waiter then hears nothing more.
     host_sends: HashMap<String, (String, tokio::sync::oneshot::Sender<bool>)>,
+    /// Answers sent to a run's agent host and waiting for its outcome, by the
+    /// answer's uuid: the outcome the run's link records once the host says the
+    /// answer reached claude. A restarted daemon holds none, and records the
+    /// outcome from the answer's claim instead.
+    host_answers: HashMap<String, AnswerOutcome>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -1685,6 +1690,9 @@ struct PendingApproval {
     agent: protocol::agent::AgentKind,
     /// Asked by a background agent rather than the main conversation.
     fork: bool,
+    /// Asked by the agent host of a run started from an app: answered through the
+    /// run's host link, never a hook, a pane or a dialog at the Mac.
+    link: bool,
     /// Set on an `AskUserQuestion` card, and only there.
     question: Option<QuestionState>,
 }
@@ -1911,15 +1919,18 @@ fn hook_is_held(entry: &PendingApproval) -> bool {
 }
 
 /// Whether an answer from the phone can reach this card now: a Codex card's
-/// through its link, any other card's only through the hook Claude holds for
-/// its call ([`hook_decision`] refuses the rest). Not once the call has run,
-/// and not while an answer is already on its way. A card no hook is held for —
-/// one restored after a restart, or released to the computer — is answered at
-/// the computer, and a doorbell for it would open onto nothing to answer.
+/// through its link, a hosted run's card through its host's link, any other
+/// card's only through the hook Claude holds for its call ([`hook_decision`]
+/// refuses the rest). Not once the call has run, and not while an answer is
+/// already on its way. A card no hook is held for — one restored after a
+/// restart, or released to the computer — is answered at the computer, and a
+/// doorbell for it would open onto nothing to answer.
 fn phone_can_answer(entry: &PendingApproval) -> bool {
     !entry.tool_ran
         && !entry.claimed
-        && (matches!(entry.agent, protocol::agent::AgentKind::Codex) || hook_is_held(entry))
+        && (matches!(entry.agent, protocol::agent::AgentKind::Codex)
+            || entry.link
+            || hook_is_held(entry))
 }
 
 /// The decisions a doorbell may speak of, read under one lock: how many cards
@@ -2138,13 +2149,22 @@ impl Daemon {
 
         match self.db.unresolved_answer_claims().await {
             Ok(claims) if !claims.is_empty() => {
-                crate::log_warn!(
-                    "recovery: {} answer(s) were claimed but never settled; recording them as \
-                     indeterminate rather than typing again",
-                    claims.len()
-                );
+                // A hosted run's answer is settled by its host: the replay says
+                // whether it reached claude, and a request the host still holds
+                // never had it ([`Daemon::host_cards_reconcile`]).
+                let mut settled = 0;
                 for claim in claims {
+                    if let Ok(Some(_)) = self.db.hosted_link(claim.session_uid.clone()).await {
+                        continue;
+                    }
                     self.settle_indeterminate(&claim, None, None).await;
+                    settled += 1;
+                }
+                if settled > 0 {
+                    crate::log_warn!(
+                        "recovery: {settled} answer(s) were claimed but never settled; recording \
+                         them as indeterminate rather than typing again"
+                    );
                 }
             }
             Ok(_) => {}
@@ -2188,6 +2208,9 @@ impl Daemon {
                 // is the failure the agent-scoped count exists to prevent.
                 let mut agents: HashMap<String, protocol::agent::AgentKind> = HashMap::new();
                 let mut ended: HashSet<String> = HashSet::new();
+                // Runs started in an agent host: their cards are the host's, held
+                // across the restart, and its link settles them once it is back.
+                let mut hosted: HashSet<String> = HashSet::new();
                 for row in &rows {
                     if !labels.contains_key(&row.session_uid) {
                         let label = self.effective_project_label(&row.session_uid).await;
@@ -2201,6 +2224,9 @@ impl Daemon {
                                 ended.insert(row.session_uid.clone());
                             }
                             agents.insert(row.session_uid.clone(), session.agent);
+                        }
+                        if let Ok(Some(_)) = self.db.hosted_link(row.session_uid.clone()).await {
+                            hosted.insert(row.session_uid.clone());
                         }
                     }
                 }
@@ -2226,9 +2252,11 @@ impl Daemon {
                         );
                         continue;
                     };
+                    let link = hosted.contains(&row.session_uid);
                     // The hook that held it was this process's connection, and
-                    // it is gone: Claude has it at the Mac now.
-                    if card.question_hold == Some(QuestionHold::Held) {
+                    // it is gone: Claude has it at the Mac now. A host's card is
+                    // still the host's.
+                    if card.question_hold == Some(QuestionHold::Held) && !link {
                         unheld.push((row.session_uid.clone(), row.request_id.clone()));
                     }
                     let question = (card.tool_name == protocol::hook::ASK_USER_QUESTION)
@@ -2256,10 +2284,11 @@ impl Daemon {
                             local_misses: 0,
                             tool_ran: false,
                             rejected: false,
-                            // Not recorded with the card, and never consulted:
-                            // no hook is held across a restart, and only a held
-                            // card's agent decides anything.
+                            // Not recorded with the card: no hook is held across a
+                            // restart, and a host's card has its `fork` from the
+                            // host's `state` when its link is back.
                             fork: false,
+                            link,
                             question,
                         },
                     );
@@ -3584,6 +3613,7 @@ impl Daemon {
                         tool_ran: false,
                         rejected: false,
                         fork,
+                        link: false,
                         question: question.then(QuestionState::default),
                     });
                     true
@@ -3822,13 +3852,24 @@ impl Daemon {
         let id: ApprovalId = (session.uid.clone(), request_id.to_string());
         let gate = self.answer_gate(&id).await;
         let _serialised = gate.lock().await;
-        let (claude, question) = match self.inner.lock().await.pending.get_mut(&id) {
+        let (claude, question, link) = match self.inner.lock().await.pending.get_mut(&id) {
             Some(entry) => {
                 entry.responder = None;
-                (entry.agent.is_claude(), entry.question.is_some())
+                (
+                    entry.agent.is_claude(),
+                    entry.question.is_some(),
+                    entry.link,
+                )
             }
             None => return,
         };
+        // A hosted run's card was its host's: nobody answered it, and nothing was
+        // typed.
+        if link {
+            self.inner.lock().await.pending.remove(&id);
+            self.close_host_card(&session.uid, request_id).await;
+            return;
+        }
         if !claude {
             self.retire_codex_approval(
                 session,
@@ -4581,6 +4622,7 @@ impl Daemon {
             rejected: false,
             // No Claude agent asked it.
             fork: false,
+            link: false,
             question: None,
         };
 
@@ -6889,6 +6931,20 @@ impl Daemon {
                     reason: "ledger unavailable".into(),
                 };
             }
+        }
+
+        // A hosted run's card is answered through its agent host, and its claim is
+        // settled by the host's outcome, never by the rule below.
+        if let Ok(Some(_)) = self.db.hosted_link(session_uid.clone()).await {
+            return crate::claude_host::answer(
+                self,
+                &session_uid,
+                request_id,
+                payload_hash,
+                decision,
+                answered_on,
+            )
+            .await;
         }
 
         // 2. A claim with no terminal outcome means a previous attempt was cut
@@ -9764,7 +9820,7 @@ impl Daemon {
             inner
                 .pending
                 .iter()
-                .map(|(id, entry)| (id.clone(), request_event_source(&entry.agent)))
+                .map(|(id, entry)| (id.clone(), request_event_source(entry)))
                 .collect()
         };
         let mut requests: HashMap<ApprovalId, (u64, Option<String>)> =
@@ -10057,6 +10113,400 @@ impl Daemon {
             events
         };
         self.published(session_uid, &events).await;
+        Ok(true)
+    }
+
+    /// Commit one of a hosted run's card lines with its cursor ([`Db::commit_host_card`])
+    /// under the run's publish order, then fan out what it filed. `None` when the cursor
+    /// did not move: nothing was written, and the line must not be acknowledged.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_host_card(
+        &self,
+        uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+        card: Option<(String, i64)>,
+        events: Vec<PendingEvent>,
+    ) -> Result<Option<Vec<Event>>> {
+        let gate = self.publish_gate(uid).await;
+        let events = {
+            let _ordered = gate.lock().await;
+            let Some(events) = self
+                .db
+                .commit_host_card(
+                    uid.to_string(),
+                    uid.to_string(),
+                    host,
+                    seq,
+                    request_id.to_string(),
+                    card,
+                    events,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        self.published(uid, &events).await;
+        Ok(Some(events))
+    }
+
+    /// A permission request from the agent host of the hosted run `uid`, message `seq`
+    /// from the host `host`: today's card, held for the apps and answered only through
+    /// the host. Its `approval_request` event and its row are committed with the
+    /// cursor, then it rings as a hook card does. A request whose card could not
+    /// reach an app whole is refused at once instead: the host is answered deny,
+    /// claude reads why, and no card is raised. `false` when the cursor did not move.
+    pub(crate) async fn host_card_asked(
+        self: &Arc<Self>,
+        uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request: protocol::host::PermissionRequest,
+    ) -> Result<bool> {
+        let session = SessionKey::new(uid, uid);
+        let request_id = request.tool_use_id;
+        let option = |key: &str| request.options.get(key).filter(|value| !value.is_null());
+        let suggestions = (option("suppressAlwaysAllowRule")
+            != Some(&serde_json::Value::Bool(true)))
+        .then(|| option("suggestions").cloned())
+        .flatten();
+        let fork = option("agentID").is_some();
+        let card = ApprovalCard {
+            request_id: request_id.clone(),
+            payload_hash: approval_payload_hash(&request.tool_name, &request.input),
+            display_text: approval_payload_text(&request.tool_name, &request.input),
+            risk: Some(protocol::risk::classify(&request.tool_name, &request.input)),
+            tool_name: request.tool_name,
+            tool_input: request.input,
+            permission_suggestions: suggestions,
+            prompt_id: None,
+            permission_mode: None,
+            generation: 0,
+            identity_bound: true,
+            question_hold: Some(QuestionHold::Held),
+        };
+        let payload = serde_json::json!({ "card": card });
+        if payload.to_string().len() > self.config.max_payload_bytes {
+            crate::log_info!(
+                "{uid}: {request_id} is refused: its card would be past the {}-byte payload \
+                 limit, which no app could show",
+                self.config.max_payload_bytes
+            );
+            if self
+                .commit_host_card(uid, host, seq, &request_id, None, Vec::new())
+                .await?
+                .is_none()
+            {
+                return Ok(false);
+            }
+            let refusal = protocol::host::ToHost::Answer {
+                uuid: crate::claude_host::answer_uuid(uid, &request_id),
+                tool_use_id: request_id,
+                decision: protocol::host::Decision::Deny {
+                    message: TOO_LARGE_TO_SHOW.into(),
+                    interrupt: false,
+                },
+            };
+            self.send_to_host(uid, refusal).await;
+            return Ok(true);
+        }
+        let created_ms = protocol::time::now_unix_ms();
+        let label = self.effective_project_label(uid).await;
+        let id: ApprovalId = (uid.to_string(), request_id.clone());
+        let registered = {
+            let mut inner = self.inner.lock().await;
+            match inner.pending.entry(id.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(PendingApproval {
+                        card: card.clone(),
+                        session: session.clone(),
+                        project_label: label,
+                        agent: protocol::agent::AgentKind::Claude,
+                        created_ms,
+                        raise: 0,
+                        responder: None,
+                        claimed: false,
+                        local_misses: 0,
+                        tool_ran: false,
+                        rejected: false,
+                        fork,
+                        link: true,
+                        question: None,
+                    });
+                    true
+                }
+            }
+        };
+        let event = PendingEvent::new(
+            &session,
+            EventKind::ApprovalRequest,
+            payload,
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("perm:{request_id}"));
+        let encoded = serde_json::to_string(&card)?;
+        let filed = match self
+            .commit_host_card(
+                uid,
+                host,
+                seq,
+                &request_id,
+                Some((encoded, created_ms)),
+                vec![event],
+            )
+            .await
+        {
+            Ok(Some(filed)) => filed,
+            other => {
+                if registered {
+                    self.inner.lock().await.pending.remove(&id);
+                }
+                return other.map(|_| false);
+            }
+        };
+        // A replayed request files nothing and rings nothing.
+        if let Some(event) = filed.first() {
+            if let Some(ticket) = self.push_gate.admit_decision(uid, &request_id, None) {
+                self.dispatch_push(
+                    uid.to_string(),
+                    event.seq,
+                    ticket,
+                    false,
+                    Some(CardKey(request_id)),
+                );
+            }
+        }
+        Ok(true)
+    }
+
+    /// The agent host of the hosted run `uid` withdrew the request `request_id`, as
+    /// message `seq` from the host `host`: claude no longer waits on it (an interrupt,
+    /// End run, or claude's end), so its card closes, nobody having answered, with no
+    /// answer recorded. `false` when the cursor did not move.
+    pub(crate) async fn host_card_withdrawn(
+        &self,
+        uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+    ) -> Result<bool> {
+        let closure = host_card_closure(&SessionKey::new(uid, uid), request_id);
+        if self
+            .commit_host_card(uid, host, seq, request_id, None, vec![closure])
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        self.inner
+            .lock()
+            .await
+            .pending
+            .remove(&(uid.to_string(), request_id.to_string()));
+        Ok(true)
+    }
+
+    /// The hosted run `uid`'s cards against its host's `pending` requests, at the end of
+    /// a re-attach's replay. A card the host no longer holds was withdrawn while this
+    /// daemon was away, and closes. A claimed card whose request the host still holds
+    /// never had its answer applied: its claim is released and it is answerable again.
+    /// Each card still held takes its `fork` from the host's request.
+    pub(crate) async fn host_cards_reconcile(
+        &self,
+        uid: &str,
+        pending: &[protocol::host::PermissionRequest],
+    ) {
+        let held: HashMap<&str, bool> = pending
+            .iter()
+            .map(|request| {
+                let fork = request
+                    .options
+                    .get("agentID")
+                    .is_some_and(|id| !id.is_null());
+                (request.tool_use_id.as_str(), fork)
+            })
+            .collect();
+        let claims = self
+            .db
+            .answer_claims_of(uid.to_string())
+            .await
+            .unwrap_or_default();
+        let (gone, released) = {
+            let mut inner = self.inner.lock().await;
+            let mut gone = Vec::new();
+            let mut released = Vec::new();
+            for ((card_uid, request_id), entry) in inner.pending.iter_mut() {
+                if card_uid != uid || !entry.link {
+                    continue;
+                }
+                match held.get(request_id.as_str()) {
+                    None => gone.push(request_id.clone()),
+                    Some(fork) => {
+                        entry.fork = *fork;
+                        if claims.iter().any(|claim| &claim.request_id == request_id) {
+                            entry.claimed = false;
+                            released.push(request_id.clone());
+                        }
+                    }
+                }
+            }
+            for request_id in &gone {
+                inner.pending.remove(&(uid.to_string(), request_id.clone()));
+            }
+            (gone, released)
+        };
+        for request_id in released {
+            if let Err(err) = self
+                .db
+                .release_answer_claim(uid.to_string(), request_id.clone())
+                .await
+            {
+                crate::log_error!("{uid}: could not release the claim on {request_id}: {err:#}");
+            }
+        }
+        for request_id in gone {
+            self.close_host_card(uid, &request_id).await;
+        }
+    }
+
+    /// Close the hosted run `uid`'s card `request_id` with no host line to commit it
+    /// with: its host withdrew it while this daemon was away, or the run has ended. No
+    /// answer is recorded; an answer claimed on it and never confirmed is settled
+    /// unknown, since nothing can confirm it any more.
+    async fn close_host_card(&self, uid: &str, request_id: &str) {
+        if let Ok(Some(claim)) = self
+            .db
+            .answer_claim(uid.to_string(), request_id.to_string())
+            .await
+        {
+            self.settle_indeterminate(&claim, None, None).await;
+            return;
+        }
+        let _ = self
+            .db
+            .delete_pending_approval(uid.to_string(), request_id.to_string())
+            .await;
+        if let Err(err) = self
+            .ingest(host_card_closure(&SessionKey::new(uid, uid), request_id))
+            .await
+        {
+            crate::log_error!("{uid}: could not close the card {request_id}: {err:#}");
+        }
+    }
+
+    /// Hold the outcome of the answer `uuid` sent to a run's agent host, for its link
+    /// to record once the host says the answer reached claude.
+    pub(crate) async fn hold_host_answer(&self, uuid: &str, outcome: AnswerOutcome) {
+        self.inner
+            .lock()
+            .await
+            .host_answers
+            .insert(uuid.to_string(), outcome);
+    }
+
+    /// The outcome held for the answer `uuid`, if this daemon sent it.
+    pub(crate) async fn take_host_answer(&self, uuid: &str) -> Option<AnswerOutcome> {
+        self.inner.lock().await.host_answers.remove(uuid)
+    }
+
+    /// Mark the hosted run `uid`'s card `request_id` answerable again, its answer
+    /// having gone nowhere.
+    pub(crate) async fn unclaim_host_card(&self, uid: &str, request_id: &str) {
+        if let Some(entry) = self
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&(uid.to_string(), request_id.to_string()))
+        {
+            entry.claimed = false;
+        }
+    }
+
+    /// Claim the hosted run `uid`'s card `request_id` for the answer `decision`: the card,
+    /// the host's decision for it, and its run, or why the answer is refused.
+    pub(crate) async fn claim_host_card(
+        &self,
+        uid: &str,
+        request_id: &str,
+        payload_hash: &str,
+        decision: &AnswerDecision,
+    ) -> std::result::Result<(SessionKey, protocol::host::Decision), String> {
+        let mut inner = self.inner.lock().await;
+        let Some(entry) = inner
+            .pending
+            .get_mut(&(uid.to_string(), request_id.to_string()))
+        else {
+            return Err("unknown or already-resolved request".into());
+        };
+        if entry.card.payload_hash != payload_hash {
+            return Err("stale payload_hash: the card you answered is out of date".into());
+        }
+        let host_decision = host_decision(entry, decision)?;
+        entry.claimed = true;
+        Ok((entry.session.clone(), host_decision))
+    }
+
+    /// Remove the hosted run `uid`'s card `request_id`, answered.
+    pub(crate) async fn answered_host_card(&self, uid: &str, request_id: &str) {
+        self.inner
+            .lock()
+            .await
+            .pending
+            .remove(&(uid.to_string(), request_id.to_string()));
+    }
+
+    /// Record the host's outcome for an answer with its cursor ([`Db::commit_host_answer`])
+    /// under the run's publish order, then fan out what it filed. `false` when the
+    /// cursor did not move.
+    pub(crate) async fn commit_host_answer(
+        &self,
+        uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+        outcome: Option<(String, AnswerOutcome)>,
+    ) -> Result<bool> {
+        let events = match &outcome {
+            Some((_, recorded)) => vec![PendingEvent::new(
+                &SessionKey::new(uid, uid),
+                EventKind::ApprovalResolved,
+                serde_json::to_value(recorded).unwrap_or(serde_json::Value::Null),
+                Source::Daemon,
+            )
+            .with_source_event_id(format!("resolved:{request_id}"))],
+            None => Vec::new(),
+        };
+        let gate = self.publish_gate(uid).await;
+        let events = {
+            let _ordered = gate.lock().await;
+            let Some(events) = self
+                .db
+                .commit_host_answer(
+                    uid.to_string(),
+                    host,
+                    seq,
+                    request_id.to_string(),
+                    outcome,
+                    events,
+                )
+                .await?
+            else {
+                return Ok(false);
+            };
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        self.published(uid, &events).await;
         Ok(true)
     }
 
@@ -10885,8 +11335,12 @@ impl Daemon {
     /// nor the composer (the detailed transcript view), or none in that time,
     /// is no answer, and the doorbell rings — unsure, the owner hears about it.
     async fn answered_at_the_mac(&self, session_uid: &str, key: &CardKey) -> bool {
-        let on_the_pane = the_card(&*self.inner.lock().await, session_uid, key)
-            .is_some_and(|entry| entry.agent.is_claude() && dialog_on_the_pane(entry));
+        // A hosted run's card has no dialog and no pane: it is answered only
+        // through its host.
+        let on_the_pane =
+            the_card(&*self.inner.lock().await, session_uid, key).is_some_and(|entry| {
+                entry.agent.is_claude() && !entry.link && dialog_on_the_pane(entry)
+            });
         if !on_the_pane {
             return false;
         }
@@ -11482,6 +11936,62 @@ const SENT_TO_CLAUDE: &str = "Sent to Claude from a phone";
 const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the computer";
 /// How a card closes when the run that asked it ends first.
 const RUN_ENDED: &str = "the session ended before anyone answered";
+/// What claude is told of a hosted run's request whose card no app could show.
+const TOO_LARGE_TO_SHOW: &str = "This request is too large to show in the app, so it was refused.";
+
+/// The closing of a hosted run's card nobody answered: its host withdrew the
+/// request, or its run ended. It closes the card; no answer is recorded, so a late
+/// answer to it finds no card rather than an answer.
+fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
+    let outcome = AnswerOutcome {
+        request_id: request_id.to_string(),
+        session_id: session.name.clone(),
+        decision: AnswerDecision::Deny,
+        resolved_by: ResolvedBy::Timeout,
+        answered_on: None,
+        applied_via: AnswerPath::HookReturn,
+        resolved_at: protocol::time::now_rfc3339(),
+        detail: Some(RUN_ENDED.into()),
+        inferred: false,
+        indeterminate: false,
+    };
+    PendingEvent::new(
+        session,
+        EventKind::ApprovalResolved,
+        serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null),
+        Source::Daemon,
+    )
+    .with_source_event_id(format!("resolved:{request_id}"))
+}
+
+/// The host's decision for an answer to a hosted run's card, as [`hook_decision`]
+/// gives a hook's: allow; a deny, which also ends the main conversation's turn; or a
+/// deny with the person's reason. Nothing else reaches a hosted run's card yet.
+fn host_decision(
+    entry: &PendingApproval,
+    decision: &AnswerDecision,
+) -> std::result::Result<protocol::host::Decision, String> {
+    match decision {
+        AnswerDecision::Allow | AnswerDecision::Option { index: 1 } => {
+            Ok(protocol::host::Decision::Allow {
+                updated_input: None,
+            })
+        }
+        AnswerDecision::Deny => Ok(protocol::host::Decision::Deny {
+            message: BACKGROUND_DENIAL.into(),
+            interrupt: !entry.fork,
+        }),
+        AnswerDecision::Text { text } => Ok(protocol::host::Decision::Deny {
+            message: format!("{DENIAL_WITH_REASON}{text}"),
+            interrupt: false,
+        }),
+        _ => Err(
+            "the app can allow or deny this card, or deny it with a reason; nothing else \
+                  is available for this session yet. Nothing was sent."
+                .into(),
+        ),
+    }
+}
 
 /// Why a claimed answer was not handed over: its call ended first.
 const ANSWERED_AT_MAC: &str =
@@ -11519,11 +12029,12 @@ const DENIAL_WITH_REASON: &str = "The user doesn't want to proceed with this too
                                   user said:\n";
 
 /// The source a card's `approval_request` event is filed under: Claude's by its
-/// hook, Codex's by this daemon with the card's row.
-fn request_event_source(agent: &protocol::agent::AgentKind) -> Source {
-    match agent {
-        protocol::agent::AgentKind::Codex => Source::Daemon,
-        _ => Source::Hook,
+/// hook, Codex's and a hosted run's by this daemon with the card's row.
+fn request_event_source(entry: &PendingApproval) -> Source {
+    if entry.link || matches!(entry.agent, protocol::agent::AgentKind::Codex) {
+        Source::Daemon
+    } else {
+        Source::Hook
     }
 }
 
@@ -17807,8 +18318,30 @@ mod tests {
             tool_ran: false,
             rejected: false,
             fork: false,
+            link: false,
             question: None,
         }
+    }
+
+    /// **B6 G7:** a hosted run's card, which no hook holds, is one the phone can answer
+    /// through its host, so it counts as a decision; the same card on a run with no host
+    /// does not, and neither does one whose answer is already on its way.
+    #[test]
+    fn a_hosted_runs_card_counts_as_a_decision() {
+        let mut inner = Inner::default();
+        let mut card = pending_card(TEST_UID, "Aion");
+        card.card.question_hold = Some(QuestionHold::Held);
+        card.link = true;
+        inner
+            .pending
+            .insert((TEST_UID.to_string(), "r".to_string()), card);
+        assert_eq!(Waiting::of(&inner).decisions, 1);
+        inner.pending.values_mut().next().unwrap().claimed = true;
+        assert_eq!(Waiting::of(&inner).decisions, 0, "an answer on its way");
+        let entry = inner.pending.values_mut().next().unwrap();
+        entry.claimed = false;
+        entry.link = false;
+        assert_eq!(Waiting::of(&inner).decisions, 0, "no host and no hook");
     }
 
     /// Two cards on one run are one agent, and the run is named once.
@@ -32577,6 +33110,7 @@ mod tests {
                 rejected: false,
                 project_label: "cc-1".into(),
                 fork: false,
+                link: false,
                 question: None,
             },
         );
@@ -32729,6 +33263,7 @@ mod tests {
                 rejected: false,
                 project_label: "cc-1".into(),
                 fork: false,
+                link: false,
                 question: None,
             },
         );
