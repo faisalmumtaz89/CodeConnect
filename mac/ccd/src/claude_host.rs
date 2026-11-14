@@ -3264,6 +3264,97 @@ mod tests {
         assert_eq!(kept(&rig, &starting).0, "starting");
     }
 
+    /// **B7 G2: End run mid-turn, with a real claude** (P1 5). A run on the real host whose
+    /// claude, signed in by its own config, is writing a long answer is ended: the run ends
+    /// `exited` "Stopped" well before the escalation's 10 s, by claude's own exit, and the
+    /// host and claude are gone. Ignored and gated: `CODECONNECT_TEST_AGENT_HOST` names the
+    /// built host, `CODECONNECT_TEST_REAL_CLAUDE` the claude, and `CODECONNECT_TEST_RIG_DIR`
+    /// a short folder the run's files go under; the host and claude get this test's own
+    /// `HOME`, `USER`, `LOGNAME`, `PATH` and `CLAUDE_CONFIG_DIR`, so they run on that
+    /// config's login and model.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_ended_mid_turn_exits_before_the_escalation() {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join("g2");
+        std::fs::create_dir(&root).unwrap();
+        let daemon = daemon_on(&root);
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let cwd = root.to_str().unwrap().to_string();
+        let codeconnect = root.join("codeconnect");
+        let started = start(
+            &daemon,
+            Run {
+                root: &root,
+                request_id: "g2",
+                cwd: &cwd,
+                prompt: "Write a 2,000-word essay on the history of mechanical clocks.",
+                model: None,
+                worktree: None,
+                claude_path: claude.to_str().unwrap(),
+                host_bin: &host,
+                codeconnect: &codeconnect,
+                environment: &environment,
+            },
+        )
+        .await;
+        let uid = started_uid(&started);
+        let host_pid = read_host_file(&run_dir(&root, &uid).join("host.json"))
+            .unwrap()
+            .host_pid;
+        // Mid-turn: the answer is being written.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let asked = Instant::now();
+        assert_eq!(daemon.stop_run(&uid).await, StopRunResult::Stopping);
+        let mut ended_after = None;
+        for _ in 0..200 {
+            let lifecycle = daemon
+                .db
+                .hosted_link(uid.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle;
+            if lifecycle == Lifecycle::Exited {
+                ended_after = Some(asked.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let host_gone = gone_within(host_pid, Duration::from_secs(5)).await;
+        if !host_gone {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
+        let group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
+        println!("G2: ended {ended_after:?} after the stop; host gone {host_gone}; group left {group_left}");
+        let ended_after = ended_after.expect("the run never ended");
+        assert!(
+            ended_after < STOP_GRACE,
+            "ended after {ended_after:?}: by the escalation, not by claude"
+        );
+        assert!(
+            host_gone && !group_left,
+            "host gone {host_gone}, group left {group_left}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Against the real agent host (mac/agent-host/build.sh's `cc-agent-host`), through
     /// zsh's login shell (`-lic`), as a zsh user's start runs it, with the host's
     /// stand-in claude: the recorded pid and birth are the host's own, it leads a session
