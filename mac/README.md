@@ -1095,7 +1095,22 @@ path}` are each answered with `folder_trust {request_id, folders: [{path, trust,
 answered_at}]}`, every answer kept, newest first, once
 the change is made; a forgotten folder is asked about again. They are served to
 the connections `start_session` is. The folder question comes before the agent's
-check, so a folder nobody has answered for runs nothing at all. A Claude Code start
+check, so a folder nobody has answered for runs nothing at all.
+
+What the answer does: a Claude Code run started from a folder answered `trusted` loads
+the project it runs in, as Claude Code does when you run it there yourself: its
+CLAUDE.md, its commands and skills, its MCP servers (as Claude Code approves them) and
+its hooks. Hooks are commands the folder's authors wrote, and they run on this
+computer, at the run's start and around the agent's tools, without asking you. So
+answer `trusted` only for a folder whose authors you trust. A run started from a folder
+answered `not_trusted`, or one that runs in a worktree with its own `not_trusted` answer,
+starts with your own settings and CodeConnect's own tools only: the agent host passes
+claude `--setting-sources=user` and `--strict-mcp-config`. A worktree's own `trusted`
+answer never lifts its start folder's `not_trusted`. A run keeps the
+answer it started with, a restarted daemon included; changing the answer applies to the
+next start.
+
+A Claude Code start
 that goes on is then checked, before anything runs: the daemon finds the claude the launcher would run,
 from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
 the login shell's `PATH`, and asks that claude itself its `--version` and
@@ -1130,12 +1145,22 @@ exits. A host gone meanwhile is the liveness tick's, as above. A starting Claude
 died before it recorded the run's host becomes `failed`.
 An app's message to a live Claude run (`send_text`) goes into claude's input through the run's
 host, as one more message from the person; the person's words, the start's prompt
-included, are filed once the host has taken them, and Claude folds a message sent mid-turn
-into that turn or runs it next. A retry with the same request id is answered from its
+included, are filed once the host has taken them. A message sent while one of Claude's
+tools is running reaches Claude with that tool's result; one sent at any other time in a
+turn runs as Claude's next turn. A retry with the same request id is answered from its
 first send, so nothing is sent twice.
 For such a run the model and effort sheets are refused ("Changing the model isn't
 available for this session yet.", and the same for the effort), and so are `/status`,
 `/usage`, `/cost` and `/clear` ("This isn't available for this session yet.").
+When claude asks permission for a tool call, its host holds the request and ccd shows it as
+a card the apps answer: allow, deny, or deny with a reason. The answer goes to claude through
+the host, and the card closes as answered once the host has written it into claude's input;
+a request claude stops waiting on (End run, or claude's end) closes with nobody having
+answered. A card stays answerable across a ccd restart, and an answer sent just before one
+is never sent twice: the host's replay says whether it reached claude. A request whose card
+would be too large for an app to show is refused at once, and claude is told why. Claude's
+questions are not cards yet: claude is told so and asks in its reply instead. A shell command
+that only reads raises no card: claude runs it without asking, as it does when run directly.
 An app ends a live Claude run with `stop_run`: the run becomes `stopping` and its host, if its link
 is attached, is sent `stop`, which interrupts claude, ends its input and closes the query;
 claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
@@ -1744,8 +1769,24 @@ fails the suite instead of failing silently in production.
 * **A message ccd took but could not hand to Claude before it stopped is not
   confirmed.** If ccd stops in the instant between recording a message to a session
   started from an app and passing it to that session's agent host, the app says the
-  message was not confirmed: it may or may not have reached Claude, and the same words
-  cannot be sent again to this session without changing them.
+  message was not confirmed: it may or may not have reached Claude. Sending the same
+  words again, unchanged or with only spaces tidied, is a retry of that message and is
+  answered from it, so it is never sent twice. Any real edit, or clearing the box, ends
+  the retry: the same words typed again later are a new message. One case is not
+  guarded: a reply typed character for character the same as a diff comment just left
+  unconfirmed on the same session, where the comment's retry could type it twice.
+* **A permission request too large to show is refused.** In a session started from an
+  app, a request whose details are too large for the app to show (a very large file
+  write, for example) is refused at once rather than approved unseen. Claude is told
+  why and the session goes on. A call in the main conversation shows as refused in the
+  timeline; a subagent's calls are not shown there, so its refusal is not either.
+* **An approval tapped in the first moment after ccd restarts may not stick.** While
+  ccd catches up with a session started from an app, which takes a fraction of a
+  second, an answer to one of its approval cards may reach Claude without being
+  recorded. The app then says the answer could not be confirmed and the card stays
+  open until the session ends. In that same moment, denying a subagent's request
+  also stops Claude's main reply. Nothing is ever allowed that the person did not
+  allow.
 * **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
   repaints the session from tmux's record of it, and tmux does not track kitty
   keyboard flags or focus reporting: an agent that turned them on when it started
@@ -1825,3 +1866,7 @@ fails the suite instead of failing silently in production.
   write. A daemon that dies in those few milliseconds leaves the run with no recorded
   identity: the restarted daemon fails the run, but has nothing it may signal, and
   Codex's app-server never exits by itself, so it runs until logout or reboot.
+* **Whether a trusted folder's allow rules skip the approval card is not
+  measured.** In a Claude Code run that loads its folder's project, that
+  project's hooks run; whether its `permissions.allow` rules also let a tool run
+  without an approval card has not been measured.

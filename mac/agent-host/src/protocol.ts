@@ -36,7 +36,7 @@ export interface StartOptions {
 }
 
 /** An answer to a permission request, as the SDK's `PermissionResult` takes it. */
-export type Decision = { behavior: 'allow'; updated_input?: Json } | { behavior: 'deny'; message: string };
+export type Decision = { behavior: 'allow'; updated_input?: Json } | { behavior: 'deny'; message: string; interrupt?: boolean };
 
 /** A line ccd sends the host. `attach` is the first line of every connection; every command carries ccd's uuid. */
 export type ToHost =

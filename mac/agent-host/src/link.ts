@@ -1,7 +1,7 @@
 // The host's side of its link to ccd (mac/protocol/src/host.rs): sequence numbers, the messages kept until ccd
 // acknowledges them, the one attached connection, and whole lines in. It names no Node API, so the pinned Bun's type
 // checker checks it against the protocol's types (test/protocol.test.ts); main.ts wires the run's socket to it.
-import type { FromHost, ToHost } from './protocol.ts';
+import type { FromHost, PermissionRequest, ToHost } from './protocol.ts';
 import type { Facts, Say, Start } from './start.ts';
 
 /** A connection from ccd: lines out, and closing it. */
@@ -15,14 +15,18 @@ export interface Run {
   start(command: Start): void;
   /** One more message from the person. */
   say(command: Say): void;
+  /** ccd's answer to one of the run's permission requests. */
+  answer(command: Extract<ToHost, { type: 'answer' }>): void;
   /** ccd ends the run (H5). */
   stop(): void;
   facts(): Facts;
+  /** The run's permission requests still open, for the state message. */
+  pending(): PermissionRequest[];
   /** The run is over and ccd has acknowledged every message: nothing is left for the host to do. */
   drained(): void;
 }
 
-type Unsequenced<M = FromHost> = M extends FromHost ? Omit<M, 'seq'> : never;
+export type Unsequenced<M = FromHost> = M extends FromHost ? Omit<M, 'seq'> : never;
 
 const line = (message: FromHost): string => `${JSON.stringify(message)}\n`;
 
@@ -71,7 +75,7 @@ export function createLink(run: Run) {
       return;
     }
     for (const message of kept) connection.write(line(message));
-    send({ type: 'state', ...run.facts(), pending: [] });
+    send({ type: 'state', ...run.facts(), pending: run.pending() });
   }
 
   function apply(connection: Connection, text: string): void {
@@ -87,6 +91,7 @@ export function createLink(run: Run) {
       settle();
     } else if (message.type === 'start') run.start(message);
     else if (message.type === 'say') run.say(message);
+    else if (message.type === 'answer') run.answer(message);
     else if (message.type === 'stop') run.stop();
   }
 

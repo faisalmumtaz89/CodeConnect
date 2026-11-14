@@ -832,6 +832,61 @@ impl Db {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_host_card(
+        &self,
+        session_uid: String,
+        session_id: String,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: String,
+        card: Option<(String, i64)>,
+        events: Vec<PendingEvent>,
+    ) -> Result<Option<Vec<Event>>> {
+        self.run(move |store| {
+            store.commit_host_card(
+                &session_uid,
+                &session_id,
+                &host,
+                seq,
+                &request_id,
+                card.as_ref()
+                    .map(|(card, created_ms)| (card.as_str(), *created_ms)),
+                &events,
+            )
+        })
+        .await
+    }
+
+    pub async fn commit_host_answer(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: String,
+        outcome: Option<(String, AnswerOutcome)>,
+        events: Vec<PendingEvent>,
+    ) -> Result<Option<Vec<Event>>> {
+        self.run(move |store| {
+            store.commit_host_answer(
+                &session_uid,
+                &host,
+                seq,
+                &request_id,
+                outcome
+                    .as_ref()
+                    .map(|(hash, outcome)| (hash.as_str(), outcome)),
+                &events,
+            )
+        })
+        .await
+    }
+
+    pub async fn answer_claims_of(&self, session_uid: String) -> Result<Vec<AnswerClaim>> {
+        self.run(move |store| store.answer_claims_of(&session_uid))
+            .await
+    }
+
     pub async fn settle_text_mutation(
         &self,
         session_uid: String,

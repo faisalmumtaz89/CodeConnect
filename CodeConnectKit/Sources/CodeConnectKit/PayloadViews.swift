@@ -90,6 +90,29 @@ extension Event {
         default: return nil
         }
     }
+
+    /// **A Codex MCP tool call, drawn as one row.** ccd files `read_messages`/`send_message` whole
+    /// under `EventKind.other("codex_mcpToolCall")` (`codex_adapter.rs`) — the call, its arguments and
+    /// its result ride in ONE event, unlike Claude's call/result split. The result is an MCP
+    /// content-block array, read with the shared `mcpBlocksText`. Nil for any other kind.
+    public var codexMcpToolCall: (name: String, input: JSONValue?, output: String?, status: ToolStatus, durationMS: Int?)? {
+        guard kind == .other("codex_mcpToolCall"), let tool = payload["tool"]?.stringValue else { return nil }
+        let server = payload["server"]?.stringValue ?? "codex"
+        let status: ToolStatus
+        if let err = payload["error"], err != .null {
+            status = .failed
+        } else {
+            switch payload["status"]?.stringValue {
+            case "completed": status = .succeeded
+            case "failed": status = .failed
+            default: status = .unresolved
+            }
+        }
+        return (
+            "mcp__\(server)__\(tool)", payload["arguments"],
+            Self.mcpBlocksText(payload["result"]?["content"]), status,
+            payload["durationMs"]?.intValue)
+    }
     public var durationMS: Int? { payload["duration_ms"]?.intValue }
     var permissionMode: String? { payload["permission_mode"]?.stringValue }
     public var modelName: String? { payload["model"]?.stringValue }

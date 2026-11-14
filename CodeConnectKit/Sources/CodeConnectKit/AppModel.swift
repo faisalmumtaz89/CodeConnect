@@ -372,6 +372,14 @@ public final class AppModel {
         // SwiftUI rebuilt the tab. One carrier per connection is also what makes
         // "one terminal at a time" true on this end, matching the daemon.
         self.terminal = TerminalCarrier(connection: connection)
+        // The carrier took `onDisconnected` to end the terminal on a drop. Chain it,
+        // don't replace it: a drop must also clear the machine stats (a figure from a
+        // link that is gone is not current) without unhooking the terminal.
+        let endTerminalOnDrop = connection.onDisconnected
+        connection.onDisconnected = { [weak self] in
+            endTerminalOnDrop?()
+            self?.machineStats = nil
+        }
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
         connection.onConnected = { [weak self] in
@@ -2093,9 +2101,12 @@ public final class AppModel {
             starter.receive(listing, answering: requestID)
         case .createFolderResult(let requestID, let refusal):
             starter.resolveCreate(requestID, refusal: refusal)
-        case .machineStats:
-            // Only asked for by a screen that shows them; this model never does.
-            break
+        case .machineStats(let stats):
+            // Only while a screen is watching (see `keepMachineStatsFresh`): a late
+            // answer after the view left, or one in flight when the link drops, is
+            // ignored. The drop clears the sample through the `onDisconnected` chain,
+            // and the view leaving clears it through the poll's own `defer`.
+            if pollingStats { machineStats = stats }
         case .startSessionResult(let requestID, let outcome):
             starter.resolve(requestID, outcome)
             // The new session reaches the fleet on its own; asking now shortens
@@ -3487,7 +3498,7 @@ public final class AppModel {
         if sampleFleetActive {
             return .failed("These agents are not real. Pair with \(HostDevice.current.computer("your computer")) to talk to your own.")
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = Self.normalizedSendText(text)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
             return .failed("\(HostDevice.current.computer("The computer"))'s CodeConnect can't take typed text.")
@@ -3551,11 +3562,29 @@ public final class AppModel {
         }
     }
 
+    /// How send text becomes a mutation identity: leading and trailing whitespace is
+    /// not part of the message. The send's mutation key, `holdsSendIdentity`,
+    /// `dropSendIdentity`, and the composer's abandon-on-edit guard all compare through
+    /// this one function, so a whitespace-only edit never drops or keeps the wrong one.
+    static func normalizedSendText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Whether this exact text to `key` still has the identity of an attempt whose
     /// outcome is unknown, so sending it again is a retry and not a second typing.
     public func holdsSendIdentity(text: String, to key: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = Self.normalizedSendText(text)
         return pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] != nil
+    }
+
+    /// Drops one unanswered send's identity (its exact session, trimmed text and
+    /// submit flag), so the same words sent again are a new send and not the retry
+    /// the daemon would replay as "already applied". The composer decides when,
+    /// through `abandonHeldSend(whenDraftChangesFrom:to:in:)`, which drops the words the
+    /// draft just left.
+    func dropSendIdentity(text: String, to key: String) {
+        let trimmed = Self.normalizedSendText(text)
+        pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] = nil
     }
 
     /// Keeps an unsettled mutation's identity — unless its session departed
@@ -3582,6 +3611,35 @@ public final class AppModel {
     func capturePane(key: String, lines: UInt32 = 80) async -> String? {
         guard connection.capabilities?.capture != false else { return nil }
         return try? await connection.capture(session: key, lines: lines)
+    }
+
+    // MARK: - Machine stats
+
+    /// This computer's latest CPU/memory/disk sample, or nil when it is unknown:
+    /// not asked yet, this computer's CodeConnect does not report stats, the link
+    /// is down, or no screen is showing them. The Kit exposes the value or nil;
+    /// what nil draws is the view's business.
+    public private(set) var machineStats: MachineStats?
+
+    private var pollingStats = false
+    static let machineStatsInterval: Duration = .seconds(5)
+
+    /// Keep `machineStats` fresh while the calling view's task lives. The sidebar is
+    /// the one caller; a second concurrent call returns at once — one poll per model,
+    /// never a second stream. While the link is up and the computer reports stats it
+    /// asks every `machineStatsInterval`; it abstains otherwise, so an old daemon is
+    /// never asked and a view that appears before the handshake still polls once it
+    /// lands. The view's task cancellation ends the loop, and the sample clears with it.
+    public func keepMachineStatsFresh() async {
+        guard !pollingStats else { return }
+        pollingStats = true
+        defer { pollingStats = false; machineStats = nil }
+        while !Task.isCancelled {
+            if connection.phase.isConnected, connection.capabilities?.reportsMachineStats == true {
+                try? await connection.send(.getMachineStats)
+            }
+            try? await Task.sleep(for: Self.machineStatsInterval)
+        }
     }
 
     // MARK: - Diff

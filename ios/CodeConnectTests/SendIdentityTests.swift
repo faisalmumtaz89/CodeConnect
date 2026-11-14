@@ -265,4 +265,96 @@ final class SendIdempotencyTests: XCTestCase {
         XCTAssertFalse(
             model.asksAgain(unanswered, to: "u-1", draft: "deploy", sending: false, now: soon), "the link is not back")
     }
+
+    /// R2T3-F2 / L7b: the draft leaves the held send's words (it is cleared), so that send is
+    /// abandoned and the same words typed later are a new send — not the stale identity the
+    /// daemon would replay as "already applied".
+    func testClearingAHeldSendMakesTheNextSameTextFresh() async {
+        let model = connectedModel { _, _ in .indeterminate(reason: "unanswered") }
+        _ = await model.send(text: "deploy", to: "u-1")
+        XCTAssertTrue(model.holdsSendIdentity(text: "deploy", to: "u-1"))
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy", to: "", in: "u-1")
+        XCTAssertFalse(
+            model.holdsSendIdentity(text: "deploy", to: "u-1"),
+            "the draft left the words, so the held send is abandoned")
+        _ = await model.send(text: "deploy", to: "u-1")
+        let sent = identities(model)
+        XCTAssertNotEqual(
+            sent[0].requestID, sent[1].requestID,
+            "once the draft left the words, the same text is a new send")
+    }
+
+    /// R2T3-F2 / L7c: editing to a different message abandons the held send, so the original
+    /// words typed again later are a new send.
+    func testEditingToADifferentMessageMakesTheOriginalFresh() async {
+        let model = connectedModel { _, _ in .indeterminate(reason: "unanswered") }
+        _ = await model.send(text: "deploy", to: "u-1")
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy", to: "roll back", in: "u-1")
+        XCTAssertFalse(model.holdsSendIdentity(text: "deploy", to: "u-1"))
+        _ = await model.send(text: "deploy", to: "u-1")
+        let sent = identities(model)
+        XCTAssertNotEqual(
+            sent[0].requestID, sent[1].requestID,
+            "a substantive edit (different normalised message) abandons the retry")
+    }
+
+    /// R2T3-F2 normalisation, one way: a whitespace-only edit is the same normalised message —
+    /// the same function the send's mutation key uses — so the held send stays the retry;
+    /// dropping it would make the retry a second typing.
+    func testAWhitespaceOnlyEditKeepsTheHeldSendRetry() async {
+        let model = connectedModel { _, _ in .indeterminate(reason: "unanswered") }
+        _ = await model.send(text: "deploy ", to: "u-1")
+        XCTAssertTrue(model.holdsSendIdentity(text: "deploy", to: "u-1"))
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy ", to: "deploy", in: "u-1")
+        XCTAssertTrue(
+            model.holdsSendIdentity(text: "deploy", to: "u-1"),
+            "normalised text is unchanged, so the retry is kept")
+        _ = await model.send(text: "deploy", to: "u-1")
+        let sent = identities(model)
+        XCTAssertEqual(
+            sent[0].requestID, sent[1].requestID,
+            "the whitespace-tidied retry reused the id, not a second typing")
+    }
+
+    /// R2T3-F2: the drop is scoped to the words the draft left; a sibling send of different
+    /// words on the same run (a diff comment) keeps its own retry.
+    func testEditingTheComposerLeavesASiblingOfDifferentWordsIntact() async {
+        let model = connectedModel { _, _ in .indeterminate(reason: "unanswered") }
+        _ = await model.send(text: "deploy", to: "u-1")
+        _ = await model.send(text: "line 9: wrong", to: "u-1")
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy", to: "something else", in: "u-1")
+        XCTAssertFalse(model.holdsSendIdentity(text: "deploy", to: "u-1"))
+        XCTAssertTrue(
+            model.holdsSendIdentity(text: "line 9: wrong", to: "u-1"),
+            "only the words the draft left are abandoned")
+    }
+
+    /// R2T3-F2 r2-f1 (fixed): a whitespace edit then a clear still abandons the held send —
+    /// the drop keys on the real draft transition, not a marker a whitespace edit strands.
+    func testAWhitespaceEditThenAClearIsFresh() async {
+        let model = connectedModel { _, _ in .indeterminate(reason: "unanswered") }
+        _ = await model.send(text: "deploy ", to: "u-1")
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy ", to: "deploy", in: "u-1")
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy", to: "", in: "u-1")
+        XCTAssertFalse(model.holdsSendIdentity(text: "deploy", to: "u-1"))
+        _ = await model.send(text: "deploy", to: "u-1")
+        let sent = identities(model)
+        XCTAssertNotEqual(
+            sent[0].requestID, sent[1].requestID,
+            "the clear abandons the held send regardless of the earlier whitespace edit")
+    }
+
+    /// R2T3-F2 r2-f2 (fixed): after the link-recovery auto-retry reuses the identity, clearing
+    /// the draft still abandons it — again because the drop keys on the draft transition.
+    func testAnAutoRetryThenAClearIsFresh() async {
+        let model = connectedModel { _, _ in .indeterminate(reason: "unanswered") }
+        _ = await model.send(text: "deploy", to: "u-1")
+        _ = await model.send(text: "deploy", to: "u-1")
+        model.abandonHeldSend(whenDraftChangesFrom: "deploy", to: "", in: "u-1")
+        _ = await model.send(text: "deploy", to: "u-1")
+        let sent = identities(model)
+        XCTAssertNotEqual(
+            sent[1].requestID, sent[2].requestID,
+            "the clear abandons the retried identity, so the re-send is new")
+    }
 }

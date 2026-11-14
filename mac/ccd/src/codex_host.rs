@@ -2560,6 +2560,38 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
+    /// **A Codex card a restart restored closes as a Codex card when its run ends.** A run
+    /// started on the engine has a hosted row, as a Claude run in an agent host does; the
+    /// card a ccd restart brings back is still its link's, so the run's end retires it as
+    /// a Codex card and its stored row goes, rather than closing it as a host's card.
+    #[tokio::test]
+    async fn a_restored_codex_card_closes_as_a_codex_card_when_its_run_ends() {
+        let rig = rig();
+        let frames = frames_of(FILE_FRAMES);
+        let (thread, turn, started, asked_once) = on_the_running_turn(&frames, 17, 19);
+        let (uid, mut ws) = engine_run(&rig, "req-restored", &thread, &turn).await;
+        tell(&mut ws, &started).await;
+        tell(&mut ws, &asked_once).await;
+        assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
+        let (restarted, ws) = restarted_under(&rig, ws).await;
+        restarted
+            .end_hosted_run(
+                &uid,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                json!({"exit_code": null, "reason": "Stopped: its process ended"}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cards_of(&restarted, &uid, 0).await.is_empty(),
+            "the restored card outlived its run"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
     /// **R6 (X7a), two restarts in a row: one actuation.** The answer sent again after the
     /// first restart lands; ccd stops before the resolved notice; after the second restart
     /// Codex has nothing to replay and ccd sends nothing, and the item's end settles the

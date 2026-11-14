@@ -2757,6 +2757,119 @@ impl Store {
         Ok(Some(filed))
     }
 
+    /// A host's line about one of its run's cards, message `seq` from the host `host`,
+    /// in one transaction: the cursor, as [`Store::commit_cursor`] advances it; then
+    /// `events`; then the card's `pending_approvals` row written (`card`, a request
+    /// claude asked) or removed (`None`, a request the host withdrew). `None`, with
+    /// nothing written, when the cursor does not move, and then the caller must not
+    /// acknowledge `seq` (H3); otherwise the events newly stored.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_host_card(
+        &self,
+        session_uid: &str,
+        session_id: &str,
+        host: &ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+        card: Option<(&str, i64)>,
+        events: &[PendingEvent],
+    ) -> Result<Option<Vec<Event>>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !advance_host_cursor(&tx, session_uid, host, seq)? {
+            return Ok(None);
+        }
+        let mut filed = Vec::new();
+        for event in events {
+            filed.extend(append_in_tx(&tx, event)?);
+        }
+        match card {
+            Some((card, created_ms)) => {
+                tx.execute(
+                    "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
+                                                   generation, created_ms)
+                     SELECT ?1, ?2, ?3, ?4, 0, ?5
+                      WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)
+                     ON CONFLICT(session_uid, request_id) DO UPDATE SET card = excluded.card",
+                    params![session_uid, session_id, request_id, card, created_ms],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM pending_approvals WHERE session_uid = ?1 AND request_id = ?2",
+                    params![session_uid, request_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(Some(filed))
+    }
+
+    /// The host's outcome for an answer ccd sent it, message `seq` from the host
+    /// `host`, in one transaction: the cursor; then, when the answer reached claude
+    /// (`outcome`, with the card's `payload_hash`), the answer recorded unless one
+    /// already is, the card's row removed and `events` (its resolution) filed; and in
+    /// either case the answer's claim removed, so a refused answer leaves the card
+    /// answerable again. `None`, with nothing written, when the cursor does not move
+    /// (H3); otherwise the events newly stored.
+    pub fn commit_host_answer(
+        &self,
+        session_uid: &str,
+        host: &ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+        outcome: Option<(&str, &AnswerOutcome)>,
+        events: &[PendingEvent],
+    ) -> Result<Option<Vec<Event>>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !advance_host_cursor(&tx, session_uid, host, seq)? {
+            return Ok(None);
+        }
+        let mut filed = Vec::new();
+        if let Some((payload_hash, outcome)) = outcome {
+            tx.execute(
+                "INSERT INTO answers(session_uid, request_id, payload_hash, outcome, created_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5
+                  WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)
+                 ON CONFLICT DO NOTHING",
+                params![
+                    session_uid,
+                    request_id,
+                    payload_hash,
+                    serde_json::to_string(outcome)?,
+                    protocol::time::now_rfc3339(),
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM pending_approvals WHERE session_uid = ?1 AND request_id = ?2",
+                params![session_uid, request_id],
+            )?;
+            for event in events {
+                filed.extend(append_in_tx(&tx, event)?);
+            }
+        }
+        tx.execute(
+            "DELETE FROM answer_claims WHERE session_uid = ?1 AND request_id = ?2",
+            params![session_uid, request_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(filed))
+    }
+
+    /// The run `session_uid`'s answers claimed and not yet settled.
+    pub fn answer_claims_of(&self, session_uid: &str) -> Result<Vec<AnswerClaim>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT session_uid, session_id, request_id, payload_hash, decision, started_at
+               FROM answer_claims WHERE session_uid = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![session_uid], answer_claim_from)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// File one SDK message from the host `host`, message `seq`, in one transaction:
     /// the cursor, as [`Store::commit_cursor`] advances it, then the message's
     /// `events`, then, from its init, the run's Claude `session_id` and the folder
@@ -7646,6 +7759,30 @@ fn upsert_codex_card_in_tx(
     } else {
         CodexCardOutcome::SessionGone
     })
+}
+
+/// Move the run `session_uid`'s host cursor to `seq` inside `tx`, only for that host
+/// and only forward. False when it did not move.
+fn advance_host_cursor(
+    tx: &rusqlite::Transaction<'_>,
+    session_uid: &str,
+    host: &ProcessIdentity,
+    seq: u64,
+) -> Result<bool> {
+    let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+    let moved = tx.execute(
+        "UPDATE run_hosts SET cursor = ?5
+          WHERE session_uid = ?1 AND host_pid = ?2
+            AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
+        params![
+            session_uid,
+            host.pid,
+            host.birth.start_sec,
+            host.birth.start_usec,
+            seq
+        ],
+    )?;
+    Ok(moved == 1)
 }
 
 fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Result<Option<Event>> {

@@ -228,4 +228,16 @@ extension AppModel {
             && now.timeIntervalSince(unanswered.sentAt) < 60
             && holdsSendIdentity(text: unanswered.text, to: key)
     }
+
+    /// The counterpart to `asksAgain`: the reader's composer draft changed from `old` to `new`.
+    /// A send kept unanswered is its retry only while the draft still shows those words; once the
+    /// draft moves off them — compared through `normalizedSendText`, the same normalisation the
+    /// send's mutation key uses, so a whitespace-only edit is not a move — the send kept under the
+    /// words the draft just left is abandoned, so the same words typed later are a new send and not
+    /// the stale identity the daemon replays as "already applied". Re-sending the kept draft
+    /// unchanged keeps the retry.
+    public func abandonHeldSend(whenDraftChangesFrom old: String, to new: String, in key: String) {
+        guard Self.normalizedSendText(old) != Self.normalizedSendText(new) else { return }
+        dropSendIdentity(text: old, to: key)
+    }
 }
