@@ -18,7 +18,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The version the host writes into `host.json`.
+/// The version the host writes into `host.json`. A new host is admitted only at this
+/// version, but a restarted ccd attaches a running host again without reading it: a change
+/// to this version brings with it, in the same change, the stop for a host still running
+/// the old one (P0 H9).
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
 
 /// `host.json`, created by the host exclusively, so a second host for the same run
