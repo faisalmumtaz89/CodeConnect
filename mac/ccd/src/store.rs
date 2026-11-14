@@ -1365,6 +1365,12 @@ impl Store {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The writer, held by a test to stand for a store busy with another write.
+    #[cfg(test)]
+    pub(crate) fn hold_writer(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.write()
+    }
+
     /// A free reader, or a wait on the least-recently-probed one.
     ///
     /// `try_lock` around the ring first so an idle reader is found without
