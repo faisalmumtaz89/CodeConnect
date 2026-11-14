@@ -254,8 +254,9 @@ impl Db {
         &self,
         row: SessionRow,
         request_id: String,
+        start: String,
     ) -> Result<Option<crate::store::HostedRun>> {
-        self.run(move |store| store.begin_run(&row, &request_id))
+        self.run(move |store| store.begin_run(&row, &request_id, &start))
             .await
     }
 
@@ -299,6 +300,21 @@ impl Db {
     ) -> Result<Option<crate::store::WatchedHost>> {
         self.run(move |store| store.watched_host(&session_uid))
             .await
+    }
+
+    pub async fn recorded_hosts(&self) -> Result<Vec<crate::store::WatchedHost>> {
+        self.run(|store| store.recorded_hosts()).await
+    }
+
+    pub async fn fail_unhosted_starts(&self) -> Result<usize> {
+        self.run(|store| store.fail_unhosted_starts()).await
+    }
+
+    pub async fn hosted_link(
+        &self,
+        session_uid: String,
+    ) -> Result<Option<crate::store::HostedLink>> {
+        self.run(move |store| store.hosted_link(&session_uid)).await
     }
 
     pub async fn commit_cursor(
