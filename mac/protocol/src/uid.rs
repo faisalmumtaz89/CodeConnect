@@ -166,15 +166,32 @@ pub fn uuid_v4() -> std::io::Result<String> {
     let mut bytes = crate::secret::random_bytes::<16>()?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(hyphenated(&bytes))
+}
+
+/// The UUID `name` names: the same name always gives the same UUID (version 8, from
+/// SHA-256). ccd names a message it sends a run's agent host by the run and the app's
+/// request id, so a ccd that restarted can tell which send a replayed outcome is for.
+pub fn uuid_named(name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(name.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    hyphenated(&bytes)
+}
+
+fn hyphenated(bytes: &[u8; 16]) -> String {
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!(
+    format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],
         &hex[8..12],
         &hex[12..16],
         &hex[16..20],
         &hex[20..32]
-    ))
+    )
 }
 
 /// Mint a uid that sorts as though it were created at `unix_ms`.
@@ -277,6 +294,20 @@ mod tests {
             assert!(parts[2].starts_with('4'), "{uuid}");
             assert!("89ab".contains(&parts[3][..1]), "{uuid}");
         }
+    }
+
+    #[test]
+    fn a_named_uuid_is_the_same_for_one_name_and_another_for_another() {
+        let named = uuid_named("01K1B3XQ8ZC0DE5FGH7JKMNPQR\0request-1");
+        assert_eq!(named, uuid_named("01K1B3XQ8ZC0DE5FGH7JKMNPQR\0request-1"));
+        assert_ne!(named, uuid_named("01K1B3XQ8ZC0DE5FGH7JKMNPQR\0request-2"));
+        let parts: Vec<&str> = named.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|part| part.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('8'), "{named}");
+        assert!("89ab".contains(&parts[3][..1]), "{named}");
     }
 
     #[test]

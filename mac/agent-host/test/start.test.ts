@@ -226,6 +226,46 @@ test("claude gets the host's environment: ccd's session uid, no CLAUDE_CONFIG_DI
   expect(env.CLAUDE_CODE_ENTRYPOINT).toBeDefined();
 }, 10_000);
 
+test("each say reaches claude's input after the first message, in order, marked as the person's and stamped with its uuid; its outcome comes once the SDK has taken it", async () => {
+  const { ccd, start, stub } = await run(trustedStart);
+  ccd.send({ type: 'say', uuid: 'c-say-1', text: 'the second message' });
+  ccd.send({ type: 'say', uuid: 'c-say-2', text: 'the third message' });
+  await ccd.line('the second say taken', (line) => line.type === 'outcome' && line.uuid === 'c-say-2');
+  await waitFor('claude to read both', () => stdinOf(stub()).filter((m) => m.type === 'user').length === 3);
+  const users = stdinOf(stub()).filter((message) => message.type === 'user');
+  expect(users.map((m) => [m.uuid, m.message.content])).toStrictEqual([
+    [start.uuid, start.prompt],
+    ['c-say-1', 'the second message'],
+    ['c-say-2', 'the third message'],
+  ]);
+  for (const message of users) expect(message.origin).toStrictEqual({ kind: 'human' });
+  const outcomes = ccd.lines.filter((line) => line.type === 'outcome' && line.uuid.startsWith('c-say'));
+  expect(outcomes.map((line) => [line.uuid, line.status])).toStrictEqual([['c-say-1', 'done'], ['c-say-2', 'done']]);
+}, 10_000);
+
+test('a say whose multibyte character is split across two writes on the socket arrives whole', async () => {
+  const { ccd, stub } = await run(trustedStart);
+  const text = 'déjà vu — 日本語 ✓';
+  const bytes = new TextEncoder().encode(`${JSON.stringify({ type: 'say', uuid: 'c-split', text })}\n`);
+  // Inside the first character of 日本語, whose UTF-8 is three bytes.
+  const cut = bytes.indexOf(0xe6) + 1;
+  ccd.socket.write(bytes.subarray(0, cut));
+  await Bun.sleep(100);
+  ccd.socket.write(bytes.subarray(cut));
+  await ccd.line('the split say taken', (line) => line.type === 'outcome' && line.uuid === 'c-split');
+  await waitFor('claude to read it', () => stdinOf(stub()).some((m) => m.uuid === 'c-split'));
+  expect(stdinOf(stub()).find((m) => m.uuid === 'c-split').message.content).toBe(text);
+}, 10_000);
+
+test('a say once the run is stopped is refused, and never reaches claude', async () => {
+  const { ccd, stub } = await run(trustedStart);
+  ccd.send({ type: 'stop', uuid: 'c-stop' });
+  ccd.send({ type: 'say', uuid: 'c-late', text: 'too late' });
+  const outcome = await ccd.line('the late say answered', (line) => line.type === 'outcome' && line.uuid === 'c-late');
+  expect(outcome.status).toBe('refused');
+  expect(stdinOf(stub()).some((message) => message.uuid === 'c-late')).toBe(false);
+}, 10_000);
+
 test('stop ends the run: claude is asked to interrupt and ends, its end is the last line, and the host exits once ccd has it; a second stop does nothing', async () => {
   const { host, ccd, stub } = await run(trustedStart);
   ccd.send({ type: 'stop', uuid: 'c-stop' });

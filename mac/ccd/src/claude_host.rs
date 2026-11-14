@@ -12,6 +12,8 @@
 //! nothing is acknowledged that was not stored. The start's outcome, committed by the
 //! link, makes the run `live` or `failed`, and the app's answer waits for it. A restarted
 //! ccd attaches each host still running again from its run's cursor ([`attach_run`]). An
+//! app's message to a live run goes to its host as `say` ([`send_text`]), and the
+//! person's words are filed once the host has taken them. An
 //! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop` if its link
 //! is attached, and a host that has not exited 10 s later is stopped by its group
 //! ([`escalate_stop`]).
@@ -28,7 +30,7 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::config::Config;
-use protocol::event::{Lifecycle, SessionKey};
+use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::host::{
     FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
     HOST_PROTOCOL_VERSION,
@@ -38,7 +40,7 @@ use protocol::proc_identity::{
     GroupWarrant, Liveness, ProcessIdentity,
 };
 use protocol::sdk_map::Signal;
-use protocol::ws::{StartFailure, StartSessionResult, StopRunResult};
+use protocol::ws::{SendTextResult, StartFailure, StartSessionResult, StopRunResult};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
@@ -46,7 +48,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::state::Daemon;
-use crate::store::{HostedRun, SessionRow};
+use crate::store::{HostedRun, SessionRow, TextClaim};
 
 /// The agent host's file name, beside ccd's own executable.
 const HOST_BIN: &str = "cc-agent-host";
@@ -240,7 +242,7 @@ async fn bring_up(
     .map_err(|err| format!("could not run the login shell: {err}"))?;
     let spawned = child.id();
     let attached = attach(
-        daemon, uid, start_uuid, start, &dir, spawned, &mut child, deadline,
+        daemon, uid, start_uuid, run.prompt, start, &dir, spawned, &mut child, deadline,
     )
     .await;
     crate::start_session::reap(child);
@@ -266,6 +268,7 @@ async fn attach(
     daemon: &Arc<Daemon>,
     uid: &str,
     start_uuid: &str,
+    start_prompt: &str,
     start: &ToHost,
     dir: &Path,
     spawned: Option<u32>,
@@ -336,6 +339,7 @@ async fn attach(
         host,
         Linked {
             start_uuid: start_uuid.to_string(),
+            start_prompt: start_prompt.to_string(),
             lifecycle: Lifecycle::Starting,
             turn: None,
             resend: None,
@@ -408,9 +412,9 @@ pub(crate) async fn attach_run(
         .start
         .as_deref()
         .and_then(|line| serde_json::from_str::<ToHost>(line).ok());
-    let start_uuid = match &start {
-        Some(ToHost::Start { uuid, .. }) => uuid.clone(),
-        _ => String::new(),
+    let (start_uuid, start_prompt) = match &start {
+        Some(ToHost::Start { uuid, prompt, .. }) => (uuid.clone(), prompt.clone()),
+        _ => (String::new(), String::new()),
     };
     let resend = match linked.lifecycle {
         Lifecycle::Starting => start,
@@ -429,6 +433,7 @@ pub(crate) async fn attach_run(
         host,
         Linked {
             start_uuid,
+            start_prompt,
             lifecycle: linked.lifecycle,
             turn: linked.turn,
             resend,
@@ -587,6 +592,8 @@ async fn apply_sdk(
 struct Linked {
     /// The uuid of the run's `start`, whose outcome makes the run `live` or `failed`.
     start_uuid: String,
+    /// The start's prompt, the person's first words, filed when the run goes live.
+    start_prompt: String,
     lifecycle: Lifecycle,
     /// The uuid of the run's last SDK init, which its turn's later events carry.
     turn: Option<String>,
@@ -625,6 +632,7 @@ async fn link(
     daemon.host_link_attached(&uid, to_link).await;
     let Linked {
         start_uuid,
+        start_prompt,
         lifecycle,
         mut turn,
         mut resend,
@@ -685,9 +693,10 @@ async fn link(
                         break format!("could not keep the start's initialize answer: {err}")
                     }
                 };
+                // The person's first words, filed as the run goes live.
+                let words = vec![person_row(&uid, &start_uuid, &start_prompt)];
                 match daemon
-                    .db
-                    .commit_outcome(uid.clone(), host, seq, lifecycle, initialize)
+                    .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words)
                     .await
                 {
                     Ok(true) => {
@@ -707,6 +716,15 @@ async fn link(
                     let _ = begun.send(said);
                 }
                 if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                    break why;
+                }
+            }
+            Ok(FromHost::Outcome {
+                seq, uuid, status, ..
+            }) if live => {
+                if let Err(why) =
+                    apply_send_outcome(&daemon, &uid, host, seq, &uuid, status, &mut write).await
+                {
                     break why;
                 }
             }
@@ -918,6 +936,216 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
     }
     tokio::spawn(escalate_stop(Arc::clone(daemon), uid.to_string()));
     StopRunResult::Stopping
+}
+
+/// How long a send waits for the run's host to take the message into claude's input.
+const SEND_WAIT: Duration = Duration::from_secs(10);
+
+/// One `send_text` for a run started in an agent host, as the app sent it and ccd
+/// checked it.
+pub(crate) struct Message {
+    pub text: String,
+    /// The app's request id with the hash it was checked against, when it gave them.
+    pub identity: Option<(String, String)>,
+    pub submit: bool,
+    pub complete_native_confirmation: bool,
+}
+
+/// `send_text` to the hosted Claude run `uid`, whose lifecycle was last read as
+/// `lifecycle`: the message goes into claude's input through the run's host (`say`),
+/// and the person's words are filed once the host has taken it ([`apply_send_outcome`]).
+/// The send's claim keeps its text, so a restarted ccd still files them from the host's
+/// replay. A retry is answered from that claim first, as a typed send's is; only a new
+/// message meets the run's state. What only a terminal shows (the model and effort
+/// confirmations, `/status`, `/usage`, `/cost`, `/clear`) is refused, as is a message
+/// staged without being sent.
+pub(crate) async fn send_text(
+    daemon: &Daemon,
+    uid: &str,
+    lifecycle: Lifecycle,
+    message: Message,
+) -> SendTextResult {
+    let refuse = |reason: &str| SendTextResult::Refused {
+        reason: reason.to_string(),
+    };
+    let Message {
+        text,
+        identity,
+        submit,
+        complete_native_confirmation,
+    } = message;
+    if complete_native_confirmation {
+        return refuse(if text.starts_with("/effort") {
+            "Changing the effort isn't available for this session yet."
+        } else {
+            "Changing the model isn't available for this session yet."
+        });
+    }
+    if matches!(
+        text.split_whitespace().next(),
+        Some("/status" | "/usage" | "/cost" | "/clear")
+    ) {
+        return refuse("This isn't available for this session yet.");
+    }
+    if !submit {
+        return refuse("A message to this session is sent whole; nothing was sent.");
+    }
+    if text.trim().is_empty() {
+        return refuse("There is nothing to send.");
+    }
+    let Some((request_id, hash)) = identity else {
+        return refuse("A message to this session needs its request id; nothing was sent.");
+    };
+    match daemon
+        .db
+        .claim_text_mutation(
+            uid.to_string(),
+            request_id.clone(),
+            hash,
+            Some(text.clone()),
+            protocol::time::now_rfc3339(),
+        )
+        .await
+    {
+        Ok(TextClaim::Claimed) => {}
+        Ok(TextClaim::Applied {
+            matched,
+            settled_at,
+        }) => {
+            return SendTextResult::Duplicate {
+                matched,
+                applied_at: settled_at,
+            }
+        }
+        Ok(TextClaim::Indeterminate { started_at }) => {
+            return SendTextResult::Indeterminate {
+                reason: format!(
+                    "this message (first sent {started_at}) was never confirmed; it may or may not \
+                     have reached Claude, and it will not be sent again"
+                ),
+            }
+        }
+        Ok(TextClaim::Conflict) => {
+            return refuse(
+                "this request_id was already used for different text in this session; use a new \
+                 one",
+            )
+        }
+        Err(err) => {
+            crate::log_error!("{uid}: could not claim send {request_id}: {err:#}");
+            return refuse("could not record that this message is being sent; nothing was sent");
+        }
+    }
+    if lifecycle != Lifecycle::Live {
+        release_send(daemon, uid, &request_id).await;
+        return refuse("This session isn't running, so nothing was sent.");
+    }
+    let uuid = send_uuid(uid, &request_id);
+    let taken = daemon.await_host_send(uid, &uuid).await;
+    let say = ToHost::Say {
+        uuid: uuid.clone(),
+        text: text.clone(),
+    };
+    if !daemon.send_to_host(uid, say).await {
+        daemon.host_send_taken(&uuid, false).await;
+        release_send(daemon, uid, &request_id).await;
+        return refuse(
+            "The computer is reconnecting to this session; nothing was sent. Try again in a \
+             moment.",
+        );
+    }
+    match tokio::time::timeout(SEND_WAIT, taken).await {
+        Ok(Ok(true)) => SendTextResult::Sent { matched: text },
+        Ok(Ok(false)) => refuse("This session stopped taking messages; nothing was sent."),
+        Ok(Err(_)) => SendTextResult::Indeterminate {
+            reason: "The computer lost the session before the message was confirmed; it may or \
+                     may not have reached Claude."
+                .into(),
+        },
+        // Settled nothing: the host's outcome, whenever it comes, still files the words.
+        Err(_) => {
+            daemon.host_send_taken(&uuid, false).await;
+            SendTextResult::Indeterminate {
+                reason: "The session did not confirm the message in time; it may or may not \
+                         have reached Claude."
+                    .into(),
+            }
+        }
+    }
+}
+
+/// Drop a send's claim when nothing was sent, so a retry is a fresh attempt.
+async fn release_send(daemon: &Daemon, uid: &str, request_id: &str) {
+    if let Err(err) = daemon
+        .db
+        .release_text_mutation(uid.to_string(), request_id.to_string())
+        .await
+    {
+        crate::log_error!("{uid}: could not release send {request_id}: {err:#}");
+    }
+}
+
+/// The uuid of the message ccd sends a run's host for the app's request `request_id`:
+/// the same for a retry, and found again by a restarted ccd.
+fn send_uuid(uid: &str, request_id: &str) -> String {
+    protocol::uid::uuid_named(&format!("{uid}\0{request_id}"))
+}
+
+/// The person's words `text`, sent as the message `uuid` (the start's or a later
+/// send's), as the run's event.
+fn person_row(uid: &str, uuid: &str, text: &str) -> PendingEvent {
+    PendingEvent::new(
+        &SessionKey::new(uid, uid),
+        EventKind::UserMessage,
+        serde_json::json!({ "text": text }),
+        Source::Daemon,
+    )
+    .with_source_event_id(format!("say:{uuid}"))
+}
+
+/// The host's outcome for a message ccd sent it (`say`): the send it names, found by its
+/// uuid among the run's claimed sends, is settled with the person's words filed when the
+/// host took the message, or released when it refused it, in one transaction with the
+/// cursor; then acknowledged, and whoever waits for it is told. An outcome naming no
+/// claimed send moves only the cursor.
+async fn apply_send_outcome(
+    daemon: &Daemon,
+    uid: &str,
+    host: ProcessIdentity,
+    seq: u64,
+    uuid: &str,
+    status: OutcomeStatus,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let taken = matches!(status, OutcomeStatus::Done);
+    let sends = daemon
+        .db
+        .host_sends(uid.to_string())
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    match sends
+        .into_iter()
+        .find(|(request_id, _)| send_uuid(uid, request_id) == uuid)
+    {
+        Some((request_id, text)) => {
+            let row = taken.then(|| person_row(uid, uuid, &text));
+            match daemon
+                .commit_host_send(uid, host, seq, &request_id, row)
+                .await
+            {
+                Ok(true) => send(write, &ToHost::Ack { seq }).await?,
+                Ok(false) => {
+                    return Err(format!(
+                        "message {seq} is not past the run's cursor for this host"
+                    ))
+                }
+                Err(err) => return Err(format!("{err:#}")),
+            }
+        }
+        None => commit_and_ack(daemon, uid, host, seq, write).await?,
+    }
+    daemon.host_send_taken(uuid, taken).await;
+    Ok(())
 }
 
 /// H5's escalation for the run `uid`, sent `stop`: [`STOP_GRACE`] later, while it is still
@@ -1829,6 +2057,21 @@ mod tests {
         rows.map(Result::unwrap).collect()
     }
 
+    /// A live run's [`stored`] events after the person's first words, which the start's
+    /// outcome filed first.
+    fn after_words(rig: &Rig, uid: &str) -> Vec<serde_json::Value> {
+        let mut stored = stored(rig, uid);
+        assert_eq!(
+            stored[0]["kind"], "user_message",
+            "the person's words first"
+        );
+        assert_eq!(
+            stored[0]["payload"],
+            serde_json::json!({"text": "fix the tests"})
+        );
+        stored.split_off(1)
+    }
+
     /// The run row's Claude session id and folder.
     fn row_of(rig: &Rig, uid: &str) -> (Option<String>, String) {
         rusqlite::Connection::open(rig.root.join("events.db"))
@@ -1862,8 +2105,9 @@ mod tests {
     /// **A live run's SDK messages are its events (G1, G2, G3).** The recorded session's
     /// 150 messages, each filed with the run's cursor in one transaction, then
     /// acknowledged: by each ack the cursor is that message's seq. The first, a
-    /// command's `queued`, files nothing. The run's events are the mapper's, each turn's
-    /// carrying its init's uuid, each broadcast once and in order. The session id stays
+    /// command's `queued`, files nothing. After the person's first words, the run's events
+    /// are the mapper's, each turn's carrying its init's uuid, each broadcast once and in
+    /// order. The session id stays
     /// through the `/clear` (line 133) and is the next init's from line 135. A message
     /// sent again with its seq files nothing and is not acknowledged: the link ends.
     #[tokio::test]
@@ -1884,7 +2128,7 @@ mod tests {
             );
             assert_eq!(cursor(&rig, &played.uid), seq as i64, "line {}", index + 1);
             if index == 0 {
-                assert!(stored(&rig, &played.uid).is_empty(), "the queued line");
+                assert!(after_words(&rig, &played.uid).is_empty(), "the queued line");
             }
             ids.push(row_of(&rig, &played.uid).0);
         }
@@ -1899,7 +2143,7 @@ mod tests {
         assert_ne!(ids[134], first_id);
         let committed: serde_json::Value = serde_json::from_str(WIRE).unwrap();
         assert_eq!(
-            serde_json::Value::Array(stored(&rig, &played.uid)),
+            serde_json::Value::Array(after_words(&rig, &played.uid)),
             committed
         );
         let mut seqs = Vec::new();
@@ -1908,12 +2152,12 @@ mod tests {
                 seqs.push(event.seq);
             }
         }
-        assert_eq!(seqs, (1..=109).collect::<Vec<u64>>(), "each once, in order");
+        assert_eq!(seqs, (1..=110).collect::<Vec<u64>>(), "each once, in order");
 
         let last = messages.len() as u64 + 2;
         sdk(&mut played.write, last, messages.last().unwrap().clone()).await;
         assert_eq!(next(&mut played.lines).await, None);
-        assert_eq!(stored(&rig, &played.uid).len(), 109);
+        assert_eq!(after_words(&rig, &played.uid).len(), 109);
         assert_eq!(cursor(&rig, &played.uid), last as i64);
         stop(&played.dir);
     }
@@ -1939,7 +2183,7 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, None);
-        assert!(stored(&rig, &played.uid).is_empty());
+        assert!(after_words(&rig, &played.uid).is_empty());
         assert_eq!(cursor(&rig, &played.uid), 2);
         assert!(broadcast.try_recv().is_err());
         stop(&played.dir);
@@ -1959,7 +2203,7 @@ mod tests {
         );
         sdk(&mut played.write, 3, capture()[2].clone()).await;
         assert_eq!(next(&mut played.lines).await, None);
-        assert!(stored(&rig, &played.uid).is_empty());
+        assert!(after_words(&rig, &played.uid).is_empty());
         assert_eq!(cursor(&rig, &played.uid), 2);
         assert_eq!(row_of(&rig, &played.uid).0, None);
         stop(&played.dir);
@@ -2051,7 +2295,7 @@ mod tests {
         }
         let mode = protocol::event::Fact {
             value: capture()[2]["permissionMode"].as_str().unwrap().to_string(),
-            seq: 1,
+            seq: 2,
         };
         assert_eq!(
             summary(&rig.daemon, &played.uid).await.permission_mode,
@@ -2071,6 +2315,15 @@ mod tests {
     /// ccd's start does: `recover`, then the hosted runs. The host's side of the connection
     /// the new daemon attached with.
     async fn restart(rig: &Rig, dir: &Path) -> (Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf) {
+        let (_, lines, write) = restarted(rig, dir).await;
+        (lines, write)
+    }
+
+    /// [`restart`], with the restarted daemon.
+    async fn restarted(
+        rig: &Rig,
+        dir: &Path,
+    ) -> (Arc<Daemon>, Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf) {
         let _ = std::fs::remove_file(dir.join("host.sock"));
         let listener = UnixListener::bind(dir.join("host.sock")).unwrap();
         let restarted = daemon_on(&rig.root);
@@ -2081,7 +2334,7 @@ mod tests {
             .expect("the restarted daemon attached the run's host")
             .unwrap();
         let (read, write) = stream.into_split();
-        (BufReader::new(read).lines(), write)
+        (restarted, BufReader::new(read).lines(), write)
     }
 
     /// A run's row and its stored start, as a start writes them before anything is
@@ -2156,12 +2409,14 @@ mod tests {
         assert_eq!(kept(&rig, &uid).0, "exited");
         assert_eq!(cursor(&rig, &uid), 7);
         let key = SessionKey::new(&uid, &uid);
-        let mut expected: Vec<String> = capture()
-            .iter()
-            .take(3)
-            .flat_map(|message| protocol::sdk_map::map(&key, None, message).events)
-            .map(|event| event.kind.as_str().to_string())
-            .collect();
+        let mut expected = vec!["user_message".to_string()];
+        expected.extend(
+            capture()
+                .iter()
+                .take(3)
+                .flat_map(|message| protocol::sdk_map::map(&key, None, message).events)
+                .map(|event| event.kind.as_str().to_string()),
+        );
         expected.push("session_end".into());
         let filed: Vec<String> = stored(&rig, &uid)
             .iter()
@@ -2418,7 +2673,7 @@ mod tests {
             let seq = index as u64 + 3;
             sdk(&mut played.write, seq, message).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
-            filed.push(stored(&rig, &played.uid).len());
+            filed.push(after_words(&rig, &played.uid).len());
         }
         assert_eq!(filed, [1, 3, 3], "the rate-limit message files nothing");
         let text = serde_json::to_string(&stored(&rig, &played.uid)).unwrap();
@@ -2941,6 +3196,426 @@ mod tests {
         );
     }
 
+    /// The app's `send_text` of `text` to the run `uid` as request `request_id`, as the
+    /// Kit sends it.
+    async fn send_as_app(
+        daemon: &Daemon,
+        uid: &str,
+        request_id: &str,
+        text: &str,
+    ) -> SendTextResult {
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+        daemon
+            .send_text(
+                uid,
+                text.to_string(),
+                Some(request_id),
+                Some(&hash),
+                true,
+                false,
+            )
+            .await
+    }
+
+    /// The person's words the run has filed, in order.
+    fn words(rig: &Rig, uid: &str) -> Vec<String> {
+        stored(rig, uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "user_message" && event["source"] == "daemon")
+            .map(|event| event["payload"]["text"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The host's side of one `say`: it reads it, then answers `status` as message `seq`
+    /// and reads ccd's ack. The say's uuid and text.
+    async fn host_takes(played: &mut Played, seq: u64, status: &str) -> (String, String) {
+        let Some(ToHost::Say { uuid, text }) = next(&mut played.lines).await else {
+            panic!("no say reached the host");
+        };
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": status}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        (uuid, text)
+    }
+
+    /// **B5 G1 and G9: a second message, and the first.** The start's prompt is filed as
+    /// the person's words when the run goes live. A message to the live run goes to its
+    /// host as `say`; once the host has taken it, the words are filed with the outcome's
+    /// cursor and the app is told `sent`.
+    #[tokio::test]
+    async fn a_message_to_a_live_run_reaches_its_host_and_the_persons_words_are_filed() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        assert_eq!(words(&rig, &played.uid), ["fix the tests"]);
+        let uid = played.uid.clone();
+        let (result, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
+            host_takes(&mut played, 3, "done")
+        );
+        assert_eq!(text, "and the docs");
+        assert_eq!(
+            result,
+            SendTextResult::Sent {
+                matched: "and the docs".into()
+            }
+        );
+        assert_eq!(words(&rig, &uid), ["fix the tests", "and the docs"]);
+        assert_eq!(cursor(&rig, &uid), 3);
+        stop(&played.dir);
+    }
+
+    /// **B5 G9: a refused start files no words.**
+    #[tokio::test]
+    async fn a_refused_start_files_no_words() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (_, played) =
+            tokio::join!(start(&rig.daemon, run(&rig, "req-1", &cwd, &host)), async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "refused", "detail": "no"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        assert!(words(&rig, &played.uid).is_empty());
+        stop(&played.dir);
+    }
+
+    /// **B5 G2: retries.** The same request asked again while its first send waits for
+    /// the host is not sent twice; once the host has taken it, it is answered `duplicate`,
+    /// with nothing sent and no second row; the same id with other words is refused;
+    /// another id with the same words is a second message.
+    #[tokio::test]
+    async fn a_retried_message_is_answered_from_its_first_send() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (first, ()) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "again"), async {
+            let Some(ToHost::Say { uuid, .. }) = next(&mut played.lines).await else {
+                panic!("no say reached the host");
+            };
+            assert!(
+                matches!(
+                    send_as_app(&rig.daemon, &uid, "r-1", "again").await,
+                    SendTextResult::Indeterminate { .. }
+                ),
+                "asked again at once"
+            );
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid, "status": "done"}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        });
+        assert!(matches!(first, SendTextResult::Sent { .. }));
+        assert!(matches!(
+            send_as_app(&rig.daemon, &uid, "r-1", "again").await,
+            SendTextResult::Duplicate { .. }
+        ));
+        assert!(matches!(
+            send_as_app(&rig.daemon, &uid, "r-1", "other words").await,
+            SendTextResult::Refused { .. }
+        ));
+        assert_eq!(next(&mut played.lines).await, None, "nothing sent again");
+        let (second, _) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-2", "again"),
+            host_takes(&mut played, 4, "done")
+        );
+        assert!(matches!(second, SendTextResult::Sent { .. }));
+        assert_eq!(words(&rig, &uid), ["fix the tests", "again", "again"]);
+        stop(&played.dir);
+    }
+
+    /// **B5 G3: what a run started in a host does not take.** Each is refused, and nothing
+    /// is sent, claimed or filed; a message that only mentions a command is a message.
+    #[tokio::test]
+    async fn what_a_hosted_run_does_not_take_is_refused_and_nothing_is_sent() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let refused = |result: SendTextResult| match result {
+            SendTextResult::Refused { reason } => reason,
+            other => panic!("not refused: {other:?}"),
+        };
+        let model_hash = protocol::hash::send_text_hash(&uid, "/model opus", true);
+        assert_eq!(
+            refused(
+                rig.daemon
+                    .send_text(
+                        &uid,
+                        "/model opus".into(),
+                        Some("m"),
+                        Some(&model_hash),
+                        true,
+                        true
+                    )
+                    .await
+            ),
+            "Changing the model isn't available for this session yet."
+        );
+        let effort_hash = protocol::hash::send_text_hash(&uid, "/effort high", true);
+        assert_eq!(
+            refused(
+                rig.daemon
+                    .send_text(
+                        &uid,
+                        "/effort high".into(),
+                        Some("f"),
+                        Some(&effort_hash),
+                        true,
+                        true
+                    )
+                    .await
+            ),
+            "Changing the effort isn't available for this session yet."
+        );
+        for text in ["/clear", "/status", "/usage now", "/cost"] {
+            assert_eq!(
+                refused(send_as_app(&rig.daemon, &uid, text, text).await),
+                "This isn't available for this session yet."
+            );
+        }
+        let staged = protocol::hash::send_text_hash(&uid, "half", false);
+        refused(
+            rig.daemon
+                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false, false)
+                .await,
+        );
+        refused(send_as_app(&rig.daemon, &uid, "e", "  ").await);
+        refused(
+            rig.daemon
+                .send_text(&uid, "no id".into(), None, None, true, false)
+                .await,
+        );
+        assert_eq!(next(&mut played.lines).await, None, "nothing sent");
+        let (result, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "why did /clear not run?"),
+            host_takes(&mut played, 3, "done")
+        );
+        assert!(matches!(result, SendTextResult::Sent { .. }));
+        assert_eq!(text, "why did /clear not run?");
+        for (lifecycle, request_id) in [("stopping", "r-2"), ("exited", "r-3")] {
+            force_lifecycle(&rig, &uid, lifecycle);
+            assert_eq!(
+                refused(send_as_app(&rig.daemon, &uid, request_id, "late").await),
+                "This session isn't running, so nothing was sent."
+            );
+            assert!(
+                matches!(
+                    send_as_app(&rig.daemon, &uid, "r-1", "why did /clear not run?").await,
+                    SendTextResult::Duplicate { .. }
+                ),
+                "a retry once {lifecycle} is answered from its send"
+            );
+        }
+        assert_eq!(next(&mut played.lines).await, None, "nothing sent");
+        assert_eq!(
+            words(&rig, &uid),
+            ["fix the tests", "why did /clear not run?"]
+        );
+        stop(&played.dir);
+    }
+
+    /// **B5 G3: a run whose link is down** refuses a message, and keeps no claim of it.
+    #[tokio::test]
+    async fn a_message_to_a_run_whose_link_is_down_is_refused() {
+        let rig = rig();
+        let (dir, uid) = detached_run(&rig, &stub_host(&rig, HOST_PROTOCOL_VERSION, None)).await;
+        assert!(matches!(
+            send_as_app(&rig.daemon, &uid, "r-1", "hello").await,
+            SendTextResult::Refused { .. }
+        ));
+        assert!(rig
+            .daemon
+            .db
+            .host_sends(uid.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        stop(&dir);
+    }
+
+    /// **B5 G4: the link ends before the host's outcome:** the app is told the message is
+    /// not confirmed, and no words are filed. A retry is answered the same, from its send,
+    /// though the link is down.
+    #[tokio::test]
+    async fn a_message_whose_link_ends_before_its_outcome_is_not_confirmed() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let dir = played.dir.clone();
+        let (result, ()) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "lost"), async {
+            assert!(matches!(
+                next(&mut played.lines).await,
+                Some(ToHost::Say { .. })
+            ));
+            drop(played);
+        });
+        assert_eq!(
+            result,
+            SendTextResult::Indeterminate {
+                reason: "The computer lost the session before the message was confirmed; it \
+                         may or may not have reached Claude."
+                    .into()
+            }
+        );
+        assert!(matches!(
+            send_as_app(&rig.daemon, &uid, "r-1", "lost").await,
+            SendTextResult::Indeterminate { .. }
+        ));
+        assert_eq!(words(&rig, &uid), ["fix the tests"]);
+        stop(&dir);
+    }
+
+    /// **B5 G3 and G7: a message that crosses End run.** The host no longer takes it once
+    /// its run is stopping, and refuses it: the app is told nothing was sent, no words are
+    /// filed, the claim is let go, and the run stays `stopping`.
+    #[tokio::test]
+    async fn a_message_crossing_a_stop_is_refused_and_files_nothing() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (result, ()) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "late"), async {
+            let Some(ToHost::Say { uuid, .. }) = next(&mut played.lines).await else {
+                panic!("no say reached the host");
+            };
+            assert_eq!(rig.daemon.stop_run(&uid).await, StopRunResult::Stopping);
+            assert!(matches!(
+                next(&mut played.lines).await,
+                Some(ToHost::Stop { .. })
+            ));
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid,
+                                   "status": "refused"}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        });
+        assert_eq!(
+            result,
+            SendTextResult::Refused {
+                reason: "This session stopped taking messages; nothing was sent.".into()
+            }
+        );
+        assert_eq!(words(&rig, &uid), ["fix the tests"]);
+        assert!(rig
+            .daemon
+            .db
+            .host_sends(uid.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(kept(&rig, &uid).0, "stopping");
+        assert_eq!(cursor(&rig, &uid), 3);
+        stop(&played.dir);
+    }
+
+    /// **B5 G4: an outcome later than the wait.** The app is told the message is not
+    /// confirmed; the host's outcome, when it comes, still files the words once, and the
+    /// retry is then answered `duplicate`.
+    #[tokio::test]
+    async fn a_late_outcome_still_files_the_words_once() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (result, uuid) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "slow"), async {
+            let Some(ToHost::Say { uuid, .. }) = next(&mut played.lines).await else {
+                panic!("no say");
+            };
+            uuid
+        });
+        assert!(matches!(result, SendTextResult::Indeterminate { .. }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(words(&rig, &uid), ["fix the tests", "slow"]);
+        assert!(matches!(
+            send_as_app(&rig.daemon, &uid, "r-1", "slow").await,
+            SendTextResult::Duplicate { .. }
+        ));
+        stop(&played.dir);
+    }
+
+    /// **B5 G5: a restart.** ccd died after the host took a message and before its outcome
+    /// was committed: the restarted ccd, holding nothing of it in memory, files the words
+    /// from the replayed outcome, and the retry is answered `duplicate`. A message sent
+    /// while the host replays goes to it as any other. A message claimed and never sent is
+    /// not confirmed, and is not sent again.
+    #[tokio::test]
+    async fn a_message_taken_before_a_restart_is_filed_from_the_replay() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let dir = played.dir.clone();
+        let (lost, uuid) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "kept"), async {
+            let Some(ToHost::Say { uuid, .. }) = next(&mut played.lines).await else {
+                panic!("no say");
+            };
+            drop(played);
+            uuid
+        });
+        assert!(matches!(lost, SendTextResult::Indeterminate { .. }));
+        let (restarted, mut lines, mut write) = restarted(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
+        let (meanwhile, ()) =
+            tokio::join!(send_as_app(&restarted, &uid, "r-3", "meanwhile"), async {
+                let Some(ToHost::Say { uuid: new, .. }) = next(&mut lines).await else {
+                    panic!("no say during the replay");
+                };
+                for (seq, uuid) in [(3, &uuid), (4, &new)] {
+                    say(
+                        &mut write,
+                        serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid,
+                                           "status": "done"}),
+                    )
+                    .await;
+                    assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq }));
+                }
+            });
+        assert_eq!(
+            meanwhile,
+            SendTextResult::Sent {
+                matched: "meanwhile".into()
+            }
+        );
+        assert!(matches!(
+            send_as_app(&restarted, &uid, "r-1", "kept").await,
+            SendTextResult::Duplicate { .. }
+        ));
+        assert_eq!(words(&rig, &uid), ["fix the tests", "kept", "meanwhile"]);
+        let hash = protocol::hash::send_text_hash(&uid, "never sent", true);
+        rig.daemon
+            .db
+            .claim_text_mutation(
+                uid.clone(),
+                "r-2".into(),
+                hash,
+                Some("never sent".into()),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            send_as_app(&restarted, &uid, "r-2", "never sent").await,
+            SendTextResult::Indeterminate { .. }
+        ));
+        stop(&dir);
+    }
+
     /// **G4, the warrant.** A host gone is signalled only under the warrant, and its run
     /// ends either way:
     /// - a pid reused: the recorded host's pid is now a live process of another birth,
@@ -3047,11 +3722,12 @@ mod tests {
 
     /// The recorded session through a live run's link, as the wire delivers its events:
     /// the store's own `Event`s, serialized. Only what differs between runs is pinned,
-    /// each checked first: the run's uid, which is also its name, and each event's clock
-    /// read (`ts`).
+    /// each checked first: the run's uid, which is also its name, each event's clock read
+    /// (`ts`), and the start's uuid, which names the person's first words.
     async fn the_capture_as_the_wire_delivers_it() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
+        let first_words = format!("say:{}", played.start_uuid());
         for (index, message) in capture().into_iter().enumerate() {
             let seq = index as u64 + 3;
             sdk(&mut played.write, seq, message).await;
@@ -3075,6 +3751,11 @@ mod tests {
             event["session_uid"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
             event["session_id"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
             event["ts"] = serde_json::json!("2026-11-13T12:00:00.000Z");
+            if event["source"] == "daemon" {
+                assert_eq!(event["source_event_id"], first_words.as_str(), "{event}");
+                event["source_event_id"] =
+                    serde_json::json!("say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b");
+            }
         }
         wire
     }
@@ -3425,12 +4106,233 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Whether the run `uid` is settled after the person's last words: a turn has ended
+    /// since them, and nothing new has been filed for 5 s. Waits 180 s at most.
+    async fn settled_after_words(rig: &Rig, uid: &str) -> bool {
+        let (mut seen, mut quiet) = (0, 0);
+        for _ in 0..360 {
+            let events = stored(rig, uid);
+            let ended = events
+                .iter()
+                .rposition(|event| event["kind"] == "user_message" && event["source"] == "daemon")
+                .is_some_and(|at| {
+                    events[at..]
+                        .iter()
+                        .any(|event| event["kind"] == "turn_complete")
+                });
+            quiet = if events.len() == seen { quiet + 1 } else { 0 };
+            seen = events.len();
+            if ended && quiet >= 10 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        false
+    }
+
+    /// How often each of `texts` is a person's line in claude's own transcript of the
+    /// session `session_id` under `config` (`projects/*/<session_id>.jsonl`); `None` when
+    /// there is no such file.
+    fn transcript_counts(config: &Path, session_id: &str, texts: &[&str]) -> Option<Vec<usize>> {
+        let name = format!("{session_id}.jsonl");
+        let file = std::fs::read_dir(config.join("projects"))
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|project| project.path().join(&name))
+            .find(|path| path.is_file())?;
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(file)
+            .ok()?
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        Some(
+            texts
+                .iter()
+                .map(|text| {
+                    lines
+                        .iter()
+                        .filter(|line| {
+                            line["type"] == "user" && line["message"]["content"] == *text
+                        })
+                        .count()
+                })
+                .collect(),
+        )
+    }
+
+    /// **B5 G6: messages mid-turn, with a real claude** (app-qa's rig). A run on the real
+    /// host whose claude, signed in by its own config, is sent a message while it writes
+    /// its first answer; once that has settled, it is asked to read a file, and sent
+    /// another message as soon as that tool call is filed (Read needs no permission). Each
+    /// message is `sent` and filed once as the person's words, the run settles with a turn
+    /// ended after the last, and claude's own transcript holds none of them twice. The
+    /// order the run's events came in is printed. Then End run, as G2. Ignored and gated
+    /// as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_takes_messages_mid_turn() {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let config = PathBuf::from(var("CLAUDE_CONFIG_DIR"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join("g6");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("note.txt"), "The keeper's name is Ada.\n").unwrap();
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let rig = Rig {
+            daemon: daemon_on(&root),
+            root,
+            environment,
+        };
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let codeconnect = rig.root.join("codeconnect");
+        let prompt = "Write a 300-word story about a lighthouse keeper.";
+        let started = start(
+            &rig.daemon,
+            Run {
+                root: &rig.root,
+                request_id: "g6",
+                cwd: &cwd,
+                prompt,
+                model: None,
+                worktree: None,
+                claude_path: claude.to_str().unwrap(),
+                host_bin: &host,
+                codeconnect: &codeconnect,
+                environment: &rig.environment,
+            },
+        )
+        .await;
+        let uid = started_uid(&started);
+        let host_pid = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+            .unwrap()
+            .host_pid;
+        let messages = [
+            ("g6-1", "Give the keeper a dog."),
+            (
+                "g6-2",
+                "Use the Read tool to read note.txt in this folder, then tell me the keeper's name.",
+            ),
+            ("g6-3", "Answer in one sentence."),
+        ];
+        let mut sent = Vec::new();
+        // While the first answer is written.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        sent.push(send_as_app(&rig.daemon, &uid, messages[0].0, messages[0].1).await);
+        let first_settled = settled_after_words(&rig, &uid).await;
+        sent.push(send_as_app(&rig.daemon, &uid, messages[1].0, messages[1].1).await);
+        // As soon as the Read call is filed.
+        let mut tool_filed = false;
+        for _ in 0..1200 {
+            let events = stored(&rig, &uid);
+            tool_filed = events
+                .iter()
+                .rposition(|event| event["kind"] == "user_message" && event["source"] == "daemon")
+                .is_some_and(|at| {
+                    events[at..].iter().any(|event| {
+                        event["kind"] == "agent_message"
+                            && event["payload"].to_string().contains("\"tool_use\"")
+                    })
+                });
+            if tool_filed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        sent.push(send_as_app(&rig.daemon, &uid, messages[2].0, messages[2].1).await);
+        let last_settled = settled_after_words(&rig, &uid).await;
+        let order: Vec<String> = stored(&rig, &uid)
+            .iter()
+            .map(|event| {
+                let kind = event["kind"].as_str().unwrap_or_default();
+                let payload = event["payload"].to_string();
+                if event["source"] == "daemon" && kind == "user_message" {
+                    format!("you: {}", event["payload"]["text"])
+                } else if kind == "agent_message" && payload.contains("\"tool_use\"") {
+                    "tool call".into()
+                } else {
+                    kind.into()
+                }
+            })
+            .collect();
+        println!("G6 ORDER: {}", order.join(" | "));
+        let texts: Vec<&str> = messages.iter().map(|(_, text)| *text).collect();
+        let transcript = row_of(&rig, &uid)
+            .0
+            .and_then(|session_id| transcript_counts(&config, &session_id, &texts));
+        println!(
+            "G6: sent {sent:?}; first settled {first_settled}; tool call filed {tool_filed}; last settled {last_settled}; claude's transcript holds each {transcript:?} times"
+        );
+        assert_eq!(rig.daemon.stop_run(&uid).await, StopRunResult::Stopping);
+        let mut ended = false;
+        for _ in 0..200 {
+            let lifecycle = rig
+                .daemon
+                .db
+                .hosted_link(uid.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle;
+            if lifecycle == Lifecycle::Exited {
+                ended = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let host_gone = gone_within(host_pid, Duration::from_secs(5)).await;
+        if !host_gone {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
+        let group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
+        println!("G6: ended {ended}; host gone {host_gone}; group left {group_left}");
+        for ((_, text), result) in messages.iter().zip(&sent) {
+            assert_eq!(
+                *result,
+                SendTextResult::Sent {
+                    matched: text.to_string()
+                },
+                "{text}"
+            );
+        }
+        let mut expected = vec![prompt.to_string()];
+        expected.extend(texts.iter().map(|text| text.to_string()));
+        assert_eq!(words(&rig, &uid), expected, "each filed once, in order");
+        assert!(first_settled && last_settled, "the run did not settle");
+        assert!(tool_filed, "claude made no tool call");
+        if let Some(counts) = &transcript {
+            assert!(
+                counts.iter().all(|count| *count <= 1),
+                "a message reached claude twice: {counts:?}"
+            );
+        }
+        assert!(ended, "the run never ended");
+        assert!(
+            host_gone && !group_left,
+            "host gone {host_gone}, group left {group_left}"
+        );
+    }
+
     /// Against the real agent host (mac/agent-host/build.sh's `cc-agent-host`), through
     /// zsh's login shell (`-lic`), as a zsh user's start runs it, with the host's
     /// stand-in claude: the recorded pid and birth are the host's own, it leads a session
     /// of its own, the start's outcome makes the run `live` with the initialize answer's
     /// models kept and none of the claude.ai connectors' commands (G5, the initialize
-    /// column: the answer carries one, which the host leaves out), claude's init is filed as the run's first event (G8), and the host is
+    /// column: the answer carries one, which the host leaves out), claude's init is filed after the person's first words (G8), and the host is
     /// still running after its 30 s no-start exit would have ended it (claude keeps
     /// running, so the host does). A start
     /// whose claude is missing is refused, naming it, and its run is `failed`. So is one
@@ -3588,7 +4490,7 @@ mod tests {
             .unwrap();
         let mut filed = Vec::new();
         for _ in 0..100 {
-            filed = self::stored(&rig, &uid);
+            filed = after_words(&rig, &uid);
             if !filed.is_empty() {
                 break;
             }
@@ -3607,7 +4509,11 @@ mod tests {
             stored_commands, recorded,
             "the stored commands are the recorded ones, the connector's left out"
         );
-        assert_eq!(filed.len(), 1, "claude's init is the run's one event");
+        assert_eq!(
+            filed.len(),
+            1,
+            "after the person's words, claude's init is the run's one event"
+        );
         assert_eq!(filed[0]["kind"], "session_start");
         assert_eq!(filed[0]["source"], "sdk");
         assert_eq!(filed[0]["payload"]["model"], session_init["model"]);
