@@ -65,7 +65,11 @@ private struct Composer: View {
         .padding(.horizontal, 20)
         .padding(.top, 4)
         .padding(.bottom, 16)
-        .onChange(of: kept.reply) { _, new in
+        .onChange(of: kept.reply) { old, new in
+            // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
+            // whitespace-only edit is not a move — the send kept under those words is no longer this draft's retry: drop
+            // its identity, so the same words typed later are a new send.
+            model.abandonHeldSend(whenDraftChangesFrom: old, to: new, in: key)
             kept.unanswered = nil
             // Editing is the reader's next act, so a standing failure or kept value has been read. The draft a landed
             // command consumes is not an edit.
