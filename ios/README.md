@@ -733,8 +733,8 @@ falls back to the approval layout, read-only):
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
 (`AnswerDecision`, `CodeConnectKit/Sources/CodeConnectKit/QuestionCard.swift`). The daemon builds Claude's answer
-from the question it stored and returns it through Claude's held hook; nothing is
-typed.
+from the question it stored and returns it through Claude's held hook, or, for a
+session started from an app, through its agent host; nothing is typed.
 
 Whether the phone may answer is the card's `question_hold` — `held`, `at_mac` or
 `ended` — and a later `question_hold` event for the same request overrides it
@@ -745,8 +745,10 @@ the questions read-only and says why (`QuestionCardStatus`): *Asking at the Mac*
 (Claude ran with exactly those answers; the kind of device that sent them is named
 when the record says, which one is not recorded, and the same answers chosen at the
 Mac would read the same), *Answered at the Mac*,
-*Declined* (a decline from a phone recorded as taken, which only an older Mac
-records), *Unconfirmed* (a current Mac's decline among them), and
+*Declined* (a decline from a phone recorded as taken: an older Mac records it so,
+and so does a current Mac for a session started from an app, whose agent host
+confirms it), *Unconfirmed* (a current Mac's decline of a terminal session's
+question among them), and
 *Closed* when the question left the Mac (Escape, the session or turn ending)
 without anyone being seen to answer it. Neither age nor a newer prompt closes a
 question card: one still open at the Mac stays *Asking at the Mac*. A refusal saying the question was "answered at the Mac"

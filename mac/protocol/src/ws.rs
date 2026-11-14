@@ -1381,9 +1381,10 @@ pub enum AnswerDecision {
         answers: Vec<QuestionAnswer>,
     },
     /// Decline a Claude `AskUserQuestion` card (minor 21): the daemon denies it
-    /// through its held hook. The main conversation's question is denied with
-    /// an interrupt, so the turn stops as Escape at its dialog does; a
-    /// background agent's is denied without one.
+    /// through its held hook, or, for a run started in an agent host, through
+    /// that host. The main conversation's question is denied with an interrupt,
+    /// so the turn stops as Escape at its dialog does; a background agent's is
+    /// denied without one.
     Decline,
 }
 

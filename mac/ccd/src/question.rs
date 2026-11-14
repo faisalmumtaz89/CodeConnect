@@ -1,8 +1,9 @@
 //! Claude's `AskUserQuestion`, answered from the phone.
 //!
-//! The answer goes back through the `PermissionRequest` hook Claude is holding:
-//! `allow` with `updatedInput` = the input as shown plus `answers` and
-//! `annotations`. Claude validates none of it (measured on 2.1.286: a partial
+//! The answer goes back as `allow` with `updatedInput` = the input as shown plus
+//! `answers` and `annotations`: through the `PermissionRequest` hook Claude is
+//! holding, or, for a run started in an agent host, through the host's return to
+//! the SDK's `canUseTool` ([`host_updated_input`]). Claude validates none of it (measured on 2.1.286: a partial
 //! answer and a label from nowhere are both accepted), so this module is the
 //! only check there is. It builds exactly what Claude's own dialog builds when
 //! the same choices are made at the keyboard, read from the 2.1.286 dialog:
@@ -26,7 +27,9 @@
 //! plain space and the zero-width joiner and non-joiner — or a label shown
 //! twice is not offered to the phone at all: [`answerable`] says no, and the
 //! card stays at the Mac. Better unanswerable here than answered with a string
-//! the keyboard would not have produced.
+//! the keyboard would not have produced. A hosted run's question has no keyboard
+//! dialog to match, so none of this applies to it; a label shown twice still
+//! does.
 
 use protocol::ws::QuestionAnswer;
 use serde_json::{Map, Value};
@@ -67,13 +70,28 @@ impl Question<'_> {
 /// True when every question on this card can be answered from the phone and
 /// the answer would be byte-identical to the keyboard's.
 pub fn answerable(tool_input: &Value) -> bool {
-    questions(tool_input).is_ok()
+    questions(tool_input, true).is_ok()
 }
 
-/// The `updatedInput` for these answers, or why they are refused. Nothing is
-/// built from anything but the stored question and the indices given.
+/// The `updatedInput` for these answers to a hook's question, or why they are
+/// refused. Nothing is built from anything but the stored question and the
+/// indices given.
 pub fn updated_input(tool_input: &Value, answers: &[QuestionAnswer]) -> Result<Value, String> {
-    let questions = questions(tool_input)?;
+    built(tool_input, answers, true)
+}
+
+/// The `updatedInput` for these answers to the question of a run started in an
+/// agent host. No keyboard dialog answers it, so nothing is refused for how the
+/// terminal would draw it; its questions and the choices are checked as a hook
+/// question's are.
+pub fn host_updated_input(tool_input: &Value, answers: &[QuestionAnswer]) -> Result<Value, String> {
+    built(tool_input, answers, false)
+}
+
+/// The answers built, `terminal` saying whether the question must be one the
+/// keyboard dialog shows as written ([`shown_as_written`]).
+fn built(tool_input: &Value, answers: &[QuestionAnswer], terminal: bool) -> Result<Value, String> {
+    let questions = questions(tool_input, terminal)?;
     if answers.len() != questions.len() {
         return Err(format!(
             "{} answer(s) for {} question(s); every question needs exactly one answer",
@@ -165,7 +183,10 @@ pub fn same_answer(sent: &Value, ran_with: &Value) -> bool {
         && sent.get("annotations") == ran_with.get("annotations")
 }
 
-fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
+/// The card's questions, or why it cannot be answered. With `terminal`, also
+/// refused: text, a label or a preview the keyboard dialog would not show as
+/// written, since its answer must be the keyboard's byte for byte.
+fn questions(tool_input: &Value, terminal: bool) -> Result<Vec<Question<'_>>, String> {
     let list = tool_input
         .get("questions")
         .and_then(Value::as_array)
@@ -180,7 +201,7 @@ fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
                 .get("question")
                 .and_then(Value::as_str)
                 .ok_or(format!("question {number} has no text"))?;
-            if !shown_as_written(text, false) {
+            if terminal && !shown_as_written(text, false) {
                 return Err(format!(
                     "question {number}'s text is shown differently at the computer"
                 ));
@@ -209,7 +230,7 @@ fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
                 let label = option
                     .get("label")
                     .and_then(Value::as_str)
-                    .filter(|label| shown_as_written(label, false))
+                    .filter(|label| !terminal || shown_as_written(label, false))
                     .ok_or(format!(
                         "question {number} has an option the phone cannot show as the computer does"
                     ))?;
@@ -222,7 +243,8 @@ fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
                 let preview = match option.get("preview") {
                     None => None,
                     Some(Value::String(preview))
-                        if preview.encode_utf16().count() > PREVIEW_SHOWN_MAX
+                        if !terminal
+                            || preview.encode_utf16().count() > PREVIEW_SHOWN_MAX
                             || shown_as_written(preview, true) =>
                     {
                         (!preview.trim().is_empty()).then_some(preview.as_str())
@@ -458,6 +480,29 @@ mod tests {
         .unwrap();
         assert_eq!(built["answers"]["Q"], r#""a, b", c, "say \"hi\"", "d, e""#);
         assert_eq!(built["annotations"], json!({}));
+    }
+
+    /// **B6 part 2a:** a hosted run's question is answered whatever the terminal would
+    /// do to its text: a preview indented with a tab and a label with a variation
+    /// selector (⚠️) are taken as written. A hook's question with the same text stays
+    /// refused, its answer having to be the keyboard's byte for byte.
+    #[test]
+    fn a_hosted_question_takes_text_the_terminal_would_rewrite() {
+        let input = json!({"questions": [{"question": "Which start?", "options": [
+            {"label": "⚠️ Now", "preview": "if ready {\n\tstart()\n}"},
+            {"label": "Later", "preview": "wait()"}]}]});
+        let built = host_updated_input(&input, &[pick(&[0])]).unwrap();
+        assert_eq!(built["answers"]["Which start?"], "⚠️ Now");
+        assert_eq!(
+            built["annotations"]["Which start?"],
+            json!({"preview": "if ready {\n\tstart()\n}"})
+        );
+        assert!(host_updated_input(&input, &[pick(&[1])]).is_ok());
+        assert!(updated_input(&input, &[pick(&[1])]).is_err());
+        assert!(!answerable(&input));
+        // The structure is checked as for a hook: one answer per question, in range.
+        assert!(host_updated_input(&input, &[]).is_err());
+        assert!(host_updated_input(&input, &[pick(&[2])]).is_err());
     }
 
     #[test]

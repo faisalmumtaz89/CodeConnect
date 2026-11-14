@@ -1170,7 +1170,7 @@ pub(crate) async fn answer(
         }
     }
     let (session, host_decision) = match daemon
-        .claim_host_card(uid, request_id, payload_hash, &decision)
+        .claim_host_card(uid, request_id, payload_hash, &decision, answered_on)
         .await
     {
         Ok(claimed) => claimed,
@@ -4224,6 +4224,243 @@ mod tests {
             None
         );
         stop(dir);
+    }
+
+    /// A question claude asks a hosted run: one single choice whose first option's label
+    /// has a variation selector (⚠️) and whose preview is indented with a tab, text the
+    /// terminal's dialog would rewrite.
+    fn question_input() -> serde_json::Value {
+        serde_json::json!({"questions": [{"question": "Which start?", "header": "Start",
+            "multiSelect": false, "options": [
+                {"label": "⚠️ Now", "description": "", "preview": "if ready {\n\tstart()\n}"},
+                {"label": "Later", "description": "", "preview": "wait()"}]}]})
+    }
+
+    /// The stand-in host relays the question `tool_use_id` as message `seq` and reads the
+    /// ack.
+    async fn host_asks_question(
+        played: &mut Played,
+        seq: u64,
+        tool_use_id: &str,
+        options: serde_json::Value,
+    ) {
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "permission", "seq": seq, "request": {
+                "tool_use_id": tool_use_id, "tool_name": "AskUserQuestion",
+                "input": question_input(), "options": options}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// An app's `decision` on the question `request_id` of the run `uid`, from `on`.
+    async fn app_answers_question(
+        daemon: &Daemon,
+        uid: &str,
+        request_id: &str,
+        decision: AnswerDecision,
+        on: AnsweredOn,
+    ) -> AnswerResult {
+        let hash = protocol::hash::approval_payload_hash("AskUserQuestion", &question_input());
+        daemon
+            .answer(request_id, &hash, decision, Some(uid), on)
+            .await
+    }
+
+    /// **B6 part 2a, G8a: a hosted run's question.** It is a question card, held and never
+    /// bound to an allow. The app's answers reach the host as the call's input: the chosen
+    /// label and the preview with the notes as its annotation, though the terminal would
+    /// rewrite that text. The answer is then `Applied` and the card closes. An incomplete
+    /// answer is refused and reaches nothing: the first answer the host reads is the whole
+    /// one.
+    #[tokio::test]
+    async fn a_hosted_question_is_answered_with_its_answers_as_its_input() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks_question(&mut played, 3, "toolu_q", serde_json::json!({})).await;
+        let asked = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| event["kind"] == "approval_request")
+            .unwrap();
+        assert_ne!(asked["payload"]["card"]["identity_bound"], true);
+        assert_eq!(asked["payload"]["card"]["question_hold"], "held");
+        let incomplete = app_answers_question(
+            &rig.daemon,
+            &uid,
+            "toolu_q",
+            AnswerDecision::Answers { answers: vec![] },
+            AnsweredOn::Iphone,
+        )
+        .await;
+        assert!(
+            matches!(&incomplete, AnswerResult::Rejected { reason }
+                if reason.contains("every question needs exactly one answer")),
+            "{incomplete:?}"
+        );
+        let answers = vec![protocol::ws::QuestionAnswer {
+            selected: vec![0],
+            other: None,
+            notes: Some("go".into()),
+        }];
+        let (result, (_, decision)) = tokio::join!(
+            app_answers_question(
+                &rig.daemon,
+                &uid,
+                "toolu_q",
+                AnswerDecision::Answers {
+                    answers: answers.clone()
+                },
+                AnsweredOn::Iphone
+            ),
+            host_settles(&mut played.lines, &mut played.write, 4, "done")
+        );
+        let protocol::host::Decision::Allow {
+            updated_input: Some(input),
+        } = decision
+        else {
+            panic!("{decision:?}");
+        };
+        assert_eq!(
+            input["answers"],
+            serde_json::json!({"Which start?": "⚠️ Now"})
+        );
+        assert_eq!(
+            input["annotations"],
+            serde_json::json!({"Which start?": {"preview": "if ready {\n\tstart()\n}", "notes": "go"}})
+        );
+        assert_eq!(input["questions"], question_input()["questions"]);
+        let AnswerResult::Applied { outcome } = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(outcome.decision, AnswerDecision::Answers { answers });
+        assert!(!outcome.indeterminate);
+        assert_eq!(cards(&rig.daemon, &uid).await, (vec![], vec![]));
+        stop(&played.dir);
+    }
+
+    /// **B6 part 2a, G8b: a hosted question declined.** The main conversation's question,
+    /// declined from the iPhone, is a deny that ends its turn, saying who declined it. A
+    /// subagent's, answered Deny from the Mac, is a decline without the interrupt. Both
+    /// are `Applied`, so the card reads declined.
+    #[tokio::test]
+    async fn a_hosted_questions_decline_ends_the_main_turn_but_not_a_subagents() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks_question(&mut played, 3, "toolu_main", serde_json::json!({})).await;
+        host_asks_question(
+            &mut played,
+            4,
+            "toolu_sub",
+            serde_json::json!({"agentID": "agent-1"}),
+        )
+        .await;
+        let (result, (_, decision)) = tokio::join!(
+            app_answers_question(
+                &rig.daemon,
+                &uid,
+                "toolu_main",
+                AnswerDecision::Decline,
+                AnsweredOn::Iphone
+            ),
+            host_settles(&mut played.lines, &mut played.write, 5, "done")
+        );
+        assert_eq!(
+            decision,
+            protocol::host::Decision::Deny {
+                message: "Declined from iPhone".into(),
+                interrupt: true,
+            }
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        let (result, (_, decision)) = tokio::join!(
+            app_answers_question(
+                &rig.daemon,
+                &uid,
+                "toolu_sub",
+                AnswerDecision::Deny,
+                AnsweredOn::Mac
+            ),
+            host_settles(&mut played.lines, &mut played.write, 6, "done")
+        );
+        assert_eq!(
+            decision,
+            protocol::host::Decision::Deny {
+                message: "Declined from Mac".into(),
+                interrupt: false,
+            }
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        stop(&played.dir);
+    }
+
+    /// **B6 part 2a, G8c: a hosted question takes only its answers or a decline.** Allow,
+    /// any option, a reason and an option id are refused on it; answers or a decline on an
+    /// ordinary card are refused too. None reaches the host: the first answer it reads is
+    /// the question's own decline.
+    #[tokio::test]
+    async fn only_answers_or_a_decline_answer_a_hosted_question() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        host_asks_question(&mut played, 3, "toolu_q", serde_json::json!({})).await;
+        host_asks(&mut played, 4, "toolu_bash", serde_json::json!({})).await;
+        for decision in [
+            AnswerDecision::Allow,
+            AnswerDecision::Option { index: 1 },
+            AnswerDecision::Option { index: 2 },
+            AnswerDecision::Text { text: "no".into() },
+            AnswerDecision::OptionId {
+                option_id: "acceptForSession".into(),
+            },
+        ] {
+            let result = app_answers_question(
+                &rig.daemon,
+                &uid,
+                "toolu_q",
+                decision.clone(),
+                AnsweredOn::Iphone,
+            )
+            .await;
+            assert!(
+                matches!(result, AnswerResult::Rejected { .. }),
+                "{decision:?}: {result:?}"
+            );
+        }
+        for decision in [
+            AnswerDecision::Answers {
+                answers: vec![protocol::ws::QuestionAnswer {
+                    selected: vec![0],
+                    ..Default::default()
+                }],
+            },
+            AnswerDecision::Decline,
+        ] {
+            let result = app_answers(&rig.daemon, &uid, "toolu_bash", decision.clone()).await;
+            assert!(
+                matches!(&result, AnswerResult::Rejected { reason }
+                    if reason.contains("this card is not one")),
+                "{decision:?}: {result:?}"
+            );
+        }
+        let (result, (_, decision)) = tokio::join!(
+            app_answers_question(
+                &rig.daemon,
+                &uid,
+                "toolu_q",
+                AnswerDecision::Decline,
+                AnsweredOn::Iphone
+            ),
+            host_settles(&mut played.lines, &mut played.write, 5, "done")
+        );
+        assert!(
+            matches!(decision, protocol::host::Decision::Deny { .. }),
+            "{decision:?}"
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        stop(&played.dir);
     }
 
     /// **B6 G11: a request too large to show** is refused at once: the host is answered
