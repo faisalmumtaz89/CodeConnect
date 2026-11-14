@@ -298,6 +298,11 @@ public struct SessionStart: Identifiable, Hashable {
     public let machineName: String
     public let sentAt: Date
     public var outcome: StartOutcome?
+    /// The reader asked this phone to stop retrying the start. It is kept — a
+    /// late daemon answer still resolves it — but it is no longer resent and no
+    /// longer the one New reopens. It never asserts the computer was told: the
+    /// start may already have run there.
+    public var retryStopped: Bool = false
 
     public var id: String { requestID }
 
@@ -416,8 +421,19 @@ public final class SessionStarter {
         starts[requestID]?.outcome = outcome
     }
 
+    /// The reader stops this phone retrying an unanswered start. Kept so a late
+    /// daemon answer still resolves it (`resolve` is unchanged); `sendStart`'s
+    /// own guard is where the retry-stopped start is held back from the send,
+    /// and `Machines.outstandingStart` no longer offers it to New. A no-op once
+    /// answered — the answer stands.
+    public func stopRetrying(_ requestID: String) {
+        guard starts[requestID]?.outcome == nil else { return }
+        starts[requestID]?.retryStopped = true
+    }
+
     /// Starts sent and not yet answered, to send again, unchanged, after a
-    /// reconnect.
+    /// reconnect. `sendStart`'s guard is the one place a retry-stopped start is
+    /// held back from the actual send.
     public var unanswered: [SessionStart] {
         starts.values.filter { $0.outcome == nil }.sorted { $0.sentAt < $1.sentAt }
     }

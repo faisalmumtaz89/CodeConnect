@@ -889,6 +889,16 @@ struct FleetView: View {
 
     private func openStart() {
         guard canStart else { return }
+        // A start this phone already sent and has not heard back on reopens to
+        // its own Starting screen — which carries Stop retrying — instead of a
+        // fresh flow, so a start whose computer went quiet is not started again
+        // elsewhere. The most recent outstanding one; the others surface on the
+        // next New. Once it is answered or its retries are stopped, New opens
+        // the normal flow again.
+        if let outstanding = machines.outstandingStart {
+            path = [SessionRoute(key: "start-\(outstanding.requestID)", startRequestID: outstanding.requestID)]
+            return
+        }
         startSeed = nil
         startOpen = true
     }
