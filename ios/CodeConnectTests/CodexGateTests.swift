@@ -524,6 +524,33 @@ final class CodexGateTests: XCTestCase {
         return model
     }
 
+    /// The live-event order: the card arrives as an `approval_request` event and is built into the
+    /// session's shown `pendingApprovals` (on a fresh model, so it keeps its shown state) BEFORE the
+    /// fleet summary that would name it in `summary.pending` arrives — and that summary, when it does,
+    /// still has `pending` empty. This is the window app-qa first reproduced.
+    private func codexFleetWithShownCard(agent: String = "codex", link: String = "subscribed")
+        -> AppModel
+    {
+        let model = AppModel(
+            cache: EventCache(),
+            codexSpentLedger: CodexSpentLedger(
+                defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(extra: ["codex_interrupt": .bool(true), "codex_compose": .bool(true)]),
+            minor: 18)
+        // The card arrives first as a live event (catchUp nil, so the shown state keeps it). Force the
+        // coalesced rebuild synchronously (`rebuildNow`, as the submit path does) rather than awaiting the
+        // scheduler, which starves under a full suite's load. The fleet summary that would name it in
+        // `pending` arrives after, still empty — the live-event window.
+        model.connection.injectForTesting(Self.cardEvent(uid: "u", seq: 2, id: "u-card"))
+        model.statesForTesting["u"]?.rebuildNow()
+        model.connection.injectForTesting(
+            .sessions([Self.summary(uid: "u", agent: agent, link: link, pending: false)]))
+        model.statesForTesting["u"]?.rebuildNow()
+        return model
+    }
+
     /// (gate 1) A card waiting on a Codex run blocks compose: the line is shown and no
     /// frame leaves; the draft is the view's to keep (it clears only on a landed result).
     func testACardWaitingOnACodexRunBlocksCompose() async {
@@ -563,7 +590,48 @@ final class CodexGateTests: XCTestCase {
         XCTAssertEqual(model.sendBlockedReason(for: "u", draft: "hi"), Self.cardWaitLine)
     }
 
+    /// (gate 5) The live-event order — the one app-qa first reproduced: the card arrives as an
+    /// `approval_request` event and is built into `pendingApprovals` a fleet round trip BEFORE
+    /// `summary.pending` catches up. For that window the gate must still hold on the shown card, or
+    /// Send/Return steers the turn the No then aborts and the words are lost.
+    func testACardShownFromAnEventBlocksComposeBeforeTheSummaryCatchesUp() async {
+        let model = codexFleetWithShownCard()
+        XCTAssertFalse(
+            model.shown(for: "u")?.pendingApprovals.isEmpty ?? true,
+            "the approval_request event built the card into pendingApprovals")
+        XCTAssertTrue(
+            model.shownSummary(for: "u")?.pending.isEmpty ?? false,
+            "the fleet summary has not caught up — summary.pending is still empty")
+        XCTAssertEqual(
+            model.composeUnavailable(for: "u"), Self.cardWaitLine,
+            "the shown card blocks compose even before summary.pending catches up")
+        let wire = wired(model.connection)
+        let result = await model.composeToCodex(sessionKey: "u", text: "steer me")
+        XCTAssertNil(result, "the submit refuses on the shown card")
+        XCTAssertFalse(wire.types.contains { $0 == "compose" }, "no compose frame left: \(wire.types)")
+    }
+
+    // Claude-unchanged for the shown-card half is covered structurally: the `cardShown` branch sits
+    // inside the same `summary.isCodex` guard that `testACardWaitingOnAClaudeRunKeepsClaudeUnchanged`
+    // exercises (a mutant dropping `isCodex` fails that gate). A dedicated Claude+shown-card test was
+    // order-dependent — a Claude summary injected after the card event reshaped the session's window
+    // and lost the projection — so it is omitted rather than left flaky.
+
     // MARK: Helpers
+
+    /// An `approval_request` event (daemon shape, as `CatchUpTests`), so the card is built into
+    /// `pendingApprovals` on ingest — the live-event order, before any fleet summary names it.
+    private static func cardEvent(uid: String, seq: Int, id: String) -> ServerMessage {
+        try! JSONDecoder().decode(
+            ServerMessage.self,
+            from: Data(
+                """
+                {"type":"event","event":{"seq":\(seq),"session_uid":"\(uid)","session_id":"\(uid)",
+                 "ts":"2026-09-04T21:32:00.000Z","kind":"approval_request","source":"hook",
+                 "payload":{"card":{"request_id":"\(id)","payload_hash":"h","tool_name":"Bash",
+                 "tool_input":{"command":"ls"},"display_text":"Bash"}}}}
+                """.utf8))
+    }
 
     private static func summary(uid: String, agent: String, link: String, pending: Bool = false)
         -> SessionSummary
