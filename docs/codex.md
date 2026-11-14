@@ -211,6 +211,9 @@ happens depends on whether the session is busy:
 * **Busy** — your words join the turn that is already running. There is no second turn:
   one turn started it, one turn ends it, and the reply names that same turn.
 
+While an approval card on the session is waiting for your answer, sending is held: answer
+the card first, and your draft stays in the box.
+
 | You see | It means |
 |---|---|
 | Nothing above the box | Your words reached the session, and they appear in the conversation: as a new turn if it was idle, inside the running turn if it was busy. Sending words that had already gone says nothing too, and nothing is said twice. |
