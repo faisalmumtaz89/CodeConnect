@@ -61,7 +61,7 @@ extension Event {
     /// valid fallback for transcript events, where it holds the entry uuid.
     public var toolUseID: String? {
         if let direct = payload["tool_use_id"]?.stringValue { return direct }
-        if source == .transcript { return transcriptToolResult?.toolUseID }
+        if source == .transcript || source == .sdk { return transcriptToolResult?.toolUseID }
         return itemID
     }
     public var toolResponse: JSONValue? { payload["tool_response"] }
@@ -432,16 +432,31 @@ extension Event {
         }
     }
 
-    /// A transcript `tool_result` block, which — unlike the PostToolUse hook —
-    /// carries Claude's own `is_error` verdict.
+    /// An MCP (and subagent) tool result is not a string but an array of content
+    /// blocks — `[{"type":"text","text":…}]`. The daemon forwards it whole, so the
+    /// text a human needs lives in the blocks, not in `.stringValue`. Joins every
+    /// `text` block; nil for any other shape, so a plain-string result still reads
+    /// through `.stringValue` and an unknown shape abstains (the row is unchanged).
+    static func mcpBlocksText(_ content: JSONValue?) -> String? {
+        guard let blocks = content?.arrayValue else { return nil }
+        let texts = blocks.compactMap { block in
+            block["type"]?.stringValue == "text" ? block["text"]?.stringValue : nil
+        }
+        return texts.isEmpty ? nil : texts.joined(separator: "\n")
+    }
+
+    /// A `tool_result` from the model's own message stream — the transcript on the
+    /// tmux engine, the SDK stream on the host engine — which carry the identical
+    /// `message.content[]` shape. Unlike the PostToolUse hook it carries Claude's
+    /// own `is_error` verdict. (The hook's copy of the output is read separately.)
     public var transcriptToolResult: (toolUseID: String, isError: Bool, text: String?)? {
-        guard kind == .toolResult, source == .transcript,
+        guard kind == .toolResult, source == .transcript || source == .sdk,
             let blocks = payload["message"]?["content"]?.arrayValue
         else { return nil }
         for block in blocks where block["type"]?.stringValue == "tool_result" {
             guard let id = block["tool_use_id"]?.stringValue else { continue }
             let isError = block["is_error"]?.boolValue ?? false
-            let text = block["content"]?.stringValue
+            let text = block["content"]?.stringValue ?? Self.mcpBlocksText(block["content"])
             return (id, isError, text)
         }
         return nil

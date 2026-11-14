@@ -286,13 +286,16 @@ struct StartForm: View {
         folderPath = path
     }
 
-    /// The selected folder when it was chosen and is not a recent one.
+    /// The selected folder when no row below shows it: one chosen that is not a recent one, or a recent one the search
+    /// hides. So the folder Start starts in is always one of the list's rows.
     private func picked(_ context: StartContext) -> StartProject? {
-        guard let folder, !context.projects.contains(where: { $0.path == folder.path }) else { return nil }
+        guard let folder, !startFilter(context.projects, query).contains(where: { $0.path == folder.path }) else {
+            return nil
+        }
         return folder
     }
 
-    /// A chosen folder that is not a recent one: its name and its path as chosen, selected. It has no history to show.
+    /// The selected folder above the rows when none of them shows it: its name and its path, selected.
     private func pickedRow(_ project: StartProject) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
