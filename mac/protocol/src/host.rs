@@ -359,6 +359,14 @@ mod tests {
                 },
             }),
             to(ToHost::Answer {
+                uuid: "c-allow-plain".into(),
+                tool_use_id: "toolu_03".into(),
+                decision: Decision::Allow {
+                    updated_input: None,
+                    updated_permissions: None,
+                },
+            }),
+            to(ToHost::Answer {
                 uuid: "c-deny".into(),
                 tool_use_id: "toolu_02".into(),
                 decision: Decision::Deny {

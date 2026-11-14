@@ -4689,8 +4689,8 @@ mod tests {
     }
 
     /// **"Allow for this session", as a minor-36 daemon sends it, emitted by this build.**
-    /// The phone's tests read the copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`).
+    /// A copy of it under `ios/` is kept byte-identical by
+    /// `fixtures/check-duplicated-fixtures.sh`.
     #[tokio::test]
     async fn the_minor_36_wire_fixture_is_what_this_build_emits() {
         const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-36-wire.json");
@@ -4700,8 +4700,8 @@ mod tests {
             committed,
             "the committed minor-36 wire contract no longer matches what this build emits. \
              Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_minor_36_wire_fixture, then copy it over its copy under ios/ \
-             (fixtures/check-duplicated-fixtures.sh names it)"
+             regenerate_the_minor_36_wire_fixture, then copy it over any copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names them)"
         );
     }
 
