@@ -38,8 +38,8 @@ final class Setup {
     }
 
     /// An agent as this Mac's service answers for it (its list of folders and agents), so the checklist and the start
-    /// form say the same: Checking… until it has answered, Ready, or why not (Claude Code's in the computer's own
-    /// sentence, Codex's in the app's). A later answer replaces it.
+    /// form say the same: Checking… until it has answered, Ready, or why not (the computer's own sentence
+    /// for either agent). A later answer replaces it.
     func agent(_ agent: StartAgent, in machines: Machines) -> Row {
         guard let context = thisMacContext(in: machines) else { return .checking }
         switch context.models(agent) {

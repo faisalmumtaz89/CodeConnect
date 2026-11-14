@@ -152,14 +152,34 @@ final class Minor33WireTests: XCTestCase {
         XCTAssertEqual(out.models(.claude), .signedOut(signedOut))
     }
 
-    /// Codex's `detail` is still its check output (a login shell's error, a stderr line), so it is never shown: Codex
-    /// gets plain words naming the computer.
-    func testCodexsCheckOutputIsNeverShown() throws {
-        let checkOutput = "could not run the login shell: No such file or directory (os error 2)"
-        let (missing, _) = try context(try projects(codex: ["available": .bool(false), "detail": .string(checkOutput)]))
-        XCTAssertEqual(missing.missingReason(.codex), "Codex can’t start on this computer.")
-        let (out, _) = try context(try projects(codex: ["signed_in": .bool(false), "detail": .string(checkOutput)]))
-        XCTAssertEqual(out.models(.codex), .signedOut("Codex on this computer isn’t signed in."))
+    /// X10: a Codex availability state draws ccd's own `detail` sentence — ccd now composes a plain
+    /// sentence for Codex (a floor, an unread version, a sign-in), not its raw check output — so the
+    /// phone and Mac say it, the same as Claude's. Each case is driven from the daemon's own
+    /// `availability-wire.json` (copied here byte for byte), asserted against the detail IN the fixture,
+    /// so the words are ccd's and never this test's. The not-found state (“Codex isn’t installed on …”)
+    /// is a written miss: a machine that could capture it has a system Codex, so the fixture omits it.
+    func testCodexAvailabilityShowsTheDaemonsDetail() throws {
+        let states = try wire("availability-wire")
+        func frame(_ state: String) throws -> ServerMessage {
+            try JSONDecoder().decode(
+                ServerMessage.self, from: Data(try XCTUnwrap(states[state]).canonicalJSONString.utf8))
+        }
+        func codexDetail(_ state: String) throws -> String {
+            let agents = try XCTUnwrap(states[state]?["agents"]?.arrayValue)
+            let codex = try XCTUnwrap(agents.first { $0["agent"] == .string("codex") })
+            return try XCTUnwrap(codex["detail"]?.stringValue)
+        }
+        // A floor and an unread version cannot start: the fixture's sentence is the missing reason.
+        for state in ["below_the_floor", "version_unread"] {
+            let (ctx, _) = try context(try frame(state))
+            XCTAssertEqual(ctx.models(.codex), .missing(try codexDetail(state)), state)
+        }
+        // Available but signed out: the fixture's sentence is the signed-out line.
+        let (signedOut, _) = try context(try frame("signed_out"))
+        XCTAssertEqual(signedOut.models(.codex), .signedOut(try codexDetail("signed_out")))
+        // Signed in: models are offered, no availability sentence.
+        let (signedIn, _) = try context(try frame("signed_in"))
+        guard case .choices = signedIn.models(.codex) else { return XCTFail("signed in offers models") }
     }
 
     /// How to sign in to Claude Code on a computer this device isn't (the owner's 2A), in one copy for both apps.

@@ -72,18 +72,18 @@ public struct StartContext {
     /// When this computer last ran anything the phone can start again.
     public var lastUsed: Date? { projects.first?.lastUsed }
 
-    /// Why an agent cannot be started on this computer, or nil when it can: the computer's own sentence for Claude
-    /// Code, else plain words naming the computer.
+    /// Why an agent cannot be started on this computer, or nil when it can: the computer's own sentence
+    /// (ccd's `detail`, for either agent), else plain words naming the computer.
     public func missingReason(_ agent: StartAgent) -> String? {
         guard !starter.availableAgents.contains(agent) else { return nil }
         return said(agent) ?? "\(agent.displayName) can’t start on \(machineName)."
     }
 
-    /// The computer's own sentence for why Claude Code would be refused (`detail`): the owner's words, naming the
-    /// computer, safe to show as sent. Codex's `detail` is still its check output, which names command lines and
-    /// settings files, so Codex is never quoted.
+    /// The computer's own sentence for why an agent would be refused or is signed out (`detail`): the
+    /// owner's words, naming the computer, safe to show as sent. ccd composes it for either agent now —
+    /// Codex's is a plain sentence (a floor, an unread version, a sign-in), no longer its raw check output.
     private func said(_ agent: StartAgent) -> String? {
-        agent == .claude ? starter.agents.first { $0.agent == agent }?.detail : nil
+        starter.agents.first { $0.agent == agent }?.detail
     }
 
     /// How to sign in to Claude Code on a computer other than this Mac (the owner's 2A): these words, then
