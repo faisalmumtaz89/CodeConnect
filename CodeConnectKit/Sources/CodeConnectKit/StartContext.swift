@@ -183,6 +183,16 @@ extension Machines {
         models.filter { $0.connection.capabilities?.startsSessions == true }
             .map { StartContext(model: $0) }
     }
+
+    /// The most recent start this phone sent that has no answer and has not been
+    /// retry-stopped, across every paired computer. New reopens it instead of a
+    /// fresh flow, so a start whose computer went quiet is not silently started
+    /// again elsewhere. Found by its request, not by whether its computer can
+    /// start right now — so it survives the computer leaving `startContexts`.
+    public var outstandingStart: SessionStart? {
+        models.flatMap { $0.starter.unanswered }.filter { !$0.retryStopped }
+            .max { $0.sentAt < $1.sentAt }
+    }
 }
 
 /// `main · 4m ago · Claude Code`: the branch, when it was last used and by

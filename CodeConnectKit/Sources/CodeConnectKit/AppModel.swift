@@ -1288,8 +1288,12 @@ public final class AppModel {
     /// One send of one start. A send that fails, or a link that drops before
     /// the answer, is sent again by the next handshake under the same id.
     private func sendStart(_ requestID: String) {
-        guard let start = starter.starts[requestID], start.outcome == nil else { return }
         Task {
+            // The one send-eligibility check, where the send happens. A start
+            // answered or retry-stopped between this being scheduled and here is
+            // not sent — the first send and every reconnect resend alike.
+            guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped
+            else { return }
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,

@@ -285,4 +285,74 @@ final class SessionStartTests: XCTestCase {
         XCTAssertEqual(StartPlace.newBranch("fix/login", for: .claude), "worktree-fix/login")
         XCTAssertEqual(StartPlace.newBranch("fix/login", for: .codex), "fix/login")
     }
+
+    // MARK: T4-F1 — a start whose computer goes quiet
+
+    /// (a) A start the reader stopped retrying is not resent on reconnect; the
+    /// one still being tried is.
+    func testAStoppedStartIsNotResentOnReconnect() async throws {
+        let (model, sent) = try model()
+        let project = try project(model)
+        let waiting = model.startSession(project, agent: .claude, prompt: "one")
+        let stopped = model.startSession(project, agent: .claude, prompt: "two")
+        await settle()
+        model.starter.stopRetrying(stopped)
+
+        let ack = try XCTUnwrap(try wire()["hello_ack_capabilities"])
+        let hello = """
+            {"type":"hello_ack","protocol_version":\(Wire.protocolVersion),"protocol_minor":28,\
+            "server_time":"2026-11-04T03:00:00.000Z","capabilities":\(ack.canonicalJSONString)}
+            """
+        model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(hello.utf8)))
+        await settle()
+
+        XCTAssertEqual(sent.starts.map(\.requestID), [waiting, stopped, waiting])
+    }
+
+    /// (b) A late `.started` still resolves a start whose retries were stopped —
+    /// the start is kept, never discarded, so the computer's own truth lands.
+    func testALateStartedResolvesAStoppedStart() async throws {
+        let (model, _) = try model()
+        let id = model.startSession(try project(model), agent: .claude, prompt: "")
+        await settle()
+        model.starter.stopRetrying(id)
+        XCTAssertEqual(model.starter.starts[id]?.retryStopped, true)
+        model.connection.injectForTesting(
+            .startSessionResult(requestID: id, outcome: .started(sessionUID: "01KLATE")))
+        XCTAssertEqual(model.starter.starts[id]?.outcome, .started(sessionUID: "01KLATE"))
+    }
+
+    /// (c) New reopens the most recent outstanding start, found by its request
+    /// even once its computer can no longer start — so a start whose computer
+    /// went quiet is reached, not started afresh elsewhere.
+    func testOutstandingStartSurvivesTheComputerLeavingStartContexts() async throws {
+        let (model, _) = try model()
+        let project = try project(model)
+        _ = model.startSession(project, agent: .claude, prompt: "one")
+        let second = model.startSession(project, agent: .claude, prompt: "two")
+        await settle()
+        let app = Machines(holding: model)
+        XCTAssertEqual(app.outstandingStart?.requestID, second)
+        // The computer's link fails and clears its start capability: it leaves
+        // the start form, but its outstanding start is still reached.
+        model.connection.simulateCapabilitiesForTesting(
+            try capabilities(startsSessions: false), minor: 28)
+        XCTAssertTrue(app.startContexts.isEmpty, "the computer can no longer start")
+        XCTAssertEqual(app.outstandingStart?.requestID, second, "its outstanding start is still reached")
+    }
+
+    /// (d) Once a start is stopped or answered it is no longer outstanding, so
+    /// New opens the normal flow again.
+    func testNoOutstandingStartAfterStopOrAnswer() async throws {
+        let (model, _) = try model()
+        let project = try project(model)
+        let stopped = model.startSession(project, agent: .claude, prompt: "one")
+        let answered = model.startSession(project, agent: .claude, prompt: "two")
+        await settle()
+        let app = Machines(holding: model)
+        model.starter.stopRetrying(stopped)
+        model.connection.injectForTesting(
+            .startSessionResult(requestID: answered, outcome: .started(sessionUID: "01KDONE")))
+        XCTAssertNil(app.outstandingStart, "stopped + answered leaves nothing for New to reopen")
+    }
 }
