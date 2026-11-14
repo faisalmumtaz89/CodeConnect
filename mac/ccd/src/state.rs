@@ -461,9 +461,12 @@ impl LivenessSweep {
 pub(crate) enum HostLink {
     /// A Claude run's: the way to send its agent host a command ([`crate::claude_host`]).
     Claude(tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>),
-    /// A Codex run's: the way to hand its link a phone's answer to one of its cards
-    /// ([`crate::codex_host`]).
-    Codex(crate::codex_link::LinkAnswers),
+    /// A Codex run's: the way to hand its link a phone's answer to one of its cards, and the
+    /// way to ask it to stop its turn or the run ([`crate::codex_host`]).
+    Codex(
+        crate::codex_link::LinkAnswers,
+        tokio::sync::mpsc::UnboundedSender<crate::codex_host::LinkCommand>,
+    ),
 }
 
 #[derive(Default)]
@@ -5726,13 +5729,18 @@ impl Daemon {
             // A tmux-era control link if the session has one, or else the engine run's own.
             Daemon::codex_answers_locked(&inner, &session.uid, &admitted).or_else(|| {
                 match inner.host_links.get(&session.uid) {
-                    Some(HostLink::Codex(answers)) => Some(answers.clone()),
+                    Some(HostLink::Codex(answers, _)) => Some(answers.clone()),
                     _ => None,
                 }
             })
         };
         let report = match link {
             Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
+            None if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) => {
+                crate::codex_link::AnswerReport::NotApplied(
+                    crate::codex_refusals::ENGINE_NO_CONNECTION.into(),
+                )
+            }
             None => crate::codex_link::AnswerReport::NotApplied(
                 "there is no live link to this Codex session, so nothing was sent; \
                  answer at the computer"
@@ -5918,6 +5926,23 @@ impl Daemon {
             }
         }
 
+        // **A run started on the engine is stopped through its own link**, which claims the
+        // ask, sends `turn/interrupt` and settles it ([`crate::codex_host`]). With its link
+        // not attached, nothing is sent and the person is told so.
+        let engine = match self.inner.lock().await.host_links.get(&session.uid) {
+            Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
+            _ => None,
+        };
+        if let Some(commands) = engine {
+            return Daemon::interrupt_result(
+                self.interrupt_on_engine(&commands, &session.uid, request_id, turn_id)
+                    .await,
+            );
+        }
+        if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) {
+            return refuse(crate::codex_refusals::ENGINE_NO_CONNECTION.into());
+        }
+
         // 4. **The link must be an addressee for this turn's thread.** `Subscribed`
         //    and not merely `Bound`: a bound connection receives no `turn/*` frame, so
         //    an interrupt written on it would be accepted into a silence in which the
@@ -6014,6 +6039,47 @@ impl Daemon {
         Daemon::interrupt_result(report)
     }
 
+    /// An engine run's Interrupt, handed to its link
+    /// ([`crate::codex_host::LinkCommand::Interrupt`]). A link that ended before answering is
+    /// reported by what the ledger then holds: no claim means nothing was sent, and a claim
+    /// means the stop may have reached Codex.
+    async fn interrupt_on_engine(
+        &self,
+        commands: &tokio::sync::mpsc::UnboundedSender<crate::codex_host::LinkCommand>,
+        uid: &str,
+        request_id: &str,
+        turn_id: &str,
+    ) -> crate::codex_link::InterruptReport {
+        use crate::codex_link::InterruptReport;
+        let (reply, told) = tokio::sync::oneshot::channel();
+        let asked = commands.send(crate::codex_host::LinkCommand::Interrupt {
+            request_id: request_id.to_string(),
+            turn_id: turn_id.to_string(),
+            reply,
+        });
+        if asked.is_ok() {
+            if let Ok(report) = told.await {
+                return report;
+            }
+        }
+        match self
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                uid.to_string(),
+                request_id.to_string(),
+            )
+            .await
+        {
+            Ok(None) => {
+                InterruptReport::NotApplied(crate::codex_refusals::ENGINE_NO_CONNECTION.into())
+            }
+            _ => InterruptReport::Unknown(crate::codex_refusals::interrupt_settled_unknown(
+                crate::codex_refusals::INTERRUPT_CONNECTION_ENDED,
+            )),
+        }
+    }
+
     /// **The one place a link's report becomes the phone's answer.**
     ///
     /// A single mapping because the alternative was two, and they disagreed: the
@@ -6029,6 +6095,19 @@ impl Daemon {
         report: crate::codex_link::InterruptReport,
     ) -> protocol::ws::InterruptResult {
         Daemon::interrupt_result(report)
+    }
+
+    /// **Test-only.** An engine run's link commands, so a test can hand its link an ask the
+    /// daemon's own replay would have answered first.
+    #[cfg(test)]
+    pub(crate) async fn engine_commands_for_tests(
+        &self,
+        uid: &str,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::codex_host::LinkCommand>> {
+        match self.inner.lock().await.host_links.get(uid) {
+            Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
+            _ => None,
+        }
     }
 
     /// **Say something to a Codex session, from a phone.**
@@ -9900,8 +9979,30 @@ impl Daemon {
         }
     }
 
-    /// [`ClientMessage::StopRun`](protocol::ws::ClientMessage::StopRun): end a Claude run
-    /// CodeConnect started ([`crate::claude_host::stop_run`]).
+    /// The first, graceful step of ending the run `session_uid`, through its link if one is
+    /// attached: a Claude host is sent `stop`; a Codex link interrupts the turn it runs and
+    /// sends its app-server's group SIGTERM. Whether a link took it. A run with none is
+    /// stopped by the escalation ([`crate::claude_host::escalate_stop`]).
+    pub(crate) async fn stop_through_link(&self, session_uid: &str) -> bool {
+        let inner = self.inner.lock().await;
+        match inner.host_links.get(session_uid) {
+            Some(HostLink::Claude(link)) => match protocol::uid::uuid_v4() {
+                Ok(uuid) => link.send(protocol::host::ToHost::Stop { uuid }).is_ok(),
+                Err(err) => {
+                    crate::log_error!("{session_uid}: could not name its stop: {err}");
+                    false
+                }
+            },
+            Some(HostLink::Codex(_, commands)) => {
+                commands.send(crate::codex_host::LinkCommand::Stop).is_ok()
+            }
+            None => false,
+        }
+    }
+
+    /// [`ClientMessage::StopRun`](protocol::ws::ClientMessage::StopRun): end a run
+    /// CodeConnect started, Claude's or Codex's ([`crate::claude_host::stop_run`], which
+    /// refuses any other).
     pub async fn stop_run(self: &Arc<Self>, session_ref: &str) -> protocol::ws::StopRunResult {
         let refuse = |reason: &str| protocol::ws::StopRunResult::Refused {
             reason: reason.to_string(),
@@ -9917,34 +10018,34 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
-        if row.agent != protocol::agent::AgentKind::Claude {
-            return refuse("Only a Claude run CodeConnect started can be ended from here.");
-        }
         crate::claude_host::stop_run(self, &row.session_uid).await
     }
 
     /// [`ClientFrame::StopHostedRuns`](protocol::ipc::ClientFrame::StopHostedRuns), for
-    /// `codeconnect daemon uninstall`: every hosted Claude run whose host is alive is
-    /// stopped as [`Self::stop_run`] stops one, read again on each pass so a run that
-    /// turns live meanwhile is stopped too, until no host but a starting run's is left,
-    /// or `within` has passed. What it stopped, and the pids of the hosts still running.
+    /// `codeconnect daemon uninstall`: every hosted run whose host is alive, a Claude run's
+    /// agent host or a Codex run's app-server, is stopped as [`Self::stop_run`] stops one,
+    /// read again on each pass so a run that turns live meanwhile is stopped too, until no
+    /// host but a starting run's is left, or `within` has passed. What it stopped, and the
+    /// pids of the hosts still running.
     pub async fn stop_hosted_runs(self: &Arc<Self>, within: Duration) -> (usize, Vec<u32>) {
         let deadline = tokio::time::Instant::now() + within;
         let mut stopped = HashSet::new();
         loop {
-            let alive: Vec<_> = match self.db.recorded_hosts().await {
-                Ok(recorded) => recorded
-                    .into_iter()
-                    .filter(|watch| {
+            let mut alive = Vec::new();
+            for agent in [
+                protocol::agent::AgentKind::Claude,
+                protocol::agent::AgentKind::Codex,
+            ] {
+                match self.db.recorded_hosts(agent).await {
+                    Ok(recorded) => alive.extend(recorded.into_iter().filter(|watch| {
                         protocol::proc_identity::liveness(&watch.host)
                             == protocol::proc_identity::Liveness::Alive
-                    })
-                    .collect(),
-                Err(err) => {
-                    crate::log_error!("could not read the hosted runs to stop them: {err:#}");
-                    Vec::new()
+                    })),
+                    Err(err) => {
+                        crate::log_error!("could not read the hosted runs to stop them: {err:#}")
+                    }
                 }
-            };
+            }
             for watch in &alive {
                 if watch.lifecycle == Lifecycle::Live
                     && crate::claude_host::stop_run(self, &watch.session_uid).await
@@ -10019,7 +10120,11 @@ impl Daemon {
             ),
             Err(err) => crate::log_error!("could not fail the hosted runs with no host: {err:#}"),
         }
-        let recorded = match self.db.recorded_hosts().await {
+        let recorded = match self
+            .db
+            .recorded_hosts(protocol::agent::AgentKind::Claude)
+            .await
+        {
             Ok(recorded) => recorded,
             Err(err) => {
                 crate::log_error!("could not read the hosted runs to attach again: {err:#}");
@@ -10051,10 +10156,12 @@ impl Daemon {
     /// The Codex half of [`Self::recover_hosted_runs`], before any socket is open. Every
     /// Codex run still `starting` becomes `failed`, whatever became of its start, and each
     /// recorded app-server's group gets the ladder under its warrant, each in a task of its
-    /// own: a start is never sent again. Then every `live` Codex run whose recorded
-    /// app-server is alive is connected again ([`crate::codex_host::reconnect`]), each in a
-    /// task of its own, with `launcher` as the `codeconnect` its thread config names; one
-    /// whose app-server is gone is the liveness watch's.
+    /// own: a start is never sent again. A run `stopping` whose recorded app-server is alive
+    /// has its escalation started again ([`crate::claude_host::escalate_stop`]), as a Claude
+    /// run's is. Then every `live` Codex run whose recorded app-server is alive is connected
+    /// again ([`crate::codex_host::reconnect`]), each in a task of its own, with `launcher`
+    /// as the `codeconnect` its thread config names; one whose app-server is gone is the
+    /// liveness watch's.
     pub(crate) async fn recover_codex_runs(
         self: &Arc<Self>,
         root: &std::path::Path,
@@ -10073,6 +10180,30 @@ impl Daemon {
                 }
             }
             Err(err) => crate::log_error!("could not fail the Codex runs still starting: {err:#}"),
+        }
+        match self
+            .db
+            .recorded_hosts(protocol::agent::AgentKind::Codex)
+            .await
+        {
+            Ok(recorded) => {
+                for watch in recorded {
+                    if watch.lifecycle == Lifecycle::Stopping
+                        && protocol::proc_identity::liveness(&watch.host)
+                            == protocol::proc_identity::Liveness::Alive
+                    {
+                        crate::log_info!(
+                            "{}: was stopping when ccd stopped; its escalation starts again",
+                            watch.session_uid
+                        );
+                        tokio::spawn(crate::claude_host::escalate_stop(
+                            Arc::clone(self),
+                            watch.session_uid,
+                        ));
+                    }
+                }
+            }
+            Err(err) => crate::log_error!("could not read the Codex runs stopping: {err:#}"),
         }
         let live = match self.db.codex_live_runs().await {
             Ok(live) => live,
@@ -28025,10 +28156,10 @@ mod tests {
         );
     }
 
-    /// **B7 G4: `stop_run` ends only a Claude run CodeConnect started.** A Codex run is
-    /// refused as a Codex run, and left as it was.
+    /// **B7 G4: `stop_run` ends only a run CodeConnect started.** A Codex run that a
+    /// terminal started (no hosted row) is refused, and left as it was.
     #[tokio::test]
-    async fn a_codex_run_is_not_ended_by_stop_run() {
+    async fn a_codex_run_codeconnect_did_not_start_is_not_ended_by_stop_run() {
         let daemon = test_daemon();
         let uid = protocol::uid::new().unwrap();
         register_codex_session(&daemon, &uid, "cc-1").await;
@@ -28036,7 +28167,7 @@ mod tests {
         assert_eq!(
             daemon.stop_run(&uid).await,
             protocol::ws::StopRunResult::Refused {
-                reason: "Only a Claude run CodeConnect started can be ended from here.".into()
+                reason: "CodeConnect did not start this run, so it cannot end it.".into()
             }
         );
         assert_eq!(

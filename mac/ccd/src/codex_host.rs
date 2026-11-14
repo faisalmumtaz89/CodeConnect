@@ -31,7 +31,8 @@
 //! notification it brings is mapped by the Codex adapter and filed, for both apps. When a
 //! ccd restarts, each `live` run whose app-server is alive is connected again
 //! ([`reconnect`]): its thread resumed with the preset and its thread config, the turns it
-//! ran meanwhile filed from the answer, and its link kept from there.
+//! ran meanwhile filed from the answer, and its link kept from there. An app's Stop and End
+//! run reach the run through its link too ([`LinkCommand`]).
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -42,15 +43,17 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::event::{Lifecycle, PendingEvent, SessionKey};
-use protocol::proc_identity::{read_birth_identity, BootIdentity, ProcessIdentity};
+use protocol::proc_identity::{
+    liveness, read_birth_identity, BootIdentity, Liveness, ProcessIdentity,
+};
 use protocol::ws::{StartFailure, StartSessionResult};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use crate::codex_adapter::CodexAdapter;
 use crate::codex_approval::{Approval, Family};
-use crate::codex_client::Client;
-use crate::codex_link::{AnswerReport, AnswerRequest};
+use crate::codex_client::{CallError, Client};
+use crate::codex_link::{AnswerReport, AnswerRequest, InterruptReport};
 use crate::state::{Daemon, HostLink, Retirement};
 use crate::store::{AnswerStatus, AnswerTerminal, LiveCodexRun, SessionRow};
 use protocol::composite_id::{CompositeId, ServerRequestId};
@@ -270,6 +273,31 @@ struct Owed {
     resume: Value,
 }
 
+/// What the daemon asks a run's link to do beside answering its cards (X8).
+pub(crate) enum LinkCommand {
+    /// A phone's Interrupt for the turn `turn_id`, its outcome told on `reply`
+    /// ([`interrupt_turn`]).
+    Interrupt {
+        request_id: String,
+        turn_id: String,
+        reply: tokio::sync::oneshot::Sender<InterruptReport>,
+    },
+    /// End run's graceful step ([`stop_gracefully`]).
+    Stop,
+}
+
+/// A phone's Stop that Codex has taken, waiting for its turn's end to say what became of it
+/// ([`settle_stop`]).
+struct WaitingStop {
+    request_id: String,
+    turn: String,
+    reply: tokio::sync::oneshot::Sender<InterruptReport>,
+}
+
+/// How long the link's end waits for the run's app-server to exit: Codex closes its
+/// connections a moment before its process ends.
+const EXIT_WAIT: Duration = Duration::from_secs(5);
+
 /// The run's link (P3 R1): every notification its one connection brings, in order, mapped
 /// by the Codex adapter and filed ([`Daemon::ingest`]) for both apps, until the connection
 /// ends; then the run is ended if its app-server is gone, as at a Claude link's end
@@ -281,6 +309,15 @@ struct Owed {
 /// answer channel ([`answer`]); any other request is answered at once with an error. A card
 /// ends when Codex says the request is resolved, or when its item or turn ends ([`settle`]).
 /// `cards` holds the run's cards a restart found still standing.
+///
+/// The daemon's other asks come on the link's command channel ([`LinkCommand`]): a phone's
+/// Interrupt for the turn the link is running, and End run's graceful step. The running turn
+/// is the one Codex's last `turn/started` named, or the one a resume found still running,
+/// until its `turn/completed`, or until Codex answers an interrupt of it: Codex answers just
+/// before the turn's end. A phone's Stop that Codex has taken waits for that end.
+///
+/// When the connection ends, the run is ended once its app-server's leader is gone, within
+/// [`EXIT_WAIT`]: Codex closes its connections a moment before it exits.
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
@@ -290,10 +327,15 @@ async fn link(
     mut cards: HashMap<String, Card>,
 ) {
     let (answers, mut asked) = crate::codex_link::answer_channel();
+    let (commands, mut commanded) = tokio::sync::mpsc::unbounded_channel();
     daemon
-        .host_link_attached(&uid, HostLink::Codex(answers))
+        .host_link_attached(&uid, HostLink::Codex(answers, commands))
         .await;
     let session = SessionKey::new(&uid, &uid);
+    let mut running = owed
+        .as_ref()
+        .map(|owed| (owed.thread.clone(), owed.turn.clone()));
+    let mut stops: Vec<WaitingStop> = Vec::new();
     loop {
         tokio::select! {
             frame = client.server_frame() => {
@@ -301,6 +343,28 @@ async fn link(
                 if frame.get("id").is_some() {
                     request(&daemon, &session, &client, &adapter, &mut cards, &frame).await;
                     continue;
+                }
+                let (thread, turn) = (
+                    frame["params"]["threadId"].as_str(),
+                    frame["params"]["turn"]["id"].as_str(),
+                );
+                match (frame["method"].as_str(), thread, turn) {
+                    (Some("turn/started"), Some(thread), Some(turn)) => {
+                        running = Some((thread.to_string(), turn.to_string()));
+                    }
+                    (Some("turn/completed"), _, Some(turn)) => {
+                        if running.as_ref().is_some_and(|(_, on)| on == turn) {
+                            running = None;
+                        }
+                        let status = frame["params"]["turn"]["status"].as_str().unwrap_or_default();
+                        let (ended, waiting): (Vec<_>, Vec<_>) =
+                            std::mem::take(&mut stops).into_iter().partition(|stop| stop.turn == turn);
+                        stops = waiting;
+                        for stop in ended {
+                            settle_stop(&daemon, &uid, stop, status).await;
+                        }
+                    }
+                    _ => {}
                 }
                 settle(&daemon, &session, &mut cards, &frame).await;
                 let ended = (frame["method"] == "turn/completed")
@@ -333,7 +397,33 @@ async fn link(
                 }
             }
             Some(ask) = asked.recv() => answer(&daemon, &uid, &client, &mut cards, ask).await,
+            Some(command) = commanded.recv() => match command {
+                LinkCommand::Interrupt { request_id, turn_id, reply } => {
+                    let told = interrupt_turn(
+                        &daemon, &uid, &client, &mut running, &stops, &request_id, &turn_id,
+                    )
+                    .await;
+                    match told {
+                        Some(report) => {
+                            let _ = reply.send(report);
+                        }
+                        None => stops.push(WaitingStop { request_id, turn: turn_id, reply }),
+                    }
+                }
+                LinkCommand::Stop => {
+                    stop_gracefully(&daemon, &uid, &client, &mut running).await;
+                }
+            },
         }
+    }
+    // A Stop Codex took and whose turn's end never came: its claim stays `applying`, for
+    // startup's settle.
+    for stop in stops {
+        let _ = stop.reply.send(InterruptReport::Unknown(
+            crate::codex_refusals::interrupt_settled_unknown(
+                crate::codex_refusals::INTERRUPT_CONNECTION_ENDED,
+            ),
+        ));
     }
     // An answer written and not yet confirmed keeps its claim `applying`: a restart's reconnect
     // sends it again if Codex replays the request, and settles it if Codex took it.
@@ -347,6 +437,13 @@ async fn link(
         }
     }
     daemon.host_link_detached(&uid).await;
+    if let Ok(Some(watch)) = daemon.db.watched_host(uid.clone()).await {
+        let deadline = Instant::now() + EXIT_WAIT;
+        // Until proven gone: a dying process reads `Unknown` before `Gone`.
+        while liveness(&watch.host) != Liveness::Gone && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+    }
     crate::claude_host::end_if_host_gone(&daemon, &uid).await;
 }
 
@@ -605,6 +702,238 @@ async fn answer(
         reply: ask.reply,
         _gate: ask.gate,
     });
+}
+
+/// A phone's Interrupt for the run's turn `turn_id` (P3 S5). What the record already says
+/// about this exact ask is the answer, as in [`Daemon::interrupt`]'s own replay. A turn
+/// whose interrupt Codex has already taken is ending, and nothing more is sent; a turn the
+/// link is not running is refused. Otherwise the ask is claimed and sent as
+/// `turn/interrupt`. Once Codex takes it (`None`), the turn no longer counts as running,
+/// and the ask waits for the turn's end ([`settle_stop`]). Codex's own refusal gives the
+/// claim back, so the same ask is a first attempt again; a connection that ends first
+/// leaves it `applying`, for startup's settle.
+async fn interrupt_turn(
+    daemon: &Daemon,
+    uid: &str,
+    client: &Client,
+    running: &mut Option<(String, String)>,
+    stops: &[WaitingStop],
+    request_id: &str,
+    turn_id: &str,
+) -> Option<InterruptReport> {
+    use crate::codex_refusals as says;
+    use crate::store::{MutationClaim, OPERATION_INTERRUPT};
+    if let Some(report) = recorded_interrupt(daemon, uid, request_id, turn_id).await {
+        return Some(report);
+    }
+    if stops.iter().any(|stop| stop.turn == turn_id) {
+        return Some(InterruptReport::NotApplied(
+            says::INTERRUPT_ALREADY_WAITING.into(),
+        ));
+    }
+    let Some((thread, turn)) = running.clone().filter(|(_, turn)| turn == turn_id) else {
+        return Some(InterruptReport::NotApplied(
+            says::INTERRUPT_TURN_NOT_RUNNING.into(),
+        ));
+    };
+    let claimed = crate::store::ClaimedMaterial {
+        thread_id: thread.clone(),
+        generation: 0,
+        route: crate::store::INTERRUPT_ROUTE.to_string(),
+        target_turn_id: Some(turn.clone()),
+        claimed_hash: protocol::hash::interrupt_hash(uid, &turn),
+    };
+    let claim = daemon
+        .db
+        .claim_mutation(
+            OPERATION_INTERRUPT,
+            uid.to_string(),
+            request_id.to_string(),
+            claimed,
+            protocol::time::now_rfc3339(),
+        )
+        .await;
+    match claim {
+        Ok(MutationClaim::Claimed) => {}
+        Ok(MutationClaim::Applied { outcome, .. }) => {
+            return Some(crate::codex_link::replayed_interrupt_report(
+                &outcome, &turn,
+            ));
+        }
+        Ok(MutationClaim::Indeterminate { .. }) => {
+            return Some(InterruptReport::Unknown(
+                says::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
+            ));
+        }
+        Ok(MutationClaim::Conflict) => {
+            return Some(InterruptReport::NotApplied(
+                says::INTERRUPT_ID_REUSED_ON_LINK.into(),
+            ));
+        }
+        Ok(MutationClaim::NoSession) => {
+            return Some(InterruptReport::NotApplied(
+                says::INTERRUPT_RUN_IS_GONE.into(),
+            ));
+        }
+        Err(err) => {
+            crate::log_error!("{uid}: could not claim the interrupt of turn {turn}: {err:#}");
+            return Some(InterruptReport::NotApplied(
+                says::INTERRUPT_CLAIM_UNRECORDED.into(),
+            ));
+        }
+    }
+    let params = json!({"threadId": thread, "turnId": turn});
+    let asked = tokio::time::timeout(
+        crate::start_session::START_TIMEOUT,
+        client.call("turn/interrupt", params),
+    )
+    .await;
+    match asked {
+        Ok(Ok(_)) => {
+            *running = None;
+            None
+        }
+        Ok(Err(CallError::Rpc { code, message })) => {
+            crate::log_info!("{uid}: Codex refused to interrupt turn {turn}: {message} ({code})");
+            if let Err(err) = daemon
+                .db
+                .release_mutation(OPERATION_INTERRUPT, uid.to_string(), request_id.to_string())
+                .await
+            {
+                crate::log_error!("{uid}: could not give back the refused interrupt: {err:#}");
+            }
+            Some(InterruptReport::NotApplied(says::wire_refused(
+                &code.to_string(),
+                says::INTERRUPT_WIRE_SUBJECT,
+                says::INTERRUPT_WIRE_REMEDY,
+            )))
+        }
+        Ok(Err(CallError::Closed)) | Err(_) => Some(InterruptReport::Unknown(
+            says::interrupt_settled_unknown(says::INTERRUPT_CONNECTION_ENDED),
+        )),
+    }
+}
+
+/// What became of a phone's Stop that Codex took, settled from its turn's end, by the rule
+/// the tmux-era link keeps (codex_link's `settle_interrupts_for_turn`): a turn that ended
+/// `interrupted` was stopped by it; any other end was the turn's own.
+async fn settle_stop(daemon: &Daemon, uid: &str, stop: WaitingStop, status: &str) {
+    use crate::codex_refusals as says;
+    let (outcome, report) = if status == "interrupted" {
+        (
+            crate::store::INTERRUPT_ABORTED,
+            InterruptReport::Aborted {
+                turn_id: stop.turn.clone(),
+            },
+        )
+    } else {
+        (
+            crate::store::INTERRUPT_TURN_ENDED,
+            InterruptReport::NotApplied(says::interrupt_turn_ended_itself(status)),
+        )
+    };
+    let settled = daemon
+        .db
+        .settle_mutation(
+            crate::store::OPERATION_INTERRUPT,
+            uid.to_string(),
+            stop.request_id.clone(),
+            outcome.to_string(),
+            protocol::time::now_rfc3339(),
+        )
+        .await;
+    let report = match settled {
+        Ok(true) => report,
+        Ok(false) => InterruptReport::Unknown(says::INTERRUPT_SETTLED_ELSEWHERE.into()),
+        Err(err) => {
+            crate::log_error!(
+                "{uid}: could not record what became of the stop of turn {}: {err:#}",
+                stop.turn
+            );
+            InterruptReport::Unknown(says::INTERRUPT_OUTCOME_UNRECORDED.into())
+        }
+    };
+    let _ = stop.reply.send(report);
+}
+
+/// What the record already says about the phone's Interrupt `request_id` for the run's turn
+/// `turn_id`, compared on what the phone bound (the turn and its hash), as
+/// [`Daemon::interrupt`] compares it; `None` when the record says nothing.
+async fn recorded_interrupt(
+    daemon: &Daemon,
+    uid: &str,
+    request_id: &str,
+    turn_id: &str,
+) -> Option<InterruptReport> {
+    use crate::codex_refusals as says;
+    let state = daemon
+        .db
+        .mutation_status(
+            crate::store::OPERATION_INTERRUPT,
+            uid.to_string(),
+            request_id.to_string(),
+        )
+        .await
+        .ok()??;
+    let same = state.claimed.target_turn_id.as_deref() == Some(turn_id)
+        && state.claimed.claimed_hash == protocol::hash::interrupt_hash(uid, turn_id);
+    if !same {
+        return Some(InterruptReport::NotApplied(
+            says::INTERRUPT_ID_REUSED_ON_LINK.into(),
+        ));
+    }
+    Some(match state.status {
+        AnswerStatus::Settled(outcome) => {
+            crate::codex_link::replayed_interrupt_report(&outcome, turn_id)
+        }
+        AnswerStatus::Indeterminate => {
+            InterruptReport::Unknown(says::INTERRUPT_ALREADY_SENT_UNKNOWN.into())
+        }
+        AnswerStatus::Applying => {
+            InterruptReport::NotApplied(says::INTERRUPT_ALREADY_WAITING.into())
+        }
+    })
+}
+
+/// End run's graceful step for the run (P3 S5, ruling D1): the turn it is running
+/// interrupted, then its app-server's process group sent SIGTERM under the warrant, so
+/// Codex drains and exits. The escalation that follows the stop takes it from there
+/// ([`crate::claude_host::escalate_stop`]).
+async fn stop_gracefully(
+    daemon: &Daemon,
+    uid: &str,
+    client: &Client,
+    running: &mut Option<(String, String)>,
+) {
+    if let Some((thread, turn)) = running.clone() {
+        let asked = tokio::time::timeout(
+            crate::start_session::START_TIMEOUT,
+            client.call(
+                "turn/interrupt",
+                json!({"threadId": thread, "turnId": turn}),
+            ),
+        )
+        .await;
+        if matches!(asked, Ok(Ok(_))) {
+            *running = None;
+        } else {
+            crate::log_info!("{uid}: its turn {turn} was not interrupted before its stop");
+        }
+    }
+    match daemon.db.watched_host(uid.to_string()).await {
+        Ok(Some(watch)) => match watch.boot {
+            Some(boot) => {
+                if !crate::claude_host::term_group(&watch.host, boot) {
+                    crate::log_info!("{uid}: its app-server's group was not sent SIGTERM");
+                }
+            }
+            None => crate::log_info!(
+                "{uid}: no boot was recorded with its app-server, so its group was not signalled"
+            ),
+        },
+        Ok(None) => {}
+        Err(err) => crate::log_error!("{uid}: could not read its app-server to stop it: {err:#}"),
+    }
 }
 
 /// The cards a notification ends: the one whose request Codex says is resolved, the one
@@ -2160,7 +2489,18 @@ mod tests {
     /// A run started on a stand-in, its first turn `turn` on `thread` answered: its uid and
     /// the stand-in's end of the run's link.
     async fn engine_run(rig: &Rig, request_id: &str, thread: &str, turn: &str) -> (String, Socket) {
-        let codex = stand_in(rig, "exec sleep 30");
+        engine_run_on(rig, request_id, thread, turn, "exec sleep 30").await
+    }
+
+    /// [`engine_run`] on a stand-in running `stand_in_script`.
+    async fn engine_run_on(
+        rig: &Rig,
+        request_id: &str,
+        thread: &str,
+        turn: &str,
+        stand_in_script: &str,
+    ) -> (String, Socket) {
+        let codex = stand_in(rig, stand_in_script);
         let mut script = whole_start();
         script.truncate(3);
         script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
@@ -2688,5 +3028,413 @@ mod tests {
         assert!(projects(PathBuf::from("/nonexistent/folder"))
             .await
             .is_err());
+    }
+
+    /// The run's one `SessionEnd` payload.
+    fn the_end(rig: &Rig, uid: &str) -> serde_json::Value {
+        let store = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        let mut statement = store
+            .prepare("SELECT payload FROM events WHERE session_uid = ?1 AND kind = 'session_end'")
+            .unwrap();
+        let ends: Vec<String> = statement
+            .query_map([uid], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        serde_json::from_str(&ends[0]).unwrap()
+    }
+
+    /// Codex's notice that `turn` started on `thread`.
+    fn turn_started(thread: &str, turn: &str) -> serde_json::Value {
+        json!({"method": "turn/started", "params": {"threadId": thread,
+               "turn": {"id": turn, "items": [], "status": "inProgress"}}})
+    }
+
+    /// The captured run's turn end (`LIVE_FRAMES`' frame 29), ended `status`.
+    fn its_turn_ended(status: &str) -> serde_json::Value {
+        let mut ended = frames_of(LIVE_FRAMES)[29].clone();
+        ended["params"]["turn"]["status"] = json!(status);
+        ended
+    }
+
+    /// A phone's Stop of the run's `turn` in a task of its own, since it is told its outcome
+    /// only when the turn ends.
+    fn stopping(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        turn: &str,
+    ) -> tokio::task::JoinHandle<protocol::ws::InterruptResult> {
+        let (daemon, uid, request_id, turn) = (
+            Arc::clone(daemon),
+            uid.to_string(),
+            request_id.to_string(),
+            turn.to_string(),
+        );
+        tokio::spawn(async move {
+            let hash = protocol::hash::interrupt_hash(&uid, &turn);
+            daemon.interrupt(&uid, &request_id, &turn, &hash).await
+        })
+    }
+
+    /// **X8-1 G1 and G8: End run ends a run started on the engine, which can then be
+    /// deleted.** The answer is `Stopping` and the run `stopping`; the link sends the
+    /// app-server's group SIGTERM, the group empties, and once the app-server's connection
+    /// closes the run ends `exited`, "Stopped", its card closed. Delete is refused while the
+    /// run runs and removes it once it has ended.
+    #[tokio::test]
+    async fn end_run_ends_a_run_started_on_the_engine_which_can_then_be_deleted() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-end", thread, turn).await;
+        for frame in &frames[1..=17] {
+            tell(&mut ws, frame).await;
+        }
+        assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
+        assert_eq!(
+            rig.daemon.delete_exited_session(&uid).await.unwrap(),
+            protocol::ws::DeleteSessionResult::StillRunning
+        );
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Stopping).await.lifecycle,
+            Lifecycle::Stopping
+        );
+        assert!(
+            group_ends(leader).await,
+            "the app-server's group outlived its SIGTERM"
+        );
+        drop(ws);
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+        assert_eq!(
+            the_end(&rig, &uid),
+            json!({"exit_code": null, "reason": "Stopped"})
+        );
+        assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
+        assert!(matches!(
+            rig.daemon.delete_exited_session(&uid).await.unwrap(),
+            protocol::ws::DeleteSessionResult::Deleted { .. }
+        ));
+    }
+
+    /// **X8-1 G5: a phone's Stop interrupts the turn waiting on a card.** The run's link
+    /// claims the ask and sends `turn/interrupt` for that turn on its thread. Codex answers,
+    /// then ends the turn `interrupted`, resolving the card's request; the phone is told
+    /// `Aborted` with the turn, and the card closes. The same ask again is answered from the
+    /// record, with nothing sent, by the daemon and by the link itself, which a retry the
+    /// daemon let through while the first was in flight reaches.
+    #[tokio::test]
+    async fn a_phones_stop_interrupts_the_turn_waiting_on_a_card() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-stop", thread, turn).await;
+        tell(&mut ws, &turn_started(thread, turn)).await;
+        for frame in &frames[1..=17] {
+            tell(&mut ws, frame).await;
+        }
+        assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
+        let stop = stopping(&rig.daemon, &uid, "req-stop-1", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        assert_eq!(
+            interrupt["params"],
+            json!({"threadId": thread, "turnId": turn})
+        );
+        answer(&mut ws, &interrupt, json!({})).await;
+        tell(&mut ws, &resolved(&json!(thread), &frames[17]["id"])).await;
+        tell(&mut ws, &its_turn_ended("interrupted")).await;
+        let aborted = protocol::ws::InterruptResult::Aborted {
+            turn_id: turn.to_string(),
+        };
+        assert_eq!(stop.await.unwrap(), aborted);
+        assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
+        let duplicate = protocol::ws::InterruptResult::Duplicate {
+            turn_id: turn.to_string(),
+        };
+        assert_eq!(
+            stopping(&rig.daemon, &uid, "req-stop-1", turn)
+                .await
+                .unwrap(),
+            duplicate
+        );
+        let (reply, told) = tokio::sync::oneshot::channel();
+        let commands = rig.daemon.engine_commands_for_tests(&uid).await.unwrap();
+        assert!(commands
+            .send(LinkCommand::Interrupt {
+                request_id: "req-stop-1".into(),
+                turn_id: turn.into(),
+                reply,
+            })
+            .is_ok());
+        assert_eq!(
+            Daemon::interrupt_result_for_tests(told.await.unwrap()),
+            duplicate,
+            "the link itself"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X8-1 G5, a turn that finishes first: a Stop whose turn then ends on its own is told
+    /// so.** Codex answers an interrupt it holds at the turn's end either way, so its answer
+    /// says nothing about the turn; the turn's `completed` end does.
+    #[tokio::test]
+    async fn a_stop_whose_turn_then_completes_is_told_it_ended_on_its_own() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-finish", thread, turn).await;
+        tell(&mut ws, &turn_started(thread, turn)).await;
+        let stop = stopping(&rig.daemon, &uid, "req-finish-1", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        tell(&mut ws, &its_turn_ended("completed")).await;
+        assert_eq!(
+            stop.await.unwrap(),
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::interrupt_turn_ended_itself("completed")
+            }
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X8-1 G5, two Stops at once: a Stop for a turn whose interrupt Codex has taken is
+    /// refused at once, and nothing more is sent.** The first is told when the turn ends.
+    #[tokio::test]
+    async fn a_second_stop_while_the_first_waits_is_refused_at_once_and_sends_nothing() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-two", thread, turn).await;
+        tell(&mut ws, &turn_started(thread, turn)).await;
+        let first = stopping(&rig.daemon, &uid, "req-two-1", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            stopping(&rig.daemon, &uid, "req-two-2", turn),
+        )
+        .await
+        .expect("the second Stop was not answered at once");
+        assert_eq!(
+            second.unwrap(),
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::INTERRUPT_ALREADY_WAITING.into()
+            }
+        );
+        tell(&mut ws, &its_turn_ended("interrupted")).await;
+        assert_eq!(
+            first.await.unwrap(),
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: turn.to_string()
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next_frame(&mut ws))
+                .await
+                .is_err(),
+            "ccd sent Codex something more"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X8-1 G2, in Codex's order: End run ends the run once its app-server exits, though it
+    /// closes its connection first.** The stand-in takes SIGTERM, its connection closes, and it
+    /// exits a second later; the run is `exited`, "Stopped", well before the escalation's 10 s.
+    #[tokio::test]
+    async fn end_run_ends_the_run_when_codex_exits_after_closing_its_connection() {
+        let rig = rig();
+        let (uid, ws) = engine_run_on(
+            &rig,
+            "req-drain",
+            "thr-drain",
+            "turn-1",
+            "trap 'touch got-term; sleep 1; exit 0' TERM\nsleep 30 &\nwait",
+        )
+        .await;
+        let asked = Instant::now();
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        let term = run_folder(&rig).await.join("got-term");
+        while !term.exists() && asked.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(POLL).await;
+        }
+        assert!(term.exists(), "the app-server was not sent SIGTERM");
+        drop(ws);
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "the run ended {:?} after End run",
+            asked.elapsed()
+        );
+        assert_eq!(
+            the_end(&rig, &uid),
+            json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
+    /// **X8-1 G6: a run `stopping` across a ccd restart is ended by the restarted ccd.** Its
+    /// app-server ignores SIGTERM. The restarted daemon's recovery starts the run's
+    /// escalation again, whose ladder ends the group 10 s later, and the run ends `exited`,
+    /// "Stopped".
+    #[tokio::test]
+    async fn a_codex_run_stopping_across_a_restart_is_ended_by_the_restarted_daemon() {
+        let rig = rig();
+        let codex = stand_in(&rig, "trap '' TERM\nexec sleep 60");
+        let (result, (_, ws)) = tokio::join!(
+            start(&rig.daemon, run(&rig, "req-stopping", &codex)),
+            play_app_server(&rig, whole_start())
+        );
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        // The row a stop left when its ccd stopped before escalating.
+        assert!(rig
+            .daemon
+            .db
+            .advance_lifecycle(uid.clone(), Lifecycle::Live, Lifecycle::Stopping)
+            .await
+            .unwrap());
+        drop(ws);
+        let restarted = daemon_on(&rig.root);
+        restarted
+            .recover_codex_runs(&rig.root, Ok(PathBuf::from(CODECONNECT)))
+            .await;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut lifecycle = Lifecycle::Stopping;
+        while lifecycle != Lifecycle::Exited && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+            // The stand-in's parent is this test's process, the ccd that started it. After a
+            // real restart that ccd is gone and launchd reaps the app-server at once; here the
+            // test reaps it the same way, so its end does not wait on a zombie.
+            // SAFETY: waitpid(2) without blocking, on the stand-in this test launched.
+            unsafe { libc::waitpid(leader, std::ptr::null_mut(), libc::WNOHANG) };
+            // The liveness sweep, as the restarted ccd runs it on its tick: it ends a run whose
+            // app-server is gone, which only the escalation's SIGKILL makes this one.
+            restarted.watch_hosted_runs().await;
+            lifecycle = restarted
+                .db
+                .get_session(uid.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle;
+        }
+        assert_eq!(lifecycle, Lifecycle::Exited, "the run stayed stopping");
+        assert!(
+            !group_alive(leader),
+            "the app-server outlived the escalation"
+        );
+        assert_eq!(
+            the_end(&rig, &uid),
+            json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
+    /// **X8-1 G7, the engine's half: uninstall's stop ends a run started on the engine**, as
+    /// End run does, and no host is left (the Claude half is B7's real-host tests).
+    #[tokio::test]
+    async fn stopping_the_hosted_runs_ends_a_run_started_on_the_engine() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-uninstall", "thr-uninstall", "turn-1").await;
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        let (stopped, left) = rig.daemon.stop_hosted_runs(Duration::from_secs(20)).await;
+        assert_eq!((stopped, left), (1, Vec::<u32>::new()));
+        assert!(!group_alive(leader), "the app-server outlived the stop");
+        drop(ws);
+    }
+
+    /// **X8-1 G9: with its link not attached, an engine run refuses an answer and a Stop with
+    /// the fact alone**, before its reconnect and after a reconnect that failed.
+    #[tokio::test]
+    async fn an_engine_run_with_no_link_refuses_an_answer_and_a_stop_with_the_fact() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-nolink", thread, turn).await;
+        for frame in &frames[1..=17] {
+            tell(&mut ws, frame).await;
+        }
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        drop(ws);
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        let refused = || async {
+            let answered = answered(&restarted, &uid, &cards[0], "accept").await;
+            let hash = protocol::hash::interrupt_hash(&uid, turn);
+            let stopped = restarted
+                .interrupt(&uid, "req-nolink-stop", turn, &hash)
+                .await;
+            (answered, stopped)
+        };
+        let fact = crate::codex_refusals::ENGINE_NO_CONNECTION.to_string();
+        let expected = (
+            protocol::ws::AnswerResult::Rejected {
+                reason: fact.clone(),
+            },
+            protocol::ws::InterruptResult::Rejected {
+                reason: fact.clone(),
+            },
+        );
+        assert_eq!(refused().await, expected, "before the reconnect");
+        let dir = run_folder(&rig).await;
+        let _ = std::fs::remove_file(dir.join("as.sock"));
+        let live = restarted.db.codex_live_runs().await.unwrap();
+        assert_eq!(live.len(), 1);
+        reconnect(
+            Arc::clone(&restarted),
+            rig.root.clone(),
+            live.into_iter().next().unwrap(),
+            PathBuf::from(CODECONNECT),
+        )
+        .await;
+        assert_eq!(refused().await, expected, "after a failed reconnect");
+        end_run(&rig, &uid).await;
     }
 }

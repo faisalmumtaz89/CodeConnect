@@ -6,9 +6,9 @@
     "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
   },
   "counts": {
-    "link_state": 21,
+    "link_state": 22,
     "permanent": 43,
-    "total": 71,
+    "total": 72,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -144,6 +144,13 @@
       "id": "interrupt_no_link",
       "outcome": "rejected",
       "text": "there is no live link to this Codex session, so nothing was sent; stop the turn at the computer",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "engine_no_connection",
+      "outcome": "rejected",
+      "text": "CodeConnect has no connection to this run right now, so nothing was sent.",
       "verb": "interrupt"
     },
     {

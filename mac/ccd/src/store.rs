@@ -3023,10 +3023,11 @@ impl Store {
             .optional()?)
     }
 
-    /// The recorded agent host of every hosted Claude run, whatever its lifecycle: what a
-    /// restarted ccd attaches again while the host is alive.
-    pub fn recorded_hosts(&self) -> Result<Vec<WatchedHost>> {
-        let (table, _) = session_tables_for(&AgentKind::Claude);
+    /// The recorded host of every hosted run of `agent`, whatever its lifecycle: a Claude
+    /// run's agent host, which a restarted ccd attaches again while it is alive, or a Codex
+    /// run's app-server leader.
+    pub fn recorded_hosts(&self, agent: &AgentKind) -> Result<Vec<WatchedHost>> {
+        let (table, _) = session_tables_for(agent);
         let conn = self.read();
         let mut stmt = conn.prepare(&format!(
             "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
