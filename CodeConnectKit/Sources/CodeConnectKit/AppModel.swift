@@ -19,12 +19,28 @@ public enum AnswerAttempt: Sendable {
     case staleCard(String)
     case rejected(String)
     case failed(String)
+    /// The answer left this phone but its outcome never came back — a transport
+    /// `sentButUnanswered`: the bytes may have landed and the daemon may still
+    /// apply it, so re-answering could collide with the one already sent. The
+    /// controls close (terminal), but it does NOT settle the card off the Deck —
+    /// the agent may still be blocked — and the computer's own `approval_resolved`
+    /// outranks it when it arrives.
+    case sentUnconfirmed(String)
 
     public var isTerminal: Bool {
         switch self {
-        case .applied, .indeterminate, .duplicate, .answeredAtKeyboard: return true
+        case .applied, .indeterminate, .duplicate, .answeredAtKeyboard, .sentUnconfirmed: return true
         case .staleCard, .rejected, .failed: return false
         }
+    }
+
+    /// Whether a terminal attempt also settles the card off the Deck. A
+    /// `.sentUnconfirmed` closes the controls but keeps the card: the agent may
+    /// still be blocked on an answer that never confirmed, so it waits for the
+    /// computer's own outcome instead of clearing.
+    public var settlesCard: Bool {
+        if case .sentUnconfirmed = self { return false }
+        return isTerminal
     }
 
     /// Turn a daemon `AnswerResult.applied` outcome into the honest attempt.
@@ -3342,6 +3358,11 @@ public final class AppModel {
                 refreshFleet()
                 return Self.classify(rejection: reason)
             }
+        } catch ConnectionError.sentButUnanswered {
+            // The answer left the phone and nothing came back. It may have
+            // landed, so re-answering could collide with it — the controls stay
+            // closed and the card waits for the computer's own outcome.
+            return .sentUnconfirmed(ConnectionError.sentButUnanswered.localizedDescription)
         } catch {
             return .failed(error.localizedDescription)
         }

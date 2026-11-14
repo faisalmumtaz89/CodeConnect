@@ -326,6 +326,13 @@ extension DecisionCard {
             return Banner(
                 title: "Refused", message: "\(host.computer("Your computer")) refused this answer",
                 provenance: reason, tone: .danger, icon: "x-circle")
+        case .sentUnconfirmed:
+            return Banner(
+                title: "Sent",
+                message: "Waiting for \(host.computer("your computer")) to confirm.",
+                provenance: "The answer left this \(host.noun); its confirmation hasn’t come back. Changing it now could "
+                    + "collide with the one already sent, so the card waits for \(host.computer("your computer"))’s word.",
+                tone: .warning, icon: "question-fill")
         case .failed(let reason):
             return Banner(
                 title: "Not delivered", message: "The answer did not reach \(host.computer("your computer"))",
@@ -407,6 +414,8 @@ extension DecisionCard {
     /// The rules, in order:
     ///   * a **terminal** local attempt (`.applied`, `.indeterminate`, `.duplicate`, `.answeredAtKeyboard`) is this
     ///     session's own observation and keeps its richer receipt, even if the backing was later dropped;
+    ///   * except `.sentUnconfirmed`, which is terminal only to close the controls: a persisted
+    ///     `approval_resolved` is the computer's real outcome and outranks this phone's "awaiting" state;
     ///   * an authoritative persisted outcome outranks a *stale, non-terminal* local attempt — the crash/recovery
     ///     false-negative, where a dead-socket `.failed` would otherwise mask the recovered `approval_resolved`;
     ///   * **no live backing** and no terminal receipt ⇒ `.unavailable`: a departed/reset/left-the-log card is
@@ -418,6 +427,10 @@ extension DecisionCard {
         attempt: AnswerAttempt?, persisted: AnswerOutcome?, isBacked: Bool
     ) -> ResolvedBanner {
         if let attempt {
+            // `.sentUnconfirmed` is terminal only to close the controls; the
+            // computer's own `approval_resolved`, when it arrives, is the real
+            // outcome and outranks this phone's "awaiting" state.
+            if case .sentUnconfirmed = attempt, let persisted { return .persisted(persisted) }
             if attempt.isTerminal { return .attempt(attempt) }
             if let persisted { return .persisted(persisted) }
             if !isBacked { return .unavailable }
