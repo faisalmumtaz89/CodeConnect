@@ -1699,8 +1699,12 @@ fails the suite instead of failing silently in production.
 * **A message ccd took but could not hand to Claude before it stopped is not
   confirmed.** If ccd stops in the instant between recording a message to a session
   started from an app and passing it to that session's agent host, the app says the
-  message was not confirmed: it may or may not have reached Claude, and the same words
-  cannot be sent again to this session without changing them.
+  message was not confirmed: it may or may not have reached Claude. Sending the same
+  words again, unchanged or with only spaces tidied, is a retry of that message and is
+  answered from it, so it is never sent twice. Any real edit, or clearing the box, ends
+  the retry: the same words typed again later are a new message. One case is not
+  guarded: a reply typed character for character the same as a diff comment just left
+  unconfirmed on the same session, where the comment's retry could type it twice.
 * **A permission request too large to show is refused.** In a session started from an
   app, a request whose details are too large for the app to show (a very large file
   write, for example) is refused at once rather than approved unseen. Claude is told
