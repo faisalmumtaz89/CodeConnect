@@ -5048,9 +5048,11 @@ mod tests {
         false
     }
 
-    /// How often each of `texts` is a person's line in claude's own transcript of the
-    /// session `session_id` under `config` (`projects/*/<session_id>.jsonl`); `None` when
-    /// there is no such file.
+    /// How often each of `texts` reached claude, by its own transcript of the session
+    /// `session_id` under `config` (`projects/*/<session_id>.jsonl`): as a person's line, or
+    /// folded into a running tool's result, which claude 2.1.322 keeps as an `attachment` of
+    /// type `queued_command` with the words as its `prompt`. `None` when there is no such
+    /// file.
     fn transcript_counts(config: &Path, session_id: &str, texts: &[&str]) -> Option<Vec<usize>> {
         let name = format!("{session_id}.jsonl");
         let file = std::fs::read_dir(config.join("projects"))
@@ -5070,7 +5072,10 @@ mod tests {
                     lines
                         .iter()
                         .filter(|line| {
-                            line["type"] == "user" && line["message"]["content"] == *text
+                            (line["type"] == "user" && line["message"]["content"] == *text)
+                                || (line["type"] == "attachment"
+                                    && line["attachment"]["type"] == "queued_command"
+                                    && line["attachment"]["prompt"] == *text)
                         })
                         .count()
                 })
@@ -5078,9 +5083,11 @@ mod tests {
         )
     }
 
-    /// G6's transcript check without a real claude: a message claude's transcript holds
-    /// twice, or not at all, is counted so, and no transcript is `None`; each fails G6's
-    /// "exactly once".
+    /// G6's and G9's transcript check without a real claude: a message claude's transcript
+    /// holds twice, or not at all, is counted so, and no transcript is `None`; each fails
+    /// "exactly once". A message folded into a tool's result counts once, and the same words
+    /// both folded and as a person's line count twice. The folded line is app-qa's G9 (a)
+    /// transcript's, its ids and long fields cut; the queue's own lines never count.
     #[tokio::test]
     async fn the_transcript_counts_a_message_held_twice_or_not_at_all() {
         let rig = rig();
@@ -5090,14 +5097,41 @@ mod tests {
             serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
                 .to_string()
         };
+        let folded = |text: &str| {
+            serde_json::json!({"type": "attachment", "isSidechain": false,
+                "attachment": {"type": "queued_command", "prompt": text, "commandMode": "prompt",
+                               "origin": {"kind": "human"}, "humanTurn": true},
+                "renderedRole": "system"})
+            .to_string()
+        };
+        let queued = |operation: &str, text: &str| {
+            serde_json::json!({"type": "queue-operation", "operation": operation, "content": text})
+                .to_string()
+        };
         let reply =
             serde_json::json!({"type": "assistant", "message": {"content": "twice"}}).to_string();
-        let lines = [user("once"), user("twice"), reply, user("twice")].join("\n");
+        let lines = [
+            user("once"),
+            user("twice"),
+            reply,
+            user("twice"),
+            queued("enqueue", "folded"),
+            folded("folded"),
+            queued("remove", "folded"),
+            user("both"),
+            folded("both"),
+            queued("enqueue", "dropped"),
+        ]
+        .join("\n");
         std::fs::write(project.join("s1.jsonl"), lines).unwrap();
         let config = rig.root.join("config");
-        let counts = transcript_counts(&config, "s1", &["once", "twice", "never"]);
-        assert_eq!(counts, Some(vec![1, 2, 0]));
-        assert_ne!(counts, Some(vec![1, 1, 1]));
+        let counts = transcript_counts(
+            &config,
+            "s1",
+            &["once", "twice", "never", "folded", "both", "dropped"],
+        );
+        assert_eq!(counts, Some(vec![1, 2, 0, 1, 2, 0]));
+        assert_ne!(counts, Some(vec![1, 1, 1, 1, 1, 1]));
         assert_eq!(transcript_counts(&config, "s2", &["once"]), None);
     }
 
@@ -5427,7 +5461,8 @@ mod tests {
     /// file in the run's folder (a command that only reads runs without a card); the
     /// iPhone's Allow is `Applied`; a message sent 2 s later, before the file is written, is
     /// `sent` and filed once; the command writes what it was asked to; the run settles with
-    /// no card open, and claude's transcript holds the message once. Then End run, as G2.
+    /// no card open, and claude got the message once ([`transcript_counts`]: sent while the
+    /// command runs, it reaches claude with the command's result). Then End run, as G2.
     /// Ignored and gated as G2 is.
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
