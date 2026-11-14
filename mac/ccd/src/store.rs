@@ -919,22 +919,23 @@ pub const ANSWER_LOST: &str = "lost";
 /// **What a settled answer claim is replayed as, in the operator's words.**
 ///
 /// `Settled` is the ledger's word for *terminal*, and it carries two facts that are each
-/// other's opposite. `delivered` is a phone answer the broker confirmed reached the
-/// app-server; `lost` is a phone answer that forwarded ZERO bytes because something else
+/// other's opposite. `delivered` is an answer the broker confirmed reached the
+/// app-server; `lost` is an answer that forwarded ZERO bytes because something else
 /// settled the request first, and whose card was deliberately left standing for that
 /// other terminal to retire. Both are replayed here, because both mean "this card will
-/// not be answered from a phone again" — but telling an operator their tap was applied
-/// when the record says it was not is the one thing this sentence must never do.
+/// not be answered again" — but telling an operator their tap was applied when the
+/// record says it was not is the one thing this sentence must never do.
+///
+/// Neither names the device that answered: the claim stores none, and the answer may
+/// have come from a phone, the Mac app, or a client on the static token.
 ///
 /// An outcome this build has no words for still refuses, naming the word rather than
 /// guessing at it: the terminal is what governs, and the vocabulary is not.
 pub fn replayed_answer_sentence(outcome: &str) -> String {
     match outcome {
-        ANSWER_DELIVERED => "this card was already answered from a phone; nothing was sent \
-                             again"
-            .to_string(),
-        ANSWER_LOST => "a phone answer to this card lost the race — something else answered \
-                        it first — so nothing was sent again"
+        ANSWER_DELIVERED => "this card was already answered; nothing was sent again".to_string(),
+        ANSWER_LOST => "an earlier answer to this card lost the race — something else \
+                        answered it first — so nothing was sent again"
             .to_string(),
         other => format!("this card's answer is already settled ({other}); nothing was sent again"),
     }
@@ -1425,6 +1426,12 @@ impl Store {
         self.writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The writer, held by a test to stand for a store busy with another write.
+    #[cfg(test)]
+    pub(crate) fn hold_writer(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.write()
     }
 
     /// A free reader, or a wait on the least-recently-probed one.
