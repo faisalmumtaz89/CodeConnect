@@ -1,0 +1,4 @@
+{
+  "plan": "# Plan\n\n## Context\nUser requested a one-step plan to create a file `plan.txt` containing the word \"hi\".\n\n## Steps\n1. Create `/private/tmp/ccqa.pp47cN/r2t1-g/plan.txt` with the content `hi`.\n\n## Verification\nRead the file and confirm it contains `hi`.\n",
+  "planFilePath": "/tmp/rig/plans/example.md"
+}
