@@ -571,7 +571,9 @@ struct QuestionCardView: View {
                 withAnimation(CC.motion.small) { authNotice = message }
             case .answered(let result):
                 authNotice = nil
-                if result.isTerminal { onSettled?() }
+                // `.sentUnconfirmed` closes the controls but must NOT settle the
+                // card off the Deck — the agent may still be blocked waiting.
+                if result.settlesCard { onSettled?() }
             }
         }
     }

@@ -12579,8 +12579,14 @@ mod tests {
             clearings, 1,
             "and its ending is said exactly once: {logged:?}"
         );
+        // The sink is process-global, so another test's line can land in this window
+        // (`crate::log::capture`): what the quiet passes must not write is a recovery
+        // line, and that is what is counted.
         assert_eq!(
-            logged.len(),
+            logged
+                .iter()
+                .filter(|l| l.contains("codex recovery:"))
+                .count(),
             2,
             "the quiet passes on either side of it must write nothing at all: {logged:?}"
         );

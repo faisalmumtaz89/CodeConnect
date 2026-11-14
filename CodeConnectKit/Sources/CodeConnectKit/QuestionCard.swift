@@ -185,6 +185,10 @@ public enum QuestionCardStatus: Sendable, Hashable {
     case declined
     /// The daemon took the answer and could not confirm Claude received it.
     case unconfirmed
+    /// The answer left this phone but its outcome never came back — a transport
+    /// timeout, not a confirmation the Mac took it. The controls stay closed; the
+    /// computer's own record settles it when it arrives.
+    case sentUnconfirmed
     /// No longer open, with no answer known: it left the Mac (Escape, the
     /// session or turn ending) without the daemon seeing how.
     case closed
@@ -212,6 +216,11 @@ public enum QuestionCardStatus: Sendable, Hashable {
             // recorded, once it arrives, says what happened.
             if let outcome { return ended(by: outcome) }
             return .answeredAtMac
+        case .sentUnconfirmed:
+            // Sent, no confirmation: the controls stay closed until the
+            // computer's own outcome arrives, which wins the moment it does.
+            if let outcome { return ended(by: outcome) }
+            return .sentUnconfirmed
         case .staleCard, .rejected, .failed, nil:
             break
         }
@@ -327,6 +336,12 @@ public enum QuestionCardStatus: Sendable, Hashable {
                 "Unconfirmed",
                 "\(host.computer("The computer")) took this answer but could not confirm Claude received it. "
                     + "Check \(host.computer("the computer")).",
+                .warning, "question"
+            )
+        case .sentUnconfirmed:
+            return (
+                "Sent",
+                "The answer left this \(host.noun); \(host.computer("your computer")) hasn’t confirmed it landed.",
                 .warning, "question"
             )
         case .closed:
