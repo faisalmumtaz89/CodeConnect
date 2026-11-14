@@ -1577,7 +1577,9 @@ struct SessionDetailView: View {
             // reader edit them into a different message rather than losing what
             // they wrote.
             if result?.landed == true {
-                composeText = ""
+                if Self.landedSendConsumesDraft(current: composeText, submitted: text) {
+                    composeText = ""
+                }
                 tailWatch.arrive()
             }
         }
@@ -1611,6 +1613,14 @@ struct SessionDetailView: View {
             }
             noteComposeResult(result)
         }
+    }
+
+    /// What a landed send does to the composer: it empties the box only when the
+    /// box still holds exactly the words that were sent. Anything typed while the
+    /// send was out is the next message, not this one, and stays. The Mac does
+    /// the same (Composer.swift, `kept.reply == draft`).
+    static func landedSendConsumesDraft(current: String, submitted: String) -> Bool {
+        current == submitted
     }
 
     private func send() {
@@ -1656,7 +1666,9 @@ struct SessionDetailView: View {
                 // Never optimistic: the field clears only on a landed
                 // mutation — and an earlier attempt's landing is a landing.
                 // Speaking is following: the reply lands at the tail.
-                composeText = ""
+                if Self.landedSendConsumesDraft(current: composeText, submitted: text) {
+                    composeText = ""
+                }
                 tailWatch.arrive()
                 // A landed outcome's note retires itself.
                 composeResultClearTask = Task {
