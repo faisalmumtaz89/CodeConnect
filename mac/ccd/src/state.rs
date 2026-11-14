@@ -36146,6 +36146,100 @@ mod tests {
         out
     }
 
+    /// **ExitPlanMode's plan, as this build emits the card.** `fixtures/claude/
+    /// exit-plan-input.json` is one ExitPlanMode `tool_input` — a plan and its
+    /// `planFilePath` — raised through the held approval path a real plan card
+    /// takes. The daemon builds `display_text` and `payload_hash`; only clock
+    /// reads are normalised. R2T1-F2: the phone must draw the plan, not this
+    /// `{tool}\n{input}`. The phone's copy under `ios/` is byte-identical
+    /// (`fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_exit_plan_card_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/exit-plan-card-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_exit_plan_card().await,
+            committed,
+            "the committed ExitPlanMode card no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_exit_plan_card_fixture, then copy it over its copy under \
+             ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/exit-plan-card-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_exit_plan_card_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_exit_plan_card().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/exit-plan-card-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn derived_exit_plan_card() -> serde_json::Value {
+        const INPUT: &str = include_str!("../../../fixtures/claude/exit-plan-input.json");
+        let input: serde_json::Value = serde_json::from_str(INPUT).unwrap();
+        let uid = TEST_UID;
+        let daemon = test_daemon();
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        // The same held path the real plan card takes: a PreToolUse, then a held
+        // PermissionRequest that raises the card. Only the tool and its input change;
+        // the hook envelope (and its already-vetted paths) is the question fixture's.
+        let mut pre = question_hook("PreToolUse");
+        pre["tool_name"] = json!("ExitPlanMode");
+        pre["tool_input"] = input.clone();
+        daemon.handle_hook(post(uid, pre, false)).await;
+        let mut request = question_hook("PermissionRequest");
+        request["tool_name"] = json!("ExitPlanMode");
+        request["tool_input"] = input;
+        let request = post(uid, request, true);
+        let hook = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let mut gone = Box::pin(std::future::pending::<()>());
+                daemon.handle_hook_held(request, &mut gone).await
+            })
+        };
+        for _ in 0..200 {
+            if !approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut events = approval_events(&daemon, uid, EventKind::ApprovalRequest);
+        assert_eq!(events.len(), 1, "one ExitPlanMode card");
+        hook.abort();
+        let mut out = json!({ "exit_plan": serde_json::to_value(events.remove(0)).unwrap() });
+        fn normalise(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "resolved_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be a clock read, and is {slot}"
+                            );
+                            *slot = json!("2026-10-03T00:00:00.000Z");
+                        } else {
+                            normalise(slot);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
+                _ => {}
+            }
+        }
+        normalise(&mut out);
+        out
+    }
+
     // ----------------------------------------- summary refs and facts (minor 23)
 
     /// The Codex approval every test below raises: its thread, turn and item.
