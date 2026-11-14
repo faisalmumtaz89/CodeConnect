@@ -1171,8 +1171,14 @@ own task then sends the first message on that connection:
 The run is then `live`, and the connection is kept as the run's one link: each event
 Codex reports on it (the thread, each message once it is finished, each command or
 file change as its call and then its result, the turn's end) is filed once and
-reaches both apps. Codex's own requests on it (an approval, a question)
-are not answered yet, so a turn that asks waits. Nothing is
+reaches both apps. Codex's own requests come on it too. A command, a file change or an
+MCP tool call that Codex asks to run (CodeConnect's own `send_message` among them)
+becomes a card on both apps. It offers the answers Codex offers for it, among Allow,
+Allow for this session and Deny, but never Codex's permanent "don't ask again for
+commands that start with …", which would write Codex's settings. The answer goes to
+Codex, and the card closes once Codex confirms it, or when its item or turn ends. Any
+other request Codex sends, a question for the person or a form an MCP server asks for
+among them, is answered at once with an error, so the turn goes on. Nothing is
 written to Codex's own config. A start with no `codeconnect` to run the mail server is
 refused before its row. A start that fails once codex is launched (codex ends, does not
 listen, or does not take the first message within 80 s, before or after the answer) is
@@ -1185,7 +1191,10 @@ warrant. Nothing is sent again, so a first message Codex had already taken is lo
 the run, and the person starts again. A `live` run whose app-server is still running is
 connected again: its thread is resumed with the same preset and thread config. The turns
 it ran meanwhile are filed from the answer, and a turn still running then is read once more when it ends, for the items
-it finished while no daemon listened.
+it finished while no daemon listened. A card still open stays open. If Codex asks for it
+again, the card answers that request; an answer that was on its way when ccd stopped is
+sent once more then, and if Codex already had it, the card closes as answered when its
+item or turn ends.
 Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
 same environment. The shell starts from the
@@ -1716,6 +1725,22 @@ fails the suite instead of failing silently in production.
 
 ## Known limits
 
+* **On a Codex run started from an app, a question or a form from Codex gets no answer
+  yet, and Codex carries on.** Codex asks the person a question only with its
+  under-development `default_mode_request_user_input` feature turned on, and a form only
+  when a person's own MCP server asks for one. The app shows neither: Codex is told nobody
+  answered, so a question gets an empty answer and a form is declined. With Codex's
+  `tool_call_mcp_elicitation` turned off, an MCP tool's approval is asked that way too,
+  and the call is cancelled.
+* **On a Codex run started from an app, a file change Codex first asks for while ccd is
+  restarting is declined.** Codex asks before a file change only when it writes outside
+  the folders the run may write, or into `.git`, `.codex` or `.agents`. If it asks in the
+  seconds ccd takes to restart, ccd cannot show what the change is, so it tells Codex it
+  could not read the request: Codex does not make the change, and no card appears. A
+  command asked then does get a card.
+* **On a Codex run started from an app, every one of CodeConnect's mail tools asks
+  first.** `list_agents` and `read_messages` show a card like `send_message` until they
+  are marked as only reading.
 * **A message ccd took but could not hand to Claude before it stopped is not
   confirmed.** If ccd stops in the instant between recording a message to a session
   started from an app and passing it to that session's agent host, the app says the

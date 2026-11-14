@@ -48,9 +48,13 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use crate::codex_adapter::CodexAdapter;
+use crate::codex_approval::{Approval, Family};
 use crate::codex_client::Client;
-use crate::state::Daemon;
-use crate::store::{LiveCodexRun, SessionRow};
+use crate::codex_link::{AnswerReport, AnswerRequest};
+use crate::state::{Daemon, HostLink, Retirement};
+use crate::store::{AnswerStatus, AnswerTerminal, LiveCodexRun, SessionRow};
+use protocol::composite_id::{CompositeId, ServerRequestId};
+use protocol::ws::{AnswerDecision, ClearCause, CodexResolution, ResolutionActor};
 
 /// How often the start looks for the app-server's socket.
 const POLL: Duration = Duration::from_millis(50);
@@ -253,7 +257,7 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
         stop(&uid, send.leader, send.boot).await;
     } else if advanced {
         let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
-        link(daemon, uid, client, adapter, None).await;
+        link(daemon, uid, client, adapter, None, HashMap::new()).await;
     }
 }
 
@@ -271,46 +275,440 @@ struct Owed {
 /// ends; then the run is ended if its app-server is gone, as at a Claude link's end
 /// ([`crate::claude_host::end_if_host_gone`]). The end of the `owed` turn brings its one
 /// follow-up resume, whose answer is filed the same way.
+///
+/// Codex's requests come on the same connection: a command, a file change or an MCP tool
+/// call to approve becomes a card ([`request`]), answered from a phone through the link's
+/// answer channel ([`answer`]); any other request is answered at once with an error. A card
+/// ends when Codex says the request is resolved, or when its item or turn ends ([`settle`]).
+/// `cards` holds the run's cards a restart found still standing.
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
     mut client: Client,
     mut adapter: CodexAdapter,
     mut owed: Option<Owed>,
+    mut cards: HashMap<String, Card>,
 ) {
-    daemon.host_link_attached(&uid, None).await;
-    while let Some(frame) = client.notification().await {
-        let ended = (frame["method"] == "turn/completed")
-            .then(|| frame["params"]["turn"]["id"].as_str().map(str::to_string))
-            .flatten();
-        file(&daemon, &uid, adapter.ingest(&frame)).await;
-        let Some(due) = owed.take_if(|owed| ended.as_deref() == Some(owed.turn.as_str())) else {
-            continue;
-        };
-        match tokio::time::timeout(
-            crate::start_session::START_TIMEOUT,
-            client.call("thread/resume", due.resume),
-        )
-        .await
-        {
-            Ok(Ok(answer)) => {
-                resumed(&daemon, &uid, &mut adapter, &answer, &due.thread).await;
-            }
-            Ok(Err(err)) => {
-                crate::log_info!(
-                    "{uid}: the follow-up resume after turn {} failed: {err}",
-                    due.turn
+    let (answers, mut asked) = crate::codex_link::answer_channel();
+    daemon
+        .host_link_attached(&uid, HostLink::Codex(answers))
+        .await;
+    let session = SessionKey::new(&uid, &uid);
+    loop {
+        tokio::select! {
+            frame = client.server_frame() => {
+                let Some(frame) = frame else { break };
+                if frame.get("id").is_some() {
+                    request(&daemon, &session, &client, &adapter, &mut cards, &frame).await;
+                    continue;
+                }
+                settle(&daemon, &session, &mut cards, &frame).await;
+                let ended = (frame["method"] == "turn/completed")
+                    .then(|| frame["params"]["turn"]["id"].as_str().map(str::to_string))
+                    .flatten();
+                file(&daemon, &uid, adapter.ingest(&frame)).await;
+                let Some(due) =
+                    owed.take_if(|owed| ended.as_deref() == Some(owed.turn.as_str()))
+                else {
+                    continue;
+                };
+                match tokio::time::timeout(
+                    crate::start_session::START_TIMEOUT,
+                    client.call("thread/resume", due.resume),
                 )
+                .await
+                {
+                    Ok(Ok(answer)) => {
+                        resumed(&daemon, &uid, &mut adapter, &answer, &due.thread).await;
+                    }
+                    Ok(Err(err)) => crate::log_info!(
+                        "{uid}: the follow-up resume after turn {} failed: {err}",
+                        due.turn
+                    ),
+                    Err(_) => crate::log_info!(
+                        "{uid}: the follow-up resume after turn {} was not answered within {} s",
+                        due.turn,
+                        crate::start_session::START_TIMEOUT.as_secs()
+                    ),
+                }
             }
-            Err(_) => crate::log_info!(
-                "{uid}: the follow-up resume after turn {} was not answered within {} s",
-                due.turn,
-                crate::start_session::START_TIMEOUT.as_secs()
-            ),
+            Some(ask) = asked.recv() => answer(&daemon, &uid, &client, &mut cards, ask).await,
+        }
+    }
+    // An answer written and not yet confirmed keeps its claim `applying`: a restart's reconnect
+    // sends it again if Codex replays the request, and settles it if Codex took it.
+    for (_, card) in cards.drain() {
+        if let Some(Answer::Phone { reply, .. }) = card.answer {
+            let _ = reply.send(AnswerReport::Unknown(
+                "the connection to Codex ended before it confirmed your answer; do not answer \
+                 it again"
+                    .into(),
+            ));
         }
     }
     daemon.host_link_detached(&uid).await;
     crate::claude_host::end_if_host_gone(&daemon, &uid).await;
+}
+
+/// A card the run's link raised, or took back after a restart, by its card id.
+struct Card {
+    /// The request's JSON-RPC id on this connection; `Null` for a card a restart found
+    /// standing, until Codex replays its request.
+    wire: Value,
+    family: Family,
+    turn: String,
+    item: String,
+    answer: Option<Answer>,
+}
+
+/// An answer written to a card and waiting for Codex's word.
+enum Answer {
+    /// A phone's, with where its outcome goes and the answer gate it holds until then.
+    Phone {
+        decision: AnswerDecision,
+        reply: tokio::sync::oneshot::Sender<AnswerReport>,
+        _gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    /// An answer claimed before a restart (R6): sent again if Codex replays the request,
+    /// settled when the card ends; nobody waits on it.
+    Claimed { decision: AnswerDecision },
+}
+
+/// **Decision 175, where this engine builds its card (owner decision 198): the only answers
+/// a card offers.** Never Codex's permanent "don't ask again for commands that start with …"
+/// (`acceptWithExecpolicyAmendment`), nor any other decision that writes Codex's settings.
+const OFFERED_DECISIONS: [&str; 4] = ["accept", "acceptForSession", "decline", "cancel"];
+
+/// A card's id (X7's row): the run, its thread and the request's JSON-RPC id, which a
+/// replay keeps (P7-2).
+fn card_id(uid: &str, thread: &str, wire: &Value) -> Option<String> {
+    let server_request_id = match wire {
+        Value::Number(number) => ServerRequestId::Number(number.as_i64()?),
+        Value::String(text) => ServerRequestId::Text(text.clone()),
+        _ => return None,
+    };
+    CompositeId {
+        session_uid: uid.to_string(),
+        thread_id: thread.to_string(),
+        server_request_id,
+        generation: 0,
+    }
+    .encode()
+    .ok()
+}
+
+/// One of Codex's requests: a card for a command, a file change or an MCP tool call to
+/// approve, and an error answer for anything else, so no turn waits on a request nobody
+/// will answer. A request whose card a restart found standing is bound to it again, and an
+/// answer claimed for it before the restart is sent once more (R6).
+async fn request(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    client: &Client,
+    adapter: &CodexAdapter,
+    cards: &mut HashMap<String, Card>,
+    frame: &Value,
+) {
+    let uid = &session.uid;
+    let (method, params, wire) = (
+        frame["method"].as_str().unwrap_or_default(),
+        &frame["params"],
+        &frame["id"],
+    );
+    let id = crate::codex_approval::card_family(method, params).and_then(|family| {
+        let thread = params["threadId"].as_str()?;
+        Some((family, card_id(uid, thread, wire)?))
+    });
+    let Some((family, id)) = id else {
+        crate::log_info!("{uid}: Codex asked {method}, which has no card; answered with an error");
+        let _ = client
+            .refuse(wire, -32601, "CodeConnect does not answer this request")
+            .await;
+        return;
+    };
+    if let Some(card) = cards.get_mut(&id) {
+        card.wire = wire.clone();
+        resend(daemon, session, client, &id, card).await;
+        return;
+    }
+    let started = params["itemId"].as_str().and_then(|item| {
+        adapter.open_item(
+            params["threadId"].as_str()?,
+            params["turnId"].as_str()?,
+            item,
+        )
+    });
+    let mut approval = match Approval::read(family, params, started) {
+        Ok(approval) => approval,
+        Err(why) => {
+            crate::log_info!(
+                "{uid}: Codex's {method} could not be read ({why}); answered with an error"
+            );
+            let _ = client
+                .refuse(wire, -32602, "CodeConnect could not read this request")
+                .await;
+            return;
+        }
+    };
+    approval
+        .choices
+        .retain(|choice| OFFERED_DECISIONS.contains(&choice.id.as_str()));
+    let item = if approval.item_id.is_empty() {
+        id.clone()
+    } else {
+        approval.item_id.clone()
+    };
+    let raised = daemon
+        .raise_codex_approval(
+            session,
+            approval.card(id.clone(), 0),
+            &approval.thread_id,
+            &approval.turn_id,
+            &item,
+            family.as_str(),
+        )
+        .await;
+    if !raised {
+        let _ = client
+            .refuse(wire, -32603, "CodeConnect could not show this request")
+            .await;
+        return;
+    }
+    cards.insert(
+        id,
+        Card {
+            wire: wire.clone(),
+            family,
+            turn: approval.turn_id,
+            item,
+            answer: None,
+        },
+    );
+}
+
+/// After a restart: the answer claimed for the card `id`, if its claim is still
+/// `applying`, sent once more to the request Codex replayed, rebuilt from the stored card
+/// and the claim's option, never from anything a phone sends now.
+async fn resend(daemon: &Daemon, session: &SessionKey, client: &Client, id: &str, card: &Card) {
+    let uid = &session.uid;
+    let Ok(Some(state)) = daemon
+        .db
+        .mutation_status(crate::store::OPERATION_ANSWER, uid.clone(), id.to_string())
+        .await
+    else {
+        return;
+    };
+    if state.status != AnswerStatus::Applying {
+        return;
+    }
+    let stored = daemon
+        .db
+        .codex_pending_approvals(uid.clone())
+        .await
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|row| row.request_id == id))
+        .and_then(|row| serde_json::from_str::<Value>(&row.card).ok());
+    let Some(decision) = stored.and_then(|card| {
+        crate::codex_approval::wire_decision(&card["tool_input"]["options"], &state.claimed.route)
+    }) else {
+        crate::log_error!(
+            "{uid}: the answer claimed for {id} could not be rebuilt; not sent again"
+        );
+        return;
+    };
+    let body = crate::codex_approval::reply(card.family, decision);
+    if client.respond(&card.wire, body).await.is_ok() {
+        crate::log_info!("{uid}: the answer claimed for {id} before the restart was sent again");
+    }
+}
+
+/// A phone's answer to one of the link's cards: claimed, then written to the request. Its
+/// outcome is told when Codex says the request is resolved ([`settle`]).
+async fn answer(
+    daemon: &Daemon,
+    uid: &str,
+    client: &Client,
+    cards: &mut HashMap<String, Card>,
+    ask: AnswerRequest,
+) {
+    let not_applied = |ask: AnswerRequest, why: &str| {
+        let _ = ask.reply.send(AnswerReport::NotApplied(why.to_string()));
+    };
+    let Some(card) = cards.get_mut(&ask.request_id) else {
+        return not_applied(ask, "this card is no longer open, so nothing was sent");
+    };
+    if card.answer.is_some() {
+        return not_applied(
+            ask,
+            "an answer to that card is already waiting to be confirmed, so nothing was sent again",
+        );
+    }
+    if card.wire.is_null() {
+        return not_applied(
+            ask,
+            "this card is waiting for Codex to ask again after the computer restarted; nothing \
+             was sent",
+        );
+    }
+    let claimed = daemon
+        .db
+        .claim_answer_mutation(
+            uid.to_string(),
+            ask.request_id.clone(),
+            ask.claimed.clone(),
+            protocol::time::now_rfc3339(),
+        )
+        .await;
+    match claimed {
+        Ok(crate::store::MutationClaim::Claimed) => {}
+        Ok(crate::store::MutationClaim::Applied { outcome, .. }) => {
+            return not_applied(ask, &crate::store::replayed_answer_sentence(&outcome));
+        }
+        Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
+            let _ = ask.reply.send(AnswerReport::Unknown(
+                "an answer to this card was already sent and what became of it is not known; \
+                 it will not be sent again. Check the computer."
+                    .into(),
+            ));
+            return;
+        }
+        Ok(crate::store::MutationClaim::Conflict) => {
+            return not_applied(
+                ask,
+                "this card has changed since it was answered, so nothing was sent",
+            );
+        }
+        Ok(crate::store::MutationClaim::NoSession) => {
+            return not_applied(ask, "this run is gone, so its card cannot be answered");
+        }
+        Err(err) => {
+            return not_applied(
+                ask,
+                &format!(
+                    "could not record that this answer is being sent ({err}); nothing was sent"
+                ),
+            );
+        }
+    }
+    let decision = AnswerDecision::OptionId {
+        option_id: ask.claimed.route.clone(),
+    };
+    let body = crate::codex_approval::reply(card.family, ask.decision);
+    if client.respond(&card.wire, body).await.is_err() {
+        let _ = ask.reply.send(AnswerReport::Unknown(
+            "the connection to Codex ended as your answer was sent; do not answer it again".into(),
+        ));
+        return;
+    }
+    card.answer = Some(Answer::Phone {
+        decision,
+        reply: ask.reply,
+        _gate: ask.gate,
+    });
+}
+
+/// The cards a notification ends: the one whose request Codex says is resolved, the one
+/// whose item completed, or every one of a turn that ended. Each is retired once, an
+/// answered one with its claim settled delivered and its phone told.
+async fn settle(
+    daemon: &Daemon,
+    session: &SessionKey,
+    cards: &mut HashMap<String, Card>,
+    frame: &Value,
+) {
+    let params = &frame["params"];
+    let ended: Vec<(String, ClearCause)> = match frame["method"].as_str() {
+        Some("serverRequest/resolved") => cards
+            .iter()
+            .filter(|(_, card)| !card.wire.is_null() && card.wire == params["requestId"])
+            .map(|(id, _)| (id.clone(), ClearCause::Superseded))
+            .collect(),
+        Some("item/completed") => cards
+            .iter()
+            .filter(|(_, card)| params["item"]["id"].as_str() == Some(card.item.as_str()))
+            .map(|(id, _)| (id.clone(), ClearCause::ItemCompleted))
+            .collect(),
+        Some("turn/completed") => {
+            let cause = if params["turn"]["status"] == "interrupted" {
+                ClearCause::TurnAborted
+            } else {
+                ClearCause::TurnCompleted
+            };
+            cards
+                .iter()
+                .filter(|(_, card)| params["turn"]["id"].as_str() == Some(card.turn.as_str()))
+                .map(|(id, _)| (id.clone(), cause))
+                .collect()
+        }
+        _ => return,
+    };
+    for (id, cause) in ended {
+        if let Some(card) = cards.remove(&id) {
+            retire(daemon, session, &id, card.answer, cause).await;
+        }
+    }
+}
+
+/// Retire the card `id`: as answered, its claim settled delivered, when an answer was
+/// written to it; as cleared by `cause` otherwise.
+async fn retire(
+    daemon: &Daemon,
+    session: &SessionKey,
+    id: &str,
+    answer: Option<Answer>,
+    cause: ClearCause,
+) {
+    let (decision, reply) = match answer {
+        Some(Answer::Phone {
+            decision, reply, ..
+        }) => (decision, Some(reply)),
+        Some(Answer::Claimed { decision }) => (decision, None),
+        None => {
+            daemon
+                .retire_codex_answered(session, id, CodexResolution::Cleared { cause }, None)
+                .await;
+            return;
+        }
+    };
+    let retired = daemon
+        .retire_codex_answered(
+            session,
+            id,
+            CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(decision),
+            },
+            Some(AnswerTerminal::Settled(crate::store::ANSWER_DELIVERED)),
+        )
+        .await;
+    let report = match retired {
+        Retirement::Retired => AnswerReport::Delivered,
+        Retirement::AlreadyGone => match daemon
+            .db
+            .settle_answer_mutation(
+                session.uid.clone(),
+                id.to_string(),
+                crate::store::ANSWER_DELIVERED,
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(_) => AnswerReport::Delivered,
+            Err(_) => AnswerReport::Unknown(
+                "your answer reached Codex but the computer could not record it, so do not \
+                 answer it again; check the computer"
+                    .into(),
+            ),
+        },
+        Retirement::Failed => AnswerReport::Unknown(
+            "your answer reached Codex but the computer could not record it, so the card is \
+             still showing; do not answer it again"
+                .into(),
+        ),
+    };
+    if let Some(reply) = reply {
+        let _ = reply.send(report);
+    }
 }
 
 /// File `events` in order ([`Daemon::ingest`]: once each, then out to every subscriber).
@@ -359,7 +757,9 @@ pub(crate) async fn reconnect(
     )
     .await;
     match resumed {
-        Ok(Ok((client, adapter, owed))) => link(daemon, uid, client, adapter, owed).await,
+        Ok(Ok((client, adapter, owed, cards))) => {
+            link(daemon, uid, client, adapter, owed, cards).await
+        }
         Ok(Err(why)) => crate::log_info!("{uid}: not reconnected: {why}"),
         Err(_) => crate::log_info!(
             "{uid}: not reconnected within {} s",
@@ -373,7 +773,7 @@ async fn resume(
     root: &Path,
     run: &LiveCodexRun,
     codeconnect: &Path,
-) -> Result<(Client, CodexAdapter, Option<Owed>), String> {
+) -> Result<(Client, CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
     let uid = &run.host.session_uid;
     let socket = crate::claude_host::run_dir(root, uid).join("as.sock");
     let client = crate::codex_client::connect(&socket)
@@ -405,12 +805,78 @@ async fn resume(
         run.thread,
         running.len()
     );
+    let cards = standing_cards(daemon, &SessionKey::new(uid, uid), &running).await;
     let owed = running.into_iter().next().map(|turn| Owed {
         thread: run.thread.clone(),
         turn,
         resume: params,
     });
-    Ok((client, adapter, owed))
+    Ok((client, adapter, owed, cards))
+}
+
+/// The run's cards a restart found standing. One whose turn the resume answer shows ended is
+/// retired (as answered, if its answer was claimed); the rest are kept for Codex's replay of
+/// their request or their item's or turn's end (P7-2). A claimed answer is kept as such
+/// (R6): sent again if Codex replays the request, settled delivered when the card ends.
+async fn standing_cards(
+    daemon: &Daemon,
+    session: &SessionKey,
+    running: &[String],
+) -> HashMap<String, Card> {
+    let mut cards = HashMap::new();
+    let rows = match daemon.db.codex_pending_approvals(session.uid.clone()).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            crate::log_error!(
+                "{}: could not read its standing cards: {err:#}",
+                session.uid
+            );
+            return cards;
+        }
+    };
+    for row in rows {
+        let Some(family) = Family::of_item_type(&row.family) else {
+            continue;
+        };
+        let answer = match daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_ANSWER,
+                session.uid.clone(),
+                row.request_id.clone(),
+            )
+            .await
+        {
+            Ok(Some(state)) if state.status == AnswerStatus::Applying => Some(Answer::Claimed {
+                decision: AnswerDecision::OptionId {
+                    option_id: state.claimed.route,
+                },
+            }),
+            _ => None,
+        };
+        if running.contains(&row.turn_id) {
+            cards.insert(
+                row.request_id,
+                Card {
+                    wire: Value::Null,
+                    family,
+                    turn: row.turn_id,
+                    item: row.item_id,
+                    answer,
+                },
+            );
+        } else {
+            retire(
+                daemon,
+                session,
+                &row.request_id,
+                answer,
+                ClearCause::TurnCompleted,
+            )
+            .await;
+        }
+    }
+    cards
 }
 
 /// `skills/list`, `thread/start`, the thread recorded, then `turn/start` with the first
@@ -1671,6 +2137,466 @@ mod tests {
         assert_eq!(
             link_of(&restarted, &uid).await,
             Some(protocol::event::Link::Attached)
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    const FILE_FRAMES: &str = include_str!("../../../fixtures/codex/file-change.jsonl");
+    /// The approval codex 0.167.0 asked for codeconnect's `send_message` (cx/x7 P7-6b).
+    const MAIL_APPROVAL: &str =
+        include_str!("../../../fixtures/codex/mcp-tool-approval-0.167.0.json");
+    /// A resume answer for a thread whose one turn still runs, as codex 0.164.0 sent it.
+    const RUNNING_TURN: &str =
+        include_str!("../../../fixtures/codex/resume-running-tool-turn-0.164.0.json");
+
+    fn frames_of(capture: &str) -> Vec<serde_json::Value> {
+        capture
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// A run started on a stand-in, its first turn `turn` on `thread` answered: its uid and
+    /// the stand-in's end of the run's link.
+    async fn engine_run(rig: &Rig, request_id: &str, thread: &str, turn: &str) -> (String, Socket) {
+        let codex = stand_in(rig, "exec sleep 30");
+        let mut script = whole_start();
+        script.truncate(3);
+        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
+        let (result, ws) = tokio::join!(start(&rig.daemon, run(rig, request_id, &codex)), async {
+            let (_, mut ws) = play_app_server(rig, script).await;
+            let first_turn = asked(&mut ws, "turn/start").await;
+            answer(&mut ws, &first_turn, json!({"turn": {"id": turn}})).await;
+            ws
+        });
+        let uid = started_uid(&result);
+        row_once(rig, &uid, Lifecycle::Live).await;
+        (uid, ws)
+    }
+
+    /// The run's stored cards once there are `n`, within 10 s.
+    async fn cards_of(daemon: &Daemon, uid: &str, n: usize) -> Vec<protocol::ws::ApprovalCard> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = daemon
+                .db
+                .codex_pending_approvals(uid.to_string())
+                .await
+                .unwrap();
+            if rows.len() == n || Instant::now() >= deadline {
+                return rows
+                    .iter()
+                    .map(|row| serde_json::from_str(&row.card).unwrap())
+                    .collect();
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    fn option_ids(card: &protocol::ws::ApprovalCard) -> Vec<String> {
+        card.tool_input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| option["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// ccd's next answer to the request `id`, within `within`; `None` if none comes.
+    async fn response_to(
+        ws: &mut Socket,
+        id: &serde_json::Value,
+        within: Duration,
+    ) -> Option<serde_json::Value> {
+        tokio::time::timeout(within, async {
+            loop {
+                let frame = next_frame(ws).await?;
+                if &frame["id"] == id && frame.get("method").is_none() {
+                    return Some(frame);
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn answered(
+        daemon: &Daemon,
+        uid: &str,
+        card: &protocol::ws::ApprovalCard,
+        option: &str,
+    ) -> protocol::ws::AnswerResult {
+        daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: option.into(),
+                },
+                Some(uid),
+                protocol::ws::AnsweredOn::Iphone,
+            )
+            .await
+    }
+
+    /// A phone answering `card` with `option` in a task of its own, since the answer is told
+    /// its outcome only when Codex resolves the request or the link ends.
+    fn answering(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        card: &protocol::ws::ApprovalCard,
+        option: &'static str,
+    ) -> tokio::task::JoinHandle<protocol::ws::AnswerResult> {
+        let (daemon, uid, card) = (Arc::clone(daemon), uid.to_string(), card.clone());
+        tokio::spawn(async move { answered(&daemon, &uid, &card, option).await })
+    }
+
+    async fn ledger(daemon: &Daemon, uid: &str, id: &str) -> Option<AnswerStatus> {
+        daemon
+            .db
+            .mutation_status(crate::store::OPERATION_ANSWER, uid.into(), id.into())
+            .await
+            .unwrap()
+            .map(|state| state.status)
+    }
+
+    fn resolved(thread: &serde_json::Value, id: &serde_json::Value) -> serde_json::Value {
+        json!({"method": "serverRequest/resolved", "params": {"threadId": thread, "requestId": id}})
+    }
+
+    /// **G1 (X7a): a command approval becomes a card, and a phone's answer reaches Codex.**
+    /// The card offers Codex's decisions within decision 175's list, here accept and cancel and
+    /// never the amendment. A phone's cancel is written to the request's own id, and Codex's
+    /// resolved notice retires the card once, settles the claim delivered and tells the phone.
+    #[tokio::test]
+    async fn a_command_approval_becomes_a_card_and_a_phones_answer_reaches_codex() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[1]["params"]["thread"]["id"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-card", thread, turn).await;
+        for frame in &frames[1..=17] {
+            tell(&mut ws, frame).await;
+        }
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(option_ids(&cards[0]), ["accept", "cancel"]);
+        let id = &frames[17]["id"];
+        let (result, response) =
+            tokio::join!(answered(&rig.daemon, &uid, &cards[0], "cancel"), async {
+                let response = response_to(&mut ws, id, Duration::from_secs(20)).await;
+                tell(&mut ws, &frames[18]).await;
+                response
+            });
+        assert_eq!(
+            response,
+            Some(json!({"id": id, "result": {"decision": "cancel"}}))
+        );
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
+        let card = &cards[0].request_id;
+        let ids = filed_until(&rig.daemon, &uid, &format!("resolved:{card}")).await;
+        assert_eq!(count(&ids, &format!("perm:{card}")), 1, "{ids:?}");
+        assert_eq!(count(&ids, &format!("resolved:{card}")), 1, "{ids:?}");
+        assert_eq!(
+            ledger(&rig.daemon, &uid, card).await,
+            Some(AnswerStatus::Settled("delivered".into()))
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G1f (X7a): a file-change card carries the changes its item started with.** The
+    /// request names only the item; the card's changes come from the item's `item/started`.
+    #[tokio::test]
+    async fn a_file_change_card_carries_the_changes_its_item_started_with() {
+        let rig = rig();
+        let frames = frames_of(FILE_FRAMES);
+        let thread = frames[1]["params"]["thread"]["id"].as_str().unwrap();
+        let turn = frames[43]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-patch", thread, turn).await;
+        for frame in &frames[1..=19] {
+            tell(&mut ws, frame).await;
+        }
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        assert!(
+            !cards[0].tool_input["changes"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{}",
+            cards[0].tool_input
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G1m (X7a): codeconnect's own Mail approval becomes a card, and "Allow for this
+    /// session" is answered as Codex reads it** (P7-6b's request as codex 0.167.0 sent it). It
+    /// has no item id, so it is keyed by the request's id; it offers Allow, Allow for this
+    /// session and Deny, never "always".
+    #[tokio::test]
+    async fn a_mail_approval_becomes_a_card_and_allow_for_this_session_is_sent_as_codex_reads_it() {
+        let rig = rig();
+        let request: serde_json::Value = serde_json::from_str(MAIL_APPROVAL).unwrap();
+        let thread = request["params"]["threadId"].as_str().unwrap();
+        let turn = request["params"]["turnId"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-mail", thread, turn).await;
+        tell(&mut ws, &request).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            option_ids(&cards[0]),
+            ["accept", "acceptForSession", "decline"]
+        );
+        let id = &request["id"];
+        let (result, response) = tokio::join!(
+            answered(&rig.daemon, &uid, &cards[0], "acceptForSession"),
+            async {
+                let response = response_to(&mut ws, id, Duration::from_secs(20)).await;
+                tell(&mut ws, &resolved(&request["params"]["threadId"], id)).await;
+                response
+            }
+        );
+        assert_eq!(
+            response,
+            Some(json!({"id": id, "result":
+                {"action": "accept", "content": null, "_meta": {"persist": "session"}}}))
+        );
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G1b (X7a): a request with no card is answered at once with an error**, so no turn
+    /// waits on it: a question, an MCP form, a request ccd has no use for, and an unknown one.
+    /// A stand-in that waited for these answers before going on would wait for ever without
+    /// them.
+    #[tokio::test]
+    async fn a_request_with_no_card_is_answered_at_once_with_an_error() {
+        let rig = rig();
+        let (thread, turn) = ("thread-b", "turn-b");
+        let (uid, mut ws) = engine_run(&rig, "req-none", thread, turn).await;
+        let params = json!({"threadId": thread, "turnId": turn, "itemId": "item-b"});
+        let requests = [
+            json!({"id": 1, "method": "item/tool/requestUserInput", "params": params}),
+            json!({"id": 2, "method": "mcpServer/elicitation/request", "params":
+                {"threadId": thread, "serverName": "theirs", "mode": "form", "message": "Name?",
+                 "requestedSchema": {"type": "object", "properties": {}}}}),
+            json!({"id": 3, "method": "currentTime/read", "params": {}}),
+            json!({"id": 4, "method": "something/new", "params": params}),
+        ];
+        for request in &requests {
+            tell(&mut ws, request).await;
+            let response = response_to(&mut ws, &request["id"], Duration::from_secs(20)).await;
+            assert!(
+                response.as_ref().is_some_and(|r| r.get("error").is_some()),
+                "{} got {response:?}",
+                request["method"]
+            );
+        }
+        assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G1e (X7a): a card ends with its item or its turn when no resolved notice comes on
+    /// this connection** (P7-2: the notice can go to a connection that has since closed).
+    #[tokio::test]
+    async fn a_card_ends_with_its_item_or_its_turn_when_no_resolved_notice_comes() {
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[1]["params"]["thread"]["id"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        // The item's end: the capture with its resolved notice (frame 18) left out.
+        for ending in [&frames[19..=20], &frames[29..=29]] {
+            let rig = rig();
+            let (uid, mut ws) = engine_run(&rig, "req-end", thread, turn).await;
+            for frame in &frames[1..=17] {
+                tell(&mut ws, frame).await;
+            }
+            assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
+            for frame in ending {
+                tell(&mut ws, frame).await;
+            }
+            assert!(
+                cards_of(&rig.daemon, &uid, 0).await.is_empty(),
+                "the card outlived {}",
+                ending.last().unwrap()["method"]
+            );
+            drop(ws);
+            end_run(&rig, &uid).await;
+        }
+    }
+
+    /// The approval of `capture`'s frame `request` (with its `item/started` at `started`),
+    /// moved onto the running turn of [`RUNNING_TURN`]'s thread so a restart's resume can
+    /// describe it.
+    fn on_the_running_turn(
+        capture: &[serde_json::Value],
+        started: usize,
+        request: usize,
+    ) -> (String, String, serde_json::Value, serde_json::Value) {
+        let resume: serde_json::Value = serde_json::from_str(RUNNING_TURN).unwrap();
+        let thread = resume["result"]["thread"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let turn = resume["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut item = capture[started].clone();
+        item["params"]["threadId"] = json!(thread);
+        item["params"]["turnId"] = json!(turn);
+        let mut asked = capture[request].clone();
+        asked["params"]["threadId"] = json!(thread);
+        asked["params"]["turnId"] = json!(turn);
+        (thread, turn, item, asked)
+    }
+
+    /// A ccd restart under the run: the first link's connection closed, the app-server
+    /// listening anew, a fresh daemon on the same store recovering, its reconnect answered
+    /// with [`RUNNING_TURN`]. The restarted daemon and the stand-in's new end of the link.
+    async fn restarted_under(rig: &Rig, first: Socket) -> (Arc<Daemon>, Socket) {
+        drop(first);
+        let resume: serde_json::Value = serde_json::from_str(RUNNING_TURN).unwrap();
+        let dir = run_folder(rig).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::remove_file(dir.join("as.sock")).unwrap();
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        let ((), ws) = tokio::join!(
+            restarted.recover_codex_runs(&rig.root, Ok(PathBuf::from(CODECONNECT))),
+            async {
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+                    .await
+                    .expect("ccd connected again")
+                    .unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let init = asked(&mut ws, "initialize").await;
+                answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+                let skills = asked(&mut ws, "skills/list").await;
+                answer(&mut ws, &skills, json!({"data": []})).await;
+                let resumed = asked(&mut ws, "thread/resume").await;
+                answer(&mut ws, &resumed, resume["result"].clone()).await;
+                ws
+            }
+        );
+        (restarted, ws)
+    }
+
+    /// **R6 (X7a): an answer in flight across a restart is sent once more to Codex's
+    /// replay** (97's R6 (i)). A file-change card is answered and ccd's connection ends
+    /// before Codex resolves it. Startup leaves the claim `applying`; the reconnected link
+    /// binds Codex's replay to the stored card by its id (with no `item/started` this time,
+    /// so the request could not be read again) and sends the claimed answer once. Another
+    /// device's answer meanwhile is refused; the resolved notice settles the claim delivered.
+    #[tokio::test]
+    async fn an_answer_in_flight_at_a_restart_is_sent_once_more_to_codexs_replay() {
+        let rig = rig();
+        let frames = frames_of(FILE_FRAMES);
+        let (thread, turn, started, asked_once) = on_the_running_turn(&frames, 17, 19);
+        let id = asked_once["id"].clone();
+        let (uid, mut ws) = engine_run(&rig, "req-r6", &thread, &turn).await;
+        tell(&mut ws, &started).await;
+        tell(&mut ws, &asked_once).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let phone = answering(&rig.daemon, &uid, &cards[0], "accept");
+        let first = response_to(&mut ws, &id, Duration::from_secs(20)).await;
+        assert_eq!(
+            first,
+            Some(json!({"id": id, "result": {"decision": "accept"}}))
+        );
+        assert_eq!(
+            ledger(&rig.daemon, &uid, &cards[0].request_id).await,
+            Some(AnswerStatus::Applying)
+        );
+        let (restarted, mut ws) = restarted_under(&rig, ws).await;
+        assert!(
+            matches!(
+                phone.await.unwrap(),
+                protocol::ws::AnswerResult::Rejected { .. }
+            ),
+            "the first phone hears its answer's fate is unknown when the link ends"
+        );
+        tell(&mut ws, &asked_once).await;
+        let again = response_to(&mut ws, &id, Duration::from_secs(20)).await;
+        assert_eq!(
+            again,
+            Some(json!({"id": id, "result": {"decision": "accept"}}))
+        );
+        let other = answering(&restarted, &uid, &cards[0], "cancel");
+        assert_eq!(
+            response_to(&mut ws, &id, Duration::from_secs(3)).await,
+            None,
+            "a second answer was written to the request"
+        );
+        let other = tokio::time::timeout(Duration::from_secs(10), other)
+            .await
+            .expect("the other device was answered")
+            .unwrap();
+        assert!(
+            matches!(other, protocol::ws::AnswerResult::Rejected { .. }),
+            "{other:?}"
+        );
+        tell(&mut ws, &resolved(&json!(thread), &id)).await;
+        assert!(cards_of(&restarted, &uid, 0).await.is_empty());
+        assert_eq!(
+            ledger(&restarted, &uid, &cards[0].request_id).await,
+            Some(AnswerStatus::Settled("delivered".into()))
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **R6 (X7a), two restarts in a row: one actuation.** The answer sent again after the
+    /// first restart lands; ccd stops before the resolved notice; after the second restart
+    /// Codex has nothing to replay and ccd sends nothing, and the item's end settles the
+    /// claim delivered.
+    #[tokio::test]
+    async fn two_restarts_in_a_row_still_send_an_answer_once() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let (thread, turn, started, asked_once) = on_the_running_turn(&frames, 16, 17);
+        let id = asked_once["id"].clone();
+        let (uid, mut ws) = engine_run(&rig, "req-twice", &thread, &turn).await;
+        tell(&mut ws, &started).await;
+        tell(&mut ws, &asked_once).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let _phone = answering(&rig.daemon, &uid, &cards[0], "accept");
+        assert!(response_to(&mut ws, &id, Duration::from_secs(20))
+            .await
+            .is_some());
+        let (_, mut ws) = restarted_under(&rig, ws).await;
+        tell(&mut ws, &asked_once).await;
+        assert!(response_to(&mut ws, &id, Duration::from_secs(20))
+            .await
+            .is_some());
+        let (restarted, mut ws) = restarted_under(&rig, ws).await;
+        assert_eq!(
+            response_to(&mut ws, &id, Duration::from_secs(3)).await,
+            None
+        );
+        let mut done = frames[20].clone();
+        done["params"]["threadId"] = json!(thread);
+        done["params"]["turnId"] = json!(turn);
+        tell(&mut ws, &done).await;
+        assert!(cards_of(&restarted, &uid, 0).await.is_empty());
+        assert_eq!(
+            ledger(&restarted, &uid, &cards[0].request_id).await,
+            Some(AnswerStatus::Settled("delivered".into()))
         );
         drop(ws);
         end_run(&rig, &uid).await;
