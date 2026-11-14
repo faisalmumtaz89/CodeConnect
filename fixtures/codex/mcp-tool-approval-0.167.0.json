@@ -1,0 +1,40 @@
+{
+  "method": "mcpServer/elicitation/request",
+  "id": 0,
+  "params": {
+    "threadId": "01a1d9fc-b2b8-7bd0-bc9b-83f850b527d8",
+    "turnId": "01a1d9fc-baf5-7ab0-8277-ad1408734d7b",
+    "serverName": "codeconnect",
+    "mode": "form",
+    "_meta": {
+      "codex_approval_kind": "mcp_tool_call",
+      "persist": [
+        "session",
+        "always"
+      ],
+      "tool_name": "send_message",
+      "tool_description": "Send a message to another Claude Code or Codex session. `to` is its address, <run id>@computer, copied from list_agents or from a message you read; a cc-N@computer label is not an address. To answer a message, also give its id as `reply_to`. The answer gives the message's id and whether it is waiting for that agent, still being sent, or refused, and why.",
+      "tool_params": {
+        "to": "nobody@nowhere",
+        "text": "x7 probe"
+      },
+      "tool_params_display": [
+        {
+          "name": "text",
+          "value": "x7 probe",
+          "display_name": "text"
+        },
+        {
+          "name": "to",
+          "value": "nobody@nowhere",
+          "display_name": "to"
+        }
+      ]
+    },
+    "message": "Allow the codeconnect MCP server to run tool \"send_message\"?",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+}

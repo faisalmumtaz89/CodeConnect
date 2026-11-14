@@ -598,7 +598,9 @@ async fn link(
     mut write: OwnedWriteHalf,
 ) {
     let (to_link, mut commands) = tokio::sync::mpsc::unbounded_channel();
-    daemon.host_link_attached(&uid, Some(to_link)).await;
+    daemon
+        .host_link_attached(&uid, crate::state::HostLink::Claude(to_link))
+        .await;
     let Linked {
         start_uuid,
         start_prompt,
@@ -2901,6 +2903,51 @@ mod tests {
         assert_eq!(
             end_reason(&rig, &uid),
             Some(serde_json::json!("Stopped: its process ended"))
+        );
+    }
+
+    /// **G1d (X7a): a linked Claude run is skipped by the hosted-run watch.** Its link is the
+    /// host's own connection, so its end is the link's to act on, not the sweep's: with the
+    /// link attached and the host gone, a pass of the watch leaves the run `live`.
+    #[tokio::test]
+    async fn a_linked_claude_run_is_skipped_by_the_watch() {
+        let rig = rig();
+        let host = stub_host_with_child(&rig);
+        let (dir, uid) = detached_run(&rig, &host).await;
+        let (stub, child) = (pid_in(&dir, "stub.pid"), pid_in(&dir, "child.pid"));
+        let (to_link, _commands) = tokio::sync::mpsc::unbounded_channel();
+        rig.daemon
+            .host_link_attached(&uid, crate::state::HostLink::Claude(to_link))
+            .await;
+        // SAFETY: kill(2) of the stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(stub, libc::SIGKILL) };
+        for _ in 0..100 {
+            // SAFETY: kill(2) with signal 0 only asks whether the pid is in use.
+            if unsafe { libc::kill(stub, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        rig.daemon.watch_hosted_runs().await;
+        // The watch ends a run by signalling its group and waiting it out, so a run it acted
+        // on leaves `live` within the ladder's 5 s; this one stays, its host's child running.
+        let mut lifecycle = kept(&rig, &uid).0;
+        for _ in 0..120 {
+            if lifecycle != "live" {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+            lifecycle = kept(&rig, &uid).0;
+        }
+        let child_ran = running(child);
+        if child_ran {
+            // SAFETY: kill(2) of the child this test's stand-in started, by its pid.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert_eq!(lifecycle, "live", "the watch acted on a run its link holds");
+        assert!(
+            child_ran,
+            "the watch signalled the group of a run its link holds"
         );
     }
 

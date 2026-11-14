@@ -5,10 +5,11 @@
 //! calls it too. A [`Client`] holds one connection. Its calls carry ids counting from 1, and
 //! its reader task hands each response to the call with that id. A frame with a `method` is
 //! the server's own, never a response, so an id the server puts on its request never takes a
-//! call's answer. One with no `id` is a notification, kept in order for the client's owner
-//! ([`Client::notification`]). One with an `id` is the server's request, which ccd answers
-//! none of yet, so it is dropped. Dropping the client stops the reader, which closes the
-//! socket. When the connection ends, every call still open gets [`CallError::Closed`].
+//! call's answer. Each such frame, a notification (no `id`) or a request (an `id`), is kept
+//! in order for the client's owner ([`Client::server_frame`]), who answers a request with
+//! [`Client::respond`] or [`Client::refuse`]. Dropping the client stops the reader, which
+//! closes the socket. When the connection ends, every call still open gets
+//! [`CallError::Closed`].
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -97,7 +98,7 @@ pub(crate) struct Client {
     open: OpenCalls,
     next_id: AtomicI64,
     reader: tokio::task::JoinHandle<()>,
-    notifications: mpsc::UnboundedReceiver<Value>,
+    server_frames: mpsc::UnboundedReceiver<Value>,
 }
 
 impl Drop for Client {
@@ -115,20 +116,36 @@ impl Client {
     fn over(socket: Socket) -> Client {
         let (sink, stream) = socket.split();
         let open: OpenCalls = Arc::new(Mutex::new(Some(HashMap::new())));
-        let (notified, notifications) = mpsc::unbounded_channel();
+        let (forwarded, server_frames) = mpsc::unbounded_channel();
         Client {
             sink: tokio::sync::Mutex::new(sink),
-            reader: tokio::spawn(read(stream, Arc::clone(&open), notified)),
+            reader: tokio::spawn(read(stream, Arc::clone(&open), forwarded)),
             open,
             next_id: AtomicI64::new(1),
-            notifications,
+            server_frames,
         }
     }
 
-    /// The server's next notification, in the order it was sent, from the connection's
-    /// first; `None` once the connection has ended and every one has been taken.
-    pub(crate) async fn notification(&mut self) -> Option<Value> {
-        self.notifications.recv().await
+    /// The server's next notification or request, in the order it was sent, from the
+    /// connection's first; `None` once the connection has ended and every one has been taken.
+    pub(crate) async fn server_frame(&mut self) -> Option<Value> {
+        self.server_frames.recv().await
+    }
+
+    /// Answer the server's request `id` with `result`.
+    pub(crate) async fn respond(&self, id: &Value, result: Value) -> Result<(), CallError> {
+        self.send(json!({"id": id, "result": result})).await
+    }
+
+    /// Answer the server's request `id` with a JSON-RPC error.
+    pub(crate) async fn refuse(
+        &self,
+        id: &Value,
+        code: i64,
+        message: &str,
+    ) -> Result<(), CallError> {
+        self.send(json!({"id": id, "error": {"code": code, "message": message}}))
+            .await
     }
 
     /// The handshake: `initialize` as CodeConnect's daemon, with the experimental API
@@ -175,12 +192,13 @@ impl Client {
     }
 }
 
-/// The connection's reader: each response to its call and each notification to `notified`,
-/// until the connection ends; then every call still open is told it is closed.
+/// The connection's reader: each response to its call, and each notification or request of
+/// the server's to `forwarded`, until the connection ends; then every call still open is told
+/// it is closed.
 async fn read(
     mut stream: SplitStream<Socket>,
     open: OpenCalls,
-    notified: mpsc::UnboundedSender<Value>,
+    forwarded: mpsc::UnboundedSender<Value>,
 ) {
     while let Some(Ok(message)) = stream.next().await {
         let text = match message {
@@ -192,9 +210,7 @@ async fn read(
             continue;
         };
         if frame.contains_key("method") {
-            if !frame.contains_key("id") {
-                let _ = notified.send(Value::Object(frame));
-            }
+            let _ = forwarded.send(Value::Object(frame));
             continue;
         }
         let Some(id) = frame.get("id").and_then(Value::as_i64) else {
@@ -326,18 +342,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notifications_reach_the_owner_in_order_and_requests_do_not() {
+    async fn the_servers_notifications_and_requests_reach_the_owner_in_order() {
         let (mut client, mut server) = pair().await;
-        say(
-            &mut server,
-            json!({"id": 7, "method": "item/commandExecution/requestApproval", "params": {}}),
-        )
-        .await;
+        let request =
+            json!({"id": 7, "method": "item/commandExecution/requestApproval", "params": {}});
         say(
             &mut server,
             json!({"method": "thread/started", "params": {"n": 1}}),
         )
         .await;
+        say(&mut server, request.clone()).await;
         say(
             &mut server,
             json!({"method": "turn/completed", "params": {"n": 2}}),
@@ -345,14 +359,36 @@ mod tests {
         .await;
         server.close(None).await.unwrap();
         assert_eq!(
-            client.notification().await,
+            client.server_frame().await,
             Some(json!({"method": "thread/started", "params": {"n": 1}}))
         );
+        assert_eq!(client.server_frame().await, Some(request));
         assert_eq!(
-            client.notification().await,
+            client.server_frame().await,
             Some(json!({"method": "turn/completed", "params": {"n": 2}}))
         );
-        assert_eq!(client.notification().await, None);
+        assert_eq!(client.server_frame().await, None);
+    }
+
+    #[tokio::test]
+    async fn a_request_is_answered_or_refused_under_its_own_id() {
+        let (client, mut server) = pair().await;
+        client
+            .respond(&json!(3), json!({"decision": "accept"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            sent(&mut server).await,
+            json!({"id": 3, "result": {"decision": "accept"}})
+        );
+        client
+            .refuse(&json!(4), -32601, "not offered by CodeConnect")
+            .await
+            .unwrap();
+        assert_eq!(
+            sent(&mut server).await,
+            json!({"id": 4, "error": {"code": -32601, "message": "not offered by CodeConnect"}})
+        );
     }
 
     #[tokio::test]

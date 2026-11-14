@@ -142,6 +142,11 @@ use serde_json::{Map, Value};
 pub(crate) const COMMAND_METHOD: &str = "item/commandExecution/requestApproval";
 /// `item/fileChange/requestApproval` — an edit wants to be written.
 pub(crate) const FILE_CHANGE_METHOD: &str = "item/fileChange/requestApproval";
+/// `mcpServer/elicitation/request` — how Codex asks for an MCP tool call's approval, among
+/// other elicitations (measured on 0.167.0, cx/x7/p76b.out).
+pub(crate) const ELICITATION_METHOD: &str = "mcpServer/elicitation/request";
+/// The `_meta.codex_approval_kind` that makes an elicitation an MCP tool approval.
+const MCP_TOOL_APPROVAL_KIND: &str = "mcp_tool_call";
 /// The ending that makes a server request one the broker will hand to this leg.
 ///
 /// The broker binds and relays **any** method with this suffix, named or not, so
@@ -259,6 +264,9 @@ const MAX_LABEL_ARGV_BYTES: usize = 512;
 pub(crate) enum Family {
     Command,
     FileChange,
+    /// An MCP tool call Codex asks to run, by elicitation (P7-6b): a server's tool, such as
+    /// CodeConnect's own `send_message`.
+    McpTool,
 }
 
 impl Family {
@@ -280,6 +288,7 @@ impl Family {
         match self {
             Family::Command => "commandExecution",
             Family::FileChange => "fileChange",
+            Family::McpTool => "mcpToolCall",
         }
     }
 
@@ -293,6 +302,7 @@ impl Family {
         match item_type {
             "commandExecution" => Some(Family::Command),
             "fileChange" => Some(Family::FileChange),
+            "mcpToolCall" => Some(Family::McpTool),
             _ => None,
         }
     }
@@ -310,6 +320,7 @@ impl Family {
         match self {
             Family::Command => "command",
             Family::FileChange => "file change",
+            Family::McpTool => "MCP tool",
         }
     }
 
@@ -337,6 +348,14 @@ impl Family {
                     "Yes, and don't ask again for these files",
                 ),
                 ("cancel", "No, and tell Codex what to do differently"),
+            ],
+            // Codex's own words for the first two (mcp_tool_call.rs:1517-1518 in 0.167.0) and
+            // decision 175's for the third; Codex's "Allow and don't ask me again" is never
+            // offered.
+            Family::McpTool => &[
+                ("accept", "Allow"),
+                ("acceptForSession", "Allow for this session"),
+                ("decline", "Deny"),
             ],
         }
     }
@@ -649,6 +668,14 @@ pub(crate) enum Context {
         /// "accept for these files" would grant.
         grant_root: Option<String>,
     },
+    /// An MCP tool approval, as the elicitation carries it (P7-6b): the server, the tool,
+    /// Codex's question and the call's arguments.
+    McpTool {
+        server: String,
+        tool: String,
+        message: String,
+        arguments: Value,
+    },
 }
 
 /// A `*/requestApproval` this daemon is prepared to raise a card for.
@@ -828,6 +855,37 @@ pub(crate) fn wire_decision(options: &Value, option_id: &str) -> Option<Value> {
     })
 }
 
+/// The family a server request is carded as, if any: the two `*/requestApproval` methods,
+/// and an elicitation whose `_meta.codex_approval_kind` says it asks for an MCP tool call
+/// (P7-6b). Any other request, a plain MCP form included, is none of them.
+pub(crate) fn card_family(method: &str, params: &Value) -> Option<Family> {
+    match method {
+        ELICITATION_METHOD => (params.pointer("/_meta/codex_approval_kind")
+            == Some(&Value::String(MCP_TOOL_APPROVAL_KIND.into())))
+        .then_some(Family::McpTool),
+        _ => Family::of_method(method),
+    }
+}
+
+/// The response that answers a card of `family` with `decision`, the wire decision
+/// [`wire_decision`] rebuilt from the stored card. A command or file change takes
+/// `{"decision": …}`; an MCP tool approval takes the elicitation's own reply, with "Allow
+/// for this session" as `_meta.persist: "session"` (P7-6b).
+pub(crate) fn reply(family: Family, decision: Value) -> Value {
+    match family {
+        Family::Command | Family::FileChange => serde_json::json!({ "decision": decision }),
+        Family::McpTool => match decision.as_str() {
+            Some("acceptForSession") => serde_json::json!(
+                {"action": "accept", "content": null, "_meta": {"persist": "session"}}
+            ),
+            Some("decline") => {
+                serde_json::json!({"action": "decline", "content": null, "_meta": null})
+            }
+            _ => serde_json::json!({"action": "accept", "content": null, "_meta": null}),
+        },
+    }
+}
+
 /// The decisions to offer, in the order they will be shown.
 ///
 /// The command family's set is the wire's, filtered to what this build has
@@ -835,16 +893,30 @@ pub(crate) fn wire_decision(options: &Value, option_id: &str) -> Option<Value> {
 /// wire offers nothing. Both are the same shape by the time they leave here, so
 /// nothing downstream has to know which came from where.
 fn choices(family: Family, params: &Value) -> Vec<Choice> {
-    match family {
-        Family::FileChange => family
+    let fixed = |keep: &dyn Fn(&str) -> bool| {
+        family
             .labels()
             .iter()
+            .filter(|(id, _)| keep(id))
             .map(|(id, label)| Choice {
                 id: (*id).to_string(),
                 label: (*label).to_string(),
                 payload: None,
             })
-            .collect(),
+            .collect()
+    };
+    match family {
+        Family::FileChange => fixed(&|_| true),
+        // "Allow for this session" only when the request offers it (`_meta.persist`);
+        // "always" never (decision 175).
+        Family::McpTool => {
+            let session = match params.pointer("/_meta/persist") {
+                Some(Value::String(one)) => one == "session",
+                Some(Value::Array(many)) => many.iter().any(|offer| offer == "session"),
+                _ => false,
+            };
+            fixed(&|id| id != "acceptForSession" || session)
+        }
         Family::Command => params
             .get("availableDecisions")
             .and_then(Value::as_array)
@@ -879,6 +951,9 @@ impl Approval {
         params: &Value,
         started: Option<&Value>,
     ) -> Result<Approval, Refusal> {
+        if family == Family::McpTool {
+            return Approval::read_mcp_tool(params);
+        }
         let thread_id = non_empty(params, "threadId")?;
         let turn_id = non_empty(params, "turnId")?;
         let item_id = non_empty(params, "itemId")?;
@@ -931,6 +1006,7 @@ impl Approval {
                     grant_root: optional(params, "grantRoot"),
                 }
             }
+            Family::McpTool => unreachable!("read above"),
         };
 
         let choices = choices(family, params);
@@ -945,6 +1021,32 @@ impl Approval {
             item_id,
             context,
             choices,
+        })
+    }
+
+    /// Read an MCP tool approval (P7-6b). It carries no item id: the card is keyed by the
+    /// request's own id, so `item_id` stays empty. `turnId` is nullable on the wire.
+    fn read_mcp_tool(params: &Value) -> Result<Approval, Refusal> {
+        let tool = params
+            .pointer("/_meta/tool_name")
+            .and_then(Value::as_str)
+            .filter(|tool| !tool.is_empty())
+            .ok_or(Refusal::NoContent)?;
+        Ok(Approval {
+            family: Family::McpTool,
+            thread_id: non_empty(params, "threadId")?,
+            turn_id: optional(params, "turnId").unwrap_or_default(),
+            item_id: String::new(),
+            context: Context::McpTool {
+                server: non_empty(params, "serverName")?,
+                tool: tool.to_string(),
+                message: optional(params, "message").unwrap_or_default(),
+                arguments: params
+                    .pointer("/_meta/tool_params")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            },
+            choices: choices(Family::McpTool, params),
         })
     }
 
@@ -1060,6 +1162,20 @@ impl Approval {
                     input.insert("grant_root".into(), Value::String(grant_root.clone()));
                 }
             }
+            Context::McpTool {
+                server,
+                tool,
+                message,
+                arguments,
+            } => {
+                input.insert("tool".into(), Value::String(tool.clone()));
+                input.insert("server".into(), Value::String(server.clone()));
+                input.insert(
+                    "message".into(),
+                    Value::String(bounded(message, MAX_REASON_BYTES)),
+                );
+                input.insert("arguments".into(), arguments.clone());
+            }
         }
         input.insert(
             "options".into(),
@@ -1091,6 +1207,9 @@ impl Approval {
             Context::FileChange { changes, .. } => {
                 serde_json::json!({ "changes": changes })
             }
+            Context::McpTool {
+                tool, arguments, ..
+            } => serde_json::json!({ "tool": tool, "arguments": arguments }),
         }
     }
 
@@ -2194,11 +2313,7 @@ mod tests {
                 .or_else(|| card.tool_input["path"].as_str())
                 .expect("a card names either a command or a path")
                 .to_string();
-            let name: &'static str = match family {
-                Family::Command => "commandExecution",
-                Family::FileChange => "fileChange",
-            };
-            out.push((name, principal, card));
+            out.push((family.as_str(), principal, card));
         }
         out
     }

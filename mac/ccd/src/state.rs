@@ -457,6 +457,15 @@ impl LivenessSweep {
     }
 }
 
+/// A hosted run's link, as [`Inner::host_links`] holds it.
+pub(crate) enum HostLink {
+    /// A Claude run's: the way to send its agent host a command ([`crate::claude_host`]).
+    Claude(tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>),
+    /// A Codex run's: the way to hand its link a phone's answer to one of its cards
+    /// ([`crate::codex_host`]).
+    Codex(crate::codex_link::LinkAnswers),
+}
+
 #[derive(Default)]
 struct Inner {
     /// Per-device floor between deliberate test pushes. A stolen credential
@@ -468,9 +477,7 @@ struct Inner {
     supervisors: HashMap<String, SupervisorHandle>,
     /// Hosted runs whose agent host or app-server this daemon is attached to now, by
     /// `session_uid`: what makes such a run's link read attached, since it has no supervisor.
-    /// A Claude run's link ([`crate::claude_host`]) carries its way to send the host a
-    /// command; a Codex run's ([`crate::codex_host`]) carries none.
-    host_links: HashMap<String, Option<tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>>,
+    host_links: HashMap<String, HostLink>,
     /// Messages sent to a run's agent host and waiting for its outcome, by the message's
     /// uuid, each with its run's `session_uid`: told `true` once the host has taken the
     /// message into claude's input, `false` once it refused it. Dropped when the run's
@@ -2272,8 +2279,9 @@ impl Daemon {
                         .await;
                 }
                 crate::log_info!(
-                    "recovery: {restored} approval card(s) restored; none can be answered from \
-                     the phone, because no hook is held for them"
+                    "recovery: {restored} approval card(s) restored; a hook's card cannot be \
+                     answered from the phone, because no hook is held for it, and an engine \
+                     Codex run's can be once Codex asks for it again"
                 );
                 true
             }
@@ -5669,7 +5677,16 @@ impl Daemon {
         // genuinely waits for the response to finish, not merely for this caller to.
         let quiesce = self.actuation_gate(&session.uid).await;
         let admitted = Arc::clone(&quiesce).read_owned().await;
-        let link = Daemon::codex_answers_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let link = {
+            let inner = self.inner.lock().await;
+            // A tmux-era control link if the session has one, or else the engine run's own.
+            Daemon::codex_answers_locked(&inner, &session.uid, &admitted).or_else(|| {
+                match inner.host_links.get(&session.uid) {
+                    Some(HostLink::Codex(answers)) => Some(answers.clone()),
+                    _ => None,
+                }
+            })
+        };
         let report = match link {
             Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
             None => crate::codex_link::AnswerReport::NotApplied(
@@ -6334,7 +6351,7 @@ impl Daemon {
     }
 
     /// **Settle every phone answer this daemon was in the middle of when it
-    /// stopped.**
+    /// stopped, except an engine run's.**
     ///
     /// An `applying` claim under `answer` is one whose response may or may not have
     /// reached the app-server: the claim is taken only once the live connection has
@@ -6343,10 +6360,16 @@ impl Daemon {
     /// not replayed and `serverRequest/resolved` names no decision, so there is no
     /// frame left that could tell.
     ///
-    /// That is terminal `Unknown`, and terminal is the point — the card is retired
-    /// saying exactly that rather than being answered a second time against a request
-    /// the app-server accepts exactly one answer to. Card and claim go in the one
-    /// commit, for [`Daemon::retire_codex_answered`]'s reason.
+    /// For a tmux-era card that is terminal `Unknown`, and terminal is the point — the
+    /// card is retired saying exactly that rather than being answered a second time
+    /// against a request the app-server accepts exactly one answer to. Card and claim go
+    /// in the one commit, for [`Daemon::retire_codex_answered`]'s reason.
+    ///
+    /// A run started on the engine keeps its claim `applying`. A live one is reconnected
+    /// later ([`Daemon::recover_codex_runs`]): Codex replays the request if the answer
+    /// never reached it, and the link sends the claimed answer once more; if it did, the
+    /// item's or turn's end settles it. A run that had ended is not reconnected, so its
+    /// claim stays as it is; its card ended with the run.
     ///
     /// **It runs after the cards are back in memory**, and that ordering is
     /// load-bearing: retirement claims the card by removing it from `inner.pending`,
@@ -6368,12 +6391,20 @@ impl Daemon {
             return;
         }
         crate::log_warn!(
-            "recovery: {} codex answer(s) were in flight; recording them as unknown rather \
-             than sending again",
+            "recovery: {} codex answer(s) were in flight; a tmux-era one is recorded as \
+             unknown rather than sent again, an engine run's is left applying for its reconnect",
             claims.len()
         );
         for claim in claims {
-            self.settle_stranded_answer_claim(&claim).await;
+            match self.db.hosted_link(claim.session_uid.clone()).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => self.settle_stranded_answer_claim(&claim).await,
+                Err(err) => crate::log_error!(
+                    "recovery: could not read the run behind the answer to {}, so its claim \
+                     is left live for the next attempt: {err:#}",
+                    claim.client_request_id
+                ),
+            }
         }
     }
 
@@ -9789,29 +9820,24 @@ impl Daemon {
         ))
     }
 
-    /// The run `session_uid`'s agent host or app-server is attached, and `commands`, a
-    /// Claude run's ([`crate::claude_host`]), reaches its host.
-    pub(crate) async fn host_link_attached(
-        &self,
-        session_uid: &str,
-        commands: Option<tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>,
-    ) {
+    /// The run `session_uid`'s agent host or app-server is attached, by `link`.
+    pub(crate) async fn host_link_attached(&self, session_uid: &str, link: HostLink) {
         self.inner
             .lock()
             .await
             .host_links
-            .insert(session_uid.to_string(), commands);
+            .insert(session_uid.to_string(), link);
     }
 
-    /// Send the run `session_uid`'s agent host `command` through its link. Whether a link
-    /// was attached to take it.
+    /// Send the run `session_uid`'s agent host `command` through its link. Whether a Claude
+    /// link was attached to take it.
     pub(crate) async fn send_to_host(
         &self,
         session_uid: &str,
         command: protocol::host::ToHost,
     ) -> bool {
         match self.inner.lock().await.host_links.get(session_uid) {
-            Some(Some(link)) => link.send(command).is_ok(),
+            Some(HostLink::Claude(link)) => link.send(command).is_ok(),
             _ => false,
         }
     }
@@ -9904,7 +9930,7 @@ impl Daemon {
             .await
             .host_links
             .iter()
-            .filter(|(_, commands)| commands.is_some())
+            .filter(|(_, link)| matches!(link, HostLink::Claude(_)))
             .map(|(uid, _)| uid.clone())
             .collect();
         for watch in watched {
