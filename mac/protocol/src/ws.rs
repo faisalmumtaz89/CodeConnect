@@ -1326,8 +1326,10 @@ pub const MAX_HISTORY_PAGE: u32 = 500;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerPath {
-    /// Structured hook return: the answer goes back through the hook Claude
-    /// holds for the call.
+    /// Returned to Claude through a channel that confirms it: the hook Claude
+    /// holds for the call, or, for a run started in an agent host, the host's
+    /// return to the SDK's `canUseTool` request. The value names the
+    /// confirmation, not the carrier.
     HookReturn,
     /// Keystrokes into the live prompt. Older daemons answered approvals this
     /// way; from minor 22 it describes only an answer made at the Mac's own

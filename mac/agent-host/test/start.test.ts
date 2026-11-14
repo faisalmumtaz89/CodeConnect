@@ -286,6 +286,100 @@ test('a say once the run is stopped is refused, and never reaches claude', async
   expect(stdinOf(stub()).some((message) => message.uuid === 'c-late')).toBe(false);
 }, 10_000);
 
+/** claude asking permission for a tool call, as claude writes it: the SDK hands it to the host's canUseTool. */
+const ask = (toolUseID: string, toolName = 'Bash', input: object = { command: 'ls' }, extra: object = {}) =>
+  JSON.stringify({
+    type: 'control_request',
+    request_id: `req-${toolUseID}`,
+    request: { subtype: 'can_use_tool', tool_name: toolName, input, tool_use_id: toolUseID, ...extra },
+  });
+/** The control responses claude read for the request `request_id`. */
+const answersRead = (log: any[], requestID: string) =>
+  stdinOf(log).filter((m) => m.type === 'control_response' && m.response?.request_id === requestID);
+
+test("claude's permission request reaches ccd once, with its tool, input and the SDK's options, and the state lists it while it is open", async () => {
+  const { ccd } = await run(trustedStart, {
+    after_user: [ask('toolu_p1', 'Bash', { command: 'ls' }, { permission_suggestions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }], decision_reason: 'a reason' })],
+  });
+  const permission = await ccd.line('the permission', (line) => line.type === 'permission');
+  expect(permission.request.tool_use_id).toBe('toolu_p1');
+  expect(permission.request.tool_name).toBe('Bash');
+  expect(permission.request.input).toStrictEqual({ command: 'ls' });
+  expect(permission.request.options.suggestions).toStrictEqual([{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
+  expect(permission.request.options.decisionReason).toBe('a reason');
+  for (const key of ['signal', 'toolUseID', 'requestId']) expect(permission.request.options).not.toHaveProperty(key);
+  const [state] = await ccd.attach(permission.seq, 1);
+  expect(state.type).toBe('state');
+  expect(state.pending.map((request: any) => request.tool_use_id)).toStrictEqual(['toolu_p1']);
+}, 10_000);
+
+test("an allow reaches claude's input with the request's input, and only then is it answered done", async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_a1')] });
+  await ccd.line('the permission', (line) => line.type === 'permission');
+  ccd.send({ type: 'answer', uuid: 'c-allow', tool_use_id: 'toolu_a1', decision: { behavior: 'allow' } });
+  const outcome = await ccd.line('the allow answered', (line) => line.type === 'outcome' && line.uuid === 'c-allow');
+  expect(outcome.status).toBe('done');
+  await waitFor('claude to read the answer', () => answersRead(stub(), 'req-toolu_a1').length === 1);
+  const [read] = answersRead(stub(), 'req-toolu_a1');
+  expect(read.response.response).toMatchObject({ behavior: 'allow', updatedInput: { command: 'ls' } });
+  const [state] = await ccd.attach(outcome.seq, 1);
+  expect(state.pending).toStrictEqual([]);
+}, 10_000);
+
+test('a deny reaches claude with its message and whether it interrupts', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_d1')] });
+  await ccd.line('the permission', (line) => line.type === 'permission');
+  ccd.send({ type: 'answer', uuid: 'c-deny', tool_use_id: 'toolu_d1', decision: { behavior: 'deny', message: 'not that', interrupt: true } });
+  expect((await ccd.line('the deny answered', (line) => line.type === 'outcome' && line.uuid === 'c-deny')).status).toBe('done');
+  await waitFor('claude to read the deny', () => answersRead(stub(), 'req-toolu_d1').length === 1);
+  expect(answersRead(stub(), 'req-toolu_d1')[0].response.response).toMatchObject({ behavior: 'deny', message: 'not that', interrupt: true });
+}, 10_000);
+
+test('an answer to a request that is not open is refused, and nothing reaches claude', async () => {
+  const { ccd, stub } = await run(trustedStart);
+  ccd.send({ type: 'answer', uuid: 'c-none', tool_use_id: 'toolu_none', decision: { behavior: 'allow' } });
+  const outcome = await ccd.line('the answer refused', (line) => line.type === 'outcome' && line.uuid === 'c-none');
+  expect(outcome).toMatchObject({ status: 'refused', detail: 'the request is no longer open' });
+  expect(stdinOf(stub()).filter((m) => m.type === 'control_response')).toStrictEqual([]);
+}, 10_000);
+
+test('a request still open when the run is stopped is withdrawn, and a later answer to it is refused', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_w1')] });
+  await ccd.line('the permission', (line) => line.type === 'permission');
+  ccd.send({ type: 'stop', uuid: 'c-stop' });
+  const withdrawn = await ccd.line('the request withdrawn', (line) => line.type === 'withdrawn');
+  expect(withdrawn.tool_use_id).toBe('toolu_w1');
+  ccd.send({ type: 'answer', uuid: 'c-late', tool_use_id: 'toolu_w1', decision: { behavior: 'allow' } });
+  expect((await ccd.line('the late answer', (line) => line.type === 'outcome' && line.uuid === 'c-late')).status).toBe('refused');
+  await ccd.line("claude's end", (line) => line.type === 'exited');
+  expect(answersRead(stub(), 'req-toolu_w1')).toStrictEqual([]);
+}, 10_000);
+
+test('an allow and a stop read together: the answer never reaches claude, so it is refused, never done', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [ask('toolu_r1')] });
+  await ccd.line('the permission', (line) => line.type === 'permission');
+  // One write: the host resolves the request and closes the query before the SDK writes the answer.
+  const allow = JSON.stringify({ type: 'answer', uuid: 'c-race', tool_use_id: 'toolu_r1', decision: { behavior: 'allow' } });
+  ccd.socket.write(`${allow}\n${JSON.stringify({ type: 'stop', uuid: 'c-stop' })}\n`);
+  const outcome = await ccd.line('the raced answer', (line) => line.type === 'outcome' && line.uuid === 'c-race');
+  expect(outcome).toMatchObject({ status: 'refused', detail: 'the run ended before the answer reached Claude' });
+  await ccd.line("claude's end", (line) => line.type === 'exited');
+  expect(answersRead(stub(), 'req-toolu_r1')).toStrictEqual([]);
+}, 10_000);
+
+test('a question claude asks is answered at once with a plain refusal, no interrupt, and never reaches ccd as a permission', async () => {
+  const { ccd, stub } = await run(trustedStart, {
+    after_user: [ask('toolu_q1', 'AskUserQuestion', { questions: [{ question: 'Tea or coffee?', header: 'Drink', options: [] }] })],
+  });
+  await waitFor('claude to read the refusal', () => answersRead(stub(), 'req-toolu_q1').length === 1);
+  expect(answersRead(stub(), 'req-toolu_q1')[0].response.response).toMatchObject({
+    behavior: 'deny',
+    message: "Questions from Claude can't be answered in the app yet, so this one was refused.",
+  });
+  expect(answersRead(stub(), 'req-toolu_q1')[0].response.response.interrupt).not.toBe(true);
+  expect(ccd.lines.filter((line) => line.type === 'permission')).toStrictEqual([]);
+}, 10_000);
+
 test('stop ends the run: claude is asked to interrupt and ends, its end is the last line, and the host exits once ccd has it; a second stop does nothing', async () => {
   const { host, ccd, stub } = await run(trustedStart);
   ccd.send({ type: 'stop', uuid: 'c-stop' });

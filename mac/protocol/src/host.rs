@@ -134,6 +134,9 @@ pub enum Decision {
     },
     Deny {
         message: String,
+        /// The deny also ends claude's turn, as the person's deny of a main-conversation call does.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interrupt: bool,
     },
 }
 
@@ -352,6 +355,7 @@ mod tests {
                 tool_use_id: "toolu_02".into(),
                 decision: Decision::Deny {
                     message: "Not now".into(),
+                    interrupt: true,
                 },
             }),
             to(ToHost::SetModel {
