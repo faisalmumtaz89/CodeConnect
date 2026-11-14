@@ -240,8 +240,9 @@ private struct Sidebar: View {
     }
 }
 
-/// A paired computer: its name, how many runs are active on it, and how its link is. One whose daemon refused
-/// its token is a button: a click pairs it again, with its address already in the code form.
+/// A paired computer: its name, how many runs are active on it, and how its link is. A live one shows its CPU, memory
+/// and disk as three quiet meters in place of the link's word, while the row is shown. One whose daemon refused its
+/// token is a button: a click pairs it again, with its address already in the code form.
 private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
@@ -253,28 +254,44 @@ private struct ComputerRow: View {
     private var address: String? { computer.endpoint?.typedAddress }
     private var id: String { "sidebar.computer.\(computer.machineID ?? "")" }
 
+    /// What the row shows of the computer's latest sample: only while its link is live, so no figure outlasts the
+    /// link that brought it.
+    private var load: MachineLoad? {
+        guard computer.linkHealth.level == .live else { return nil }
+        var stats = computer.machineStats
+        #if DEBUG
+            if let shown = RenderWindow.machineStats { stats = shown }
+        #endif
+        guard let stats else { return nil }
+        return MachineLoad(
+            cpu: stats.cpu, memoryUsed: stats.memoryUsed, memoryTotal: stats.memoryTotal,
+            diskUsed: stats.diskUsed, diskTotal: stats.diskTotal)
+    }
+
     var body: some View {
+        let load = load
         Group {
             if computer.linkHealth.pairingCures, let address {
-                Button { pairAgain(address) } label: { row.contentShape(Rectangle()) }
+                Button { pairAgain(address) } label: { row(load).contentShape(Rectangle()) }
                     .buttonStyle(.hover(id: "\(id).pairAgain"))
                     .accessibilityIdentifier("\(id).pairAgain")
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier(id)
             } else {
                 Button(action: select) {
-                    row.background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
+                    row(load).background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.hover(id: id))
                 .accessibilityIdentifier(id)
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
-        .help([computer.machineSystem, computer.linkHealth.word].compactMap { $0 }.joined(separator: " · "))
+        .help([computer.machineSystem, computer.linkHealth.word, load?.line].compactMap { $0 }.joined(separator: " · "))
+        .task { await computer.keepMachineStatsFresh() }
     }
 
-    private var row: some View {
-        VStack(alignment: .leading, spacing: 3) {
+    private func row(_ load: MachineLoad?) -> some View {
+        VStack(alignment: .leading, spacing: load == nil ? 3 : 5) {
             HStack(spacing: 8) {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).foregroundStyle(Theme.text2)
                     .frame(width: 16)
@@ -284,13 +301,49 @@ private struct ComputerRow: View {
                 Spacer()
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
             }
-            Text(computer.linkHealth.word)
-                .font(Theme.ui(10.5))
-                .foregroundStyle(Theme.text3)
+            if let load {
+                HStack(spacing: 10) {
+                    if let cpu = load.cpu { LoadMeter(label: "CPU", used: cpu) }
+                    if let memory = load.memory { LoadMeter(label: "RAM", used: memory) }
+                    if let disk = load.disk { LoadMeter(label: "Disk", used: disk) }
+                }
                 .padding(.leading, 24)
+            } else {
+                Text(computer.linkHealth.word)
+                    .font(Theme.ui(10.5))
+                    .foregroundStyle(Theme.text3)
+                    .padding(.leading, 24)
+            }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.vertical, load == nil ? 5 : 6)
+    }
+}
+
+/// One figure of a computer's load: its name, its share under it, and a thin bar, amber at 90% or more, when the
+/// computer needs you, and quiet grey below that. The name sits above the share, not beside it, so "100%" keeps one
+/// line in a meter as narrow as a sidebar with a scroll bar leaves it (about 41 pt, for 28 pt).
+private struct LoadMeter: View {
+    let label: String
+    let used: Double
+
+    var body: some View {
+        let high = used >= 0.9
+        VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(label).foregroundStyle(Theme.text3)
+                Text(MachineLoad.percent(used)).foregroundStyle(high ? Theme.amber : Theme.text2)
+            }
+            .font(Theme.ui(9.5, .medium))
+            .monospacedDigit()
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule().fill(high ? Theme.amber : Theme.text3).frame(width: geometry.size.width * used)
+                }
+            }
+            .frame(height: 2.5)
+        }
     }
 }
 
