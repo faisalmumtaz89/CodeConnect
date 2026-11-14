@@ -502,6 +502,25 @@ public enum TimelineBuilder {
                                 output: outcome?.text,
                                 isTruncated: event.isTruncated))))
 
+            case .other("codex_mcpToolCall"):
+                // A Codex MCP call (read_messages/send_message) is call+result in one event, filed as
+                // Other by ccd; without this it drew no row (the person never saw what mail Codex read
+                // or sent). Its result is an MCP content-block array, read via the shared mcpBlocksText.
+                guard let call = event.codexMcpToolCall else { break }
+                items.append(
+                    event.item(
+                        .tool(
+                            ToolItem(
+                                toolUseID: event.itemID,
+                                name: call.name,
+                                argument: ToolSummary.principalArgument(
+                                    tool: call.name, input: call.input),
+                                status: call.status,
+                                durationMS: call.durationMS,
+                                input: call.input,
+                                output: call.output,
+                                isTruncated: event.isTruncated))))
+
             case .approvalRequest:
                 guard let card = event.approvalCard else {
                     items.append(
