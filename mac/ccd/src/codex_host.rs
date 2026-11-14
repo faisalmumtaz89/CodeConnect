@@ -26,6 +26,12 @@
 //! never ends by itself. A start that a restarted ccd finds still `starting` is failed the
 //! same way, whatever became of it ([`crate::state::Daemon::recover_hosted_runs`]): a
 //! start is never sent again.
+//!
+//! The start's connection is then kept as the run's link ([`link`], P3 R1): every
+//! notification it brings is mapped by the Codex adapter and filed, for both apps. When a
+//! ccd restarts, each `live` run whose app-server is alive is connected again
+//! ([`reconnect`]): its thread resumed with the preset and its thread config, the turns it
+//! ran meanwhile filed from the answer, and its link kept from there.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -35,15 +41,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::agent::AgentKind;
-use protocol::event::Lifecycle;
+use protocol::event::{Lifecycle, PendingEvent, SessionKey};
 use protocol::proc_identity::{read_birth_identity, BootIdentity, ProcessIdentity};
 use protocol::ws::{StartFailure, StartSessionResult};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
+use crate::codex_adapter::CodexAdapter;
 use crate::codex_client::Client;
 use crate::state::Daemon;
-use crate::store::SessionRow;
+use crate::store::{LiveCodexRun, SessionRow};
 
 /// How often the start looks for the app-server's socket.
 const POLL: Duration = Duration::from_millis(50);
@@ -206,9 +213,9 @@ pub(crate) async fn stop(uid: &str, leader: ProcessIdentity, boot: Option<BootId
 }
 
 /// The run's own task after `started` (L9 i-v): the first message sent by the start's
-/// deadline, then the run `live`. A failure ends the run `failed` and stops its group;
-/// either way a run the sweep has ended meanwhile stays as the sweep left it. The
-/// connection is then let go: a turn Codex has taken runs on without it.
+/// deadline, then the run `live` and its connection kept as the run's [`link`]. A failure
+/// ends the run `failed`, lets the connection go and stops its group; either way a run the
+/// sweep has ended meanwhile stays as the sweep left it, unlinked.
 async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
     let uid = send.uid.clone();
     let sent = tokio::time::timeout_at(send.deadline, send_first(&daemon, &client, &send))
@@ -219,7 +226,6 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
                 crate::start_session::START_TIMEOUT.as_secs()
             ))
         });
-    drop(client);
     let to = match &sent {
         Ok(()) => Lifecycle::Live,
         Err(why) => {
@@ -227,18 +233,184 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
             Lifecycle::Failed
         }
     };
-    match daemon
+    let advanced = match daemon
         .db
         .advance_lifecycle(uid.clone(), Lifecycle::Starting, to)
         .await
     {
-        Ok(true) => {}
-        Ok(false) => crate::log_info!("{uid}: the run had already ended; it is left as it is"),
-        Err(err) => crate::log_error!("{uid}: could not mark the run {to:?}: {err:#}"),
-    }
+        Ok(true) => true,
+        Ok(false) => {
+            crate::log_info!("{uid}: the run had already ended; it is left as it is");
+            false
+        }
+        Err(err) => {
+            crate::log_error!("{uid}: could not mark the run {to:?}: {err:#}");
+            false
+        }
+    };
     if sent.is_err() {
+        drop(client);
         stop(&uid, send.leader, send.boot).await;
+    } else if advanced {
+        let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
+        link(daemon, uid, client, adapter, None).await;
     }
+}
+
+/// A turn a resume found still running, and the resume to send once more when it ends: the
+/// items it finished while no connection was subscribed are in no notification, and the
+/// answer read while it ran does not describe them.
+struct Owed {
+    thread: String,
+    turn: String,
+    resume: Value,
+}
+
+/// The run's link (P3 R1): every notification its one connection brings, in order, mapped
+/// by the Codex adapter and filed ([`Daemon::ingest`]) for both apps, until the connection
+/// ends; then the run is ended if its app-server is gone, as at a Claude link's end
+/// ([`crate::claude_host::end_if_host_gone`]). The end of the `owed` turn brings its one
+/// follow-up resume, whose answer is filed the same way.
+async fn link(
+    daemon: Arc<Daemon>,
+    uid: String,
+    mut client: Client,
+    mut adapter: CodexAdapter,
+    mut owed: Option<Owed>,
+) {
+    daemon.host_link_attached(&uid, None).await;
+    while let Some(frame) = client.notification().await {
+        let ended = (frame["method"] == "turn/completed")
+            .then(|| frame["params"]["turn"]["id"].as_str().map(str::to_string))
+            .flatten();
+        file(&daemon, &uid, adapter.ingest(&frame)).await;
+        let Some(due) = owed.take_if(|owed| ended.as_deref() == Some(owed.turn.as_str())) else {
+            continue;
+        };
+        match tokio::time::timeout(
+            crate::start_session::START_TIMEOUT,
+            client.call("thread/resume", due.resume),
+        )
+        .await
+        {
+            Ok(Ok(answer)) => {
+                resumed(&daemon, &uid, &mut adapter, &answer, &due.thread).await;
+            }
+            Ok(Err(err)) => {
+                crate::log_info!(
+                    "{uid}: the follow-up resume after turn {} failed: {err}",
+                    due.turn
+                )
+            }
+            Err(_) => crate::log_info!(
+                "{uid}: the follow-up resume after turn {} was not answered within {} s",
+                due.turn,
+                crate::start_session::START_TIMEOUT.as_secs()
+            ),
+        }
+    }
+    daemon.host_link_detached(&uid).await;
+    crate::claude_host::end_if_host_gone(&daemon, &uid).await;
+}
+
+/// File `events` in order ([`Daemon::ingest`]: once each, then out to every subscriber).
+async fn file(daemon: &Daemon, uid: &str, events: Vec<PendingEvent>) {
+    for pending in events {
+        if let Err(err) = daemon.ingest(pending).await {
+            crate::log_error!("{uid}: could not file a Codex event: {err:#}");
+        }
+    }
+}
+
+/// A `thread/resume` answer's facts filed, then the adapter told what was filed; the turns
+/// the answer reports still running.
+async fn resumed(
+    daemon: &Daemon,
+    uid: &str,
+    adapter: &mut CodexAdapter,
+    answer: &Value,
+    thread: &str,
+) -> Vec<String> {
+    let Some(mut seed) = adapter.plan_resume_seed(answer, thread) else {
+        crate::log_info!("{uid}: Codex's resume answer for thread {thread} was not read");
+        return Vec::new();
+    };
+    file(daemon, uid, seed.take_events()).await;
+    adapter.apply_resume_seed(&seed);
+    seed.running_turn_ids().to_vec()
+}
+
+/// A restarted ccd's link to the `live` run `run`, whose recorded app-server is alive (P3
+/// R2): its socket, `initialize`, a fresh skills scan, then `thread/resume` with the preset
+/// and the run's thread config, the answer filed, and the run's [`link`] from there. Codex
+/// restores the thread's model itself; the resume carries the preset and the thread config,
+/// as the start did. A turn the answer reports running is owed its follow-up. Anything that
+/// fails, within START_TIMEOUT, leaves the run `live` and unlinked, and is logged.
+pub(crate) async fn reconnect(
+    daemon: Arc<Daemon>,
+    root: PathBuf,
+    run: LiveCodexRun,
+    codeconnect: PathBuf,
+) {
+    let uid = run.host.session_uid.clone();
+    let resumed = tokio::time::timeout(
+        crate::start_session::START_TIMEOUT,
+        resume(&daemon, &root, &run, &codeconnect),
+    )
+    .await;
+    match resumed {
+        Ok(Ok((client, adapter, owed))) => link(daemon, uid, client, adapter, owed).await,
+        Ok(Err(why)) => crate::log_info!("{uid}: not reconnected: {why}"),
+        Err(_) => crate::log_info!(
+            "{uid}: not reconnected within {} s",
+            crate::start_session::START_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+async fn resume(
+    daemon: &Daemon,
+    root: &Path,
+    run: &LiveCodexRun,
+    codeconnect: &Path,
+) -> Result<(Client, CodexAdapter, Option<Owed>), String> {
+    let uid = &run.host.session_uid;
+    let socket = crate::claude_host::run_dir(root, uid).join("as.sock");
+    let client = crate::codex_client::connect(&socket)
+        .await
+        .map_err(|err| format!("could not reach Codex's app-server: {err:#}"))?;
+    client
+        .initialize()
+        .await
+        .map_err(|err| format!("Codex's app-server did not initialize: {err}"))?;
+    let folders = folders(&run.cwd, daemon.config.git_bin.as_deref()).await?;
+    let skills = client
+        .call(
+            "skills/list",
+            json!({"cwds": [&run.cwd], "forceReload": true}),
+        )
+        .await
+        .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
+    let mut params = thread_params(&run.cwd, None);
+    params["threadId"] = json!(run.thread);
+    params["config"] = thread_config(uid, &codeconnect.to_string_lossy(), &folders, &skills);
+    let answer = client
+        .call("thread/resume", params.clone())
+        .await
+        .map_err(|err| format!("Codex did not resume the thread: {err}"))?;
+    let mut adapter = CodexAdapter::new(SessionKey::new(uid, uid));
+    let running = resumed(daemon, uid, &mut adapter, &answer, &run.thread).await;
+    crate::log_info!(
+        "{uid}: connected again to its app-server; thread {} resumed, {} turn(s) still running",
+        run.thread,
+        running.len()
+    );
+    let owed = running.into_iter().next().map(|turn| Owed {
+        thread: run.thread.clone(),
+        turn,
+        resume: params,
+    });
+    Ok((client, adapter, owed))
 }
 
 /// `skills/list`, `thread/start`, the thread recorded, then `turn/start` with the first
@@ -252,7 +424,7 @@ async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Resul
         .await
         .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
     let mut params = thread_params(&send.cwd, send.model.as_deref());
-    params["config"] = thread_config(send, &skills);
+    params["config"] = thread_config(&send.uid, &send.codeconnect, &send.folders, &skills);
     let started = client
         .call("thread/start", params)
         .await
@@ -295,12 +467,11 @@ fn thread_params(cwd: &str, model: Option<&str>) -> Value {
     })
 }
 
-/// The run's thread config (P3 L4): its folders untrusted, the repository's own skills
-/// that `skills/list` reported disabled, and CodeConnect's mail server with the run's uid,
-/// which Codex hands an MCP server only through its `env`.
-fn thread_config(send: &FirstSend, skills: &Value) -> Value {
-    let projects: serde_json::Map<String, Value> = send
-        .folders
+/// The run `uid`'s thread config (P3 L4): its `folders` untrusted, the repository's own
+/// skills that `skills/list` reported disabled, and CodeConnect's mail server, run by
+/// `codeconnect` with the run's uid, which Codex hands an MCP server only through its `env`.
+fn thread_config(uid: &str, codeconnect: &str, folders: &[PathBuf], skills: &Value) -> Value {
+    let projects: serde_json::Map<String, Value> = folders
         .iter()
         .map(|folder| {
             (
@@ -312,9 +483,9 @@ fn thread_config(send: &FirstSend, skills: &Value) -> Value {
     let mut config = json!({
         "projects": projects,
         "mcp_servers.codeconnect": {
-            "command": send.codeconnect,
-            "args": protocol::ipc::mail_server_args(&send.uid, &protocol::socket_path()),
-            "env": {protocol::ENV_SESSION_UID: send.uid},
+            "command": codeconnect,
+            "args": protocol::ipc::mail_server_args(uid, &protocol::socket_path()),
+            "env": {protocol::ENV_SESSION_UID: uid},
         },
     });
     let disabled: Vec<Value> = skills["data"]
@@ -730,11 +901,10 @@ mod tests {
     async fn a_codex_start_launches_after_the_claim_records_its_leader_and_initializes() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
-        let (result, (seen, ws)) = tokio::join!(
+        let (result, (seen, _ws)) = tokio::join!(
             start(&rig.daemon, run(&rig, "req-1", &codex)),
             play_app_server(&rig, whole_start())
         );
-        until_closed(ws).await;
         let uid = started_uid(&result);
         assert_eq!(
             result,
@@ -798,12 +968,12 @@ mod tests {
     async fn the_leader_leads_its_own_group_and_session() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
-        let (result, (_, ws)) = tokio::join!(
+        let (result, (_, _ws)) = tokio::join!(
             start(&rig.daemon, run(&rig, "req-group", &codex)),
             play_app_server(&rig, whole_start())
         );
-        until_closed(ws).await;
         let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
         let watch = rig
             .daemon
             .db
@@ -824,16 +994,15 @@ mod tests {
     /// folder, the start's model, the preset and the keep-out config (the folder
     /// untrusted, the repository's skill disabled and the user's kept, CodeConnect's mail
     /// server with the run's uid), the thread recorded on the row, then `turn/start` with
-    /// the first message under the start's uuid. The connection is let go after it.
+    /// the first message under the start's uuid. The connection is kept as the run's link.
     #[tokio::test]
     async fn a_started_codex_run_sends_its_first_message_on_its_own_thread_and_goes_live() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
-        let (result, (mut seen, ws)) = tokio::join!(
+        let (result, (seen, _ws)) = tokio::join!(
             start(&rig.daemon, run(&rig, "req-first", &codex)),
             play_app_server(&rig, whole_start())
         );
-        seen.extend(until_closed(ws).await);
         let uid = started_uid(&result);
         let row = row_once(&rig, &uid, Lifecycle::Live).await;
         end_run(&rig, &uid).await;
@@ -981,11 +1150,10 @@ mod tests {
     async fn a_live_codex_run_whose_app_server_dies_ends_and_can_be_removed() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
-        let (result, (_, ws)) = tokio::join!(
+        let (result, (_, _ws)) = tokio::join!(
             start(&rig.daemon, run(&rig, "req-dies", &codex)),
             play_app_server(&rig, whole_start())
         );
-        until_closed(ws).await;
         let uid = started_uid(&result);
         row_once(&rig, &uid, Lifecycle::Live).await;
         let leader = rig
@@ -1215,6 +1383,297 @@ mod tests {
             group_ends(leader.pid).await,
             "the orphaned child outlived the restart"
         );
+    }
+
+    /// A Codex turn with a command, as codex sent it (fixtures/codex/command-execution.jsonl).
+    const LIVE_FRAMES: &str = include_str!("../../../fixtures/codex/command-execution.jsonl");
+    /// A turn a resume found running, and the answers before and after its end, as codex
+    /// sent them (fixtures/codex/resume-follow-up-turn-0.164.0.json).
+    const FOLLOW_UP: &str =
+        include_str!("../../../fixtures/codex/resume-follow-up-turn-0.164.0.json");
+
+    /// The method call `method` ccd sends next on `ws`, within 20 s, every other frame before
+    /// it passed over.
+    async fn asked(ws: &mut Socket, method: &str) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let frame = next_frame(ws).await.expect("ccd hung up");
+                if frame["method"] == method && frame.get("id").is_some() {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("ccd did not call {method} within 20 s"))
+    }
+
+    async fn answer(ws: &mut Socket, asked: &serde_json::Value, result: serde_json::Value) {
+        let reply = json!({"id": asked["id"], "result": result});
+        ws.send(Message::Text(reply.to_string())).await.unwrap();
+    }
+
+    async fn tell(ws: &mut Socket, frame: &serde_json::Value) {
+        ws.send(Message::Text(frame.to_string())).await.unwrap();
+    }
+
+    /// The source ids of the run's filed events once one ends with `last`, within 10 s.
+    async fn filed_until(daemon: &Daemon, uid: &str, last: &str) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let ids: Vec<String> = daemon
+                .db
+                .events_after(uid.to_string(), 0, 10_000)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|event| event.source_event_id)
+                .collect();
+            if ids.iter().any(|id| id.ends_with(last)) || Instant::now() >= deadline {
+                return ids;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    fn count(ids: &[String], end: &str) -> usize {
+        ids.iter().filter(|id| id.ends_with(end)).count()
+    }
+
+    async fn link_of(daemon: &Daemon, uid: &str) -> Option<protocol::event::Link> {
+        daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.session_uid == uid)
+            .map(|session| session.link)
+    }
+
+    /// **G1: the start's connection is kept as the run's link.** Codex announces the thread
+    /// before it answers the first turn, while the row is still `starting`; the rest of the
+    /// turn, a command among it, follows. Each fact is filed once, the command's call and
+    /// its result as two, and the run reads linked. Once its app-server is gone and the
+    /// connection ends, the run ends `exited`.
+    #[tokio::test]
+    async fn a_started_runs_connection_is_kept_and_each_event_filed_once() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let frames: Vec<serde_json::Value> = LIVE_FRAMES
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let thread = frames[1]["params"]["thread"]["id"].clone();
+        let tool = frames[16]["params"]["item"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let turn = frames[29]["params"]["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut script = whole_start();
+        script.truncate(3);
+        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
+        let (result, ws) = tokio::join!(start(&rig.daemon, run(&rig, "req-kept", &codex)), async {
+            let (_, mut ws) = play_app_server(&rig, script).await;
+            let first_turn = asked(&mut ws, "turn/start").await;
+            tell(&mut ws, &frames[1]).await;
+            answer(&mut ws, &first_turn, json!({"turn": {"id": turn}})).await;
+            for frame in &frames[2..] {
+                tell(&mut ws, frame).await;
+            }
+            ws
+        });
+        let uid = started_uid(&result);
+        let ids = filed_until(&rig.daemon, &uid, &format!(":turn:{turn}")).await;
+        assert_eq!(count(&ids, ":thread_started"), 1, "{ids:?}");
+        assert_eq!(count(&ids, &format!(":pre:{tool}")), 1, "{ids:?}");
+        assert_eq!(count(&ids, &format!(":post:{tool}")), 1, "{ids:?}");
+        for message in [&frames[10], &frames[25]] {
+            let item = message["params"]["item"]["id"].as_str().unwrap();
+            assert_eq!(count(&ids, &format!(":item:{item}")), 1, "{ids:?}");
+        }
+        assert_eq!(count(&ids, &format!(":turn:{turn}")), 1, "{ids:?}");
+        assert_eq!(
+            link_of(&rig.daemon, &uid).await,
+            Some(protocol::event::Link::Attached)
+        );
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        end_run(&rig, &uid).await;
+        assert!(group_ends(leader).await);
+        drop(ws);
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+    }
+
+    /// **A linked Codex run whose leader dies alone is ended by the sweep** (X2 decision 1's
+    /// npm-launcher case): with the launcher killed, its child still in the group and the
+    /// connection still open, the liveness sweep runs the ladder on the group and ends the run
+    /// `exited`.
+    #[tokio::test]
+    async fn a_linked_codex_run_whose_leader_dies_alone_is_ended_by_the_sweep() {
+        let rig = rig();
+        let codex = stand_in(&rig, "sleep 30 &\necho $! > child\nwait");
+        let (result, (_, _ws)) = tokio::join!(
+            start(&rig.daemon, run(&rig, "req-leader-dies", &codex)),
+            play_app_server(&rig, whole_start())
+        );
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        assert_eq!(
+            link_of(&rig.daemon, &uid).await,
+            Some(protocol::event::Link::Attached)
+        );
+        let dir = run_folder(&rig).await;
+        while !dir.join("child").exists() {
+            tokio::time::sleep(POLL).await;
+        }
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host;
+        // SAFETY: kill(2) of the rig's own stand-in leader, which this test launched.
+        unsafe { libc::kill(leader.pid, libc::SIGKILL) };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while protocol::proc_identity::liveness(&leader)
+                != protocol::proc_identity::Liveness::Gone
+            {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the killed leader is gone");
+        assert!(group_alive(leader.pid), "the leader's child left its group");
+        rig.daemon.watch_hosted_runs().await;
+        assert!(
+            group_ends(leader.pid).await,
+            "the orphaned child outlived the sweep"
+        );
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+    }
+
+    /// **G2: a `live` run is connected again at a restart.** The restarted ccd resumes the
+    /// run's thread with the preset and its thread config, and files the answer. The answer
+    /// reports a turn still running, whose command finished while no ccd listened; when that
+    /// turn ends, ccd resumes once more and files the command, once.
+    #[tokio::test]
+    async fn a_live_run_is_connected_again_at_a_restart_and_its_running_turn_followed_up() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let thread = capture["answerMidTurn"]["result"]["thread"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let after = &capture["answerAfter"]["result"]["thread"]["turns"];
+        let item_of = |kind: &str| {
+            after[1]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == kind)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (command, message) = (item_of("commandExecution"), item_of("agentMessage"));
+        let turns = [after[0]["id"].clone(), after[1]["id"].clone()];
+        let mut script = whole_start();
+        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
+        let (result, (_, first)) = tokio::join!(
+            start(&rig.daemon, run(&rig, "req-again", &codex)),
+            play_app_server(&rig, script)
+        );
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        // The first ccd's connection ends with it; the app-server lives on, listening anew.
+        drop(first);
+        let dir = run_folder(&rig).await;
+        std::fs::remove_file(dir.join("as.sock")).unwrap();
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        let ((), ((first_resume, follow_up), ws)) = tokio::join!(
+            restarted.recover_codex_runs(&rig.root, Ok(PathBuf::from(CODECONNECT))),
+            async {
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+                    .await
+                    .expect("ccd connected again")
+                    .unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let init = asked(&mut ws, "initialize").await;
+                answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+                let skills = asked(&mut ws, "skills/list").await;
+                answer(&mut ws, &skills, json!({"data": []})).await;
+                let first_resume = asked(&mut ws, "thread/resume").await;
+                answer(
+                    &mut ws,
+                    &first_resume,
+                    capture["answerMidTurn"]["result"].clone(),
+                )
+                .await;
+                for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+                    tell(&mut ws, frame).await;
+                }
+                let follow_up = asked(&mut ws, "thread/resume").await;
+                answer(
+                    &mut ws,
+                    &follow_up,
+                    capture["answerAfter"]["result"].clone(),
+                )
+                .await;
+                ((first_resume, follow_up), ws)
+            }
+        );
+        for resume in [&first_resume, &follow_up] {
+            let params = &resume["params"];
+            assert_eq!(params["threadId"], thread.as_str());
+            assert_eq!(params["approvalPolicy"], "on-request");
+            assert_eq!(params["sandbox"], "workspace-write");
+            assert!(params["config"]["projects"].is_object(), "{params}");
+            assert!(
+                params["config"]["mcp_servers.codeconnect"].is_object(),
+                "{params}"
+            );
+        }
+        let ids = filed_until(&restarted, &uid, &format!(":post:{command}")).await;
+        assert_eq!(count(&ids, &format!(":post:{command}")), 1, "{ids:?}");
+        assert_eq!(
+            ids.iter().filter(|id| id.contains(&message)).count(),
+            1,
+            "{ids:?}"
+        );
+        for turn in &turns {
+            assert_eq!(
+                count(&ids, &format!(":turn:{}", turn.as_str().unwrap())),
+                1,
+                "{ids:?}"
+            );
+        }
+        assert_eq!(
+            link_of(&restarted, &uid).await,
+            Some(protocol::event::Link::Attached)
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 
     /// `git -C dir <args>`, quietly.

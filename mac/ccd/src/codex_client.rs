@@ -4,10 +4,11 @@
 //! [`dial`] is the one WebSocket dial ccd makes to a Codex socket; codex_link's control link
 //! calls it too. A [`Client`] holds one connection. Its calls carry ids counting from 1, and
 //! its reader task hands each response to the call with that id. A frame with a `method` is
-//! the server's own request or notification, never a response, so an id the server puts on
-//! its request never takes a call's answer; ccd subscribes to none of them yet, and they are
-//! dropped. Dropping the client stops the reader, which closes the socket. When the
-//! connection ends, every call still open gets [`CallError::Closed`].
+//! the server's own, never a response, so an id the server puts on its request never takes a
+//! call's answer. One with no `id` is a notification, kept in order for the client's owner
+//! ([`Client::notification`]). One with an `id` is the server's request, which ccd answers
+//! none of yet, so it is dropped. Dropping the client stops the reader, which closes the
+//! socket. When the connection ends, every call still open gets [`CallError::Closed`].
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,7 +21,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 
@@ -96,6 +97,7 @@ pub(crate) struct Client {
     open: OpenCalls,
     next_id: AtomicI64,
     reader: tokio::task::JoinHandle<()>,
+    notifications: mpsc::UnboundedReceiver<Value>,
 }
 
 impl Drop for Client {
@@ -113,12 +115,20 @@ impl Client {
     fn over(socket: Socket) -> Client {
         let (sink, stream) = socket.split();
         let open: OpenCalls = Arc::new(Mutex::new(Some(HashMap::new())));
+        let (notified, notifications) = mpsc::unbounded_channel();
         Client {
             sink: tokio::sync::Mutex::new(sink),
-            reader: tokio::spawn(read(stream, Arc::clone(&open))),
+            reader: tokio::spawn(read(stream, Arc::clone(&open), notified)),
             open,
             next_id: AtomicI64::new(1),
+            notifications,
         }
+    }
+
+    /// The server's next notification, in the order it was sent, from the connection's
+    /// first; `None` once the connection has ended and every one has been taken.
+    pub(crate) async fn notification(&mut self) -> Option<Value> {
+        self.notifications.recv().await
     }
 
     /// The handshake: `initialize` as CodeConnect's daemon, with the experimental API
@@ -165,9 +175,13 @@ impl Client {
     }
 }
 
-/// The connection's reader: each response to its call, until the connection ends; then
-/// every call still open is told it is closed.
-async fn read(mut stream: SplitStream<Socket>, open: OpenCalls) {
+/// The connection's reader: each response to its call and each notification to `notified`,
+/// until the connection ends; then every call still open is told it is closed.
+async fn read(
+    mut stream: SplitStream<Socket>,
+    open: OpenCalls,
+    notified: mpsc::UnboundedSender<Value>,
+) {
     while let Some(Ok(message)) = stream.next().await {
         let text = match message {
             Message::Text(text) => text,
@@ -178,6 +192,9 @@ async fn read(mut stream: SplitStream<Socket>, open: OpenCalls) {
             continue;
         };
         if frame.contains_key("method") {
+            if !frame.contains_key("id") {
+                let _ = notified.send(Value::Object(frame));
+            }
             continue;
         }
         let Some(id) = frame.get("id").and_then(Value::as_i64) else {
@@ -306,6 +323,36 @@ mod tests {
             say(&mut server, json!({"id": id, "result": "again"})).await;
         });
         assert_eq!(again, Ok(json!("again")));
+    }
+
+    #[tokio::test]
+    async fn notifications_reach_the_owner_in_order_and_requests_do_not() {
+        let (mut client, mut server) = pair().await;
+        say(
+            &mut server,
+            json!({"id": 7, "method": "item/commandExecution/requestApproval", "params": {}}),
+        )
+        .await;
+        say(
+            &mut server,
+            json!({"method": "thread/started", "params": {"n": 1}}),
+        )
+        .await;
+        say(
+            &mut server,
+            json!({"method": "turn/completed", "params": {"n": 2}}),
+        )
+        .await;
+        server.close(None).await.unwrap();
+        assert_eq!(
+            client.notification().await,
+            Some(json!({"method": "thread/started", "params": {"n": 1}}))
+        );
+        assert_eq!(
+            client.notification().await,
+            Some(json!({"method": "turn/completed", "params": {"n": 2}}))
+        );
+        assert_eq!(client.notification().await, None);
     }
 
     #[tokio::test]

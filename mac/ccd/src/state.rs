@@ -466,10 +466,11 @@ struct Inner {
     /// Keyed by `session_uid`. A second run of the same name gets its own slot
     /// instead of evicting the first's supervisor.
     supervisors: HashMap<String, SupervisorHandle>,
-    /// Hosted Claude runs whose agent host this daemon is attached to now, by
-    /// `session_uid` ([`crate::claude_host`]), each with its link's way to send the host a
-    /// command: what makes such a run's link read attached, since it has no supervisor.
-    host_links: HashMap<String, tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>,
+    /// Hosted runs whose agent host or app-server this daemon is attached to now, by
+    /// `session_uid`: what makes such a run's link read attached, since it has no supervisor.
+    /// A Claude run's link ([`crate::claude_host`]) carries its way to send the host a
+    /// command; a Codex run's ([`crate::codex_host`]) carries none.
+    host_links: HashMap<String, Option<tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -9758,12 +9759,12 @@ impl Daemon {
         ))
     }
 
-    /// The run `session_uid`'s agent host is attached ([`crate::claude_host`]), and
-    /// `commands` reaches it.
+    /// The run `session_uid`'s agent host or app-server is attached, and `commands`, a
+    /// Claude run's ([`crate::claude_host`]), reaches its host.
     pub(crate) async fn host_link_attached(
         &self,
         session_uid: &str,
-        commands: tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>,
+        commands: Option<tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>,
     ) {
         self.inner
             .lock()
@@ -9780,8 +9781,8 @@ impl Daemon {
         command: protocol::host::ToHost,
     ) -> bool {
         match self.inner.lock().await.host_links.get(session_uid) {
-            Some(link) => link.send(command).is_ok(),
-            None => false,
+            Some(Some(link)) => link.send(command).is_ok(),
+            _ => false,
         }
     }
 
@@ -9852,11 +9853,13 @@ impl Daemon {
         }
     }
 
-    /// H7 for a run whose link has ended: each hosted run that has not ended and whose host
-    /// is not attached is checked by its recorded identity, and a host gone ends its run
-    /// ([`crate::claude_host::end_if_host_gone`]), each in a task of its own. On the
-    /// liveness tick, beside the tmux sweep rather than inside it, so the sweep's no-tmux
-    /// return never skips it.
+    /// H7: each hosted run that has not ended is checked by its recorded identity, and a host
+    /// gone ends its run ([`crate::claude_host::end_if_host_gone`]), each in a task of its
+    /// own; but a Claude run whose host's link is attached, since that host is the link's
+    /// peer and its group's leader, so the link's end checks it. A Codex run is checked even
+    /// while linked: its leader is the launch's, which can die alone while its app-server
+    /// keeps the link. On the liveness tick, beside the tmux sweep rather than inside it, so
+    /// the sweep's no-tmux return never skips it.
     pub async fn watch_hosted_runs(self: &Arc<Self>) {
         let watched = match self.db.watched_hosts().await {
             Ok(watched) => watched,
@@ -9865,8 +9868,15 @@ impl Daemon {
                 return;
             }
         };
-        let attached: HashSet<String> =
-            self.inner.lock().await.host_links.keys().cloned().collect();
+        let attached: HashSet<String> = self
+            .inner
+            .lock()
+            .await
+            .host_links
+            .iter()
+            .filter(|(_, commands)| commands.is_some())
+            .map(|(uid, _)| uid.clone())
+            .collect();
         for watch in watched {
             if attached.contains(&watch.session_uid) {
                 continue;
@@ -9886,9 +9896,7 @@ impl Daemon {
     /// whose run has ended is drained, so it can exit. A run stopping is sent `stop` again
     /// and its escalation starts again ([`crate::claude_host::escalate_stop`]), so a host
     /// that cannot answer is still stopped. A host gone is the liveness watch's
-    /// ([`Self::watch_hosted_runs`]). Last, every Codex run still `starting` becomes
-    /// `failed`, whatever became of its start, and each recorded app-server's group gets the
-    /// ladder under its warrant, each in a task of its own: a start is never sent again.
+    /// ([`Self::watch_hosted_runs`]). Last, the Codex runs ([`Self::recover_codex_runs`]).
     pub async fn recover_hosted_runs(self: &Arc<Self>, root: &std::path::Path) {
         match self.db.fail_unhosted_starts().await {
             Ok(0) => {}
@@ -9923,6 +9931,21 @@ impl Daemon {
                 watch.host,
             ));
         }
+        self.recover_codex_runs(root, codex_launcher()).await;
+    }
+
+    /// The Codex half of [`Self::recover_hosted_runs`], before any socket is open. Every
+    /// Codex run still `starting` becomes `failed`, whatever became of its start, and each
+    /// recorded app-server's group gets the ladder under its warrant, each in a task of its
+    /// own: a start is never sent again. Then every `live` Codex run whose recorded
+    /// app-server is alive is connected again ([`crate::codex_host::reconnect`]), each in a
+    /// task of its own, with `launcher` as the `codeconnect` its thread config names; one
+    /// whose app-server is gone is the liveness watch's.
+    pub(crate) async fn recover_codex_runs(
+        self: &Arc<Self>,
+        root: &std::path::Path,
+        launcher: Result<std::path::PathBuf, String>,
+    ) {
         match self.db.fail_codex_starts().await {
             Ok((0, _)) => {}
             Ok((failed, hosts)) => {
@@ -9936,6 +9959,39 @@ impl Daemon {
                 }
             }
             Err(err) => crate::log_error!("could not fail the Codex runs still starting: {err:#}"),
+        }
+        let live = match self.db.codex_live_runs().await {
+            Ok(live) => live,
+            Err(err) => {
+                crate::log_error!("could not read the live Codex runs to connect again: {err:#}");
+                return;
+            }
+        };
+        if live.is_empty() {
+            return;
+        }
+        let codeconnect = match launcher {
+            Ok(codeconnect) => codeconnect,
+            Err(why) => {
+                crate::log_info!(
+                    "{} live Codex run(s) were not connected again: {why}",
+                    live.len()
+                );
+                return;
+            }
+        };
+        for run in live {
+            if protocol::proc_identity::liveness(&run.host.host)
+                != protocol::proc_identity::Liveness::Alive
+            {
+                continue;
+            }
+            tokio::spawn(crate::codex_host::reconnect(
+                Arc::clone(self),
+                root.to_path_buf(),
+                run,
+                codeconnect.clone(),
+            ));
         }
     }
 
