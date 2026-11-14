@@ -157,7 +157,7 @@ codeconnect daemon install        # write the LaunchAgent and start it
 codeconnect daemon status         # plist, launchd job and live daemon, side by side
 codeconnect daemon restart        # launchctl kickstart -k
 codeconnect daemon folders        # let ccd open Desktop, Documents and Downloads
-codeconnect daemon uninstall      # end its Claude runs, stop it and remove the LaunchAgent
+codeconnect daemon uninstall      # end its runs, stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
 codeconnect devices               # paired devices
@@ -588,10 +588,11 @@ sessions are in tmux and the log is in SQLite.
 up new binaries without rewriting the plist. A daemon too old to answer
 `daemon_info` is identified through `lsof` on its socket rather than guessed at.
 
-`codeconnect daemon uninstall` first asks ccd to end each Claude run whose agent host
-still runs, as an app's `stop_run` ends one, since a host outlives ccd by design and would
-run on with no daemon; it prints how many it ended. When ccd is not running, it names the
-agent hosts still running by pid instead, for the person to end. It removes the plist only
+`codeconnect daemon uninstall` first asks ccd to end each run it started whose host still
+runs, a Claude run's agent host or a Codex run's app-server, as an app's `stop_run` ends
+one, since a host outlives ccd by design and would run on with no daemon; it prints how
+many it ended. When ccd is not running, it names the hosts still running by pid instead:
+an agent host from its `host.json`, a Codex run's app-server from its `as.pid`. It removes the plist only
 once `launchctl bootout` has actually succeeded. An unrecognised failure there means the job may still be
 loaded, and deleting its definition would leave a daemon that nothing can
 manage, restart or stop.
@@ -1166,8 +1167,8 @@ is attached, is sent `stop`, which interrupts claude, ends its input and closes 
 claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
 for it. A host that has not exited 10 s after the stop, told or not, has its group stopped by
 the same ladder, and the run ends "Stopped" too. A run still starting is refused, and one that has ended answers
-`already_ended`. A ccd restart sends a stopping run `stop` again and starts its 10 s again. A Codex run is refused: only a Claude run CodeConnect
-started can be ended from here.
+`already_ended`. A ccd restart sends a stopping run `stop` again and starts its 10 s again. A run CodeConnect
+did not start is refused.
 A Codex start that goes on is checked the same way: the daemon finds the codex the
 launcher would run, from the same list as `codex_bin` without `CODECONNECT_CODEX_BIN`,
 and asks it its `--version`. It is `agent_missing` when none is found, and
@@ -1198,9 +1199,12 @@ Codex reports on it (the thread, each message once it is finished, each command 
 file change as its call and then its result, the turn's end) is filed once and
 reaches both apps. Codex's own requests come on it too. A command, a file change or an
 MCP tool call that Codex asks to run (CodeConnect's own `send_message` among them)
-becomes a card on both apps. It offers the answers Codex offers for it, among Allow,
-Allow for this session and Deny, but never Codex's permanent "don't ask again for
-commands that start with …", which would write Codex's settings. The answer goes to
+becomes a card on both apps. It offers the answers Codex offers for it among accept,
+accept for this session, decline and cancel, under the words the apps show: a command's
+"Yes, proceed" and "No, and tell Codex what to do differently" (cancel, which ends the
+turn); a file change's also "Yes, and don't ask again for these files"; an MCP tool
+call's "Allow", "Allow for this session" and "Deny". It never offers Codex's permanent
+"don't ask again for commands that start with …", which would write Codex's settings. The answer goes to
 Codex, and the card closes once Codex confirms it, or when its item or turn ends. Any
 other request Codex sends, a question for the person or a form an MCP server asks for
 among them, is answered at once with an error, so the turn goes on. Nothing is
@@ -1209,7 +1213,20 @@ refused before its row. A start that fails once codex is launched (codex ends, d
 listen, or does not take the first message within 80 s, before or after the answer) is
 `failed`, and so is its run, whose process group then gets SIGTERM, and SIGKILL 5 s
 later only while members remain, under the same warrant. A `live` run whose app-server
-dies ends `exited`, "Stopped: its process ended", as a Claude run does. A run that a
+dies ends `exited`, "Stopped: its process ended", as a Claude run does.
+An app ends a live Codex run with `stop_run` as it ends a Claude run: the run becomes
+`stopping`, and its link interrupts the turn Codex is running and sends the app-server's
+process group SIGTERM, so Codex finishes and exits, and the run ends `exited`, "Stopped".
+An app-server that has not exited 10 s later gets the same ladder (a second SIGTERM, then
+SIGKILL 5 s later while members remain), and a ccd restart starts that 10 s again for a run
+still stopping. An app's Stop (`interrupt`) stops the turn it names through the same link,
+and is answered when that turn ends: `aborted` with the turn when Codex ended it
+interrupted, or, if the turn finished on its own first, a sentence saying so. A card the
+turn was waiting on closes. A retry with the same request id is answered from the first,
+and a Stop for a turn whose stop is already on its way is refused at once. While a run's
+link is not attached, before its reconnect or after one that failed, an answer and a Stop
+are refused with "CodeConnect has no connection to this run right now, so nothing was
+sent." A run that a
 restarted daemon finds still `starting` is `failed`, whatever became of its start, before
 the daemon listens, and its recorded process group gets the same ladder under the same
 warrant. Nothing is sent again, so a first message Codex had already taken is lost with
@@ -1763,6 +1780,15 @@ fails the suite instead of failing silently in production.
   seconds ccd takes to restart, ccd cannot show what the change is, so it tells Codex it
   could not read the request: Codex does not make the change, and no card appears. A
   command asked then does get a card.
+* **On a Codex run started from an app, a command Codex started can outlive an End run
+  that had to force Codex's app-server to stop.** End run asks Codex to finish and exit.
+  An app-server that has not exited 10 s later is ended by force, and a command it had
+  started, which runs in a process group of its own, can go on running.
+* **On a Codex run started from an app, End run can show "stopping" for up to a minute
+  after Codex has gone, when ccd has no connection to the run.** That happens when ccd
+  restarts while the run is stopping, or when End run follows a reconnect that failed.
+  Codex is still ended by force, and the run reads ended at ccd's next check of its runs,
+  every 60 s by default.
 * **On a Codex run started from an app, every one of CodeConnect's mail tools asks
   first.** `list_agents` and `read_messages` show a card like `send_message` until they
   are marked as only reading.

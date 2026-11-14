@@ -132,9 +132,10 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
-    /// `codeconnect daemon uninstall`, before it removes the daemon: end every Claude
-    /// run whose agent host is still running, as [`crate::ws::ClientMessage::StopRun`]
-    /// ends one, since a host outlives ccd by design and would run on with no daemon.
+    /// `codeconnect daemon uninstall`, before it removes the daemon: end every run ccd
+    /// started whose host is still running, a Claude run's agent host or a Codex run's
+    /// app-server, as [`crate::ws::ClientMessage::StopRun`] ends one, since a host
+    /// outlives ccd by design and would run on with no daemon.
     /// Answered with [`DaemonFrame::HostedRunsStopped`] once every such host has exited,
     /// or after 20 s.
     StopHostedRuns,
@@ -343,8 +344,9 @@ pub enum DaemonFrame {
     HostedRunsStopped {
         /// Runs this request ended.
         stopped: usize,
-        /// The pids of agent hosts still running at the answer: a run still starting,
-        /// which is not stopped, or a host that had not exited within 20 s.
+        /// The pids of hosts still running at the answer, Claude runs' agent hosts and
+        /// Codex runs' app-servers: a run still starting, which is not stopped, or a host
+        /// that had not exited within 20 s.
         left: Vec<u32>,
     },
     Folders {

@@ -321,8 +321,11 @@ impl Db {
             .await
     }
 
-    pub async fn recorded_hosts(&self) -> Result<Vec<crate::store::WatchedHost>> {
-        self.run(|store| store.recorded_hosts()).await
+    pub async fn recorded_hosts(
+        &self,
+        agent: protocol::agent::AgentKind,
+    ) -> Result<Vec<crate::store::WatchedHost>> {
+        self.run(move |store| store.recorded_hosts(&agent)).await
     }
 
     pub async fn fail_unhosted_starts(&self) -> Result<usize> {

@@ -14,9 +14,9 @@
 //! ccd attaches each host still running again from its run's cursor ([`attach_run`]). An
 //! app's message to a live run goes to its host as `say` ([`send_text`]), and the
 //! person's words are filed once the host has taken them. An
-//! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop` if its link
-//! is attached, and a host that has not exited 10 s later is stopped by its group
-//! ([`escalate_stop`]).
+//! app ends a live run ([`stop_run`]), a Codex run on the engine as well: it is `stopping`,
+//! its link takes the graceful step if it is attached (a Claude host is sent `stop`), and a
+//! host that has not exited 10 s later is stopped by its group ([`escalate_stop`]).
 //!
 //! The lines are [`protocol::host`]'s; the host is mac/agent-host.
 
@@ -838,6 +838,17 @@ pub(crate) async fn stop_group(host: ProcessIdentity, boot: BootIdentity) -> Lad
     Ladder::Done
 }
 
+/// One SIGTERM to the process group `host` leads, under the warrant, if it has members:
+/// the graceful first step of ending a Codex run, whose app-server drains and exits.
+/// Whether it was sent.
+pub(crate) fn term_group(host: &ProcessIdentity, boot: BootIdentity) -> bool {
+    if group_warrant(host, boot) != GroupWarrant::Warranted || !group_has_members(host.pid) {
+        return false;
+    }
+    // SAFETY: kill(2) of the run's process group, which the warrant ties to its leader.
+    unsafe { libc::kill(-host.pid, libc::SIGTERM) == 0 }
+}
+
 /// H7: when the run `uid` has not ended and its recorded host is gone, the ladder on the
 /// host's group, then the run ends. `starting` → `failed`, as a refused start, with no end
 /// in its timeline, which the apps would read as a session that ran and finished; `live` →
@@ -902,10 +913,12 @@ pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
     }
 }
 
-/// End the hosted Claude run `uid` ([`protocol::ws::ClientMessage::StopRun`], H5): a `live`
-/// run becomes `stopping`, its link sends the host `stop`, and [`escalate_stop`] follows.
-/// One that is stopping is told so again and nothing more is sent; one that has ended is
-/// left as it is. A run still starting is refused: its start's own outcome decides it.
+/// End the hosted run `uid` ([`protocol::ws::ClientMessage::StopRun`], H5), Claude's or
+/// Codex's: a `live` run becomes `stopping`, its link takes the graceful step
+/// ([`Daemon::stop_through_link`]), and [`escalate_stop`] follows. One that is stopping is
+/// told so again and nothing more is sent; one that has ended is left as it is. A run still
+/// starting is refused: its start's own outcome decides it. A run CodeConnect did not start
+/// (no hosted row) is refused, whatever its agent.
 pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
     let refuse = |reason: &str| StopRunResult::Refused {
         reason: reason.to_string(),
@@ -938,13 +951,8 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
             return refuse("This computer could not record the stop.");
         }
     }
-    match protocol::uid::uuid_v4() {
-        Ok(uuid) => {
-            // A host not attached is stopped by the escalation.
-            daemon.send_to_host(uid, ToHost::Stop { uuid }).await;
-        }
-        Err(err) => crate::log_error!("{uid}: could not name its stop: {err}"),
-    }
+    // A run whose link is not attached is stopped by the escalation.
+    daemon.stop_through_link(uid).await;
     tokio::spawn(escalate_stop(Arc::clone(daemon), uid.to_string()));
     StopRunResult::Stopping
 }

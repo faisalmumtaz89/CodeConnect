@@ -33,9 +33,10 @@
 //! after a clean exit, gives it an absolute program and `PATH`, and appends to the
 //! same two log files. Stopping it ends ccd alone (`KillMode=process`), as
 //! launchd ends only the job's own process group, so the helpers ccd starts to
-//! outlive it are left running; `uninstall` first asks ccd to end each Claude run whose
-//! agent host still runs, on both. The unit sets `CODECONNECT_SERVICE` to the label,
-//! which is how ccd knows this unit runs it.
+//! outlive it are left running; `uninstall` first asks ccd to end each run it started
+//! whose host still runs, a Claude run's agent host or a Codex run's app-server, on both.
+//! The unit sets `CODECONNECT_SERVICE` to the label, which is how ccd knows this unit
+//! runs it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -136,7 +137,7 @@ codeconnect daemon — the ccd LaunchAgent
   codeconnect daemon status                    plist, launchd job and live daemon
   codeconnect daemon restart                   restart the managed daemon
   codeconnect daemon folders                   let it open Desktop, Documents, Downloads
-  codeconnect daemon uninstall                 end its Claude runs, stop it and remove the LaunchAgent
+  codeconnect daemon uninstall                 end its runs, stop it and remove the LaunchAgent
 
 Installing stops whatever ccd is running — its own job included, because the
 plist cannot be replaced under a live one. Sessions survive it: they live in
@@ -155,7 +156,7 @@ codeconnect daemon — the ccd systemd user unit
   codeconnect daemon install [--no-takeover]   write the unit and start it
   codeconnect daemon status                    unit, its state and live daemon
   codeconnect daemon restart                   restart the managed daemon
-  codeconnect daemon uninstall                 end its Claude runs, stop it and remove the unit
+  codeconnect daemon uninstall                 end its runs, stop it and remove the unit
 
 Installing stops whatever ccd is running — its own unit's included, so the new
 definition is the one that runs. Sessions survive it: they live in tmux and
@@ -270,74 +271,90 @@ fn install(args: &[String]) -> Result<()> {
 }
 
 /// How long `daemon uninstall` waits for ccd's answer to [`ClientFrame::StopHostedRuns`],
-/// which comes within 20 s, once each agent host has exited.
+/// which comes within 20 s, once each run's agent host or app-server has exited.
 const STOP_HOSTS_WITHIN: Duration = Duration::from_secs(25);
 
 /// `daemon uninstall`'s first step, before ccd goes: ask the daemon at `socket` to end
-/// every Claude run whose agent host still runs ([`ClientFrame::StopHostedRuns`]). A host
-/// outlives ccd by design, so one left would run on with no daemon. What to tell the
-/// person. When ccd cannot be asked, or its answer does not come, the agent hosts still
-/// running among the runs under `root` are named by pid, so the person can end them.
+/// every run it started whose host still runs, a Claude run's agent host or a Codex run's
+/// app-server ([`ClientFrame::StopHostedRuns`]). A host outlives ccd by design, so one left
+/// would run on with no daemon. What to tell the person. When ccd cannot be asked, or its
+/// answer does not come, the hosts still running among the runs under `root` are named by
+/// pid.
 fn stop_hosted_runs(socket: &Path, root: &Path) -> String {
     let answer = match crate::daemon::DaemonLink::connect(socket, STOP_HOSTS_WITHIN) {
         Ok(mut link) => link.request(&ClientFrame::StopHostedRuns),
         Err(_) => {
             return format!(
-                "ccd is not running, so the agent hosts it started were not stopped{}",
+                "ccd is not running, so the runs it started were not stopped{}",
                 hosts_running(root)
             )
         }
     };
     match answer {
         Ok(DaemonFrame::HostedRunsStopped { stopped, left }) if left.is_empty() => {
-            format!("ended {stopped} Claude run(s) and their agent hosts")
+            format!("ended {stopped} run(s)")
         }
         Ok(DaemonFrame::HostedRunsStopped { stopped, left }) => format!(
-            "ended {stopped} Claude run(s); agent hosts still running, pids {}: end them with \
-             `kill <pid>`",
+            "ended {stopped} run(s); still running, pids {}",
             left.iter()
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         Ok(other) => format!(
-            "could not confirm the agent hosts were stopped (ccd answered {other:?}){}",
+            "could not confirm the runs were stopped (ccd answered {other:?}){}",
             hosts_running(root)
         ),
         Err(err) => format!(
-            "could not confirm the agent hosts were stopped ({err:#}){}",
+            "could not confirm the runs were stopped ({err:#}){}",
             hosts_running(root)
         ),
     }
 }
 
-/// The agent hosts still running among the runs under `root`, each by the pid it wrote
-/// into its `host.json` and the name of the program that pid now runs: nothing when there
-/// are none, else "; agent hosts still running, pids …".
+/// The hosts still running among the runs under `root`, by pid: an agent host by the pid
+/// it wrote into its `host.json`, a Codex run's app-server by its leader's pid in `as.pid`,
+/// each only while that pid runs the program it should (`cc-agent-host`; `codex`, or the
+/// `node` an npm install runs it under). Nothing when there are none, else "; still
+/// running, pids …".
 fn hosts_running(root: &Path) -> String {
-    let pids: Vec<String> = std::fs::read_dir(root.join("runs"))
-        .into_iter()
-        .flatten()
-        .flatten()
+    let runs = || {
+        std::fs::read_dir(root.join("runs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+    };
+    let runs_program = |pid: i32, program: &dyn Fn(&str) -> bool| {
+        crate::codex_host::child_image(pid).is_some_and(|image| {
+            image
+                .file_name()
+                .is_some_and(|name| program(&name.to_string_lossy()))
+        })
+    };
+    let hosts = runs()
         .filter_map(|run| {
             let record = std::fs::read(run.path().join("host.json")).ok()?;
             serde_json::from_slice::<protocol::host::HostFile>(&record).ok()
         })
-        .filter(|record| {
-            crate::codex_host::child_image(record.host_pid).is_some_and(|image| {
-                image
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("cc-agent-host"))
-            })
+        .map(|record| record.host_pid)
+        .filter(|pid| runs_program(*pid, &|name| name.starts_with("cc-agent-host")));
+    let leaders = runs()
+        .filter_map(|run| {
+            let text = std::fs::read_to_string(run.path().join("as.pid")).ok()?;
+            text.trim().parse::<i32>().ok()
         })
-        .map(|record| record.host_pid.to_string())
-        .collect();
+        .filter(|pid| runs_program(*pid, &|name| name.starts_with("codex") || name == "node"));
+    let mut pids: Vec<i32> = hosts.chain(leaders).collect();
+    pids.sort_unstable();
     if pids.is_empty() {
         String::new()
     } else {
         format!(
-            "; agent hosts still running, pids {}: end them with `kill <pid>`",
-            pids.join(", ")
+            "; still running, pids {}",
+            pids.iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
@@ -1528,22 +1545,22 @@ mod tests {
             ),
             "ccd was asked {asked:?}"
         );
-        assert_eq!(
-            said,
-            "ended 2 Claude run(s); agent hosts still running, pids 4242: end them with \
-             `kill <pid>`"
-        );
+        assert_eq!(said, "ended 2 run(s); still running, pids 4242");
     }
 
-    /// **With no ccd to ask,** uninstall names the agent hosts still running among the
-    /// runs, by pid: a live process running a program named `cc-agent-host`, and neither
-    /// another live process nor a pid no process has.
+    /// **With no ccd to ask,** uninstall names the hosts still running among the runs, by
+    /// pid: a live process running a program named `cc-agent-host` (its `host.json`) or
+    /// `codex` (a Codex run's `as.pid`), and neither another live process nor a pid no
+    /// process has.
     #[test]
-    fn with_ccd_down_uninstall_names_the_agent_hosts_still_running() {
+    fn with_ccd_down_uninstall_names_the_hosts_still_running() {
         let dir = scratch("down");
         let host_program = dir.join("cc-agent-host");
         std::fs::copy("/bin/sleep", &host_program).unwrap();
+        let codex_program = dir.join("codex");
+        std::fs::copy("/bin/sleep", &codex_program).unwrap();
         let mut host = Command::new(&host_program).arg("60").spawn().unwrap();
+        let mut codex = Command::new(&codex_program).arg("60").spawn().unwrap();
         let mut other = Command::new("/bin/sleep").arg("60").spawn().unwrap();
         for (run, pid) in [
             ("a", host.id() as i32),
@@ -1555,9 +1572,15 @@ mod tests {
             let record = serde_json::json!({"protocol_version": 1, "host_pid": pid});
             std::fs::write(folder.join("host.json"), record.to_string()).unwrap();
         }
+        for (run, pid) in [("d", codex.id()), ("e", other.id())] {
+            let folder = dir.join("runs").join(run);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("as.pid"), format!("{pid}\n")).unwrap();
+        }
         let said = stop_hosted_runs(&dir.join("no-ccd.sock"), &dir);
-        let host_pid = host.id();
-        for child in [&mut host, &mut other] {
+        let mut named = [host.id(), codex.id()];
+        named.sort_unstable();
+        for child in [&mut host, &mut codex, &mut other] {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -1565,8 +1588,9 @@ mod tests {
         assert_eq!(
             said,
             format!(
-                "ccd is not running, so the agent hosts it started were not stopped; agent \
-                 hosts still running, pids {host_pid}: end them with `kill <pid>`"
+                "ccd is not running, so the runs it started were not stopped; still running, \
+                 pids {}, {}",
+                named[0], named[1]
             )
         );
     }

@@ -121,6 +121,12 @@ pub(crate) const INTERRUPT_NO_LINK: &str =
     "there is no live link to this Codex session, so nothing was sent; \
     stop the turn at the computer";
 
+/// A run started on the engine whose link is not attached, before its reconnect or after one
+/// that failed: an answer or a stop is refused with the fact alone. Such a run has no screen
+/// at the computer to send the person to.
+pub(crate) const ENGINE_NO_CONNECTION: &str =
+    "CodeConnect has no connection to this run right now, so nothing was sent.";
+
 pub(crate) fn compose_on_claude(uid: &str) -> String {
     format!(
         "{uid} is a Claude session, and this message is the Codex compose; \
@@ -647,6 +653,13 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "rejected",
             "link_state",
             INTERRUPT_NO_LINK.to_string(),
+        ),
+        row(
+            "engine_no_connection",
+            "interrupt",
+            "rejected",
+            "link_state",
+            ENGINE_NO_CONNECTION.to_string(),
         ),
         row(
             "compose_link_bound",
