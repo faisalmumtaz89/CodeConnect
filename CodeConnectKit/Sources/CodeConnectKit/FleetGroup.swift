@@ -11,6 +11,19 @@ public struct FleetGroup: Sendable, Hashable, Identifiable {
     public enum Kind: Sendable, Hashable, CaseIterable {
         case computer
         case project
+
+        /// Where the Mac keeps the list's grouping between launches: "computer" or "project".
+        static let keptKey = "codeconnect.fleet.grouping"
+
+        /// The grouping kept in `defaults`, or by computer when none is.
+        public static func kept(in defaults: UserDefaults) -> Kind {
+            defaults.string(forKey: keptKey) == "project" ? .project : .computer
+        }
+
+        /// Keeps this grouping in `defaults`, for the next launch.
+        public func keep(in defaults: UserDefaults) {
+            defaults.set(self == .project ? "project" : "computer", forKey: Self.keptKey)
+        }
     }
 
     public let id: String
