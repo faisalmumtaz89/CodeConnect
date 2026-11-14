@@ -372,6 +372,14 @@ public final class AppModel {
         // SwiftUI rebuilt the tab. One carrier per connection is also what makes
         // "one terminal at a time" true on this end, matching the daemon.
         self.terminal = TerminalCarrier(connection: connection)
+        // The carrier took `onDisconnected` to end the terminal on a drop. Chain it,
+        // don't replace it: a drop must also clear the machine stats (a figure from a
+        // link that is gone is not current) without unhooking the terminal.
+        let endTerminalOnDrop = connection.onDisconnected
+        connection.onDisconnected = { [weak self] in
+            endTerminalOnDrop?()
+            self?.machineStats = nil
+        }
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
         connection.onConnected = { [weak self] in
@@ -2093,9 +2101,12 @@ public final class AppModel {
             starter.receive(listing, answering: requestID)
         case .createFolderResult(let requestID, let refusal):
             starter.resolveCreate(requestID, refusal: refusal)
-        case .machineStats:
-            // Only asked for by a screen that shows them; this model never does.
-            break
+        case .machineStats(let stats):
+            // Only while a screen is watching (see `keepMachineStatsFresh`): a late
+            // answer after the view left, or one in flight when the link drops, is
+            // ignored. The drop clears the sample through the `onDisconnected` chain,
+            // and the view leaving clears it through the poll's own `defer`.
+            if pollingStats { machineStats = stats }
         case .startSessionResult(let requestID, let outcome):
             starter.resolve(requestID, outcome)
             // The new session reaches the fleet on its own; asking now shortens
@@ -3600,6 +3611,35 @@ public final class AppModel {
     func capturePane(key: String, lines: UInt32 = 80) async -> String? {
         guard connection.capabilities?.capture != false else { return nil }
         return try? await connection.capture(session: key, lines: lines)
+    }
+
+    // MARK: - Machine stats
+
+    /// This computer's latest CPU/memory/disk sample, or nil when it is unknown:
+    /// not asked yet, this computer's CodeConnect does not report stats, the link
+    /// is down, or no screen is showing them. The Kit exposes the value or nil;
+    /// what nil draws is the view's business.
+    public private(set) var machineStats: MachineStats?
+
+    private var pollingStats = false
+    static let machineStatsInterval: Duration = .seconds(5)
+
+    /// Keep `machineStats` fresh while the calling view's task lives. The sidebar is
+    /// the one caller; a second concurrent call returns at once — one poll per model,
+    /// never a second stream. While the link is up and the computer reports stats it
+    /// asks every `machineStatsInterval`; it abstains otherwise, so an old daemon is
+    /// never asked and a view that appears before the handshake still polls once it
+    /// lands. The view's task cancellation ends the loop, and the sample clears with it.
+    public func keepMachineStatsFresh() async {
+        guard !pollingStats else { return }
+        pollingStats = true
+        defer { pollingStats = false; machineStats = nil }
+        while !Task.isCancelled {
+            if connection.phase.isConnected, connection.capabilities?.reportsMachineStats == true {
+                try? await connection.send(.getMachineStats)
+            }
+            try? await Task.sleep(for: Self.machineStatsInterval)
+        }
     }
 
     // MARK: - Diff
