@@ -590,7 +590,7 @@ async fn link(
     mut write: OwnedWriteHalf,
 ) {
     let (to_link, mut commands) = tokio::sync::mpsc::unbounded_channel();
-    daemon.host_link_attached(&uid, to_link).await;
+    daemon.host_link_attached(&uid, Some(to_link)).await;
     let Linked {
         start_uuid,
         lifecycle,

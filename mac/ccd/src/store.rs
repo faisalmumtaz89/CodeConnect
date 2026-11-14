@@ -601,6 +601,18 @@ pub struct WatchedHost {
     pub boot: Option<BootIdentity>,
 }
 
+/// A `live` Codex run ccd hosts, as a restarted ccd connects to it again
+/// ([`Store::codex_live_runs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCodexRun {
+    /// Its recorded app-server.
+    pub host: WatchedHost,
+    /// The folder it runs in.
+    pub cwd: String,
+    /// The thread its first message started.
+    pub thread: String,
+}
+
 /// What a link to a recorded host starts from ([`Store::hosted_link`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedLink {
@@ -2901,6 +2913,30 @@ impl Store {
         )?;
         tx.commit()?;
         Ok((failed, hosts))
+    }
+
+    /// Every `live` Codex run ccd hosts with a recorded app-server and a thread: what a
+    /// restarted ccd connects to again while its app-server is alive.
+    pub fn codex_live_runs(&self) -> Result<Vec<LiveCodexRun>> {
+        let (table, _) = session_tables_for(&AgentKind::Codex);
+        let conn = self.read();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
+                    h.boot_sec, h.boot_usec, s.cwd, s.codex_thread_id
+               FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
+              WHERE s.lifecycle = ?1 AND h.host_pid IS NOT NULL
+                AND s.codex_thread_id IS NOT NULL"
+        ))?;
+        let rows = stmt
+            .query_map(params![lifecycle_str(Lifecycle::Live)], |row| {
+                Ok(LiveCodexRun {
+                    host: watched_host_from(row)?,
+                    cwd: row.get(7)?,
+                    thread: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// What a link to the hosted run `session_uid`'s host starts from: the run's

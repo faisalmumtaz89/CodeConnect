@@ -1160,7 +1160,11 @@ own task then sends the first message on that connection:
 - `turn/start` with the first message under the start's own uuid as its
   `clientUserMessageId`.
 
-The run is then `live`, and the connection is let go: the turn runs on. Nothing is
+The run is then `live`, and the connection is kept as the run's one link: each event
+Codex reports on it (the thread, each message once it is finished, each command or
+file change as its call and then its result, the turn's end) is filed once and
+reaches both apps. Codex's own requests on it (an approval, a question)
+are not answered yet, so a turn that asks waits. Nothing is
 written to Codex's own config. A start with no `codeconnect` to run the mail server is
 refused before its row. A start that fails once codex is launched (codex ends, does not
 listen, or does not take the first message within 80 s, before or after the answer) is
@@ -1170,7 +1174,10 @@ dies ends `exited`, "Stopped: its process ended", as a Claude run does. A run th
 restarted daemon finds still `starting` is `failed`, whatever became of its start, before
 the daemon listens, and its recorded process group gets the same ladder under the same
 warrant. Nothing is sent again, so a first message Codex had already taken is lost with
-the run, and the person starts again.
+the run, and the person starts again. A `live` run whose app-server is still running is
+connected again: its thread is resumed with the same preset and thread config. The turns
+it ran meanwhile are filed from the answer, and a turn still running then is read once more when it ends, for the items
+it finished while no daemon listened.
 Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
 same environment. The shell starts from the

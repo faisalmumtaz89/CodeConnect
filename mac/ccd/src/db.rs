@@ -333,6 +333,10 @@ impl Db {
         self.run(|store| store.fail_codex_starts()).await
     }
 
+    pub async fn codex_live_runs(&self) -> Result<Vec<crate::store::LiveCodexRun>> {
+        self.run(|store| store.codex_live_runs()).await
+    }
+
     pub async fn hosted_link(
         &self,
         session_uid: String,
