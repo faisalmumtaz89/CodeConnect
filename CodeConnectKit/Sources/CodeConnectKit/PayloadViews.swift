@@ -526,6 +526,11 @@ public enum ToolSummary {
         // Claude's question: what it asks, never the JSON carrying it.
         case "AskUserQuestion":
             return input["questions"]?.arrayValue?.first?["question"]?.stringValue
+        // Claude's plan: the plan itself, never the JSON carrying it. The rest of the
+        // input (planFilePath, and anything a later build adds) stays in the card's
+        // "Full tool input" disclosure, so nothing being approved is hidden.
+        case "ExitPlanMode":
+            return input.firstString("plan")
         case "TodoWrite":
             guard let todos = input["todos"]?.arrayValue else { return nil }
             return "\(todos.count) item\(todos.count == 1 ? "" : "s")"
