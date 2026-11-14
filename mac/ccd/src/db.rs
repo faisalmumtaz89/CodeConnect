@@ -273,9 +273,9 @@ impl Db {
         &self,
         row: SessionRow,
         request_id: String,
-        start: String,
+        start: Option<String>,
     ) -> Result<Option<crate::store::HostedRun>> {
-        self.run(move |store| store.begin_run(&row, &request_id, &start))
+        self.run(move |store| store.begin_run(&row, &request_id, start.as_deref()))
             .await
     }
 

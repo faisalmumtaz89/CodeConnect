@@ -130,15 +130,9 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         codex_socket: None,
     };
     let model = run.model.filter(|model| *model != "default");
-    // The run's start, stored with its row (X3-DESIGN.md decisions 3 and 4): `thread/start`'s
-    // params but its config, and the first turn's text under the start's uuid.
-    let start = json!({
-        "thread": thread_params(run.cwd, model),
-        "turn": {"text": run.prompt, "clientUserMessageId": start_uuid},
-    });
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), start.to_string())
+        .begin_run(row, run.request_id.to_string(), None)
         .await
     {
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
@@ -895,48 +889,6 @@ mod tests {
         assert_eq!((uuid.len(), uuid.matches('-').count()), (36, 4), "{uuid}");
     }
 
-    /// **A Codex run's row stores its start** (X3-DESIGN.md decisions 3 and 4): exactly
-    /// `thread/start`'s params but its config, and the first turn's text under the uuid its
-    /// `turn/start` carried.
-    #[tokio::test]
-    async fn a_codex_run_stores_its_start_and_first_turn_with_its_row() {
-        let rig = rig();
-        let codex = stand_in(&rig, "exec sleep 30");
-        let (result, (mut seen, ws)) = tokio::join!(
-            start(&rig.daemon, run(&rig, "req-stored", &codex)),
-            play_app_server(&rig, whole_start())
-        );
-        seen.extend(until_closed(ws).await);
-        let uid = started_uid(&result);
-        row_once(&rig, &uid, Lifecycle::Live).await;
-        let link = rig
-            .daemon
-            .db
-            .hosted_link(uid.clone())
-            .await
-            .unwrap()
-            .unwrap();
-        end_run(&rig, &uid).await;
-        let sent = &seen
-            .iter()
-            .find(|frame| frame["method"] == "turn/start")
-            .unwrap()["params"]["clientUserMessageId"];
-        let stored: serde_json::Value =
-            serde_json::from_str(link.start.as_deref().expect("the run's start")).unwrap();
-        assert_eq!(
-            stored,
-            json!({
-                "thread": {
-                    "cwd": rig.project,
-                    "model": "gpt-test",
-                    "approvalPolicy": "on-request",
-                    "sandbox": "workspace-write",
-                },
-                "turn": {"text": "fix the tests", "clientUserMessageId": sent},
-            })
-        );
-    }
-
     /// **The start answers before the thread is made, and a `skills/list` that fails ends
     /// the run**: `started` reaches the app while `skills/list` is still unanswered; then
     /// its error makes the run `failed` and the ladder empties its group.
@@ -1212,11 +1164,7 @@ mod tests {
         let begun = rig
             .daemon
             .db
-            .begin_run(
-                row,
-                "req-unrecorded".into(),
-                r#"{"thread":{},"turn":{}}"#.into(),
-            )
+            .begin_run(row, "req-unrecorded".into(), None)
             .await
             .unwrap();
         assert_eq!(begun, None);

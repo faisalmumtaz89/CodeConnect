@@ -2508,14 +2508,16 @@ impl Store {
     }
 
     /// Write a new hosted run's row, in its agent's table, and its `run_hosts` row with
-    /// its `start` line in one transaction, before anything for it is spawned (H1). If
-    /// `request_id` already has a run, of either agent, nothing is written and that run
-    /// is returned, so a repeated start never makes a second one.
+    /// its `start` line, when it has one, in one transaction, before anything for it is
+    /// spawned (H1). A Claude run's host is sent its start again after a restart; a Codex
+    /// start is never sent again, so it has none. If `request_id` already has a run, of
+    /// either agent, nothing is written and that run is returned, so a repeated start never
+    /// makes a second one.
     pub fn begin_run(
         &self,
         row: &SessionRow,
         request_id: &str,
-        start: &str,
+        start: Option<&str>,
     ) -> Result<Option<HostedRun>> {
         let (table, _) = session_tables_for(&row.agent);
         let mut conn = self.write();
@@ -13020,14 +13022,14 @@ mod tests {
         row.lifecycle = Lifecycle::Starting;
         assert_eq!(
             store
-                .begin_run(&row, request_id, r#"{"type":"start"}"#)
+                .begin_run(&row, request_id, Some(r#"{"type":"start"}"#))
                 .unwrap(),
             None
         );
         session
     }
 
-    /// A hosted Codex run, in Codex's table: written with its start request.
+    /// A hosted Codex run, in Codex's table: written with its start request and no start.
     fn begun_codex(store: &Store, tag: &str, request_id: &str) -> SessionKey {
         let session = key(tag, &format!("run-{tag}"));
         let mut row = session_row(&session);
@@ -13035,12 +13037,7 @@ mod tests {
         row.tmux_socket.clear();
         row.lifecycle = Lifecycle::Starting;
         row.agent = AgentKind::Codex;
-        assert_eq!(
-            store
-                .begin_run(&row, request_id, r#"{"thread":{},"turn":{}}"#)
-                .unwrap(),
-            None
-        );
+        assert_eq!(store.begin_run(&row, request_id, None).unwrap(), None);
         session
     }
 
@@ -13091,7 +13088,7 @@ mod tests {
         let mut second = session_row(&key("BB", "run-BB"));
         second.lifecycle = Lifecycle::Starting;
         let existing = store
-            .begin_run(&second, "req-1", r#"{"type":"start"}"#)
+            .begin_run(&second, "req-1", Some(r#"{"type":"start"}"#))
             .unwrap()
             .expect("the first run");
         assert_eq!(existing.session_uid, first.uid);

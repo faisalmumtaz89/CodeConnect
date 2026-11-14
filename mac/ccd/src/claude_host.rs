@@ -168,7 +168,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     };
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), line)
+        .begin_run(row, run.request_id.to_string(), Some(line))
         .await
     {
         Ok(Some(existing)) => return answer_for(existing),
@@ -2082,7 +2082,7 @@ mod tests {
         assert_eq!(
             rig.daemon
                 .db
-                .begin_run(row, "req-1".into(), line)
+                .begin_run(row, "req-1".into(), Some(line))
                 .await
                 .unwrap(),
             None
