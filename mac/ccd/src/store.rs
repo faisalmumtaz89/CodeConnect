@@ -63,7 +63,7 @@ use protocol::agent::AgentKind;
 use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::host::Trust;
 use protocol::pairing::DeviceSummary;
-use protocol::proc_identity::ProcessIdentity;
+use protocol::proc_identity::{BootIdentity, ProcessIdentity};
 use protocol::secret::Redacted;
 use protocol::ws::{AnswerOutcome, FolderAnswer};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -589,6 +589,38 @@ pub struct HostedRun {
     pub session_uid: String,
     pub cwd: String,
     pub lifecycle: Lifecycle,
+}
+
+/// A hosted run's recorded host, as ccd checks whether it is still there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedHost {
+    pub session_uid: String,
+    pub lifecycle: Lifecycle,
+    pub host: ProcessIdentity,
+    /// The boot the host was recorded in; `None` when it could not be read then.
+    pub boot: Option<BootIdentity>,
+}
+
+fn watched_host_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<WatchedHost> {
+    let boot = match (row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?) {
+        (Some(boot_sec), Some(boot_usec)) => Some(BootIdentity {
+            boot_sec,
+            boot_usec,
+        }),
+        _ => None,
+    };
+    Ok(WatchedHost {
+        session_uid: row.get(0)?,
+        lifecycle: parse_lifecycle(&row.get::<_, String>(1)?),
+        host: ProcessIdentity {
+            pid: row.get(2)?,
+            birth: protocol::proc_identity::BirthIdentity {
+                start_sec: row.get(3)?,
+                start_usec: row.get(4)?,
+            },
+        },
+        boot,
+    })
 }
 
 fn hosted_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostedRun> {
@@ -2510,17 +2542,26 @@ impl Store {
         Ok(None)
     }
 
-    /// Record the agent host's identity, as ccd read it from the kernel.
-    pub fn record_host(&self, session_uid: &str, host: &ProcessIdentity) -> Result<()> {
+    /// Record the agent host's identity, as ccd read it from the kernel, and the boot it
+    /// runs in, which a signal to its group is warranted against.
+    pub fn record_host(
+        &self,
+        session_uid: &str,
+        host: &ProcessIdentity,
+        boot: Option<BootIdentity>,
+    ) -> Result<()> {
         let conn = self.write();
         let changed = conn.execute(
-            "UPDATE run_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4
+            "UPDATE run_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4,
+                                  boot_sec = ?5, boot_usec = ?6
               WHERE session_uid = ?1",
             params![
                 session_uid,
                 host.pid,
                 host.birth.start_sec,
-                host.birth.start_usec
+                host.birth.start_usec,
+                boot.map(|boot| boot.boot_sec),
+                boot.map(|boot| boot.boot_usec)
             ],
         )?;
         anyhow::ensure!(
@@ -2670,6 +2711,99 @@ impl Store {
         }
         tx.commit()?;
         Ok(Some(filed))
+    }
+
+    /// End a hosted run in one transaction: with `cursor`, the run's cursor first, as
+    /// [`Store::commit_cursor`] advances it; then the row from `from` to `to`, only while it
+    /// is still `from`; then, if the row changed, the run's `end` event. `None`, with
+    /// nothing written, when the cursor does not move, and then the caller must not
+    /// acknowledge the message (H3). Otherwise the events newly stored: none when the row
+    /// was no longer `from`.
+    pub fn end_hosted_run(
+        &self,
+        session_uid: &str,
+        cursor: Option<(&ProcessIdentity, u64)>,
+        from: Lifecycle,
+        to: Lifecycle,
+        end: &PendingEvent,
+    ) -> Result<Option<Vec<Event>>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some((host, seq)) = cursor {
+            let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+            let moved = tx.execute(
+                "UPDATE run_hosts SET cursor = ?5
+                  WHERE session_uid = ?1 AND host_pid = ?2
+                    AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
+                params![
+                    session_uid,
+                    host.pid,
+                    host.birth.start_sec,
+                    host.birth.start_usec,
+                    seq
+                ],
+            )?;
+            if moved != 1 {
+                return Ok(None);
+            }
+        }
+        // A hosted run is Claude's, so its row is in Claude's table.
+        let (table, _) = session_tables_for(&AgentKind::Claude);
+        let ended = tx.execute(
+            &format!(
+                "UPDATE {table} SET lifecycle = ?3, updated_at = ?4
+                  WHERE session_uid = ?1 AND lifecycle = ?2"
+            ),
+            params![
+                session_uid,
+                lifecycle_str(from),
+                lifecycle_str(to),
+                protocol::time::now_rfc3339()
+            ],
+        )?;
+        let mut filed = Vec::new();
+        if ended == 1 {
+            filed.extend(append_in_tx(&tx, end)?);
+        }
+        tx.commit()?;
+        Ok(Some(filed))
+    }
+
+    /// The recorded host of every hosted run that has not ended (`starting` or `live`).
+    pub fn watched_hosts(&self) -> Result<Vec<WatchedHost>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
+                    h.boot_sec, h.boot_usec
+               FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+              WHERE h.host_pid IS NOT NULL AND s.lifecycle IN (?1, ?2)",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    lifecycle_str(Lifecycle::Starting),
+                    lifecycle_str(Lifecycle::Live)
+                ],
+                watched_host_from,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The recorded host of the hosted run `session_uid`, whatever its lifecycle; `None`
+    /// before its host is recorded.
+    pub fn watched_host(&self, session_uid: &str) -> Result<Option<WatchedHost>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec,
+                        h.host_start_usec, h.boot_sec, h.boot_usec
+                   FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+                  WHERE h.session_uid = ?1 AND h.host_pid IS NOT NULL",
+                params![session_uid],
+                watched_host_from,
+            )
+            .optional()?)
     }
 
     /// The answer kept for the folder whose real path is `path`.
@@ -6103,7 +6237,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             host_start_sec  INTEGER,
             host_start_usec INTEGER,
             cursor          INTEGER NOT NULL DEFAULT 0,
-            initialize      TEXT
+            initialize      TEXT,
+            boot_sec        INTEGER,
+            boot_usec       INTEGER
         );
 
         -- A deletion is a decision, and this is its record. A uid here was

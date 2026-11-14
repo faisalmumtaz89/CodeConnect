@@ -263,8 +263,41 @@ impl Db {
         &self,
         session_uid: String,
         host: protocol::proc_identity::ProcessIdentity,
+        boot: Option<protocol::proc_identity::BootIdentity>,
     ) -> Result<()> {
-        self.run(move |store| store.record_host(&session_uid, &host))
+        self.run(move |store| store.record_host(&session_uid, &host, boot))
+            .await
+    }
+
+    pub async fn end_hosted_run(
+        &self,
+        session_uid: String,
+        cursor: Option<(protocol::proc_identity::ProcessIdentity, u64)>,
+        from: Lifecycle,
+        to: Lifecycle,
+        end: PendingEvent,
+    ) -> Result<Option<Vec<Event>>> {
+        self.run(move |store| {
+            store.end_hosted_run(
+                &session_uid,
+                cursor.as_ref().map(|(host, seq)| (host, *seq)),
+                from,
+                to,
+                &end,
+            )
+        })
+        .await
+    }
+
+    pub async fn watched_hosts(&self) -> Result<Vec<crate::store::WatchedHost>> {
+        self.run(|store| store.watched_hosts()).await
+    }
+
+    pub async fn watched_host(
+        &self,
+        session_uid: String,
+    ) -> Result<Option<crate::store::WatchedHost>> {
+        self.run(move |store| store.watched_host(&session_uid))
             .await
     }
 

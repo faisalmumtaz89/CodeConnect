@@ -29,7 +29,10 @@ use protocol::host::{
     FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
     HOST_PROTOCOL_VERSION,
 };
-use protocol::proc_identity::{read_birth_identity, ProcessIdentity};
+use protocol::proc_identity::{
+    group_has_members, group_warrant, is_zombie, liveness, read_birth_identity, BootIdentity,
+    GroupWarrant, Liveness, ProcessIdentity,
+};
 use protocol::sdk_map::Signal;
 use protocol::ws::{StartFailure, StartSessionResult};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -46,6 +49,14 @@ const HOST_BIN: &str = "cc-agent-host";
 
 /// How often the start looks for `host.json` and the socket.
 const POLL: Duration = Duration::from_millis(50);
+
+/// How long a dead host may stay an unreaped zombie while ccd waits to signal its group. On
+/// macOS a zombie's birth cannot be read, so its group is warranted only once its pid is free;
+/// Linux reads a zombie's birth, and the warrant passes at once.
+const ZOMBIE_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a dead host's group has after SIGTERM before SIGKILL (decision 179).
+const TERM_GRACE: Duration = Duration::from_secs(5);
 
 /// One Claude start, as the app asked for it and the checks before the row resolved it.
 pub(crate) struct Run<'a> {
@@ -155,8 +166,9 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
             return failed(detail);
         }
     };
-    // From `start` on, claude may be running, so only the outcome the link commits ends
-    // the run: a link that ends first leaves it `starting`, protected from deletion.
+    // From `start` on, claude may be running, so only the outcome the link commits, or the
+    // host's end, ends the run: a link that ends first, its host still running, leaves it
+    // `starting`, protected from deletion.
     let started = StartSessionResult::Started {
         session_uid: uid,
         // A start in a new worktree does not know its folder until claude reports it.
@@ -261,7 +273,11 @@ async fn attach(
     };
     daemon
         .db
-        .record_host(uid.to_string(), host)
+        .record_host(
+            uid.to_string(),
+            host,
+            protocol::proc_identity::boot_identity(),
+        )
         .await
         .map_err(|err| format!("could not record the agent host: {err:#}"))?;
 
@@ -440,10 +456,11 @@ async fn apply_sdk(
 /// order. It applies the run's `state` and the outcome of `start_uuid`, which makes the
 /// run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
 /// why the link ended if it ends first. A `live` run's SDK messages are its events
-/// ([`apply_sdk`]); the host sends none before the outcome. After a refusal it also
-/// applies claude's `exited`, which has nothing to change in a `failed` run and lets its
-/// host end. It ends at the first message this daemon does not apply, which stays in the
-/// host with everything after it, or when the connection or a commit fails.
+/// ([`apply_sdk`]); the host sends none before the outcome. A `live` run's `exited` ends the
+/// run (H6, `Daemon::end_hosted_run`). After a refusal claude's `exited` changes nothing
+/// in the `failed` run and is applied so its host can end. It ends at the first message
+/// this daemon does not apply, which stays in the host with everything after it, or when
+/// the connection or a commit fails, and then checks the run's host ([`end_if_host_gone`]).
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
@@ -521,6 +538,32 @@ async fn link(
                     break why;
                 }
             }
+            Ok(FromHost::Exited { seq, code, signal }) if live => {
+                let mut payload = serde_json::json!({ "exit_code": code });
+                if let Some(signal) = signal {
+                    payload["signal"] = signal.into();
+                }
+                match daemon
+                    .end_hosted_run(
+                        &uid,
+                        Some((host, seq)),
+                        Lifecycle::Live,
+                        Lifecycle::Exited,
+                        payload,
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                            break why;
+                        }
+                    }
+                    Ok(false) => {
+                        break format!("message {seq} is not past the run's cursor for this host")
+                    }
+                    Err(err) => break format!("{err:#}"),
+                }
+            }
             Ok(FromHost::Exited { seq, .. }) if refused => {
                 if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
                     break why;
@@ -535,6 +578,114 @@ async fn link(
         let _ = begun.send(Err(ended));
     }
     daemon.host_link_detached(&uid).await;
+    end_if_host_gone(&daemon, &uid).await;
+}
+
+/// What became of a dead host's group.
+#[derive(Debug, PartialEq, Eq)]
+enum Ladder {
+    /// Signalled as the ladder says, or no member was left to signal.
+    Done,
+    /// The warrant was refused, so nothing was signalled.
+    Refused(String),
+    /// The host was still an unreaped zombie after [`ZOMBIE_WAIT`]: nothing was signalled yet.
+    Deferred,
+}
+
+/// The ladder (decision 179) on a dead host's process group, whose id is the host's pid,
+/// under the warrant (`group_warrant`): SIGTERM, then SIGKILL after [`TERM_GRACE`] only
+/// while members remain and the warrant still holds. Never SIGKILL first: claude ends its
+/// Bash tool's own session on SIGTERM. A host that is a zombie whose birth cannot be read (on
+/// macOS) is waited out first: its group is warranted only once it is reaped and its pid free.
+async fn stop_group(host: ProcessIdentity, boot: BootIdentity) -> Ladder {
+    let waited = Instant::now() + ZOMBIE_WAIT;
+    loop {
+        match group_warrant(&host, boot) {
+            GroupWarrant::Warranted => break,
+            GroupWarrant::Refused(_) if is_zombie(host.pid) == Some(true) => {
+                if Instant::now() >= waited {
+                    return Ladder::Deferred;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            GroupWarrant::Refused(why) => return Ladder::Refused(why),
+        }
+    }
+    let group = host.pid;
+    if !group_has_members(group) {
+        return Ladder::Done;
+    }
+    // SAFETY: kill(2) of the host's process group, which the warrant ties to the host.
+    unsafe { libc::kill(-group, libc::SIGTERM) };
+    let grace = Instant::now() + TERM_GRACE;
+    while Instant::now() < grace {
+        if !group_has_members(group) {
+            return Ladder::Done;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    if group_has_members(group) && group_warrant(&host, boot) == GroupWarrant::Warranted {
+        // SAFETY: as above, the warrant asked again just before.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    }
+    Ladder::Done
+}
+
+/// H7: when the run `uid` has not ended and its recorded host is gone, the ladder on the
+/// host's group, then the run ends. `starting` → `failed`, as a refused start, with no end
+/// in its timeline, which the apps would read as a session that ran and finished; `live` →
+/// `exited` ("Stopped: its process ended"). A host alive, or one the kernel cannot be
+/// asked about, leaves the run as it is; so does one still a zombie after
+/// [`ZOMBIE_WAIT`], for the next sweep.
+pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
+    let watch = match daemon.db.watched_host(uid.to_string()).await {
+        Ok(Some(watch)) => watch,
+        Ok(None) => return,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its host: {err:#}");
+            return;
+        }
+    };
+    if !matches!(watch.lifecycle, Lifecycle::Starting | Lifecycle::Live) {
+        return;
+    }
+    if liveness(&watch.host) != Liveness::Gone {
+        return;
+    }
+    match watch.boot {
+        Some(boot) => match stop_group(watch.host, boot).await {
+            Ladder::Done => {}
+            Ladder::Refused(why) => {
+                crate::log_info!("{uid}: its host is gone; its group was not signalled: {why}")
+            }
+            Ladder::Deferred => {
+                crate::log_info!(
+                    "{uid}: its host is gone and not yet reaped; the next sweep tries again"
+                );
+                return;
+            }
+        },
+        None => crate::log_info!(
+            "{uid}: its host is gone; no boot was recorded with it, so its group was not signalled"
+        ),
+    }
+    if watch.lifecycle == Lifecycle::Starting {
+        if let Err(err) = daemon
+            .db
+            .set_lifecycle(uid.to_string(), Lifecycle::Failed)
+            .await
+        {
+            crate::log_error!("{uid}: could not mark the run failed: {err:#}");
+        }
+        return;
+    }
+    let payload = serde_json::json!({ "exit_code": null, "reason": "Stopped: its process ended" });
+    if let Err(err) = daemon
+        .end_hosted_run(uid, None, Lifecycle::Live, Lifecycle::Exited, payload)
+        .await
+    {
+        crate::log_error!("{uid}: could not end the run: {err:#}");
+    }
 }
 
 #[cfg(test)]
@@ -612,6 +763,40 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    /// [`stub_host`] whose process group also holds a child it started, its pid in
+    /// `child.pid` in the run's folder, as claude is held in the real host's group. The child
+    /// ignores SIGTERM, so only the ladder's SIGKILL ends it.
+    fn stub_host_with_child(rig: &Rig) -> PathBuf {
+        let path = rig.root.join("stub-host-with-child");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho $$ > \"$1/stub.pid\"\n(trap '' TERM; exec sleep 60) &\necho $! > \"$1/child.pid\"\n\
+                 printf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \"$$\" > \
+                 \"$1/host.json\"\nexec sleep 20\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// The pid a stand-in wrote into `dir/name`.
+    fn pid_in(dir: &Path, name: &str) -> i32 {
+        std::fs::read_to_string(dir.join(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Whether `pid` is a running process: neither gone nor a zombie.
+    fn running(pid: i32) -> bool {
+        // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+        let exists = unsafe { libc::kill(pid, 0) } == 0;
+        exists && protocol::proc_identity::is_zombie(pid) != Some(true)
     }
 
     fn run<'a>(rig: &'a Rig, request_id: &'a str, cwd: &'a str, host_bin: &'a Path) -> Run<'a> {
@@ -1059,16 +1244,18 @@ mod tests {
     }
 
     /// Once `start` is sent, claude may be running, so a run whose outcome is not
-    /// committed stays `starting`, and a delete is refused: the app is answered with the
-    /// reason, but the run is not marked failed. Three ways: the outcome's commit changes
-    /// nothing (the run's recorded host is another), the outcome is for another command,
-    /// and the connection ends first. None is acknowledged.
+    /// committed stays `starting` while its host runs, and a delete is refused: the app is
+    /// answered with the reason, but the run is not marked failed. Three ways: the outcome is
+    /// for another command, the connection ends first, and the outcome's commit changes
+    /// nothing because the run's recorded host is another. None is acknowledged, and nothing
+    /// of the outcome is kept. In the last, the recorded host is gone by its own identity, so
+    /// once the link ends the run is `failed` (H7), with no end in its timeline.
     #[tokio::test]
     async fn a_start_with_no_committed_outcome_leaves_its_run_starting() {
-        for (case, why) in [
-            ("another host", "not past the run's cursor"),
-            ("another command", "does not apply"),
-            ("closed", "closed the connection"),
+        for (case, why, after) in [
+            ("another host", "not past the run's cursor", "failed"),
+            ("another command", "does not apply", "starting"),
+            ("closed", "closed the connection", "starting"),
         ] {
             let rig = rig();
             let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
@@ -1113,13 +1300,21 @@ mod tests {
                 matches!(&result, StartSessionResult::Failed { detail, .. } if detail.contains(why)),
                 "{case}: {result:?}"
             );
-            assert_eq!(kept(&rig, &uid), ("starting".to_string(), None), "{case}");
+            until_ended(&rig, &uid, after, None).await;
+            assert_eq!(kept(&rig, &uid), (after.to_string(), None), "{case}");
             assert_eq!(cursor(&rig, &uid), 1, "{case}");
-            let deleted = rig.daemon.db.delete_exited_session(uid).await.unwrap();
-            assert!(
-                matches!(deleted, crate::store::DeleteOutcome::NotExited { .. }),
-                "{case}: {deleted:?}"
+            assert_eq!(
+                end_reason(&rig, &uid),
+                None,
+                "{case}: an end in a run that never started"
             );
+            if after == "starting" {
+                let deleted = rig.daemon.db.delete_exited_session(uid).await.unwrap();
+                assert!(
+                    matches!(deleted, crate::store::DeleteOutcome::NotExited { .. }),
+                    "{case}: {deleted:?}"
+                );
+            }
             stop(&dir);
         }
     }
@@ -1315,7 +1510,12 @@ mod tests {
     /// A run a stand-in host has made `live` (its done outcome is seq 2), with the
     /// host's side of the socket open.
     async fn live_run(rig: &Rig) -> Played {
-        let host = stub_host(rig, HOST_PROTOCOL_VERSION, None);
+        live_run_on(rig, &stub_host(rig, HOST_PROTOCOL_VERSION, None)).await
+    }
+
+    /// [`live_run`] with the stand-in host `host`.
+    async fn live_run_on(rig: &Rig, host: &Path) -> Played {
+        let host = host.to_path_buf();
         let cwd = rig.root.to_str().unwrap().to_string();
         let daemon = Arc::clone(&rig.daemon);
         let (result, played) =
@@ -1649,6 +1849,350 @@ mod tests {
             assert!(!text.contains(field), "{field} reached the store");
         }
         stop(&played.dir);
+    }
+
+    /// **G13: claude's own end (H6).** A live run's `exited` is filed with the run's cursor
+    /// in one transaction: the row `exited` and one `SessionEnd`, which a receiver already
+    /// subscribed gets once. Then it is acknowledged, so the host can end.
+    #[tokio::test]
+    async fn a_live_runs_own_end_is_filed_with_its_cursor_then_acknowledged() {
+        let rig = rig();
+        let mut broadcast = rig.daemon.events_tx.subscribe();
+        let mut played = live_run(&rig).await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(kept(&rig, &played.uid).0, "exited");
+        assert_eq!(cursor(&rig, &played.uid), 3);
+        let ends: Vec<serde_json::Value> = stored(&rig, &played.uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert_eq!(ends[0]["payload"], serde_json::json!({"exit_code": 0}));
+        let mut seen = 0;
+        while let Ok(event) = broadcast.try_recv() {
+            if event.session_uid == played.uid
+                && event.kind == protocol::event::EventKind::SessionEnd
+            {
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 1, "the subscribed receiver gets the end once");
+        stop(&played.dir);
+    }
+
+    /// **G13's injected failure:** an end that cannot be stored (a test trigger aborts its
+    /// event's insert) changes nothing: the row stays `live`, the cursor where it was, and
+    /// the end is not acknowledged, so the host keeps it.
+    #[tokio::test]
+    async fn an_end_that_cannot_be_stored_changes_nothing() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        trigger(
+            &rig,
+            "CREATE TRIGGER no_end BEFORE INSERT ON events WHEN NEW.kind = 'session_end'
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, None);
+        assert_eq!(kept(&rig, &played.uid).0, "live");
+        assert_eq!(cursor(&rig, &played.uid), 2);
+        stop(&played.dir);
+    }
+
+    /// **G4: the host dies (H7).** The host is SIGKILLed while its group holds a child, a
+    /// decoy runs outside the group, and the run's connection ends. ccd finds the host
+    /// gone: the group is signalled, its child, which ignores SIGTERM, is gone by the
+    /// ladder's SIGKILL, the decoy lives, and the run is `exited` with H7's reason.
+    #[tokio::test]
+    async fn a_dead_hosts_group_is_stopped_and_its_run_ends() {
+        let rig = rig();
+        let host = stub_host_with_child(&rig);
+        let mut decoy = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let Played {
+            dir,
+            uid,
+            lines,
+            write,
+            ..
+        } = live_run_on(&rig, &host).await;
+        let child = pid_in(&dir, "child.pid");
+        // SAFETY: kill(2) of the stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(pid_in(&dir, "stub.pid"), libc::SIGKILL) };
+        drop((lines, write));
+        for _ in 0..150 {
+            if kept(&rig, &uid).0 == "exited" && !running(child) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let child_ran = running(child);
+        let decoy_ran = running(decoy.id() as i32);
+        let _ = decoy.kill();
+        let _ = decoy.wait();
+        if child_ran {
+            // SAFETY: kill(2) of the child this test's stand-in started, by its pid.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert!(!child_ran, "the host's group outlived it");
+        assert!(decoy_ran, "a process outside the group was signalled");
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        let ends: Vec<serde_json::Value> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert_eq!(
+            ends[0]["payload"]["reason"],
+            serde_json::json!("Stopped: its process ended")
+        );
+    }
+
+    /// A live run whose link has ended with its host still running: the host sent a
+    /// message this daemon does not apply yet. Its folder and uid.
+    async fn detached_run(rig: &Rig, host: &Path) -> (PathBuf, String) {
+        let Played {
+            dir,
+            uid,
+            mut lines,
+            mut write,
+            ..
+        } = live_run_on(rig, host).await;
+        say(
+            &mut write,
+            serde_json::json!({"type": "withdrawn", "seq": 3, "tool_use_id": "toolu_1"}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, None);
+        for _ in 0..100 {
+            let session = summary(&rig.daemon, &uid).await;
+            if session.link == protocol::event::Link::Detached {
+                return (dir, uid);
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("the run's link never read detached");
+    }
+
+    /// A process leading a group of its own (`setsid`) with a child in it: a host this
+    /// test controls, which it reaps itself. The child's pid is written to `child`.
+    fn leader(child: &Path) -> (std::process::Child, i32) {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("sleep 60 & echo $! > \"$0\"; exec sleep 60")
+            .arg(child);
+        // SAFETY: setsid(2) is async-signal-safe and touches nothing of the parent's.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        for _ in 0..100 {
+            if let Ok(pid) = std::fs::read_to_string(child) {
+                if let Ok(pid) = pid.trim().parse() {
+                    return (leader, pid);
+                }
+            }
+            std::thread::sleep(POLL);
+        }
+        let _ = leader.kill();
+        let _ = leader.wait();
+        panic!("the leader's child never wrote its pid");
+    }
+
+    /// Record `host`, in `boot`, as the run's host, in place of the one ccd recorded.
+    fn record_as_host(rig: &Rig, uid: &str, host: ProcessIdentity, boot: BootIdentity) {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4,
+                                      boot_sec = ?5, boot_usec = ?6
+                  WHERE session_uid = ?1",
+                rusqlite::params![
+                    uid,
+                    host.pid,
+                    host.birth.start_sec,
+                    host.birth.start_usec,
+                    boot.boot_sec,
+                    boot.boot_usec
+                ],
+            )
+            .unwrap();
+    }
+
+    /// Wait, with a bound, until the run's row reads `lifecycle` and `pid`, if any, is not
+    /// running.
+    async fn until_ended(rig: &Rig, uid: &str, lifecycle: &str, pid: Option<i32>) {
+        for _ in 0..150 {
+            if kept(rig, uid).0 == lifecycle && !pid.is_some_and(running) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// The reason the run's one `SessionEnd` gives, if it has one.
+    fn end_reason(rig: &Rig, uid: &str) -> Option<serde_json::Value> {
+        let ends: Vec<serde_json::Value> = stored(rig, uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .collect();
+        assert!(ends.len() <= 1, "{ends:?}");
+        ends.first().map(|end| end["payload"]["reason"].clone())
+    }
+
+    /// **G6: a detached host's death (H7).** The run's link has ended with its host alive;
+    /// then the host is killed while ccd runs. Once its pid is free, one pass of the
+    /// hosted-run watch, which the liveness tick runs beside the tmux sweep, finds it gone:
+    /// its group is signalled and the run ends.
+    #[tokio::test]
+    async fn a_detached_hosts_death_ends_its_run_on_the_next_watch() {
+        let rig = rig();
+        let host = stub_host_with_child(&rig);
+        let (dir, uid) = detached_run(&rig, &host).await;
+        let (stub, child) = (pid_in(&dir, "stub.pid"), pid_in(&dir, "child.pid"));
+        assert_eq!(kept(&rig, &uid).0, "live");
+        // SAFETY: kill(2) of the stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(stub, libc::SIGKILL) };
+        for _ in 0..100 {
+            // SAFETY: kill(2) with signal 0 only asks whether the pid is in use.
+            if unsafe { libc::kill(stub, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", Some(child)).await;
+        let child_ran = running(child);
+        if child_ran {
+            // SAFETY: kill(2) of the child this test's stand-in started, by its pid.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert!(!child_ran, "the host's group outlived it");
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        assert_eq!(
+            end_reason(&rig, &uid),
+            Some(serde_json::json!("Stopped: its process ended"))
+        );
+    }
+
+    /// **G4, the warrant.** A host gone is signalled only under the warrant, and its run
+    /// ends either way:
+    /// - a pid reused: the recorded host's pid is now a live process of another birth,
+    ///   leading a group of its own, so nothing is signalled and it and its child live;
+    /// - another boot: the recorded group still has a member, its leader gone, but the
+    ///   host was recorded in a boot that is not this one, so the member lives.
+    #[tokio::test]
+    async fn a_dead_hosts_group_is_signalled_only_under_the_warrant() {
+        let rig = rig();
+        let (dir, uid) = detached_run(&rig, &stub_host(&rig, HOST_PROTOCOL_VERSION, None)).await;
+        let boot = protocol::proc_identity::boot_identity().unwrap();
+        let (mut reused, reused_child) = leader(&rig.root.join("reused.child"));
+        let pid = reused.id() as i32;
+        let mut birth = read_birth_identity(pid).unwrap();
+        birth.start_usec += 1;
+        record_as_host(&rig, &uid, ProcessIdentity { pid, birth }, boot);
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", None).await;
+        let (leader_ran, child_ran) = (running(pid), running(reused_child));
+        let _ = reused.kill();
+        let _ = reused.wait();
+        // SAFETY: kill(2) of the child this test's leader started, by its pid.
+        unsafe { libc::kill(reused_child, libc::SIGKILL) };
+        assert!(
+            leader_ran && child_ran,
+            "a group the warrant refused was signalled"
+        );
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        stop(&dir);
+
+        let rig = self::rig();
+        let (dir, uid) = detached_run(&rig, &stub_host(&rig, HOST_PROTOCOL_VERSION, None)).await;
+        let (mut gone, member) = leader(&rig.root.join("gone.child"));
+        let host = ProcessIdentity {
+            pid: gone.id() as i32,
+            birth: read_birth_identity(gone.id() as i32).unwrap(),
+        };
+        let _ = gone.kill();
+        let _ = gone.wait();
+        let elsewhere = BootIdentity {
+            boot_sec: boot.boot_sec + 1,
+            boot_usec: boot.boot_usec,
+        };
+        record_as_host(&rig, &uid, host, elsewhere);
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", None).await;
+        let member_ran = running(member);
+        // SAFETY: kill(2) of the child this test's leader started, by its pid.
+        unsafe { libc::kill(member, libc::SIGKILL) };
+        assert!(member_ran, "a group from another boot was signalled");
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        stop(&dir);
+    }
+
+    /// **G4, a dead host not yet reaped.** The recorded host dies while its parent holds
+    /// off reaping it: a zombie, whose birth cannot be read, so the warrant refuses it.
+    /// The ladder waits; once the host is reaped and its pid free, its group gets SIGTERM
+    /// and the member it held is gone, and only then does the run end. macOS only: Linux
+    /// reads a zombie's birth, so its warrant passes at once and there is nothing to wait out.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_dead_host_is_waited_out_until_it_is_reaped() {
+        let rig = rig();
+        let (dir, uid) = detached_run(&rig, &stub_host(&rig, HOST_PROTOCOL_VERSION, None)).await;
+        let (mut zombie, member) = leader(&rig.root.join("zombie.child"));
+        let host = ProcessIdentity {
+            pid: zombie.id() as i32,
+            birth: read_birth_identity(zombie.id() as i32).unwrap(),
+        };
+        record_as_host(
+            &rig,
+            &uid,
+            host,
+            protocol::proc_identity::boot_identity().unwrap(),
+        );
+        let _ = zombie.kill();
+        for _ in 0..100 {
+            if is_zombie(host.pid) == Some(true) {
+                break;
+            }
+            std::thread::sleep(POLL);
+        }
+        assert_eq!(is_zombie(host.pid), Some(true), "the host is not a zombie");
+        rig.daemon.watch_hosted_runs().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let waited = kept(&rig, &uid).0 == "live" && running(member);
+        let _ = zombie.wait();
+        until_ended(&rig, &uid, "exited", Some(member)).await;
+        let member_ran = running(member);
+        if member_ran {
+            // SAFETY: kill(2) of the child this test's leader started, by its pid.
+            unsafe { libc::kill(member, libc::SIGKILL) };
+        }
+        assert!(
+            waited,
+            "the run ended, or its group was signalled, before the host was reaped"
+        );
+        assert!(!member_ran, "the group outlived its reaped host");
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        stop(&dir);
     }
 
     const SESSION_EVENTS: &str = include_str!("../../../fixtures/claude/sdk-session-events.json");

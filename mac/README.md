@@ -1104,12 +1104,19 @@ own, so it outlives the daemon; ccd hands the host the first message as the run'
 answer waits for the host's outcome: a done start makes the run `live` and is
 answered started, and a refused one makes it `failed` and is answered with the
 reason; its host then ends, once claude's end is acknowledged. With no outcome within the start's 80 s, the answer is started and the run
-stays `starting` until its outcome comes. Once `start` is sent, only that outcome
-ends a run, so a run whose host lost its link first stays `starting`, and a delete
-refuses it. A live run's conversation is what claude sends over the link: each SDK
+stays `starting` until its outcome comes. Once `start` is sent, only that outcome or
+its host's end ends a starting run: one whose host lost its link but still runs stays
+`starting`, and a delete refuses it; one whose host is gone becomes `failed`. A live run's conversation is what claude sends over the link: each SDK
 message becomes the run's events (`sdk` source, through `protocol::sdk_map`), filed with
 the run's cursor in one transaction before it is acknowledged, and each init also names
 the run's Claude session id and the folder claude runs in, a new worktree's included.
+A live run ends when claude does: its `exited` is filed with the run's cursor in one
+transaction, the run `exited` and its `SessionEnd` carrying the exit code and any signal. It
+also ends when its host is gone, seen when the run's link ends or by the liveness tick. ccd
+then sends SIGTERM to the host's process group, and SIGKILL 5 s later only while members
+remain, each under a warrant: the same boot, and the host's pid free or still its own. The
+run is then `exited`, "Stopped: its process ended". A ccd restart does not re-attach a hosted
+run: its host keeps running, and its later messages stay in it.
 A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the

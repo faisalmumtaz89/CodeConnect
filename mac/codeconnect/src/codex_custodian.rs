@@ -99,7 +99,9 @@ use crate::codex_launch::{
     self, deadline_expiry, CleanupState, Expiry, LaunchLock, LaunchRecord, LaunchState,
 };
 use anyhow::Result;
-use protocol::proc_identity::{liveness, BootIdentity, Liveness, ProcessIdentity};
+use protocol::proc_identity::{
+    group_has_members, group_warrant, liveness, GroupWarrant, Liveness, ProcessIdentity,
+};
 use protocol::tmux::CleanupOutcome;
 
 /// One pass's verdict. Terminal variants stop the loop; the rest sleep + retry.
@@ -441,157 +443,6 @@ fn late_session_still_possible<D: CustodianDeps>(deps: &D, record: &LaunchRecord
     // The sighting is read from the RECORD first (durable, and therefore inherited
     // by a replacement custodian) and only then from this process's own memory.
     !arrived && !record.session_observed && !deps.seen_session_present()
-}
-
-/// Whether a process group still has any member this process could signal.
-///
-/// `kill(-pgid, 0)` sends nothing; it only asks. `ESRCH` is the proof of
-/// extinction. Any other error means the question could not be answered, which is
-/// reported as "still has members" — the fail-closed reading, since the caller
-/// uses this to decide whether cleanup fell short.
-fn group_has_members(pgid: i32) -> bool {
-    // SAFETY: signal 0 delivers nothing and only probes for the group's existence.
-    if unsafe { libc::kill(-pgid, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-/// Whether a recorded pgid may still be signalled as a group (the pgid-reuse guard).
-#[derive(Debug, PartialEq, Eq)]
-enum GroupWarrant {
-    Warranted,
-    Refused(String),
-}
-
-/// Bind a process group to the identity that was recorded as leading it.
-///
-/// The reasoning, which rests on one kernel rule: a process group id can only come
-/// into existence in a process whose **pid equals that id** (`setpgid(0, 0)`). So
-/// the only way the recorded number can name a group that is not ours is if the
-/// recorded leader's pid was freed and handed to somebody else who then led a group
-/// with it. Deciding whether that happened is therefore a question about the PID,
-/// and it is answerable:
-///
-///   * the pid is **unoccupied** — nothing can currently be leading a fresh group
-///     with that id, so whatever is still in the group inherited it from our leader.
-///     This is the case that actually occurs: the app-server is reaped and the
-///     descendants it forked keep the group alive (measured);
-///   * the pid is still **our recorded process** — the identity matches outright;
-///   * anything else — a live pid with a different birth stamp, or one whose birth
-///     cannot be read — is the ABA case, or indistinguishable from it. Refused.
-///
-/// **Residual, stated exactly, and it is bigger than this used to claim.**
-///
-/// The first part is the gap between the answer and the signal that follows it:
-/// Darwin has no atomic check-and-signal for a process group, so that window is
-/// narrowed to an instant rather than closed.
-///
-/// The second part is the **unoccupied-leader arm itself, which is an unbounded
-/// ABA** — this doc used to say the opposite, and that was wrong. "Nothing can
-/// currently be leading a fresh group with that id" is true and does not imply what
-/// the arm concludes from it. Counterexample: our group empties; the pid is reused
-/// by a new process that leads a group with it; that process forks and exits; its
-/// unrelated descendants keep the group alive while the pid is unoccupied *again*.
-/// The arm then SIGKILLs a group that was never ours, and the age of the record
-/// does not bound it.
-///
-/// Measured (`KERN_PROC_PGRP` on the constructed state): the surviving members'
-/// only distinguishing fields are pid, ppid and start time. Every member has
-/// reparented to `launchd`, so ppid says nothing; and members of a recycled group
-/// start *after* the recycled leader's birth, which is after our leader's death,
-/// which is after our leader's birth — so start time does not separate them either.
-/// Nothing Darwin exposes today tells our own descendants from a stranger's.
-///
-/// The arm is nevertheless KEPT, deliberately, and the alternative is worse: the
-/// host reaps its children by pid (`Child::start_kill`), so the app-server's
-/// surviving descendants are exactly what this arm reaches on the ordinary teardown
-/// path. Refusing here would trade a narrow within-boot risk for a guaranteed leak of
-/// codex subprocesses on every session that ends normally — the leak this arm
-/// exists to close.
-///
-/// **The worst arm of that residual is closed rather than recorded.** The residual
-/// above is a within-boot one, and the sentences describing it used to say the
-/// unrelated-group risk "requires pid wraparound". Across a REBOOT it
-/// requires nothing at all: the recorded pgid is a number from a boot that no longer
-/// exists, the new boot allocates pids from the bottom and reaches that number in the
-/// ordinary course of starting up, and if the new occupant has exited while its
-/// children live, the unoccupied-leader arm authorizes `SIGKILL` on a process group
-/// belonging to a machine-lifetime this launch never touched. Nothing about the
-/// recorded identity distinguishes it, because every field in it — pid, birth,
-/// pgid — is scoped to the boot it was written under.
-///
-/// So the warrant now takes the record's [`BootIdentity`] and refuses outright when
-/// the current boot differs. This costs nothing real: no process recorded before a
-/// reboot can still be running after it, so there is never anything of ours on the
-/// other side of that comparison to reach. It is the one place in this residual where
-/// fail-closed is free. An UNREADABLE current boot also refuses — the same rule
-/// `boot_changed` uses in the other direction is inverted here on purpose, because
-/// this side is authorizing a `SIGKILL` rather than declining to conclude an absence.
-///
-/// **What would close it**, and why it is a change of its own rather than a line
-/// here: provenance the members carry themselves. The host would stamp the
-/// app-server's environment with this launch's nonce, every descendant would inherit
-/// it, and the warrant would enumerate `KERN_PROC_PGRP` and require every member to
-/// present it (via `KERN_PROCARGS2`, which is readable for same-uid processes). That
-/// is new kernel-introspection machinery with its own measurement and failure modes,
-/// and until it exists this arm signals on a warrant it cannot corroborate.
-///
-/// A second, smaller residual: a same-uid process in the same session may join an
-/// existing group deliberately with `setpgid(self, pgid)`. Such a process would be
-/// killed by the group signal. It is not reachable by accident — it requires
-/// guessing the pgid and choosing to join it — and no privilege boundary is crossed.
-fn group_warrant(identity: &ProcessIdentity, recorded_boot: BootIdentity) -> GroupWarrant {
-    // The boot check. Asked FIRST, before the pid is even probed: across a boot
-    // change every field of `identity` names a machine-lifetime that is over, so no
-    // answer the kernel gives about that pid can be about our process.
-    match protocol::proc_identity::boot_identity() {
-        Some(now) if now == recorded_boot => {}
-        Some(_) => {
-            return GroupWarrant::Refused(
-                "the machine has rebooted since this launch was recorded, so the recorded \
-                 pgid names a process group from a boot that no longer exists"
-                    .to_string(),
-            )
-        }
-        None => {
-            return GroupWarrant::Refused(
-                "the current boot identity could not be read, so the recorded pgid cannot \
-                 be proven to belong to this boot at all"
-                    .to_string(),
-            )
-        }
-    }
-    let pid = identity.pid;
-    // SAFETY: signal 0 delivers nothing; it only asks whether the pid is occupied.
-    if unsafe { libc::kill(pid, 0) } != 0 {
-        let err = std::io::Error::last_os_error();
-        return match err.raw_os_error() {
-            // Unoccupied: no live leader. This is the UNCORROBORATED arm — see the
-            // residual above. It is warranted because the alternative leaks, not
-            // because the members are proven ours.
-            Some(libc::ESRCH) => GroupWarrant::Warranted,
-            // Occupied by a process we may not signal — fall through to the birth
-            // compare, which is what decides whether it is still ours.
-            Some(libc::EPERM) => birth_matches(identity),
-            _ => GroupWarrant::Refused(format!("pid {pid} could not be probed: {err}")),
-        };
-    }
-    birth_matches(identity)
-}
-
-fn birth_matches(identity: &ProcessIdentity) -> GroupWarrant {
-    let pid = identity.pid;
-    match protocol::proc_identity::read_birth_identity(pid) {
-        Some(birth) if birth == identity.birth => GroupWarrant::Warranted,
-        Some(_) => GroupWarrant::Refused(format!(
-            "pid {pid} is now a different process, so the group id may have been recycled"
-        )),
-        // A pid that exists but cannot be described is not evidence of anything.
-        None => GroupWarrant::Refused(format!(
-            "pid {pid} exists but its birth identity could not be read"
-        )),
-    }
 }
 
 /// Whether the server that hosted this launch's session is provably gone.
@@ -1660,6 +1511,7 @@ pub fn late_host_admission(uid: &str, nonce: &str, socket: &str) -> Result<HostA
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use protocol::proc_identity::BootIdentity;
     use std::cell::RefCell;
 
     /// A fully scripted deps: the test dictates the record, liveness, deadline,
