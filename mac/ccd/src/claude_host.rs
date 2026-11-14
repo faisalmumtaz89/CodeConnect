@@ -4899,6 +4899,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A real claude across a restart, then End run.** A run on the real host whose claude,
+    /// signed in by its own config, is writing a long answer when ccd stops: the first
+    /// daemon's runtime is shut down mid-turn, as a crash or an update ends ccd, and a second
+    /// daemon on the same store recovers it (`recover`, then `recover_hosted_runs`, in
+    /// main.rs's order). The run is live and attached again; End run on the restarted daemon
+    /// ends it `exited` before the escalation's 10 s, and the host and its group are gone.
+    /// Ignored and gated as G2 is: `CODECONNECT_TEST_AGENT_HOST`,
+    /// `CODECONNECT_TEST_REAL_CLAUDE`, `CODECONNECT_TEST_RIG_DIR`.
+    #[test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    fn a_real_claude_across_a_restart_is_ended_by_the_restarted_daemon() {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join("restart");
+        std::fs::create_dir(&root).unwrap();
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let cwd = root.to_str().unwrap().to_string();
+        let codeconnect = root.join("codeconnect");
+        // The first ccd: the run starts, and claude is mid-turn when ccd's runtime ends.
+        let first = tokio::runtime::Runtime::new().unwrap();
+        let (uid, host_pid) = first.block_on(async {
+            let daemon = daemon_on(&root);
+            let started = start(
+                &daemon,
+                Run {
+                    root: &root,
+                    request_id: "restart",
+                    cwd: &cwd,
+                    prompt: "Write a 2,000-word essay on the history of mechanical clocks.",
+                    model: None,
+                    worktree: None,
+                    trust: Trust::NotTrusted,
+                    claude_path: claude.to_str().unwrap(),
+                    host_bin: &host,
+                    codeconnect: &codeconnect,
+                    environment: &environment,
+                },
+            )
+            .await;
+            let uid = started_uid(&started);
+            let host_pid = read_host_file(&run_dir(&root, &uid).join("host.json"))
+                .unwrap()
+                .host_pid;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            (uid, host_pid)
+        });
+        drop(first);
+        // The restarted ccd, on the same store.
+        let second = tokio::runtime::Runtime::new().unwrap();
+        let (attached, ended_after) = second.block_on(async {
+            let daemon = daemon_on(&root);
+            daemon.recover().await;
+            daemon.recover_hosted_runs(&root).await;
+            let mut attached = false;
+            for _ in 0..100 {
+                if summary(&daemon, &uid).await.link == protocol::event::Link::Attached {
+                    attached = true;
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            let asked = Instant::now();
+            let answer = daemon.stop_run(&uid).await;
+            assert_eq!(
+                answer,
+                StopRunResult::Stopping,
+                "the restarted run is not live"
+            );
+            let mut ended_after = None;
+            for _ in 0..200 {
+                let lifecycle = daemon
+                    .db
+                    .hosted_link(uid.clone())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lifecycle;
+                if lifecycle == Lifecycle::Exited {
+                    ended_after = Some(asked.elapsed());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            (attached, ended_after)
+        });
+        let host_gone = second.block_on(gone_within(host_pid, Duration::from_secs(5)));
+        if !host_gone {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
+        let group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
+        println!(
+            "RESTART: attached again {attached}; ended {ended_after:?} after the stop; host gone {host_gone}; group left {group_left}"
+        );
+        assert!(
+            attached,
+            "the restarted daemon never attached the host again"
+        );
+        let ended_after = ended_after.expect("the run never ended");
+        assert!(
+            ended_after < STOP_GRACE,
+            "ended after {ended_after:?}: by the escalation, not by claude"
+        );
+        assert!(
+            host_gone && !group_left,
+            "host gone {host_gone}, group left {group_left}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Whether the run `uid` is settled after the person's last words: a turn has ended
     /// since them, and nothing new has been filed for 5 s. Waits 180 s at most.
     async fn settled_after_words(rig: &Rig, uid: &str) -> bool {
