@@ -3,11 +3,12 @@ import SwiftUI
 
 /// Settings: this computer's devices, as its own CodeConnect lists them over its local socket. One entry a phone or
 /// computer (Kit's `DeviceGroup`), with Block; the blocked ones with Allow again. Each asks first, naming the device.
-/// The app's own entry has no Block. Every word is Kit's.
+/// The app's own entry has no Block, and no entry has Block while the app can't tell which is its own. While this
+/// computer isn't answering, the pane says so rather than show the last list. Every word is Kit's.
 struct DevicesPane: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
-    /// Nil until this computer has answered.
+    /// Nil until this computer has answered, and again whenever a read fails.
     @State private var devices: [PairedDevice]?
     @State private var answers = true
     @State private var address: LocalDaemon.Address?
@@ -41,6 +42,10 @@ struct DevicesPane: View {
     private var thisDevice: String? {
         machines.model(for: setup.thisMac(at: address))?.connection.helloAck?.deviceID
     }
+
+    /// The pane knows which entry is the app's own: its link has said the device id, or the app has no pairing with
+    /// this computer. Not while that link is down or still connecting, when any entry could be the app's own.
+    private var knowsThisDevice: Bool { thisDevice != nil || setup.thisMac(at: address) == nil }
 
     var body: some View {
         ScrollView {
@@ -130,7 +135,7 @@ struct DevicesPane: View {
                 ActionButton(title: DeviceGroup.allowAction, key: nil, prominent: false, id: "\(id).allow") {
                     asking = .allow(group)
                 }
-            } else if !isThisMac {
+            } else if !isThisMac, knowsThisDevice {
                 ActionButton(title: DeviceGroup.blockAction, key: nil, prominent: false, id: "\(id).block") {
                     asking = .block(group)
                 }
@@ -189,6 +194,7 @@ struct DevicesPane: View {
             devices = listed
             answers = true
         } else {
+            devices = nil
             answers = false
         }
     }
