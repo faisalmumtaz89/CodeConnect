@@ -22,6 +22,10 @@ public enum ConnectionError: LocalizedError, Sendable {
     /// The daemon speaks a protocol this app does not. Terminal: retrying cannot
     /// change it, and the fix is at the Mac.
     case incompatible(String)
+    /// This device's token names a pairing the computer has blocked. The token is
+    /// kept, so this is NOT terminal for a saved-token dial: the app waits and
+    /// reconnects the moment the computer allows it again, with no new code.
+    case revoked
     case invalidEndpoint
     case server(code: String, message: String)
     case transport(String)
@@ -54,6 +58,9 @@ public enum ConnectionError: LocalizedError, Sendable {
                 "\(HostDevice.current.pairingComputer("The computer")) rejected this pairing code. It may have expired, already been used, or been mistyped. \(HostDevice.current.codeAgain)"
         case .notAdmitted: return HostDevice.current.addWithCode
         case .incompatible(let detail): return detail
+        case .revoked:
+            return
+                "\(HostDevice.current.pairingComputer("This computer")) has blocked this device. It reconnects when the computer allows it again."
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
@@ -234,6 +241,9 @@ public final class DaemonConnection {
         case quiet
         /// Any other failure: the computer could not be reached.
         case unreachable
+        /// The computer has blocked this device — it answered "revoked" at the handshake.
+        /// The app keeps its pairing and reconnects the moment it is allowed again.
+        case blocked
     }
     public private(set) var dialFailure: DialFailure?
 
@@ -463,6 +473,14 @@ public final class DaemonConnection {
                     // again takes it back as it was at the next try.
                     withoutCredential = true
                     continue
+                case .revoked:
+                    // Only a saved-token dial reaches `.revoked` (a pairing dial is routed to
+                    // `.unauthorized` at the handshake). Keep the token and keep dialling, so
+                    // the instant it is allowed again the next dial is admitted — no new code
+                    // (the "allow again" promise). A server answer, not a transport failure:
+                    // advance the backoff without switching the scheme it answered on.
+                    dialFailure = .blocked
+                    ledger.serverRefused()
                 case .unauthorized, .rejectedPairingCode, .notAdmitted, .incompatible:
                     refusal = ConnectionRefusal(error)
                     phase = .failed(reason: error.localizedDescription)
@@ -595,6 +613,16 @@ public final class DaemonConnection {
             attempts += 1
             dnsStreak = 0
             schemeEligibleFailures += 1
+        }
+
+        /// A dial got a server-level refusal — a "revoked" answer, not a transport failure.
+        /// Advance the backoff on the ordinary cadence, but take no scheme alternation and
+        /// clear stale scheme-failure evidence: the computer answered, so the transport works
+        /// and the scheme it worked on must not be switched away from.
+        mutating func serverRefused() {
+            attempts += 1
+            dnsStreak = 0
+            schemeEligibleFailures = 0
         }
 
         /// The connection completed a handshake, or a new `start` began:
@@ -834,6 +862,16 @@ public final class DaemonConnection {
                     // not say which side is older.
                     throw ConnectionError.incompatible(
                         "\(HostDevice.current.pairingComputer("This computer")) runs a different version of CodeConnect. Update CodeConnect on it and on this \(HostDevice.current.name), then try again.")
+                case "revoked" where helloAck == nil:
+                    // The handshake refused a token whose pairing the computer has blocked.
+                    // A SAVED token is not terminal: the dial loop waits and reconnects when
+                    // it is allowed again. A TYPED token (a pairing dial) cannot wait on a
+                    // running pairing screen, so it takes the plain refused-token path — the
+                    // same words and finality as "unauthorized", not a promise of a
+                    // reconnect it will never make. A live mid-session "revoked" (helloAck
+                    // set) falls through to the ordinary reconnect — it re-dials and meets
+                    // this answer at the handshake.
+                    throw dialIsForPairing ? ConnectionError.unauthorized : ConnectionError.revoked
                 default:
                     break
                 }

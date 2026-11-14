@@ -38,7 +38,7 @@ use protocol::ws::AnswerOutcome;
 
 use crate::store::{
     AnswerClaim, CodexPendingApprovalRow, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume,
-    PendingApprovalRow, PrunedSession, SessionRow, Store, TailCursor, TextClaim,
+    PendingApprovalRow, PrunedSession, SessionRow, Store, TailCursor, TextClaim, TokenAuth,
 };
 
 #[derive(Clone)]
@@ -141,7 +141,7 @@ db_ops! {
     fn claim_answer(claim: AnswerClaim) -> ();
     fn unresolved_answer_claims() -> Vec<AnswerClaim>;
     fn find_device(needle: String) -> DeviceLookup;
-    fn device_by_token_hash(token_hash: String) -> Option<DeviceRow>;
+    fn device_by_token_hash(token_hash: String) -> TokenAuth;
     fn device_is_active(device_id: String) -> bool;
     /// Where this device's token is registered, or `None` when it has none.
     fn push_environment_for(device_id: String) -> Option<String>;

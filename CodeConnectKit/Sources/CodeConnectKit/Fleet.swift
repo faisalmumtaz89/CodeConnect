@@ -469,6 +469,9 @@ public struct LinkHealth: Sendable, Equatable {
         case connecting
         case offline
         case rejected
+        /// The computer has blocked this device. The pairing is still held, so this is
+        /// not "pair again": the app waits and reconnects when it is allowed again.
+        case blocked
     }
 
     /// What broke, when the level alone cannot pick the right words or the
@@ -508,6 +511,7 @@ public struct LinkHealth: Sendable, Equatable {
         case .connecting: return "Connecting to \(HostDevice.current.computer("your computer"))…"
         case .offline: return detail
         case .rejected: return detail
+        case .blocked: return detail
         case .live, .lagging: return nil
         }
     }
@@ -524,6 +528,7 @@ public struct LinkHealth: Sendable, Equatable {
         case .connecting: return "Connecting"
         case .offline: return "Offline"
         case .rejected: return cause == .refused(.differentVersion) ? "Different version" : "Pair again"
+        case .blocked: return "Blocked"
         }
     }
 
@@ -535,6 +540,7 @@ public struct LinkHealth: Sendable, Equatable {
         case .connecting: return "arrows-clockwise"
         case .offline: return "plugs"
         case .rejected: return "lock-open"
+        case .blocked: return "lock"
         }
     }
 
@@ -575,6 +581,10 @@ public struct LinkHealth: Sendable, Equatable {
             return LinkHealth(
                 level: .offline, age: age,
                 detail: "Can't reach \(HostDevice.current.computer("your computer")). Retrying automatically.")
+        case .blocked:
+            return LinkHealth(
+                level: .blocked, age: age,
+                detail: "\(HostDevice.current.computer("Your computer")) has blocked this device. It reconnects when the computer allows it again.")
         }
     }
 
