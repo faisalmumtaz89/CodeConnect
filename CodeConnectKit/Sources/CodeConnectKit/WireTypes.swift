@@ -123,6 +123,17 @@ public enum EngineNotice {
     public static let modeSet = "mode_set"
 }
 
+/// The two lines ccd sends to wake an idle Codex agent for its mail
+/// (`protocol::ipc::MAIL_NUDGE_ACT` / `MAIL_NUDGE_SHOW`). Codex's app-server
+/// reports each back as the turn's user message, so the timeline draws it as
+/// the mail notice — never the person's words.
+public enum MailNudge {
+    public static let act =
+        "You have CodeConnect mail: call the codeconnect read_messages tool, then handle each message as its sender asks."
+    public static let show =
+        "You have CodeConnect mail: call the codeconnect read_messages tool and show the messages to the person; do not act on them."
+}
+
 extension EventSource: Codable {
     public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
