@@ -6300,6 +6300,104 @@ mod tests {
         );
     }
 
+    /// **B6 part 2b G17: "Allow for this session" on a real claude** (app-qa's rig; probe
+    /// M1's shape, now through ccd and an app answer). claude is asked to run `touch m1.txt`
+    /// twice, one call after the other. Its first card offers "Allow for this session", the
+    /// iPhone answers with it, and the answer is `Applied`; the second call is not asked, so
+    /// the run had one card, and both calls ran; no settings file changed, byte for byte:
+    /// the config's own, and the folder's, which has none. Then End run, as G2. Ignored and
+    /// gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_allowed_for_the_session_is_not_asked_again() {
+        let prompt = "Use the Bash tool to run exactly this command: touch m1.txt. Once it has finished, run exactly the same command again, touch m1.txt, as a second Bash call. Then say done.";
+        let config = PathBuf::from(
+            std::env::var_os("CLAUDE_CONFIG_DIR").expect("CLAUDE_CONFIG_DIR is not set"),
+        );
+        let read = |dir: &Path| -> Vec<(String, Option<Vec<u8>>)> {
+            ["settings.json", "settings.local.json"]
+                .into_iter()
+                .map(|name| (name.to_string(), std::fs::read(dir.join(name)).ok()))
+                .collect()
+        };
+        let config_before = read(&config);
+        let (rig, uid, host_pid) = real_claude_run("g17", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let offered = card.as_ref().map(|(request_id, _)| {
+            filed_card(&rig, &uid, request_id)
+                .get("allow_for_session")
+                .cloned()
+        });
+        let answer = match &card {
+            Some((request_id, hash)) => Some(
+                rig.daemon
+                    .answer(
+                        request_id,
+                        hash,
+                        allow_for_this_session(),
+                        Some(&uid),
+                        AnsweredOn::Iphone,
+                    )
+                    .await,
+            ),
+            None => None,
+        };
+        let settled = settled_after_words(&rig, &uid).await;
+        let events = stored(&rig, &uid);
+        let asked = events
+            .iter()
+            .filter(|event| event["kind"] == "approval_request")
+            .count();
+        let results: Vec<serde_json::Value> = events
+            .iter()
+            .filter(|event| event["kind"] == "tool_result")
+            .map(|event| event["payload"]["message"]["content"][0].clone())
+            .collect();
+        let ran = results
+            .iter()
+            .filter(|result| result["is_error"] != true)
+            .count();
+        let open = cards(&rig.daemon, &uid).await;
+        let (config_after, folder_after) = (read(&config), read(&rig.root.join(".claude")));
+        println!(
+            "G17: card {card:?}; offered {offered:?}; answer {answer:?}; settled {settled}; asked {asked}; results {results:?}; open {open:?}; config unchanged {}; folder settings {folder_after:?}",
+            config_after == config_before
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("G17: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert!(card.is_some(), "claude asked nothing");
+        assert_eq!(
+            offered,
+            Some(Some(serde_json::Value::Bool(true))),
+            "the card did not offer it"
+        );
+        let Some(AnswerResult::Applied { outcome }) = &answer else {
+            panic!("not applied: {answer:?}");
+        };
+        assert!(!outcome.indeterminate);
+        assert_eq!(asked, 1, "the second call was asked again");
+        assert!(settled, "the run did not settle");
+        assert_eq!((results.len(), ran), (2, 2), "both calls ran: {results:?}");
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert!(
+            config_after == config_before,
+            "the config's settings changed"
+        );
+        assert!(
+            folder_after.iter().all(|(_, bytes)| bytes.is_none()),
+            "the folder has settings: {folder_after:?}"
+        );
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
     /// claude's `can_use_tool` request for the Bash call `toolu_rh`, as claude writes it.
     fn claude_asks() -> String {
         serde_json::json!({"type": "control_request", "request_id": "req-toolu_rh",
