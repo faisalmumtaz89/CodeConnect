@@ -1041,7 +1041,8 @@ public enum AnswerDecision: Sendable, Hashable {
     /// stored and these indices; nothing is typed.
     case answers([QuestionAnswer])
     /// Decline an `AskUserQuestion` (minor 21): the daemon denies it through
-    /// its held hook. The main conversation's question is denied with an
+    /// its held hook, or, for a run started from an app, through the run's
+    /// agent host. The main conversation's question is denied with an
     /// interrupt, so the turn stops as Escape at its dialog does; a background
     /// agent's is denied without one.
     case decline

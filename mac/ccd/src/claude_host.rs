@@ -4226,11 +4226,11 @@ mod tests {
         stop(dir);
     }
 
-    /// A question claude asks a hosted run: one single choice whose first option's label
-    /// has a variation selector (⚠️) and whose preview is indented with a tab, text the
-    /// terminal's dialog would rewrite.
+    /// A question claude asks a hosted run: one single choice whose text holds a tab and a
+    /// variation selector (⚠️), as does its first option's label, and whose preview is
+    /// indented with a tab, text the terminal's dialog would rewrite.
     fn question_input() -> serde_json::Value {
-        serde_json::json!({"questions": [{"question": "Which start?", "header": "Start",
+        serde_json::json!({"questions": [{"question": "Which\tstart ⚠️?", "header": "Start",
             "multiSelect": false, "options": [
                 {"label": "⚠️ Now", "description": "", "preview": "if ready {\n\tstart()\n}"},
                 {"label": "Later", "description": "", "preview": "wait()"}]}]})
@@ -4268,12 +4268,13 @@ mod tests {
             .await
     }
 
-    /// **B6 part 2a, G8a: a hosted run's question.** It is a question card, held and never
-    /// bound to an allow. The app's answers reach the host as the call's input: the chosen
-    /// label and the preview with the notes as its annotation, though the terminal would
-    /// rewrite that text. The answer is then `Applied` and the card closes. An incomplete
-    /// answer is refused and reaches nothing: the first answer the host reads is the whole
-    /// one.
+    /// **B6 part 2a, G8a: a hosted run's question.** It is a question card at birth, held
+    /// and never bound to an allow; born as anything else, its answers would be refused.
+    /// The app's answers reach the host as the call's input: the chosen label and the
+    /// preview with the notes as its annotation, though the terminal would rewrite that
+    /// text and the question's own. The answer is then `Applied` and the card closes. An
+    /// incomplete answer is refused and reaches nothing: the first answer the host reads
+    /// is the whole one.
     #[tokio::test]
     async fn a_hosted_question_is_answered_with_its_answers_as_its_input() {
         let rig = rig();
@@ -4324,11 +4325,11 @@ mod tests {
         };
         assert_eq!(
             input["answers"],
-            serde_json::json!({"Which start?": "⚠️ Now"})
+            serde_json::json!({"Which\tstart ⚠️?": "⚠️ Now"})
         );
         assert_eq!(
             input["annotations"],
-            serde_json::json!({"Which start?": {"preview": "if ready {\n\tstart()\n}", "notes": "go"}})
+            serde_json::json!({"Which\tstart ⚠️?": {"preview": "if ready {\n\tstart()\n}", "notes": "go"}})
         );
         assert_eq!(input["questions"], question_input()["questions"]);
         let AnswerResult::Applied { outcome } = result else {

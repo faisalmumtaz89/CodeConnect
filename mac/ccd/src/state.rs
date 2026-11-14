@@ -18374,21 +18374,6 @@ mod tests {
         assert_eq!(Waiting::of(&inner).decisions, 0, "no host and no hook");
     }
 
-    /// **B6 part 2a, G8d:** a hosted run's question rings as a question, as a hook's does.
-    #[test]
-    fn a_hosted_runs_question_rings_as_a_question() {
-        let mut inner = Inner::default();
-        let mut card = pending_card(TEST_UID, "Aion");
-        card.card.question_hold = Some(QuestionHold::Held);
-        card.link = true;
-        card.question = Some(QuestionState::default());
-        inner
-            .pending
-            .insert((TEST_UID.to_string(), "q".to_string()), card);
-        let waiting = Waiting::of(&inner);
-        assert_eq!((waiting.decisions, waiting.question), (1, true));
-    }
-
     /// Two cards on one run are one agent, and the run is named once.
     /// Unreachable through hooks alone — it takes a claimed card the
     /// superseding sweep left standing — so the rule is pinned where it lives

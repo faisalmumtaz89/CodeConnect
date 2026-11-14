@@ -483,18 +483,19 @@ mod tests {
     }
 
     /// **B6 part 2a:** a hosted run's question is answered whatever the terminal would
-    /// do to its text: a preview indented with a tab and a label with a variation
-    /// selector (⚠️) are taken as written. A hook's question with the same text stays
-    /// refused, its answer having to be the keyboard's byte for byte.
+    /// do to its text: question text with a tab and a variation selector (⚠️), a label
+    /// with one, and a preview indented with a tab are taken as written. A hook's question
+    /// with the same text stays refused, its answer having to be the keyboard's byte for
+    /// byte.
     #[test]
     fn a_hosted_question_takes_text_the_terminal_would_rewrite() {
-        let input = json!({"questions": [{"question": "Which start?", "options": [
+        let input = json!({"questions": [{"question": "Which\tstart ⚠️?", "options": [
             {"label": "⚠️ Now", "preview": "if ready {\n\tstart()\n}"},
             {"label": "Later", "preview": "wait()"}]}]});
         let built = host_updated_input(&input, &[pick(&[0])]).unwrap();
-        assert_eq!(built["answers"]["Which start?"], "⚠️ Now");
+        assert_eq!(built["answers"]["Which\tstart ⚠️?"], "⚠️ Now");
         assert_eq!(
-            built["annotations"]["Which start?"],
+            built["annotations"]["Which\tstart ⚠️?"],
             json!({"preview": "if ready {\n\tstart()\n}"})
         );
         assert!(host_updated_input(&input, &[pick(&[1])]).is_ok());

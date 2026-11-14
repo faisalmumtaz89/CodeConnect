@@ -526,14 +526,16 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         (`{request_id, question_hold}`), and the latest one wins.
 ///       - [`ws::AnswerDecision::Answers`] and [`ws::AnswerDecision::Decline`] —
 ///         the only decisions a question card takes. The daemon returns them
-///         through Claude's held hook; nothing is typed.
+///         through Claude's held hook, or, for a run started in an agent host,
+///         through that host; nothing is typed.
 ///
 ///     What changed for every client, including older ones: `allow` and `option`
 ///     on a question card are refused before anything is claimed or typed, and
 ///     `deny` on one is a decline. A minor-20 phone still shows the question as an
 ///     approval; nothing it can tap chooses an answer for the person.
 ///   * `22` — **Every Claude card is answered only through the hook Claude holds
-///     for its own call. Nothing is typed into a permission prompt.**
+///     for its own call (or, for a run started in an agent host, through that
+///     host). Nothing is typed into a permission prompt.**
 ///
 ///     A phone's answer used to be typed into whichever prompt was on screen,
 ///     and Claude queues background agents' prompts there, so it could answer
