@@ -1124,6 +1124,14 @@ what was not acknowledged and the run goes on; a run still starting is sent its 
 which a host that has one ignores; and the host of a run that has ended is drained, so it
 exits. A host gone meanwhile is the liveness tick's, as above. A starting run whose ccd died
 before it recorded the run's host becomes `failed`.
+An app's message to a live run (`send_text`) goes into claude's input through the run's
+host, as one more message from the person; the person's words, the start's prompt
+included, are filed once the host has taken them, and Claude folds a message sent mid-turn
+into that turn or runs it next. A retry with the same request id is answered from its
+first send, so nothing is sent twice.
+For such a run the model and effort sheets are refused ("Changing the model isn't
+available for this session yet.", and the same for the effort), and so are `/status`,
+`/usage`, `/cost` and `/clear` ("This isn't available for this session yet.").
 An app ends a live run with `stop_run`: the run becomes `stopping` and its host, if its link
 is attached, is sent `stop`, which interrupts claude, ends its input and closes the query;
 claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
@@ -1663,6 +1671,11 @@ fails the suite instead of failing silently in production.
 
 ## Known limits
 
+* **A message ccd took but could not hand to Claude before it stopped is not
+  confirmed.** If ccd stops in the instant between recording a message to a session
+  started from an app and passing it to that session's agent host, the app says the
+  message was not confirmed: it may or may not have reached Claude, and the same words
+  cannot be sent again to this session without changing them.
 * **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
   repaints the session from tmux's record of it, and tmux does not track kitty
   keyboard flags or focus reporting: an agent that turned them on when it started

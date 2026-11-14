@@ -4,6 +4,7 @@
 import type { InitializeAnswer, Json, StartOptions, ToHost } from './protocol.ts';
 
 export type Start = Extract<ToHost, { type: 'start' }>;
+export type Say = Extract<ToHost, { type: 'say' }>;
 
 /** What the state message reports of the run, besides the pending requests. */
 export interface Facts {
@@ -36,15 +37,24 @@ export function queryOptions(options: StartOptions) {
   };
 }
 
-/** The start's prompt as the run's first message, stamped with the start's uuid. */
-export function firstMessage(start: Start) {
+/**
+ * A message the person sent into Claude's input, stamped with ccd's uuid and marked as typed by a person: the SDK
+ * treats a user message with no `origin` as unattributed (its `SDKMessageOrigin`).
+ */
+export function userMessage(uuid: string, text: string) {
   return {
     type: 'user',
-    message: { role: 'user', content: start.prompt },
+    message: { role: 'user', content: text },
     parent_tool_use_id: null,
     session_id: '',
-    uuid: start.uuid,
+    uuid,
+    origin: { kind: 'human' },
   } as const;
+}
+
+/** The start's prompt as the run's first message, stamped with the start's uuid. */
+export function firstMessage(start: Start) {
+  return userMessage(start.uuid, start.prompt);
 }
 
 /**
