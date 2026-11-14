@@ -5267,6 +5267,324 @@ mod tests {
         );
     }
 
+    /// A run on the real host whose claude, signed in by its own config, is given `prompt`
+    /// in a folder of its own, `name`, under `CODECONNECT_TEST_RIG_DIR`, as G6's run is:
+    /// the rig, the run's uid and its host's pid.
+    async fn real_claude_run(name: &str, prompt: &str) -> (Rig, String, i32) {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join(name);
+        std::fs::create_dir(&root).unwrap();
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let rig = Rig {
+            daemon: daemon_on(&root),
+            root,
+            environment,
+        };
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let codeconnect = rig.root.join("codeconnect");
+        let started = start(
+            &rig.daemon,
+            Run {
+                root: &rig.root,
+                request_id: name,
+                cwd: &cwd,
+                prompt,
+                model: None,
+                worktree: None,
+                trust: Trust::NotTrusted,
+                claude_path: claude.to_str().unwrap(),
+                host_bin: &host,
+                codeconnect: &codeconnect,
+                environment: &rig.environment,
+            },
+        )
+        .await;
+        let uid = started_uid(&started);
+        let host_pid = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+            .unwrap()
+            .host_pid;
+        (rig, uid, host_pid)
+    }
+
+    /// The run `uid`'s first card, once claude has asked: its request id and the hash an
+    /// app answers it with, as its `approval_request` carries them. Waits 120 s at most.
+    async fn first_card(rig: &Rig, uid: &str) -> Option<(String, String)> {
+        for _ in 0..1200 {
+            let asked = stored(rig, uid)
+                .into_iter()
+                .find(|event| event["kind"] == "approval_request");
+            if let Some(event) = asked {
+                let card = &event["payload"]["card"];
+                return Some((
+                    card["request_id"].as_str()?.to_string(),
+                    card["payload_hash"].as_str()?.to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    }
+
+    /// The app's Allow of the card `card` of the run `uid`, from an iPhone.
+    async fn allow_from_app(
+        rig: &Rig,
+        uid: &str,
+        card: &Option<(String, String)>,
+    ) -> Option<AnswerResult> {
+        let (request_id, hash) = card.as_ref()?;
+        Some(
+            rig.daemon
+                .answer(
+                    request_id,
+                    hash,
+                    AnswerDecision::Allow,
+                    Some(uid),
+                    AnsweredOn::Iphone,
+                )
+                .await,
+        )
+    }
+
+    /// Whether a tool result the run `uid` filed holds `text`.
+    fn tool_printed(rig: &Rig, uid: &str, text: &str) -> bool {
+        stored(rig, uid).iter().any(|event| {
+            event["kind"] == "tool_result" && event["payload"].to_string().contains(text)
+        })
+    }
+
+    /// End run on the run `uid`, as G2 sends it: the answer, whether the run then ended
+    /// `exited` within 20 s, whether its host `host_pid` is gone, and whether its group
+    /// still has a member. A group still there is ended.
+    async fn end_real_run(
+        rig: &Rig,
+        uid: &str,
+        host_pid: i32,
+    ) -> (StopRunResult, bool, bool, bool) {
+        let answer = rig.daemon.stop_run(uid).await;
+        let mut ended = false;
+        for _ in 0..200 {
+            let lifecycle = rig
+                .daemon
+                .db
+                .hosted_link(uid.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle;
+            if lifecycle == Lifecycle::Exited {
+                ended = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let host_gone = gone_within(host_pid, Duration::from_secs(5)).await;
+        // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
+        let group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
+        if group_left {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        (answer, ended, host_gone, group_left)
+    }
+
+    /// **B6 G9 (a): an allowed command, and a message while it runs, with a real claude**
+    /// (app-qa's rig). claude asks to run a Bash command that sleeps 8 s; the iPhone's
+    /// Allow is `Applied`; a message sent 2 s later, before the command has printed, is
+    /// `sent` and filed once; the command runs and prints what it was asked to; the run
+    /// settles with no card open, and claude's transcript holds the message once. Then End
+    /// run, as G2. Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_runs_an_allowed_command_while_a_message_waits() {
+        let prompt =
+            "Use the Bash tool to run exactly this command, once: sleep 8 && echo $((6*7))-rang";
+        let message = "Then say goodbye in one word.";
+        let (rig, uid, host_pid) = real_claude_run("g9a", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let answer = allow_from_app(&rig, &uid, &card).await;
+        // While the command sleeps.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let printed_before = tool_printed(&rig, &uid, "42-rang");
+        let sent = send_as_app(&rig.daemon, &uid, "g9a-1", message).await;
+        let settled = settled_after_words(&rig, &uid).await;
+        let printed = tool_printed(&rig, &uid, "42-rang");
+        let open = cards(&rig.daemon, &uid).await;
+        let config = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap());
+        let transcript = row_of(&rig, &uid)
+            .0
+            .and_then(|session_id| transcript_counts(&config, &session_id, &[message]));
+        println!(
+            "G9: allow: card {card:?}; answer {answer:?}; printed before the message {printed_before}; sent {sent:?}; settled {settled}; printed {printed}; open {open:?}; claude's transcript holds the message {transcript:?} times"
+        );
+        let (stopping, ended, host_gone, group_left) = end_real_run(&rig, &uid, host_pid).await;
+        println!(
+            "G9: allow: End run {stopping:?}; ended {ended}; host gone {host_gone}; group left {group_left}"
+        );
+        assert!(card.is_some(), "claude asked nothing");
+        assert!(
+            matches!(answer, Some(AnswerResult::Applied { .. })),
+            "{answer:?}"
+        );
+        assert!(
+            !printed_before,
+            "the command had printed before the message was sent"
+        );
+        assert_eq!(
+            sent,
+            SendTextResult::Sent {
+                matched: message.to_string()
+            }
+        );
+        assert_eq!(
+            words(&rig, &uid),
+            vec![prompt.to_string(), message.to_string()],
+            "each filed once, in order"
+        );
+        assert!(printed, "the allowed command never printed");
+        assert!(settled, "the run did not settle");
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert_eq!(transcript, Some(vec![1]), "claude got the message once");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && !group_left,
+            "ended {ended}, host gone {host_gone}, group left {group_left}"
+        );
+    }
+
+    /// **B6 G9 (b): End run with a card open, with a real claude.** claude asks to run a
+    /// command, and the run is ended before anyone answers: it ends `exited`, the host and
+    /// its group are gone, the card closes once with nobody having answered, nothing is
+    /// left open, the command never ran, and an app's late Allow is refused. Ignored and
+    /// gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_ended_with_a_card_open_leaves_it_unanswered() {
+        let prompt = "Use the Bash tool to run exactly this command, once: echo $((6*7))-rang";
+        let (rig, uid, host_pid) = real_claude_run("g9b", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let (stopping, ended, host_gone, group_left) = end_real_run(&rig, &uid, host_pid).await;
+        let closed: Vec<serde_json::Value> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "approval_resolved")
+            .map(|event| event["payload"].clone())
+            .collect();
+        let open = cards(&rig.daemon, &uid).await;
+        let late = allow_from_app(&rig, &uid, &card).await;
+        let printed = tool_printed(&rig, &uid, "42-rang");
+        println!(
+            "G9: end: card {card:?}; End run {stopping:?}; ended {ended}; host gone {host_gone}; group left {group_left}; closed {closed:?}; open {open:?}; late answer {late:?}; printed {printed}"
+        );
+        assert!(card.is_some(), "claude asked nothing");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && !group_left,
+            "ended {ended}, host gone {host_gone}, group left {group_left}"
+        );
+        assert_eq!(closed.len(), 1, "closed once: {closed:?}");
+        assert_eq!(closed[0]["resolved_by"], "timeout", "nobody answered");
+        assert_eq!(closed[0]["answered_on"], serde_json::Value::Null);
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert!(
+            matches!(late, Some(AnswerResult::Rejected { .. })),
+            "{late:?}"
+        );
+        assert!(!printed, "the command ran with nobody answering");
+    }
+
+    /// **B6 G9 (c): SIGTERM mid-command, with a real claude.** claude's allowed command,
+    /// a shell that writes its pid and sleeps 60 s, is running when the host's group is
+    /// sent SIGTERM: the host and the command's shell are gone within 10 s, and neither
+    /// the host's group nor the shell's has a member left. Whatever is left is ended, by
+    /// the pids and groups this run started. Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_sent_sigterm_mid_command_leaves_nothing() {
+        let prompt =
+            "Use the Bash tool to run exactly this command, once: echo $$ > tool.pid && sleep 60";
+        let (rig, uid, host_pid) = real_claude_run("g9c", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let answer = allow_from_app(&rig, &uid, &card).await;
+        // The command's shell, once it has written its pid.
+        let mut shell = None;
+        for _ in 0..300 {
+            shell = std::fs::read_to_string(rig.root.join("tool.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            if shell.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // SAFETY: getpgid(2) only reads the group of the command's shell; getpgrp(2) this
+        // test's own.
+        let (shell_group, own_group) = unsafe {
+            (
+                shell
+                    .map(|pid| libc::getpgid(pid))
+                    .filter(|group| *group > 0),
+                libc::getpgrp(),
+            )
+        };
+        // SAFETY: kill(2) of the process group this test's host leads.
+        unsafe { libc::kill(-host_pid, libc::SIGTERM) };
+        let host_gone = gone_within(host_pid, Duration::from_secs(10)).await;
+        let shell_gone = match shell {
+            Some(pid) => gone_within(pid, Duration::from_secs(10)).await,
+            None => false,
+        };
+        // SAFETY: kill(2) with signal 0 only asks whether a group has a member.
+        let host_group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
+        let shell_group_left = shell_group
+            .is_some_and(|group| group != own_group && unsafe { libc::kill(-group, 0) } == 0);
+        println!(
+            "G9: sigterm: card {card:?}; answer {answer:?}; shell {shell:?} in group {shell_group:?}; host gone {host_gone}; shell gone {shell_gone}; host's group left {host_group_left}; shell's group left {shell_group_left}"
+        );
+        if host_group_left {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        if let (true, Some(group)) = (shell_group_left, shell_group) {
+            // SAFETY: kill(2) of the group of the shell this test's claude started.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+        if let (false, Some(pid)) = (shell_gone, shell) {
+            // SAFETY: kill(2) of the shell this test's claude started, by its pid.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(card.is_some(), "claude asked nothing");
+        assert!(
+            matches!(answer, Some(AnswerResult::Applied { .. })),
+            "{answer:?}"
+        );
+        assert!(shell.is_some(), "the command never started");
+        assert!(
+            host_gone && shell_gone && !host_group_left && !shell_group_left,
+            "host gone {host_gone}, shell gone {shell_gone}, host's group left {host_group_left}, shell's group left {shell_group_left}"
+        );
+    }
+
     /// claude's `can_use_tool` request for the Bash call `toolu_rh`, as claude writes it.
     fn claude_asks() -> String {
         serde_json::json!({"type": "control_request", "request_id": "req-toolu_rh",
