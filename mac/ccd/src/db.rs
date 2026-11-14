@@ -361,9 +361,17 @@ impl Db {
         seq: u64,
         lifecycle: Lifecycle,
         initialize: Option<String>,
-    ) -> Result<bool> {
+        events: Vec<PendingEvent>,
+    ) -> Result<Option<Vec<Event>>> {
         self.run(move |store| {
-            store.commit_outcome(&session_uid, &host, seq, lifecycle, initialize.as_deref())
+            store.commit_outcome(
+                &session_uid,
+                &host,
+                seq,
+                lifecycle,
+                initialize.as_deref(),
+                &events,
+            )
         })
         .await
     }
@@ -791,10 +799,35 @@ impl Db {
         session_uid: String,
         request_id: String,
         payload_hash: String,
+        text: Option<String>,
         now: String,
     ) -> Result<TextClaim> {
         self.run(move |store| {
-            store.claim_text_mutation(&session_uid, &request_id, &payload_hash, &now)
+            store.claim_text_mutation(
+                &session_uid,
+                &request_id,
+                &payload_hash,
+                text.as_deref(),
+                &now,
+            )
+        })
+        .await
+    }
+
+    pub async fn host_sends(&self, session_uid: String) -> Result<Vec<(String, String)>> {
+        self.run(move |store| store.host_sends(&session_uid)).await
+    }
+
+    pub async fn commit_host_send(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: String,
+        row: Option<PendingEvent>,
+    ) -> Result<Option<Vec<Event>>> {
+        self.run(move |store| {
+            store.commit_host_send(&session_uid, &host, seq, &request_id, row.as_ref())
         })
         .await
     }

@@ -2,7 +2,7 @@
 // acknowledges them, the one attached connection, and whole lines in. It names no Node API, so the pinned Bun's type
 // checker checks it against the protocol's types (test/protocol.test.ts); main.ts wires the run's socket to it.
 import type { FromHost, ToHost } from './protocol.ts';
-import type { Facts, Start } from './start.ts';
+import type { Facts, Say, Start } from './start.ts';
 
 /** A connection from ccd: lines out, and closing it. */
 export interface Connection {
@@ -13,6 +13,8 @@ export interface Connection {
 /** What the link calls on: the run's start and stop, its facts for the state message, and its end. */
 export interface Run {
   start(command: Start): void;
+  /** One more message from the person. */
+  say(command: Say): void;
   /** ccd ends the run (H5). */
   stop(): void;
   facts(): Facts;
@@ -84,6 +86,7 @@ export function createLink(run: Run) {
       drop(message.seq);
       settle();
     } else if (message.type === 'start') run.start(message);
+    else if (message.type === 'say') run.say(message);
     else if (message.type === 'stop') run.stop();
   }
 

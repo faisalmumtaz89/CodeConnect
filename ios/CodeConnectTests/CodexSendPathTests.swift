@@ -727,6 +727,34 @@ final class CodexSendPathTests: XCTestCase {
         }
     }
 
+    /// **A reply typed while the last send was out is the next message, not this
+    /// one.** A landed send empties the composer only when the box still holds
+    /// exactly the words that were sent; an edit made while the send was in flight
+    /// stays. The Mac guards the identical paths (`Composer.swift`,
+    /// `kept.reply == draft`), and the iPhone `send()`/`sendToCodex()` landed
+    /// clears route through this rule. The rendered path is not driven here (a
+    /// deterministic held-ack UI harness was out of proportion to the guard); this
+    /// pins the decision the clears call. Mutant: make `landedSendConsumesDraft`
+    /// ignore the edit (return `true`) and the kept-edit assertion fails — the
+    /// typed-ahead message is lost, which is the shipped defect.
+    func testALandedSendEmptiesTheBoxOnlyIfItStillHoldsWhatWasSent() {
+        // No edit while the send was out: the words that landed are consumed.
+        XCTAssertTrue(
+            SessionDetailView.landedSendConsumesDraft(
+                current: "Run the tests", submitted: "Run the tests"),
+            "an unchanged draft is the message that landed, so the box empties")
+        // A new message typed while the send was out: it is kept.
+        XCTAssertFalse(
+            SessionDetailView.landedSendConsumesDraft(
+                current: "and check lint too", submitted: "Run the tests"),
+            "a reply typed while the send was out is the next message and stays")
+        // Exact match only: a draft differing by a trailing space is still an edit.
+        XCTAssertFalse(
+            SessionDetailView.landedSendConsumesDraft(
+                current: "Run the tests ", submitted: "Run the tests"),
+            "the box empties on an exact match, never a near one")
+    }
+
     private static func approvalItem(sessionKey: String, withOptions: Bool) -> ApprovalItem {
         let input =
             withOptions

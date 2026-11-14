@@ -2640,9 +2640,10 @@ impl Store {
     /// transaction: the cursor, as [`Store::commit_cursor`] advances it, with the
     /// SDK's initialize answer (`initialize`, as JSON) on a done start; then the
     /// run's lifecycle, `starting` to `lifecycle` (`Live` or `Failed`), only while it
-    /// is `starting`, so a run already ended keeps its end. `false`, with nothing
-    /// written, when the cursor does not move, and then the caller must not
-    /// acknowledge `seq` (H3).
+    /// is `starting`, so a run already ended keeps its end; and, when that made it
+    /// `live`, `events` (the person's first words). `None`, with nothing written,
+    /// when the cursor does not move, and then the caller must not acknowledge `seq`
+    /// (H3); otherwise the events newly stored.
     pub fn commit_outcome(
         &self,
         session_uid: &str,
@@ -2650,7 +2651,8 @@ impl Store {
         seq: u64,
         lifecycle: Lifecycle,
         initialize: Option<&str>,
-    ) -> Result<bool> {
+        events: &[PendingEvent],
+    ) -> Result<Option<Vec<Event>>> {
         let seq = i64::try_from(seq).context("a host sequence number past i64")?;
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2668,11 +2670,12 @@ impl Store {
             ],
         )?;
         if changed != 1 {
-            return Ok(false);
+            return Ok(None);
         }
         let now = protocol::time::now_rfc3339();
+        let mut moved = 0;
         for table in SESSION_TABLES {
-            tx.execute(
+            moved += tx.execute(
                 // A compile-time list in this file; nothing a caller supplies
                 // reaches the statement text.
                 &format!(
@@ -2687,8 +2690,71 @@ impl Store {
                 ],
             )?;
         }
+        let mut filed = Vec::new();
+        if moved == 1 && lifecycle == Lifecycle::Live {
+            for event in events {
+                filed.extend(append_in_tx(&tx, event)?);
+            }
+        }
         tx.commit()?;
-        Ok(true)
+        Ok(Some(filed))
+    }
+
+    /// Commit the host's outcome for a message ccd sent it, message `seq` from the host
+    /// `host`, in one transaction: the cursor, as [`Store::commit_cursor`] advances it;
+    /// then the send `request_id`'s claim, settled `sent` with `row` (the person's words)
+    /// filed when the host took the message, or released when it refused it (`row`
+    /// `None`), either only while it is still claimed. `None`, with nothing written,
+    /// when the cursor does not move, and then the caller must not acknowledge `seq`
+    /// (H3); otherwise the events newly stored.
+    pub fn commit_host_send(
+        &self,
+        session_uid: &str,
+        host: &ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+        row: Option<&PendingEvent>,
+    ) -> Result<Option<Vec<Event>>> {
+        let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let moved = tx.execute(
+            "UPDATE run_hosts SET cursor = ?5
+              WHERE session_uid = ?1 AND host_pid = ?2
+                AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
+            params![
+                session_uid,
+                host.pid,
+                host.birth.start_sec,
+                host.birth.start_usec,
+                seq
+            ],
+        )?;
+        if moved != 1 {
+            return Ok(None);
+        }
+        let mut filed = Vec::new();
+        match row {
+            Some(row) => {
+                let settled = tx.execute(
+                    "UPDATE text_mutations SET status = 'sent', settled_at = ?3
+                      WHERE session_uid = ?1 AND request_id = ?2 AND status = 'applying'",
+                    params![session_uid, request_id, protocol::time::now_rfc3339()],
+                )?;
+                if settled == 1 {
+                    filed.extend(append_in_tx(&tx, row)?);
+                }
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM text_mutations
+                      WHERE session_uid = ?1 AND request_id = ?2 AND status = 'applying'",
+                    params![session_uid, request_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(Some(filed))
     }
 
     /// File one SDK message from the host `host`, message `seq`, in one transaction:
@@ -4558,12 +4624,15 @@ impl Store {
     ///
     /// Read and insert share one immediate transaction, so two sockets replaying
     /// the same `request_id` at the same instant cannot both come back
-    /// [`TextClaim::Claimed`] and both type.
+    /// [`TextClaim::Claimed`] and both type. `text` is kept with the claim for a
+    /// message to a run's agent host, so a restarted ccd can file the person's words
+    /// when the host's replay says the message was taken ([`Store::host_sends`]).
     pub fn claim_text_mutation(
         &self,
         session_uid: &str,
         request_id: &str,
         payload_hash: &str,
+        text: Option<&str>,
         now: &str,
     ) -> Result<TextClaim> {
         let mut conn = self.write();
@@ -4606,9 +4675,9 @@ impl Store {
                     // table is split per agent. See [`create_schema`].
                     "INSERT INTO text_mutations(session_uid, request_id, payload_hash,
                                                 status, matched, started_at, settled_at)
-                     SELECT ?1, ?2, ?3, 'applying', NULL, ?4, NULL
+                     SELECT ?1, ?2, ?3, 'applying', ?5, ?4, NULL
                       WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
-                    params![session_uid, request_id, payload_hash, now],
+                    params![session_uid, request_id, payload_hash, now, text],
                 )?;
                 TextClaim::Claimed
             }
@@ -4659,16 +4728,35 @@ impl Store {
 
     /// Turn every claim this process did not settle into a durable "unknown".
     ///
+    /// A message to a run's agent host is left claimed: the host's replay settles it
+    /// when it says the message was taken, and until then a retry is told it is not
+    /// confirmed, as an unknown is.
+    ///
     /// Returns how many were found, so startup can *say* it rather than leaving
     /// the operator to infer it from a quiet log.
     pub fn recover_text_mutations(&self, at: &str) -> Result<usize> {
         let conn = self.write();
         let changed = conn.execute(
             "UPDATE text_mutations SET status = 'indeterminate', settled_at = ?1
-              WHERE status = 'applying'",
+              WHERE status = 'applying'
+                AND session_uid NOT IN (SELECT session_uid FROM run_hosts)",
             params![at],
         )?;
         Ok(changed)
+    }
+
+    /// The run `session_uid`'s messages to its agent host still claimed, each by its
+    /// request id with its text.
+    pub fn host_sends(&self, session_uid: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT request_id, matched FROM text_mutations
+              WHERE session_uid = ?1 AND status = 'applying' AND matched IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map(params![session_uid], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     // ------------------------------------------------------------------- mail
@@ -11043,7 +11131,7 @@ mod tests {
         // producer is the speculative half-surface this design refuses.
         assert_eq!(
             store
-                .claim_text_mutation(&codex.uid, "req-3", "hash", &now)
+                .claim_text_mutation(&codex.uid, "req-3", "hash", None, &now)
                 .unwrap(),
             TextClaim::Claimed
         );
@@ -11055,7 +11143,7 @@ mod tests {
         // comes back `Claimed` again and the caller types twice.
         assert_eq!(
             store
-                .claim_text_mutation(&codex.uid, "req-3", "hash", &now)
+                .claim_text_mutation(&codex.uid, "req-3", "hash", None, &now)
                 .unwrap(),
             TextClaim::Indeterminate {
                 started_at: now.clone()
@@ -11773,7 +11861,13 @@ mod tests {
             })
             .unwrap();
         store
-            .claim_text_mutation(&dead.uid, "toolu_4", "hash", &protocol::time::now_rfc3339())
+            .claim_text_mutation(
+                &dead.uid,
+                "toolu_4",
+                "hash",
+                None,
+                &protocol::time::now_rfc3339(),
+            )
             .unwrap();
         // The cursor is only written alongside a transcript batch, which is the
         // invariant that keeps consuming lines and recording that they were
@@ -13130,6 +13224,46 @@ mod tests {
         assert_eq!(existing.session_uid, first.uid);
         assert_eq!(existing.lifecycle, Lifecycle::Starting);
         assert!(store.get_session(&second.session_uid).unwrap().is_none());
+    }
+
+    /// **B5, the startup sweep:** a typed send still claimed when ccd stopped is settled
+    /// `indeterminate`, as before; a hosted run's is left claimed with its text, for its
+    /// host's replay to settle and file.
+    #[test]
+    fn the_startup_sweep_leaves_a_hosted_runs_sends_for_its_host() {
+        let (store, _path) = temp_store();
+        let typed = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&typed))
+            .unwrap()
+            .assert_present();
+        let hosted = begun(&store, "BB", "req-1");
+        let now = protocol::time::now_rfc3339();
+        for (uid, text) in [(&typed.uid, None), (&hosted.uid, Some("kept"))] {
+            assert!(matches!(
+                store
+                    .claim_text_mutation(uid, "r-1", "hash", text, &now)
+                    .unwrap(),
+                TextClaim::Claimed
+            ));
+        }
+        assert_eq!(store.recover_text_mutations(&now).unwrap(), 1);
+        let status = |uid: &str| -> String {
+            store
+                .read()
+                .query_row(
+                    "SELECT status FROM text_mutations WHERE session_uid = ?1",
+                    [uid],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(status(&typed.uid), "indeterminate");
+        assert_eq!(status(&hosted.uid), "applying");
+        assert_eq!(
+            store.host_sends(&hosted.uid).unwrap(),
+            [("r-1".to_string(), "kept".to_string())]
+        );
     }
 
     /// A run ccd hosts has no tmux, and that must not make it removable while it

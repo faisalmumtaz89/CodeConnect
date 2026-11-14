@@ -471,6 +471,11 @@ struct Inner {
     /// A Claude run's link ([`crate::claude_host`]) carries its way to send the host a
     /// command; a Codex run's ([`crate::codex_host`]) carries none.
     host_links: HashMap<String, Option<tokio::sync::mpsc::UnboundedSender<protocol::host::ToHost>>>,
+    /// Messages sent to a run's agent host and waiting for its outcome, by the message's
+    /// uuid, each with its run's `session_uid`: told `true` once the host has taken the
+    /// message into claude's input, `false` once it refused it. Dropped when the run's
+    /// link ends, so a waiter then hears nothing more.
+    host_sends: HashMap<String, (String, tokio::sync::oneshot::Sender<bool>)>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -7325,7 +7330,6 @@ impl Daemon {
                 }
             }
         };
-
         // The identity, if the client offered one. A `request_id` without a
         // hash is refused rather than trusted: the id alone says "this is a
         // retry" without saying a retry *of what*, and the ledger would then
@@ -7352,6 +7356,31 @@ impl Daemon {
             (None, _) => None,
         };
 
+        // A Claude run started in an agent host takes the message through its host.
+        match self.db.hosted_link(session_uid.clone()).await {
+            Ok(Some(linked)) => {
+                return crate::claude_host::send_text(
+                    self,
+                    &session_uid,
+                    linked.lifecycle,
+                    crate::claude_host::Message {
+                        text,
+                        identity,
+                        submit,
+                        complete_native_confirmation,
+                    },
+                )
+                .await
+            }
+            Ok(None) => {}
+            Err(err) => {
+                crate::log_error!("send_text for {session_uid}: could not read its run: {err:#}");
+                return SendTextResult::Refused {
+                    reason: "This computer could not read the session; nothing was sent.".into(),
+                };
+            }
+        }
+
         if let Some((request_id, hash)) = &identity {
             match self
                 .db
@@ -7359,6 +7388,7 @@ impl Daemon {
                     session_uid.clone(),
                     request_id.to_string(),
                     hash.to_string(),
+                    None,
                     protocol::time::now_rfc3339(),
                 )
                 .await
@@ -9997,7 +10027,109 @@ impl Daemon {
 
     /// The run `session_uid`'s connection to its agent host has ended.
     pub(crate) async fn host_link_detached(&self, session_uid: &str) {
-        self.inner.lock().await.host_links.remove(session_uid);
+        let mut inner = self.inner.lock().await;
+        inner.host_links.remove(session_uid);
+        inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
+    }
+
+    /// Wait for the outcome of the message `uuid` this daemon is sending the run
+    /// `session_uid`'s agent host ([`Self::host_send_taken`]).
+    pub(crate) async fn await_host_send(
+        &self,
+        session_uid: &str,
+        uuid: &str,
+    ) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tell, told) = tokio::sync::oneshot::channel();
+        self.inner
+            .lock()
+            .await
+            .host_sends
+            .insert(uuid.to_string(), (session_uid.to_string(), tell));
+        told
+    }
+
+    /// The host took the message `uuid` into claude's input (`true`) or refused it, or
+    /// nobody waits any more: whoever waits for it hears so.
+    pub(crate) async fn host_send_taken(&self, uuid: &str, taken: bool) {
+        if let Some((_, tell)) = self.inner.lock().await.host_sends.remove(uuid) {
+            let _ = tell.send(taken);
+        }
+    }
+
+    /// Commit the host's outcome for the send `request_id` with its cursor, the person's
+    /// words `row` filed when the host took it, then fan them out
+    /// ([`crate::store::Store::commit_host_send`]). `false` when the cursor did not move:
+    /// nothing was written, and the outcome must not be acknowledged.
+    pub(crate) async fn commit_host_send(
+        &self,
+        session_uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        request_id: &str,
+        row: Option<PendingEvent>,
+    ) -> Result<bool> {
+        let gate = self.publish_gate(session_uid).await;
+        let events = {
+            let _ordered = gate.lock().await;
+            let Some(events) = self
+                .db
+                .commit_host_send(
+                    session_uid.to_string(),
+                    host,
+                    seq,
+                    request_id.to_string(),
+                    row,
+                )
+                .await?
+            else {
+                return Ok(false);
+            };
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        self.published(session_uid, &events).await;
+        Ok(true)
+    }
+
+    /// Commit the run's start outcome with its cursor and, when it makes the run live,
+    /// `events`, the person's first words, then fan them out
+    /// ([`crate::store::Store::commit_outcome`]). `false` when the cursor did not move:
+    /// nothing was written, and the outcome must not be acknowledged.
+    pub(crate) async fn commit_start_outcome(
+        &self,
+        session_uid: &str,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: u64,
+        lifecycle: Lifecycle,
+        initialize: Option<String>,
+        events: Vec<PendingEvent>,
+    ) -> Result<bool> {
+        let gate = self.publish_gate(session_uid).await;
+        let events = {
+            let _ordered = gate.lock().await;
+            let Some(events) = self
+                .db
+                .commit_outcome(
+                    session_uid.to_string(),
+                    host,
+                    seq,
+                    lifecycle,
+                    initialize,
+                    events,
+                )
+                .await?
+            else {
+                return Ok(false);
+            };
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        self.published(session_uid, &events).await;
+        Ok(true)
     }
 
     /// Build the fleet listing from rows already read and a state already locked.
@@ -26731,7 +26863,7 @@ mod tests {
         // A claim from a process that did not come back.
         assert_eq!(
             store
-                .claim_text_mutation(uid, "st-1", &hash, &protocol::time::now_rfc3339())
+                .claim_text_mutation(uid, "st-1", &hash, None, &protocol::time::now_rfc3339())
                 .unwrap(),
             TextClaim::Claimed
         );

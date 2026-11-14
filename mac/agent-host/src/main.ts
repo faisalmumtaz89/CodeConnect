@@ -6,7 +6,9 @@
 //
 // The first `start` runs the run's one query() (start.ts); a later one is ignored. claude stays in the host's process
 // group (H2). The start's outcome carries the initialize answer, or the reason the start failed. After an answer,
-// every message the query yields follows as `sdk`; after a refusal, none does. `stop` ends the run (H5): the query is
+// every message the query yields follows as `sdk`; after a refusal, none does. A `say` is one more message from the
+// person, given to the query in the order ccd sent it, with its outcome `done` once the SDK has taken it; one the run
+// cannot take (before the start, or once its input has ended) is `refused`. `stop` ends the run (H5): the query is
 // interrupted, its input ended and the query closed, so claude exits; a second `stop` does nothing. claude's end is
 // the last message, `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
 import { query } from '@anthropic-ai/claude-agent-sdk';
@@ -16,7 +18,18 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createLink } from './link.ts';
 import { HOST_PROTOCOL_VERSION, type HostFile } from './protocol.ts';
-import { type Facts, firstMessage, initializeAnswer, noteMessage, oneLine, queryOptions, type Start, startFacts } from './start.ts';
+import {
+  type Facts,
+  firstMessage,
+  initializeAnswer,
+  noteMessage,
+  oneLine,
+  queryOptions,
+  type Say,
+  type Start,
+  startFacts,
+  userMessage,
+} from './start.ts';
 
 const runDir = process.argv[2];
 const recordPath = join(runDir, 'host.json');
@@ -39,7 +52,21 @@ const noStart = setTimeout(() => {
 }, 30_000);
 
 let facts: Facts = {};
-const link = createLink({ start: begin, stop: () => stop?.(), facts: () => facts, drained: () => process.exit(0) });
+const link = createLink({
+  start: begin,
+  say: (command) => (say ? say(command) : refuse(command.uuid)),
+  stop: () => stop?.(),
+  facts: () => facts,
+  drained: () => process.exit(0),
+});
+
+// A message the run cannot take: before its start, or once its input has ended.
+function refuse(uuid: string): void {
+  link.send({ type: 'outcome', uuid, status: 'refused', detail: 'the run is not taking messages' });
+}
+
+// The run's later messages, while its input is open.
+let say: ((command: Say) => void) | undefined;
 
 // A start after the first is ignored: ccd re-sends a start whose outcome it does not hold yet, and the first one's
 // outcome is still to come.
@@ -54,13 +81,35 @@ function begin(start: Start): void {
   clearTimeout(noStart);
   facts = startFacts(start.options);
   let claudeEnded: Promise<{ code: number | null; signal: string | null }> | undefined;
-  let endInput = () => {};
+  // The run's later messages, in the order ccd sent them. Each one's outcome is `done` once the SDK has taken it from
+  // the input; claude then folds it into the running turn or runs it next.
+  const queued: Say[] = [];
+  let wake = () => {};
+  let inputEnded = false;
+  say = (command) => {
+    queued.push(command);
+    wake();
+  };
+  // The input ends with the run's stop or claude's own end: a message still queued, or sent later, is refused.
+  const endInput = () => {
+    inputEnded = true;
+    say = undefined;
+    for (const command of queued.splice(0)) refuse(command.uuid);
+    wake();
+  };
   const input = (async function* () {
     yield firstMessage(start);
-    // The input stays open for the run's later messages, until the run is stopped.
-    await new Promise<void>((resolve) => {
-      endInput = resolve;
-    });
+    for (;;) {
+      while (queued.length === 0 && !inputEnded) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+      if (inputEnded) return;
+      const command = queued.shift()!;
+      yield userMessage(command.uuid, command.text);
+      link.send({ type: 'outcome', uuid: command.uuid, status: 'done' });
+    }
   })();
   const run = query({
     prompt: input,
@@ -113,6 +162,7 @@ function begin(start: Start): void {
     } catch (error) {
       console.error(`the query ended: ${oneLine(error)}`);
     }
+    endInput();
     // claude's end comes after every message the query yielded. A claude that never started (no pid) has no end to
     // report.
     const ended = await claudeEnded;
