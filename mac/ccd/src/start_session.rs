@@ -340,7 +340,7 @@ pub(crate) async fn launch(
     if let Some(refusal) = refusal(agent, path, prompt) {
         return refusal;
     }
-    if let Some(asked) = folder_question(db, path, trust).await {
+    if let Err(asked) = folder_question(db, path, trust).await {
         return asked;
     }
     if *agent == AgentKind::Claude {
@@ -471,34 +471,73 @@ fn refusal(agent: &AgentKind, path: &str, prompt: Option<&str>) -> Option<StartS
 }
 
 /// The folder question, by the folder's real path: an answer given is kept, and with
-/// none given or kept nothing runs and the app asks. `None` lets the start go on.
+/// none given or kept nothing runs and the app asks. `Ok` is the answer the start goes
+/// on with, the one given or else the one kept: a Claude run loads the folder's project
+/// only when it is `Trusted` (decision 157).
 async fn folder_question(
     db: &crate::db::Db,
     path: &str,
     trust: Option<Trust>,
-) -> Option<StartSessionResult> {
+) -> Result<Trust, StartSessionResult> {
     let folder = match std::fs::canonicalize(path) {
         Ok(folder) => folder.to_string_lossy().into_owned(),
-        Err(err) => return Some(failed(StartFailure::LaunchFailed, format!("{path}: {err}"))),
+        Err(err) => return Err(failed(StartFailure::LaunchFailed, format!("{path}: {err}"))),
     };
     let answered = match trust {
         Some(trust) => db
             .set_folder_trust(folder.clone(), trust)
             .await
-            .map(|()| true),
-        None => db
-            .folder_trust(folder.clone())
-            .await
-            .map(|kept| kept.is_some()),
+            .map(|()| Some(trust)),
+        None => db.folder_trust(folder.clone()).await,
     };
     match answered {
-        Ok(true) => None,
-        Ok(false) => Some(StartSessionResult::NeedsTrust { path: folder }),
-        Err(err) => Some(failed(
+        Ok(Some(trust)) => Ok(trust),
+        Ok(None) => Err(StartSessionResult::NeedsTrust { path: folder }),
+        Err(err) => Err(failed(
             StartFailure::LaunchFailed,
             format!("the folder's answer could not be read or kept: {err}"),
         )),
     }
+}
+
+/// The folder a Claude run runs in, for every start kind: the start folder; an existing or
+/// a branch's worktree, as `place` found or made it (`cwd`); a new worktree's folder in
+/// Claude's own layout under the repository's main folder, which `--worktree <name>`
+/// reopens when it is already there.
+async fn run_folder(
+    path: &str,
+    cwd: &str,
+    worktree: Option<&StartWorktree>,
+    git_bin: Option<&str>,
+) -> PathBuf {
+    match worktree {
+        Some(StartWorktree::New { name }) => crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
+            .await
+            .and_then(|entries| {
+                entries
+                    .first()
+                    .map(|main| worktree_folder(&main.path, name))
+            })
+            .unwrap_or_else(|| PathBuf::from(cwd)),
+        None | Some(StartWorktree::Existing { .. } | StartWorktree::Branch { .. }) => {
+            PathBuf::from(cwd)
+        }
+    }
+}
+
+/// Whether `folder` has its own kept `not_trusted` answer: by its real path, or by the path
+/// itself while it is not there yet (a new worktree's). A folder whose answer cannot be
+/// read counts as declined: it runs not trusted.
+async fn declined(db: &crate::db::Db, folder: &Path) -> bool {
+    let real = match std::fs::canonicalize(folder) {
+        Ok(real) => real,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => folder.to_path_buf(),
+        Err(_) => return true,
+    };
+    !matches!(
+        db.folder_trust(real.to_string_lossy().into_owned()).await,
+        Ok(None | Some(Trust::Trusted))
+    )
 }
 
 /// A Claude start: the run its request already has (H1), or the start's checks, then
@@ -539,9 +578,11 @@ async fn claude_start(
     if let Some(refusal) = refusal(&AgentKind::Claude, path, Some(prompt)) {
         return refusal;
     }
-    if let Some(asked) = folder_question(&daemon.db, path, trust).await {
-        return asked;
-    }
+    // The start path's answer; the folder the run runs in can only lower it (below).
+    let trust = match folder_question(&daemon.db, path, trust).await {
+        Ok(trust) => trust,
+        Err(asked) => return asked,
+    };
     let ready = match claude_preflight(environment, daemon.config.claude_bin.as_deref()).await {
         Ok(ready) => ready,
         Err(refusal) => return refusal,
@@ -582,6 +623,21 @@ async fn claude_start(
             Err(why) => return failed(StartFailure::LaunchFailed, why),
         },
     };
+    // A folder the person answered "not trusted" never runs trusted, whichever folder the
+    // start named: the folder the run runs in, with its own kept `not_trusted` answer,
+    // lowers the start's. It only ever lowers, and the stored start line records what was
+    // sent, so a restart re-sends it without looking again.
+    let trust = if trust == Trust::Trusted
+        && declined(
+            &daemon.db,
+            &run_folder(path, &cwd, worktree, daemon.config.git_bin.as_deref()).await,
+        )
+        .await
+    {
+        Trust::NotTrusted
+    } else {
+        trust
+    };
     crate::claude_host::start(
         daemon,
         crate::claude_host::Run {
@@ -591,6 +647,7 @@ async fn claude_start(
             prompt,
             model,
             worktree: new_worktree,
+            trust,
             claude_path,
             host_bin: &host_bin,
             codeconnect: &codeconnect,
@@ -2122,6 +2179,522 @@ mod tests {
         assert!(
             checked.contains("--version"),
             "the start did not check its claude: {checked}"
+        );
+    }
+
+    /// **B10: a run starts with the folder's answer** (decision 157). A Claude start's
+    /// stored start line carries the answer it resolved for the folder it names: the one
+    /// given with the start, else the one kept, either way round. For every start kind, the
+    /// folder the run runs in lowers that answer and never raises it: one answered not
+    /// trusted runs not trusted; one answered trusted under a start folder answered not
+    /// trusted runs not trusted; one with no answer of its own keeps the start folder's.
+    #[tokio::test]
+    async fn a_claude_start_carries_its_folders_answer() {
+        let root = arm_root("5");
+        let (claude, environment) = test_claude(&root);
+        let host = root.join("stand-in-host");
+        std::fs::write(&host, "#!/bin/sh\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let started = |request_id: String,
+                       path: String,
+                       place: Option<StartWorktree>,
+                       trust: Option<Trust>| {
+            let (daemon, root, environment) = (&daemon, &root, &environment);
+            async move {
+                claude_start(
+                    daemon,
+                    Ok(root.join("codeconnect")),
+                    root,
+                    &request_id,
+                    &path,
+                    "fix the tests",
+                    place.as_ref(),
+                    None,
+                    environment,
+                    trust,
+                )
+                .await;
+                let run = daemon
+                    .db
+                    .hosted_run_for_request(request_id)
+                    .await
+                    .unwrap()
+                    .expect("the start wrote its row");
+                let line = daemon
+                    .db
+                    .hosted_link(run.session_uid)
+                    .await
+                    .unwrap()
+                    .and_then(|link| link.start)
+                    .expect("the start stored its line");
+                match serde_json::from_str(&line).unwrap() {
+                    protocol::host::ToHost::Start { options, .. } => options,
+                    other => panic!("not a start: {other:?}"),
+                }
+            }
+        };
+        let path = root.join("project").to_str().unwrap().to_string();
+        let given = started("req-given".into(), path.clone(), None, Some(Trust::Trusted)).await;
+        let kept = started("req-kept".into(), path.clone(), None, None).await;
+        let changed = started(
+            "req-changed".into(),
+            path.clone(),
+            None,
+            Some(Trust::NotTrusted),
+        )
+        .await;
+        let kept_again = started("req-kept-again".into(), path, None, None).await;
+
+        // Every start kind, each row its own repository: the folder its run runs in is the
+        // start folder, an existing worktree, a branch's worktree, or a new worktree's folder
+        // in Claude's layout, there or not there (removed, its answer kept). The answers are
+        // kept ones: the start folder's by its real path, the run folder's by its real path,
+        // or by its own path while it is not there.
+        #[derive(Debug)]
+        enum Kind {
+            StartFolder,
+            Existing,
+            Branch,
+            New { there: bool },
+        }
+        use Trust::{NotTrusted as Not, Trusted as Yes};
+        let rows = [
+            // (the start kind, the start folder's answer, the run folder's own, the run's)
+            (Kind::StartFolder, Not, None, Not),
+            (Kind::Existing, Yes, Some(Not), Not),
+            (Kind::Branch, Yes, Some(Not), Not),
+            (Kind::New { there: true }, Yes, Some(Not), Not),
+            (Kind::New { there: false }, Yes, Some(Not), Not),
+            // The mirror: a run folder answered trusted never raises the start folder's.
+            (Kind::Existing, Not, Some(Yes), Not),
+            (Kind::Branch, Not, Some(Yes), Not),
+            (Kind::New { there: true }, Not, Some(Yes), Not),
+            (Kind::New { there: false }, Not, Some(Yes), Not),
+            // A run folder with no answer of its own keeps the start folder's.
+            (Kind::StartFolder, Yes, None, Yes),
+            (Kind::Existing, Yes, None, Yes),
+            (Kind::Branch, Yes, None, Yes),
+            (Kind::New { there: true }, Yes, None, Yes),
+            (Kind::New { there: false }, Yes, None, Yes),
+        ];
+        let mut wrong = Vec::new();
+        for (row, (kind, start, own, runs)) in rows.iter().enumerate() {
+            let project = root.join(format!("row{row}"));
+            std::fs::create_dir(&project).unwrap();
+            git(&project, &["init", "-q", "-b", "main"]);
+            git(&project, &["commit", "-q", "--allow-empty", "-m", "A"]);
+            let project = std::fs::canonicalize(&project).unwrap();
+            let main = project.to_str().unwrap();
+            let (place, folder) = match kind {
+                Kind::StartFolder => (None, project.clone()),
+                Kind::Existing => {
+                    let folder = root.join(format!("row{row}-wt"));
+                    git(
+                        &project,
+                        &[
+                            "worktree",
+                            "add",
+                            "-q",
+                            "-b",
+                            "wt",
+                            folder.to_str().unwrap(),
+                        ],
+                    );
+                    let folder = std::fs::canonicalize(folder).unwrap();
+                    let path = folder.to_str().unwrap().to_string();
+                    (Some(StartWorktree::Existing { path }), folder)
+                }
+                Kind::Branch => {
+                    git(&project, &["branch", "fix/b10"]);
+                    let branch = "fix/b10".to_string();
+                    (
+                        Some(StartWorktree::Branch { branch }),
+                        worktree_folder(main, "fix/b10"),
+                    )
+                }
+                Kind::New { there } => {
+                    let folder = worktree_folder(main, "feat/b10");
+                    if *there {
+                        git(
+                            &project,
+                            &[
+                                "worktree",
+                                "add",
+                                "-q",
+                                "-b",
+                                "worktree-feat",
+                                folder.to_str().unwrap(),
+                            ],
+                        );
+                    }
+                    let name = "feat/b10".to_string();
+                    (Some(StartWorktree::New { name }), folder)
+                }
+            };
+            daemon
+                .db
+                .set_folder_trust(main.to_string(), *start)
+                .await
+                .unwrap();
+            if let Some(own) = own {
+                let folder = folder.to_str().unwrap().to_string();
+                daemon.db.set_folder_trust(folder, *own).await.unwrap();
+            }
+            let ran = started(format!("req-row{row}"), main.to_string(), place, None).await;
+            if ran.trust != *runs {
+                wrong.push(format!(
+                    "{kind:?}, start {start:?}, own {own:?}: ran {:?}",
+                    ran.trust
+                ));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(given.trust, Trust::Trusted, "the answer given");
+        assert_eq!(kept.trust, Trust::Trusted, "the answer kept");
+        assert_eq!(changed.trust, Trust::NotTrusted, "the answer given");
+        assert_eq!(kept_again.trust, Trust::NotTrusted, "the answer kept");
+        assert!(
+            wrong.is_empty(),
+            "rows that ran with the wrong answer: {wrong:#?}"
+        );
+    }
+
+    /// B10 G3's project, `<root>/project`, a git repository with its project checked in: a
+    /// SessionStart hook writing `<root>/hook-canary`, a project command `g10canary`, a
+    /// CLAUDE.md asking every reply to end with ZEBRA-G10, an allow rule for one Bash
+    /// command (`touch <root>/allow-canary`), and a stdio MCP server in .mcp.json writing
+    /// `<root>/mcp-canary` when claude starts it. By its real path.
+    fn g3_project(root: &Path) -> PathBuf {
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join(".claude/commands")).unwrap();
+        let canary = |name: &str| root.join(name).display().to_string();
+        let settings = serde_json::json!({
+            "hooks": {"SessionStart": [{"hooks": [
+                {"type": "command", "command": format!("touch {}", canary("hook-canary"))}
+            ]}]},
+            "permissions": {"allow": [format!("Bash(touch {})", canary("allow-canary"))]},
+        });
+        std::fs::write(project.join(".claude/settings.json"), settings.to_string()).unwrap();
+        std::fs::write(
+            project.join(".claude/commands/g10canary.md"),
+            "Say the word G10.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("CLAUDE.md"),
+            "End every reply with the word ZEBRA-G10.\n",
+        )
+        .unwrap();
+        let mcp = serde_json::json!({"mcpServers": {"g10mcp": {
+            "type": "stdio", "command": "/bin/sh",
+            "args": ["-c", format!("touch {}; exec cat", canary("mcp-canary"))],
+        }}});
+        std::fs::write(project.join(".mcp.json"), mcp.to_string()).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-q", "-m", "G3"]);
+        std::fs::canonicalize(project).unwrap()
+    }
+
+    /// One B10 G3 run and what it showed by its first reply.
+    struct G3 {
+        daemon: Arc<Daemon>,
+        root: PathBuf,
+        uid: String,
+        /// The text of the run's first reply a model wrote, empty when none came within 90 s.
+        reply: String,
+        /// Whether the run's initialize answer lists the project command `g10canary`.
+        listed: bool,
+        /// The folder claude replied from, as its own transcript records it.
+        ran_in: Option<String>,
+    }
+
+    /// **B10 G3's start**: a real, signed-in claude on the real agent host, started as the
+    /// app starts one, through the folder question: in `g3_project` under
+    /// `CODECONNECT_TEST_RIG_DIR/<name>`, its answer `trust` given with the start; with
+    /// `worktree`, in a new worktree of that name whose folder is already there (checked out
+    /// from the project, so its project is there too) and answered not trusted in its own
+    /// right. The host and claude get this test's `HOME`, `USER`, `LOGNAME`, `PATH` and
+    /// `CLAUDE_CONFIG_DIR`, as B7's G2 gives them.
+    async fn g3_start(name: &str, trust: Trust, worktree: Option<&str>) -> G3 {
+        let var =
+            |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
+        let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
+        let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
+        let config = PathBuf::from(var("CLAUDE_CONFIG_DIR"));
+        let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join(name);
+        std::fs::create_dir(&root).unwrap();
+        let project = g3_project(&root);
+        let daemon = hosted_daemon(&root, &claude, &host);
+        let mut environment: HashMap<OsString, OsString> = [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "CLAUDE_CONFIG_DIR",
+            "DISABLE_AUTOUPDATER",
+        ]
+        .into_iter()
+        .map(|name| (OsString::from(name), var(name)))
+        .collect();
+        environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        let place = match worktree {
+            Some(name) => {
+                let folder = worktree_folder(project.to_str().unwrap(), name);
+                let branch = format!("worktree-{name}");
+                git(
+                    &project,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        &branch,
+                        folder.to_str().unwrap(),
+                    ],
+                );
+                let folder = std::fs::canonicalize(folder).unwrap();
+                let folder = folder.to_str().unwrap().to_string();
+                daemon
+                    .db
+                    .set_folder_trust(folder, Trust::NotTrusted)
+                    .await
+                    .unwrap();
+                Some(StartWorktree::New {
+                    name: name.to_string(),
+                })
+            }
+            None => None,
+        };
+        let started = claude_start(
+            &daemon,
+            Ok(root.join("codeconnect")),
+            &root,
+            name,
+            project.to_str().unwrap(),
+            "Say hello in one short sentence.",
+            place.as_ref(),
+            None,
+            &environment,
+            Some(trust),
+        )
+        .await;
+        let StartSessionResult::Started { session_uid, .. } = &started else {
+            panic!("not started: {started:?}");
+        };
+        let uid = session_uid.clone();
+        let store = rusqlite::Connection::open(root.join("events.db")).unwrap();
+        let mut reply = String::new();
+        for _ in 0..900 {
+            let mut statement = store
+                .prepare(
+                    "SELECT payload FROM events WHERE session_uid = ?1 AND kind = 'agent_message'
+                      ORDER BY seq",
+                )
+                .unwrap();
+            let payloads: Vec<String> = statement
+                .query_map([&uid], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            reply = payloads
+                .iter()
+                .map(|payload| serde_json::from_str::<serde_json::Value>(payload).unwrap())
+                // Claude writes an API error as its own "<synthetic>" message: no model answered.
+                .filter(|payload| payload["message"]["model"] != "<synthetic>")
+                .map(|payload| {
+                    let blocks = payload["message"]["content"].as_array().cloned();
+                    let texts = blocks.into_iter().flatten();
+                    texts
+                        .filter_map(|block| block["text"].as_str().map(str::to_string))
+                        .collect::<String>()
+                })
+                .find(|text| !text.is_empty())
+                .unwrap_or_default();
+            if !reply.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (initialize, session_id): (Option<String>, Option<String>) = store
+            .query_row(
+                "SELECT h.initialize, s.claude_session_id
+                   FROM run_hosts AS h JOIN sessions AS s USING(session_uid)
+                  WHERE session_uid = ?1",
+                [&uid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let listed = initialize.is_some_and(|json| {
+            let answer: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let commands = answer["commands"].as_array().cloned();
+            commands
+                .into_iter()
+                .flatten()
+                .any(|command| command["name"] == "g10canary")
+        });
+        let ran_in = session_id.and_then(|id| {
+            let name = format!("{id}.jsonl");
+            let transcript = std::fs::read_dir(config.join("projects"))
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|folder| folder.path().join(&name))
+                .find(|path| path.is_file())?;
+            std::fs::read_to_string(transcript)
+                .ok()?
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|line| line["type"] == "assistant")?["cwd"]
+                .as_str()
+                .map(str::to_string)
+        });
+        G3 {
+            daemon,
+            root,
+            uid,
+            reply,
+            listed,
+            ran_in,
+        }
+    }
+
+    /// The G3 run ended as an app ends it, its host's group gone, and its folder removed.
+    async fn g3_end(g3: &G3) {
+        let host_file = crate::claude_host::run_dir(&g3.root, &g3.uid).join("host.json");
+        let host_pid = std::fs::read_to_string(host_file)
+            .ok()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|file| file["host_pid"].as_i64())
+            .and_then(|pid| i32::try_from(pid).ok());
+        let _ = g3.daemon.stop_run(&g3.uid).await;
+        if let Some(pid) = host_pid {
+            let mut gone = false;
+            for _ in 0..150 {
+                // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
+                gone = unsafe { libc::kill(-pid, 0) } != 0;
+                if gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if !gone {
+                // SAFETY: kill(2) of the process group this test's host leads.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+            }
+        }
+        let _ = std::fs::remove_dir_all(&g3.root);
+    }
+
+    /// **B10 G3, trusted** (decision 157): a start from a folder answered trusted loads its
+    /// project into a real claude: its SessionStart hook runs, its command is listed, its
+    /// CLAUDE.md shapes the reply. Then one more message asks for the allowed Bash command,
+    /// and whether it ran within 30 s is printed as a fact, as is whether the .mcp.json
+    /// server was started. Ignored and gated as B7's G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_folder_answered_trusted_loads_its_project_into_a_real_claude() {
+        let g3 = g3_start("g3t", Trust::Trusted, None).await;
+        let hook = g3.root.join("hook-canary").exists();
+        let mcp = g3.root.join("mcp-canary").exists();
+        println!(
+            "G3 trusted: hook canary {hook}; g10canary listed {}; ran in {:?}; reply {:?}",
+            g3.listed, g3.ran_in, g3.reply
+        );
+        println!("G3 fact: .mcp.json server started {mcp}");
+        let checks = (hook, g3.listed, g3.reply.contains("ZEBRA-G10"));
+        if checks == (true, true, true) {
+            let allow = g3.root.join("allow-canary");
+            let text = format!(
+                "Run the Bash command `touch {}`, then reply done.",
+                allow.display()
+            );
+            let hash = protocol::hash::send_text_hash(&g3.uid, &text, true);
+            let sent = g3
+                .daemon
+                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true, false)
+                .await;
+            let mut ran = false;
+            for _ in 0..300 {
+                ran = allow.exists();
+                if ran {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            println!("G3 fact: sent {sent:?}; the allowed command ran within 30 s {ran}");
+        }
+        g3_end(&g3).await;
+        assert_eq!(
+            checks,
+            (true, true, true),
+            "hook canary, g10canary listed, ZEBRA-G10 in the reply"
+        );
+    }
+
+    /// **B10 G3, not trusted** (decision 157): a start from a folder answered not trusted
+    /// loads nothing of its project into a real claude: no hook canary, `g10canary` not
+    /// listed, no ZEBRA-G10 in the reply, and the .mcp.json server not started
+    /// (`--strict-mcp-config`). Ignored and gated as B7's G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_folder_answered_not_trusted_loads_nothing_of_its_project_into_a_real_claude() {
+        let g3 = g3_start("g3u", Trust::NotTrusted, None).await;
+        let hook = g3.root.join("hook-canary").exists();
+        let mcp = g3.root.join("mcp-canary").exists();
+        println!(
+            "G3 not trusted: hook canary {hook}; g10canary listed {}; mcp canary {mcp}; ran in {:?}; reply {:?}",
+            g3.listed, g3.ran_in, g3.reply
+        );
+        g3_end(&g3).await;
+        assert!(
+            !g3.reply.is_empty(),
+            "the run never replied, so the reply's canary proves nothing"
+        );
+        assert_eq!(
+            (hook, g3.listed, g3.reply.contains("ZEBRA-G10"), mcp),
+            (false, false, false, false),
+            "hook canary, g10canary listed, ZEBRA-G10 in the reply, mcp canary"
+        );
+    }
+
+    /// **B10 G3, a new worktree's folder reopened**: from a folder answered trusted, a new
+    /// worktree whose folder, `.claude/worktrees/<name>` in Claude's layout, is already there
+    /// and answered not trusted in its own right. A real claude reopens that folder (its
+    /// transcript's `cwd`) and loads nothing of the project checked out there. Ignored and
+    /// gated as B7's G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_new_worktree_reopens_its_declined_folder_and_loads_nothing_into_a_real_claude() {
+        let g3 = g3_start("g3w", Trust::Trusted, Some("g3")).await;
+        let reopened = std::fs::canonicalize(g3.root.join("project/.claude/worktrees/g3"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let hook = g3.root.join("hook-canary").exists();
+        println!(
+            "G3 new worktree: ran in {:?}, the folder {reopened:?}; hook canary {hook}; g10canary listed {}; reply {:?}",
+            g3.ran_in, g3.listed, g3.reply
+        );
+        g3_end(&g3).await;
+        assert!(
+            !g3.reply.is_empty(),
+            "the run never replied, so the reply's canary proves nothing"
+        );
+        assert_eq!(
+            g3.ran_in.as_deref(),
+            Some(reopened.as_str()),
+            "claude reopened the folder that was there"
+        );
+        assert_eq!(
+            (hook, g3.listed, g3.reply.contains("ZEBRA-G10")),
+            (false, false, false),
+            "hook canary, g10canary listed, ZEBRA-G10 in the reply"
         );
     }
 

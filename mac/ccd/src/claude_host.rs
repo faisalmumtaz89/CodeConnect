@@ -86,6 +86,12 @@ pub(crate) struct Run<'a> {
     pub model: Option<&'a str>,
     /// A new worktree for claude to make and start in, when the app asked for one.
     pub worktree: Option<&'a str>,
+    /// The answer to "trust this folder?" the run starts with: the one the start resolved
+    /// for the folder it names, lowered to not trusted when the folder the run runs in has
+    /// its own `not_trusted` answer. Trusted, claude loads the project it runs in; not
+    /// trusted, only the person's own settings and CodeConnect's MCP server (decision
+    /// 157, the host's `queryOptions`).
+    pub trust: Trust,
     /// The claude the start's check found.
     pub claude_path: &'a str,
     /// The agent host to spawn.
@@ -476,9 +482,7 @@ fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
         // The app chooses no mode at a start, so claude picks its own: the person's
         // `defaultMode`, else its default.
         permission_mode: None,
-        // Not trusted, whatever the folder's answer: that answer decides only whether
-        // the start goes on (start_session's folder question).
-        trust: Trust::NotTrusted,
+        trust: run.trust,
         resume: None,
         model: run
             .model
@@ -1296,6 +1300,7 @@ mod tests {
             prompt: "fix the tests",
             model: Some("default"),
             worktree: None,
+            trust: Trust::NotTrusted,
             claude_path: "/nonexistent/claude",
             host_bin,
             codeconnect: Path::new("/nonexistent/codeconnect"),
@@ -1602,6 +1607,7 @@ mod tests {
                 &daemon,
                 Run {
                     worktree: Some("feature-x"),
+                    trust: Trust::Trusted,
                     ..run(&rig, "req-1", &cwd, &host)
                 }
             ),
@@ -1651,7 +1657,7 @@ mod tests {
                 assert_eq!(options.claude_path, "/nonexistent/claude");
                 assert_eq!(options.permission_mode, None, "the app chose no mode");
                 assert_eq!(options.worktree.as_deref(), Some("feature-x"));
-                assert_eq!(options.trust, Trust::NotTrusted);
+                assert_eq!(options.trust, Trust::Trusted, "the start's answer");
                 assert_eq!(options.model, None, "Claude Code's own default is no model");
                 assert_eq!(
                     options.mail.args[..3],
@@ -2338,13 +2344,19 @@ mod tests {
         (restarted, BufReader::new(read).lines(), write)
     }
 
-    /// A run's row and its stored start, as a start writes them before anything is
-    /// spawned: what a ccd that died then leaves.
-    async fn begun(rig: &Rig, cwd: &str, host: &Path) -> (String, ToHost) {
+    /// A run's row and its stored start, as a start answered `trust` writes them before
+    /// anything is spawned: what a ccd that died then leaves.
+    async fn begun(rig: &Rig, cwd: &str, host: &Path, trust: Trust) -> (String, ToHost) {
         let uid = protocol::uid::new().unwrap();
         let start = ToHost::Start {
             uuid: protocol::uid::uuid_v4().unwrap(),
-            options: start_options(&uid, &run(rig, "req-1", cwd, host)),
+            options: start_options(
+                &uid,
+                &Run {
+                    trust,
+                    ..run(rig, "req-1", cwd, host)
+                },
+            ),
             prompt: "fix the tests".into(),
         };
         let now = protocol::time::now_rfc3339();
@@ -2473,13 +2485,21 @@ mod tests {
 
     /// **G2: a start its host never had.** A ccd died after it recorded the run's host and
     /// before it sent `start`, while the host was not yet listening. The restarted ccd waits
-    /// for the socket, attaches, and at the host's first `state` sends the stored start.
+    /// for the socket, attaches, and at the host's first `state` sends the stored start. It
+    /// carries the answer the run started with: the folder's answer changed since (B10's
+    /// G2) is the next start's, not this run's.
     #[tokio::test]
     async fn a_restarted_daemon_sends_a_start_its_host_never_had() {
         let rig = rig();
         let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (uid, start) = begun(&rig, &cwd, &host).await;
+        let (uid, start) = begun(&rig, &cwd, &host, Trust::Trusted).await;
+        let folder = std::fs::canonicalize(&cwd).unwrap();
+        rig.daemon
+            .db
+            .set_folder_trust(folder.to_string_lossy().into_owned(), Trust::NotTrusted)
+            .await
+            .unwrap();
         let dir = run_dir(&rig.root, &uid);
         std::fs::create_dir_all(&dir).unwrap();
         let mut stub = std::process::Command::new(&host).arg(&dir).spawn().unwrap();
@@ -2522,7 +2542,12 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 1 }));
-        assert_eq!(next(&mut lines).await, Some(start));
+        let sent = next(&mut lines).await;
+        assert!(
+            matches!(&sent, Some(ToHost::Start { options, .. }) if options.trust == Trust::Trusted),
+            "the run's own answer, not the folder's answer now: {sent:?}"
+        );
+        assert_eq!(sent, Some(start));
     }
 
     /// **G3: a run with no host.** A ccd died after the run's row and before it recorded the
@@ -2532,7 +2557,7 @@ mod tests {
         let rig = rig();
         let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (uid, _) = begun(&rig, &cwd, &host).await;
+        let (uid, _) = begun(&rig, &cwd, &host, Trust::NotTrusted).await;
         let restarted = daemon_on(&rig.root);
         restarted.recover().await;
         restarted.recover_hosted_runs(&rig.root).await;
@@ -3019,7 +3044,7 @@ mod tests {
 
         let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (starting, _) = begun(&rig, &cwd, &host).await;
+        let (starting, _) = begun(&rig, &cwd, &host, Trust::NotTrusted).await;
         assert!(matches!(
             rig.daemon.stop_run(&starting).await,
             StopRunResult::Refused { .. }
@@ -3960,7 +3985,7 @@ mod tests {
         let (host, rig) = real_host_rig();
         let (uid, host_pid, claude_pid) = real_live_run(&rig, &host, "uninstalled").await;
         let cwd = rig.root.to_str().unwrap().to_string();
-        let (starting, _) = begun(&rig, &cwd, &host).await;
+        let (starting, _) = begun(&rig, &cwd, &host, Trust::NotTrusted).await;
         let mut pending = std::process::Command::new("/bin/sleep")
             .arg("60")
             .spawn()
@@ -4074,6 +4099,7 @@ mod tests {
                 prompt: "Write a 2,000-word essay on the history of mechanical clocks.",
                 model: None,
                 worktree: None,
+                trust: Trust::NotTrusted,
                 claude_path: claude.to_str().unwrap(),
                 host_bin: &host,
                 codeconnect: &codeconnect,
@@ -4249,6 +4275,7 @@ mod tests {
                 prompt,
                 model: None,
                 worktree: None,
+                trust: Trust::NotTrusted,
                 claude_path: claude.to_str().unwrap(),
                 host_bin: &host,
                 codeconnect: &codeconnect,

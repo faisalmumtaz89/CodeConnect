@@ -1091,7 +1091,22 @@ path}` are each answered with `folder_trust {request_id, folders: [{path, trust,
 answered_at}]}`, every answer kept, newest first, once
 the change is made; a forgotten folder is asked about again. They are served to
 the connections `start_session` is. The folder question comes before the agent's
-check, so a folder nobody has answered for runs nothing at all. A Claude Code start
+check, so a folder nobody has answered for runs nothing at all.
+
+What the answer does: a Claude Code run started from a folder answered `trusted` loads
+the project it runs in, as Claude Code does when you run it there yourself: its
+CLAUDE.md, its commands and skills, its MCP servers (as Claude Code approves them) and
+its hooks. Hooks are commands the folder's authors wrote, and they run on this
+computer, at the run's start and around the agent's tools, without asking you. So
+answer `trusted` only for a folder whose authors you trust. A run started from a folder
+answered `not_trusted`, or one that runs in a worktree with its own `not_trusted` answer,
+starts with your own settings and CodeConnect's own tools only: the agent host passes
+claude `--setting-sources=user` and `--strict-mcp-config`. A worktree's own `trusted`
+answer never lifts its start folder's `not_trusted`. A run keeps the
+answer it started with, a restarted daemon included; changing the answer applies to the
+next start.
+
+A Claude Code start
 that goes on is then checked, before anything runs: the daemon finds the claude the launcher would run,
 from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
 the login shell's `PATH`, and asks that claude itself its `--version` and
@@ -1750,3 +1765,7 @@ fails the suite instead of failing silently in production.
 * **A `send_text` from a client below minor 3 is not idempotent.** There is
   nothing to recognise a retry by, so a retried takeover types twice. The daemon
   logs it rather than pretending otherwise.
+* **Whether a trusted folder's allow rules skip the approval card is not
+  measured.** In a Claude Code run that loads its folder's project, that
+  project's hooks run; whether its `permissions.allow` rules also let a tool run
+  without an approval card has not been measured.
