@@ -2786,20 +2786,22 @@ impl Store {
         Ok(Some(filed))
     }
 
-    /// The recorded host of every hosted run that has not ended (`starting` or `live`).
+    /// The recorded host of every hosted run that has not ended (`starting`, `live` or
+    /// `stopping`).
     pub fn watched_hosts(&self) -> Result<Vec<WatchedHost>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
                     h.boot_sec, h.boot_usec
                FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
-              WHERE h.host_pid IS NOT NULL AND s.lifecycle IN (?1, ?2)",
+              WHERE h.host_pid IS NOT NULL AND s.lifecycle IN (?1, ?2, ?3)",
         )?;
         let rows = stmt
             .query_map(
                 params![
                     lifecycle_str(Lifecycle::Starting),
-                    lifecycle_str(Lifecycle::Live)
+                    lifecycle_str(Lifecycle::Live),
+                    lifecycle_str(Lifecycle::Stopping)
                 ],
                 watched_host_from,
             )?
@@ -3369,6 +3371,29 @@ impl Store {
             )?;
         }
         Ok(())
+    }
+
+    /// Move the run `session_uid` from `from` to `to`, only while it is still `from`, in
+    /// whichever table holds it. Whether it moved.
+    pub fn advance_lifecycle(
+        &self,
+        session_uid: &str,
+        from: Lifecycle,
+        to: Lifecycle,
+    ) -> Result<bool> {
+        let conn = self.write();
+        let now = protocol::time::now_rfc3339();
+        let mut moved = 0;
+        for table in SESSION_TABLES {
+            moved += conn.execute(
+                &format!(
+                    "UPDATE {table} SET lifecycle = ?3, updated_at = ?4
+                      WHERE session_uid = ?1 AND lifecycle = ?2"
+                ),
+                params![session_uid, lifecycle_str(from), lifecycle_str(to), now],
+            )?;
+        }
+        Ok(moved == 1)
     }
 
     /// **Write down the thread a control link has actually adopted**, against the
@@ -7590,6 +7615,7 @@ pub(crate) fn lifecycle_str(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
         Lifecycle::Starting => "starting",
         Lifecycle::Live => "live",
+        Lifecycle::Stopping => "stopping",
         Lifecycle::Exited => "exited",
         Lifecycle::Failed => "failed",
         Lifecycle::Unknown => "unknown",
@@ -7600,6 +7626,7 @@ fn parse_lifecycle(value: &str) -> Lifecycle {
     match value {
         "starting" => Lifecycle::Starting,
         "live" => Lifecycle::Live,
+        "stopping" => Lifecycle::Stopping,
         "exited" => Lifecycle::Exited,
         "failed" => Lifecycle::Failed,
         _ => Lifecycle::Unknown,

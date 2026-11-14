@@ -2113,7 +2113,7 @@ fn take_kill_after_go_fault() -> bool {
 
 /// The child's own image, or `None` if it has no image to report (it is gone).
 #[cfg(target_os = "macos")]
-fn child_image(pid: i32) -> Option<std::path::PathBuf> {
+pub(crate) fn child_image(pid: i32) -> Option<std::path::PathBuf> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: `buf` is exactly the size this call documents and outlives it.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
@@ -2129,7 +2129,7 @@ fn child_image(pid: i32) -> Option<std::path::PathBuf> {
 /// The child's own image, or `None` if it has no image to report: the kernel's
 /// `/proc/<pid>/exe` link, which a dead or zombie child no longer has.
 #[cfg(target_os = "linux")]
-fn child_image(pid: i32) -> Option<std::path::PathBuf> {
+pub(crate) fn child_image(pid: i32) -> Option<std::path::PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 

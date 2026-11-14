@@ -6,8 +6,9 @@
 //
 // The first `start` runs the run's one query() (start.ts); a later one is ignored. claude stays in the host's process
 // group (H2). The start's outcome carries the initialize answer, or the reason the start failed. After an answer,
-// every message the query yields follows as `sdk`; after a refusal, none does. claude's end is the last message,
-// `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
+// every message the query yields follows as `sdk`; after a refusal, none does. `stop` ends the run (H5): the query is
+// interrupted, its input ended and the query closed, so claude exits; a second `stop` does nothing. claude's end is
+// the last message, `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,11 +39,14 @@ const noStart = setTimeout(() => {
 }, 30_000);
 
 let facts: Facts = {};
-const link = createLink({ start: begin, facts: () => facts, drained: () => process.exit(0) });
+const link = createLink({ start: begin, stop: () => stop?.(), facts: () => facts, drained: () => process.exit(0) });
 
 // A start after the first is ignored: ccd re-sends a start whose outcome it does not hold yet, and the first one's
 // outcome is still to come.
 let begun = false;
+
+// The run's stop, once it has a query to stop.
+let stop: (() => void) | undefined;
 
 function begin(start: Start): void {
   if (begun) return;
@@ -50,10 +54,13 @@ function begin(start: Start): void {
   clearTimeout(noStart);
   facts = startFacts(start.options);
   let claudeEnded: Promise<{ code: number | null; signal: string | null }> | undefined;
+  let endInput = () => {};
   const input = (async function* () {
     yield firstMessage(start);
-    // The input stays open for the run's later messages.
-    await new Promise(() => {});
+    // The input stays open for the run's later messages, until the run is stopped.
+    await new Promise<void>((resolve) => {
+      endInput = resolve;
+    });
   })();
   const run = query({
     prompt: input,
@@ -75,6 +82,12 @@ function begin(start: Start): void {
       },
     },
   });
+  stop = () => {
+    stop = undefined;
+    run.interrupt().catch(() => {});
+    endInput();
+    run.close();
+  };
   // Whether claude answered initialize.
   const outcome = run.initializationResult().then(
     (answer) => {

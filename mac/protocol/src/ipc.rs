@@ -132,6 +132,12 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
+    /// `codeconnect daemon uninstall`, before it removes the daemon: end every Claude
+    /// run whose agent host is still running, as [`crate::ws::ClientMessage::StopRun`]
+    /// ends one, since a host outlives ccd by design and would run on with no daemon.
+    /// Answered with [`DaemonFrame::HostedRunsStopped`] once every such host has exited,
+    /// or after 20 s.
+    StopHostedRuns,
     /// "May ccd open the folders macOS guards?" — asked by `codeconnect daemon
     /// folders` while someone is at the Mac. The daemon reads each folder once,
     /// so a dialog macOS shows names ccd and the answer is kept for ccd; one
@@ -333,6 +339,14 @@ pub enum DaemonFrame {
         ssh_key_removed: AlwaysFalse,
     },
     Daemon(DaemonInfo),
+    /// The answer to [`ClientFrame::StopHostedRuns`].
+    HostedRunsStopped {
+        /// Runs this request ended.
+        stopped: usize,
+        /// The pids of agent hosts still running at the answer: a run still starting,
+        /// which is not stopped, or a host that had not exited within 20 s.
+        left: Vec<u32>,
+    },
     Folders {
         folders: Vec<FolderAccess>,
     },

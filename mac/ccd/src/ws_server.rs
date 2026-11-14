@@ -1336,6 +1336,21 @@ where
                 request_id,
             ));
         }
+        ClientMessage::StopRun {
+            session_id,
+            request_id,
+        } => {
+            let result = daemon.stop_run(&session_id).await;
+            send(
+                sink,
+                &ServerMessage::StopRunResult {
+                    session_id,
+                    request_id,
+                    result,
+                },
+            )
+            .await?;
+        }
         ClientMessage::DeleteSession { session_uid } => {
             // **By uid, never by name.** `resolve` accepts a tmux name and maps it
             // to the newest run under it, which is right for subscribing and wrong
@@ -3222,6 +3237,7 @@ fn capabilities(
         start_worktree: paired,
         browse_folders: paired,
         machine_stats: true,
+        stop_run: true,
     }
 }
 
@@ -9270,6 +9286,95 @@ mod tests {
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// **Ending a run, as a minor-35 daemon sends it, emitted by this build.** The
+    /// phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_35_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-35-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_35_wire().await,
+            committed,
+            "the committed minor-35 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_35_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-35-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_35_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_35_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-35-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The capabilities a paired phone is offered over a live socket, with `stop_run`;
+    /// the `stop_run` request and its three answers, the refusal as the daemon words an
+    /// unknown run; and a session list holding a run that is `stopping`.
+    async fn derived_minor_35_wire() -> serde_json::Value {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let (_phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let answer = |result| {
+            serde_json::to_value(ServerMessage::StopRunResult {
+                session_id: uid.into(),
+                request_id: "stop-1".into(),
+                result,
+            })
+            .unwrap()
+        };
+        let stopping = protocol::event::SessionSummary {
+            session_uid: uid.into(),
+            session_id: uid.into(),
+            tmux_session: String::new(),
+            cwd: "/tmp/ccd-minor-35/app".into(),
+            lifecycle: protocol::event::Lifecycle::Stopping,
+            link: protocol::event::Link::Attached,
+            claude_session_id: None,
+            transcript_path: None,
+            last_seq: 12,
+            created_at: "2026-11-14T07:00:00.000Z".into(),
+            updated_at: "2026-11-14T08:00:00.000Z".into(),
+            blocked_on: Vec::new(),
+            project_label: crate::project_label::project_label("/tmp/ccd-minor-35/app"),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_link: protocol::event::CodexLink::None,
+            pending: Vec::new(),
+            model: None,
+            permission_mode: None,
+            git_branch: None,
+            diff_stat: None,
+        };
+        serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "stop_run_request": serde_json::to_value(ClientMessage::StopRun {
+                session_id: uid.into(),
+                request_id: "stop-1".into(),
+            })
+            .unwrap(),
+            "stop_run_stopping": answer(protocol::ws::StopRunResult::Stopping),
+            "stop_run_already_ended": answer(protocol::ws::StopRunResult::AlreadyEnded),
+            "stop_run_refused": answer(server.daemon.stop_run(uid).await),
+            "sessions": serde_json::to_value(ServerMessage::Sessions {
+                sessions: vec![stopping],
+            })
+            .unwrap(),
+        })
     }
 
     /// The capabilities a paired phone is offered over a live socket, the

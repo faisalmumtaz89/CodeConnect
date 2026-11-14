@@ -186,7 +186,7 @@ pub enum ClientMessage {
     },
     /// Remove one run's record from the Mac.
     ///
-    /// Deliberately the only destructive verb the phone has, and deliberately
+    /// Deliberately the only verb that removes a run's record, and deliberately
     /// narrow: `session_uid`, never a tmux name, because a name is handed to the
     /// next run and a phone that deleted "cc-1" could destroy a session it never
     /// saw. A **hosted** run (in tmux, or through the agent host ccd started for
@@ -202,6 +202,21 @@ pub enum ClientMessage {
     /// works afterwards. The phone's copy says so.
     DeleteSession {
         session_uid: String,
+    },
+    /// **End a Claude run CodeConnect started** (minor 35), answered with
+    /// [`ServerMessage::StopRunResult`].
+    ///
+    /// A `live` run becomes [`crate::event::Lifecycle::Stopping`]: its agent host, if its
+    /// link is attached, is sent `stop`, which interrupts claude and ends its input, and a
+    /// host that has not exited 10 s later, told or not, is stopped by its process group. The run then ends `exited`
+    /// with the reason "Stopped". Nothing is kept per `request_id`: a retry reads the
+    /// run as it is, `stopping` while it stops and `already_ended` once it has.
+    ///
+    /// A client sends it only when [`Capabilities::stop_run`] is advertised: a daemon
+    /// below minor 35 answers `bad_request`.
+    StopRun {
+        session_id: String,
+        request_id: String,
     },
     /// "Prove the doorbell rings." Sends one real APNs notification to **this
     /// connection's own device**, so the whole chain — stored token, provider
@@ -623,6 +638,12 @@ pub enum ServerMessage {
     DeleteSessionResult {
         session_uid: String,
         result: DeleteSessionResult,
+    },
+    /// What became of a [`ClientMessage::StopRun`].
+    StopRunResult {
+        session_id: String,
+        request_id: String,
+        result: StopRunResult,
     },
     TestPushResult {
         request_id: String,
@@ -1289,6 +1310,12 @@ pub struct Capabilities {
     /// client asks only when this is advertised.
     #[serde(default)]
     pub machine_stats: bool,
+    /// **This daemon ends a Claude run it started** ([`ClientMessage::StopRun`],
+    /// minor 35). Absent decodes `false`: an older daemon answers `stop_run` with
+    /// `bad_request`, so a client sends it, and offers to end a run, only when this
+    /// is advertised.
+    #[serde(default)]
+    pub stop_run: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -1676,6 +1703,18 @@ pub enum AnswerResult {
     Rejected {
         reason: String,
     },
+}
+
+/// What became of a [`ClientMessage::StopRun`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StopRunResult {
+    /// The stop is accepted: the run is `stopping`, and reads ended once it has exited.
+    Stopping,
+    /// The run had ended; nothing was done.
+    AlreadyEnded,
+    /// Nothing was done, and `reason` says why: human text, safe to show.
+    Refused { reason: String },
 }
 
 /// What became of a `delete_session`.
@@ -2207,12 +2246,17 @@ mod tests {
             "which kind of device sent an answer (`answered_on`) is minor 34"
         );
         const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 35,
+            "ending a Claude run from an app (`stop_run`, `stop_run_result`, the `stop_run` \
+             capability) and the `stopping` lifecycle are minor 35"
+        );
+        const _: () = assert!(
             crate::PROTOCOL_VERSION == 2,
             "major 2 is the one engine's protocol"
         );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 34);
+        assert_eq!(crate::PROTOCOL_MINOR, 35);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2723,6 +2767,7 @@ mod tests {
             start_worktree: true,
             browse_folders: true,
             machine_stats: true,
+            stop_run: true,
         }
     }
 

@@ -707,7 +707,16 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         to Claude is detailed "Sent to Claude from a phone" whichever device
 ///         sent it, because that sentence is how every app knows it was sent; so an
 ///         app that does not know the field reads every answer as it always has.
-pub const PROTOCOL_MINOR: u32 = 34;
+///   * `35` — **A Claude run CodeConnect started can be ended from an app.**
+///
+///     Additive:
+///       - [`ws::Capabilities::stop_run`], [`ws::ClientMessage::StopRun`] and
+///         [`ws::ServerMessage::StopRunResult`] (`stopping`, `already_ended`,
+///         `refused`). A daemon below 35 answers `stop_run` with `bad_request`, so a
+///         client sends it only when the capability is advertised.
+///       - [`event::Lifecycle::Stopping`] — the run was asked to end and has not yet.
+///         A client from before 35 reads the word as `unknown`.
+pub const PROTOCOL_MINOR: u32 = 35;
 
 #[cfg(test)]
 mod ledger_tests {

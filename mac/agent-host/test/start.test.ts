@@ -226,6 +226,19 @@ test("claude gets the host's environment: ccd's session uid, no CLAUDE_CONFIG_DI
   expect(env.CLAUDE_CODE_ENTRYPOINT).toBeDefined();
 }, 10_000);
 
+test('stop ends the run: claude is asked to interrupt and ends, its end is the last line, and the host exits once ccd has it; a second stop does nothing', async () => {
+  const { host, ccd, stub } = await run(trustedStart);
+  ccd.send({ type: 'stop', uuid: 'c-stop' });
+  ccd.send({ type: 'stop', uuid: 'c-stop-again' });
+  await ccd.line("claude's end", (line) => line.type === 'exited');
+  expect(stdinOf(stub()).some((message) => message.request?.subtype === 'interrupt')).toBe(true);
+  await Bun.sleep(500);
+  expect(ccd.lines.filter((line) => line.type === 'exited').length).toBe(1);
+  expect(ccd.lines.at(-1).type).toBe('exited');
+  ccd.ackAll();
+  expect(await exitWithin(host, 3000)).toBe(0);
+}, 10_000);
+
 test('a start after the first is ignored, while its initialize is outstanding and after its outcome: one claude, one outcome', async () => {
   const dir = runDir();
   const work = join(dir, 'work');

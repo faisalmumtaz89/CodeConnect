@@ -529,6 +529,14 @@ async fn read_loop(
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
+            ClientFrame::StopHostedRuns => {
+                let (stopped, left) = daemon
+                    .stop_hosted_runs(std::time::Duration::from_secs(20))
+                    .await;
+                let _ = tx
+                    .send(DaemonFrame::HostedRunsStopped { stopped, left })
+                    .await;
+            }
             ClientFrame::AskFolderAccess => {
                 let _ = tx.send(ask_folder_access().await).await;
             }

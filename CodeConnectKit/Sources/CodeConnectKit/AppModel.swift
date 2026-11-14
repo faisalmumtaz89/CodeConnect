@@ -2229,7 +2229,7 @@ public final class AppModel {
             }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()
-        case .interruptResult, .composeResult:
+        case .interruptResult, .stopRunResult, .composeResult:
             // Awaited by the control that asked, correlated on the request id it
             // minted. Nothing here may act on one: a stop or a message is a
             // mutation somebody pressed, and its outcome belongs to that press.
