@@ -5477,8 +5477,8 @@ impl Daemon {
         {
             Ok(Some(crate::store::AnswerStatus::Settled(outcome))) => {
                 // **Branch on what the ledger recorded, not on the fact that it is
-                // terminal.** `lost` is the record that this phone's answer reached
-                // nothing; replaying it as "answered from a phone" tells the operator the
+                // terminal.** `lost` is the record that the earlier answer reached
+                // nothing; replaying it as "already answered" tells the operator the
                 // opposite of what happened, at the moment they are asking.
                 return AnswerResult::Rejected {
                     reason: crate::store::replayed_answer_sentence(&outcome),
@@ -30437,39 +30437,28 @@ mod tests {
         );
     }
 
-    /// **A ledger replay says what the ledger actually recorded, and `lost` is not
-    /// "a phone answered".**
-    ///
-    /// `Settled` is the ledger's word for *terminal*, and it carries two very different
-    /// outcomes. `delivered` is a phone answer the broker confirmed went upstream.
-    /// `lost` is the opposite fact: this phone's answer forwarded ZERO bytes, something
-    /// else settled the request, and the card was left standing for that other terminal.
-    /// Replaying both as "already answered from a phone" tells the operator their tap was
-    /// applied when the whole record says it was not — and it is the sentence a second
-    /// tap on a lost card gets, which is exactly the moment they are asking.
+    /// The reason a second answer, from an iPhone, is refused with when the card's answer
+    /// claim is already settled `outcome`.
     ///
     /// The card is a real one, raised through the observer's own producer, and the ledger
     /// row is settled through the store's own primitive, so this is the replay path and
-    /// not a hand-built string.
-    ///
-    /// **Mutation:** collapse `replayed_answer_sentence` back to one format string over
-    /// `{outcome}` and the second assertion goes red — the operator is told a phone
-    /// answered a card no phone answer ever reached.
-    #[tokio::test]
-    async fn a_lost_answer_replays_as_a_loss_and_not_as_a_phone_answer() {
+    /// not a hand-built string. The claim stores no device, so the same row stands for an
+    /// answer from a phone, from the Mac app, or from a client on the static token.
+    async fn second_answer_after_a_settled_claim(outcome: &'static str) -> String {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
-        assert!(raise_codex_card(&daemon, uid, "req-lost", "item-lost").await);
+        assert!(raise_codex_card(&daemon, uid, "req-settled", "item-settled").await);
         let held = open_cards(&daemon, uid)
             .into_iter()
-            .find(|row| row.request_id == "req-lost")
+            .find(|row| row.request_id == "req-settled")
             .expect("the producer filed the card");
         let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
 
-        // The exact durable state a lost race leaves: a claim under this card's key,
-        // settled `lost`, with the card still standing for the winner's own terminal.
+        // The exact durable state the first answer left: a claim under this card's key,
+        // settled `outcome`; a `lost` one leaves the card standing for the winner's own
+        // terminal.
         let claimed = crate::store::ClaimedMaterial {
             thread_id: "th-1".into(),
             generation: 1,
@@ -30481,20 +30470,20 @@ mod tests {
         assert_eq!(
             daemon
                 .db
-                .claim_answer_mutation(uid.to_string(), "req-lost".into(), claimed, now.clone())
+                .claim_answer_mutation(uid.to_string(), "req-settled".into(), claimed, now.clone())
                 .await
                 .expect("the claim"),
             crate::store::MutationClaim::Claimed
         );
         assert!(daemon
             .db
-            .settle_answer_mutation(uid.to_string(), "req-lost".into(), "lost", now)
+            .settle_answer_mutation(uid.to_string(), "req-settled".into(), outcome, now)
             .await
             .expect("the settle"));
 
         let again = daemon
             .answer(
-                "req-lost",
+                "req-settled",
                 &card.payload_hash,
                 AnswerDecision::OptionId {
                     option_id: "accept".into(),
@@ -30504,21 +30493,53 @@ mod tests {
             )
             .await;
 
-        let AnswerResult::Rejected { reason } = &again else {
+        let AnswerResult::Rejected { reason } = again else {
             panic!("a terminal claim may never actuate again: {again:?}");
         };
-        assert!(
-            reason.contains("nothing was sent again"),
-            "the refusal must say nothing went out: {reason}"
+        reason
+    }
+
+    /// **A ledger replay says what the ledger actually recorded, and `lost` is not
+    /// "an answer reached Codex".**
+    ///
+    /// `Settled` is the ledger's word for *terminal*, and it carries two very different
+    /// outcomes. `delivered` is an answer the broker confirmed went upstream. `lost` is
+    /// the opposite fact: that answer forwarded ZERO bytes, something else settled the
+    /// request, and the card was left standing for that other terminal. Replaying both as
+    /// "already answered" tells the operator their tap was applied when the whole record
+    /// says it was not — and it is the sentence a second tap on a lost card gets, which is
+    /// exactly the moment they are asking.
+    ///
+    /// The sentence is pinned whole: the claim stores no device, so any wording that names
+    /// one is a guess. **Mutation:** put "a phone answer" back at the head of the `lost`
+    /// sentence and the assertion goes red.
+    #[tokio::test]
+    async fn a_lost_answer_replays_as_a_loss_and_not_as_a_phone_answer() {
+        let reason = second_answer_after_a_settled_claim(crate::store::ANSWER_LOST).await;
+        assert_eq!(
+            reason,
+            "an earlier answer to this card lost the race — something else answered it \
+             first — so nothing was sent again"
         );
-        assert!(
-            !reason.contains("answered from a phone"),
-            "no phone answer ever reached Codex for this card — `lost` is the record \
-             that it did not: {reason}"
-        );
-        assert!(
-            reason.contains("lost") || reason.contains("something else answered"),
-            "and the operator is told what actually happened to it: {reason}"
+    }
+
+    /// **A second answer to a card that was already answered is not told a phone answered
+    /// it.**
+    ///
+    /// Two devices answer one Codex card. The Mac app's answer is delivered first, and the
+    /// iPhone's comes second. The claim the first answer left stores no device, so the
+    /// refusal can say the card was answered and nothing was sent again, but not by whom:
+    /// "from a phone" was a guess, wrong whenever the Mac app answered.
+    ///
+    /// The sentence is pinned whole, so a wording that names any device fails. **Mutation:**
+    /// put "from a phone" (or "from the Mac app") in the `delivered` sentence and the
+    /// assertion goes red.
+    #[tokio::test]
+    async fn a_delivered_answer_replays_without_naming_a_device() {
+        let reason = second_answer_after_a_settled_claim(crate::store::ANSWER_DELIVERED).await;
+        assert_eq!(
+            reason,
+            "this card was already answered; nothing was sent again"
         );
     }
 
