@@ -1071,7 +1071,11 @@ token. `list_projects` is answered with
 its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
 agent can start as last checked (Claude Code: the check a start makes, below;
-Codex: `codeconnect codex --version` through the user's login shell): the first list after the daemon starts waits for the
+Codex: the user's own codex, found from the list the launcher reads, config.json's
+`codex_bin`, every `codex` on the login shell's `PATH`, then the install locations,
+and its `--version` through that login shell, at least 0.167.0; one not found, below
+that or not saying its version is listed unavailable with the sentence that says so,
+and a signed-out one with "Codex on <computer> isn’t signed in."): the first list after the daemon starts waits for the
 check, and every later one answers from the last check and checks again; when that check finds the agents changed,
 `projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt, trust?}` takes a listed
 folder (from `>= 30`, any absolute folder) and a first message, and a start
@@ -1212,17 +1216,23 @@ once `--version` says it is there: Claude Code as `<claude> -p --input-format st
 --output-format stream-json --verbose --no-session-persistence
 --strict-mcp-config --settings '{"disableAllHooks":true}'`, which answers one
 `initialize` with its models, its own `default` first with the model that is now;
-Codex as `codeconnect codex app-server`, which answers `model/list` (hidden models
-left out) and `account/read`. Claude Code is signed in when `auth status` exits 0
+Codex as `<codex> app-server`, the codex that check found, asked for `model/list`
+(hidden models left out) and, unless `codex login status` says it is signed in,
+`account/read`, and ended once it has answered, since a signed-in app-server
+answers `model/list` but never `account/read` and keeps running; it reaches
+chatgpt.com as it starts, and signed out github.com too. Claude Code is signed in when `auth status` exits 0
 with `loggedIn` true, signed out when it exits 1 with it false, and otherwise not
-known; Codex is signed in when it holds an account or needs no OpenAI sign-in. An agent keeps its own books as it starts: Claude Code
+known; Codex is signed in when `codex login status` says so, or else when
+`account/read` names an account or no OpenAI sign-in is needed. An agent keeps its own books as it starts: Claude Code
 refreshes its caches in `~/.claude.json`, and Codex begins a plugin sync that the
 ask cuts short, leaving a 4 KB `~/.codex/.tmp/git-*` it never removes. So an
 answer that says signed in is kept until the agent's `--version` changes or the
 daemon restarts. A Claude Code that `auth status` says is signed out is not asked
 at all, since its start is refused. One whose sign-in is not known is asked at
 every list. A signed-out Codex's answer is asked again only once `codex login
-status`, which starts nothing, says it is signed in. An agent that does not answer
+status`, which starts nothing, says it is signed in; that status does not count a
+model provider of the user's own, so one set up while the daemon runs is offered
+once Codex is updated or the daemon restarts. An agent that does not answer
 within the check's 10 s offers no models. `start_session`'s `model` is given to the
 agent: to Claude Code's host as the run's model, and to Codex as one argument,
 `--model=<value>`, after `--no-attach`. Absent, or Claude Code's `default`, the
