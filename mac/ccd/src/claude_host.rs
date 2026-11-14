@@ -11,7 +11,9 @@
 //! order and stops at the first one it does not apply, which the host keeps, so
 //! nothing is acknowledged that was not stored. The start's outcome, committed by the
 //! link, makes the run `live` or `failed`, and the app's answer waits for it. A restarted
-//! ccd attaches each host still running again from its run's cursor ([`attach_run`]).
+//! ccd attaches each host still running again from its run's cursor ([`attach_run`]). An
+//! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop`, and a
+//! host that has not exited 10 s later is stopped by its group ([`escalate_stop`]).
 //!
 //! The lines are [`protocol::host`]'s; the host is mac/agent-host.
 
@@ -35,7 +37,7 @@ use protocol::proc_identity::{
     GroupWarrant, Liveness, ProcessIdentity,
 };
 use protocol::sdk_map::Signal;
-use protocol::ws::{StartFailure, StartSessionResult};
+use protocol::ws::{StartFailure, StartSessionResult, StopRunResult};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
@@ -58,6 +60,15 @@ const ZOMBIE_WAIT: Duration = Duration::from_secs(5);
 
 /// How long a dead host's group has after SIGTERM before SIGKILL (decision 179).
 const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a run sent `stop` has to exit before its host's group is stopped (H5).
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// The end of a run that was `stopping`, however it ended. It carries no exit code: the
+/// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing.
+fn stopped_end() -> serde_json::Value {
+    serde_json::json!({ "exit_code": null, "reason": "Stopped" })
+}
 
 /// One Claude start, as the app asked for it and the checks before the row resolved it.
 pub(crate) struct Run<'a> {
@@ -316,7 +327,6 @@ async fn attach(
         _ => return Err("the agent host's first message was not its state".into()),
     }
     send(&mut write, start).await?;
-    daemon.host_link_attached(uid).await;
     // The link is a task of its own, so the start's answer timing out never ends it.
     let (begun, outcome) = oneshot::channel();
     tokio::spawn(link(
@@ -340,8 +350,9 @@ async fn attach(
 /// found it (H8): its socket, waited for while the host is alive and not yet listening,
 /// as a new host's is; then `attach` from the run's cursor and the link, which reads from
 /// the store what the connection that started the run knew. A run still starting gets
-/// its stored `start` at the first `state`, once the replay is over. When it cannot
-/// connect, the run's host is checked as at the link's end ([`end_if_host_gone`]).
+/// its stored `start` at the first `state`, once the replay is over, and a run stopping
+/// gets `stop` again there (H8). When it cannot connect, the run's host is checked as at
+/// the link's end ([`end_if_host_gone`]).
 pub(crate) async fn attach_run(
     daemon: Arc<Daemon>,
     root: PathBuf,
@@ -392,7 +403,6 @@ pub(crate) async fn attach_run(
             return;
         }
     };
-    daemon.host_link_attached(&uid).await;
     let start = linked
         .start
         .as_deref()
@@ -401,7 +411,17 @@ pub(crate) async fn attach_run(
         Some(ToHost::Start { uuid, .. }) => uuid.clone(),
         _ => String::new(),
     };
-    let resend = start.filter(|_| linked.lifecycle == Lifecycle::Starting);
+    let resend = match linked.lifecycle {
+        Lifecycle::Starting => start,
+        Lifecycle::Stopping => match protocol::uid::uuid_v4() {
+            Ok(uuid) => Some(ToHost::Stop { uuid }),
+            Err(err) => {
+                crate::log_error!("{uid}: could not name its stop: {err}");
+                None
+            }
+        },
+        _ => None,
+    };
     link(
         daemon,
         uid,
@@ -569,7 +589,8 @@ struct Linked {
     lifecycle: Lifecycle,
     /// The uuid of the run's last SDK init, which its turn's later events carry.
     turn: Option<String>,
-    /// The run's `start`, sent at the link's first `state` if no outcome has come by then.
+    /// Sent at the link's first `state`: the run's `start` if no outcome has come by then,
+    /// or `stop` for a run stopping.
     resend: Option<ToHost>,
 }
 
@@ -582,9 +603,14 @@ struct Linked {
 /// in the `failed` run and is applied so its host can end. After a re-attach, the host
 /// replays what it kept and then sends its `state`, so the first `state` ends the replay
 /// (decision 1): a run still starting then gets its start again, which a host that
-/// already has one ignores (decision 2). It ends at the first message this daemon does
-/// not apply, which stays in the host with everything after it, or when the connection or
-/// a commit fails, and then checks the run's host ([`end_if_host_gone`]).
+/// already has one ignores (decision 2), and a run stopping gets `stop` again (H8).
+///
+/// While it runs, the daemon sends the host commands through it
+/// ([`Daemon::send_to_host`]). A `stopping` run is still going, so its messages are
+/// filed as a live run's, and its `exited` ends it "Stopped" ([`stopped_end`]). It ends at
+/// the first message this daemon does not apply, which stays in the host with everything
+/// after it, or when the connection or a commit fails, and then checks the run's host
+/// ([`end_if_host_gone`]).
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
@@ -594,27 +620,46 @@ async fn link(
     mut lines: Lines<BufReader<OwnedReadHalf>>,
     mut write: OwnedWriteHalf,
 ) {
+    let (to_link, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    daemon.host_link_attached(&uid, to_link).await;
     let Linked {
         start_uuid,
         lifecycle,
         mut turn,
         mut resend,
     } = linked;
-    let (mut live, mut refused) = (lifecycle == Lifecycle::Live, lifecycle == Lifecycle::Failed);
+    let (mut live, mut refused) = (
+        matches!(lifecycle, Lifecycle::Live | Lifecycle::Stopping),
+        lifecycle == Lifecycle::Failed,
+    );
+    let mut stopping = lifecycle == Lifecycle::Stopping;
     let ended = loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break "the agent host closed the connection".to_string(),
-            Err(err) => break format!("could not read the agent host: {err}"),
+        let line = tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => line,
+                Ok(None) => break "the agent host closed the connection".to_string(),
+                Err(err) => break format!("could not read the agent host: {err}"),
+            },
+            Some(command) = commands.recv() => {
+                stopping |= matches!(command, ToHost::Stop { .. });
+                if let Err(why) = send(&mut write, &command).await {
+                    break why;
+                }
+                continue;
+            }
         };
         match serde_json::from_str::<FromHost>(&line) {
             Ok(FromHost::State { seq, .. }) => {
                 if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
                     break why;
                 }
-                if let Some(start) = resend.take().filter(|_| !live && !refused) {
-                    if let Err(why) = send(&mut write, &start).await {
-                        break why;
+                if let Some(command) = resend.take() {
+                    // A start goes again only while no outcome has come.
+                    let due = !matches!(command, ToHost::Start { .. }) || (!live && !refused);
+                    if due {
+                        if let Err(why) = send(&mut write, &command).await {
+                            break why;
+                        }
                     }
                 }
             }
@@ -672,18 +717,17 @@ async fn link(
                 }
             }
             Ok(FromHost::Exited { seq, code, signal }) if live => {
-                let mut payload = serde_json::json!({ "exit_code": code });
-                if let Some(signal) = signal {
-                    payload["signal"] = signal.into();
-                }
+                let (from, payload) = if stopping {
+                    (Lifecycle::Stopping, stopped_end())
+                } else {
+                    let mut payload = serde_json::json!({ "exit_code": code });
+                    if let Some(signal) = signal {
+                        payload["signal"] = signal.into();
+                    }
+                    (Lifecycle::Live, payload)
+                };
                 match daemon
-                    .end_hosted_run(
-                        &uid,
-                        Some((host, seq)),
-                        Lifecycle::Live,
-                        Lifecycle::Exited,
-                        payload,
-                    )
+                    .end_hosted_run(&uid, Some((host, seq)), from, Lifecycle::Exited, payload)
                     .await
                 {
                     Ok(true) => {
@@ -767,9 +811,9 @@ async fn stop_group(host: ProcessIdentity, boot: BootIdentity) -> Ladder {
 /// H7: when the run `uid` has not ended and its recorded host is gone, the ladder on the
 /// host's group, then the run ends. `starting` → `failed`, as a refused start, with no end
 /// in its timeline, which the apps would read as a session that ran and finished; `live` →
-/// `exited` ("Stopped: its process ended"). A host alive, or one the kernel cannot be
-/// asked about, leaves the run as it is; so does one still a zombie after
-/// [`ZOMBIE_WAIT`], for the next sweep.
+/// `exited` ("Stopped: its process ended"); `stopping` → `exited` ("Stopped"). A host
+/// alive, or one the kernel cannot be asked about, leaves the run as it is; so does one
+/// still a zombie after [`ZOMBIE_WAIT`], for the next sweep.
 pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
     let watch = match daemon.db.watched_host(uid.to_string()).await {
         Ok(Some(watch)) => watch,
@@ -779,7 +823,10 @@ pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
             return;
         }
     };
-    if !matches!(watch.lifecycle, Lifecycle::Starting | Lifecycle::Live) {
+    if !matches!(
+        watch.lifecycle,
+        Lifecycle::Starting | Lifecycle::Live | Lifecycle::Stopping
+    ) {
         return;
     }
     if liveness(&watch.host) != Liveness::Gone {
@@ -812,13 +859,92 @@ pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
         }
         return;
     }
-    let payload = serde_json::json!({ "exit_code": null, "reason": "Stopped: its process ended" });
+    let payload = if watch.lifecycle == Lifecycle::Stopping {
+        stopped_end()
+    } else {
+        serde_json::json!({ "exit_code": null, "reason": "Stopped: its process ended" })
+    };
     if let Err(err) = daemon
-        .end_hosted_run(uid, None, Lifecycle::Live, Lifecycle::Exited, payload)
+        .end_hosted_run(uid, None, watch.lifecycle, Lifecycle::Exited, payload)
         .await
     {
         crate::log_error!("{uid}: could not end the run: {err:#}");
     }
+}
+
+/// End the hosted Claude run `uid` ([`protocol::ws::ClientMessage::StopRun`], H5): a `live`
+/// run becomes `stopping`, its link sends the host `stop`, and [`escalate_stop`] follows.
+/// One that is stopping is told so again and nothing more is sent; one that has ended is
+/// left as it is. A run still starting is refused: its start's own outcome decides it.
+pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
+    let refuse = |reason: &str| StopRunResult::Refused {
+        reason: reason.to_string(),
+    };
+    let lifecycle = match daemon.db.hosted_link(uid.to_string()).await {
+        Ok(Some(linked)) => linked.lifecycle,
+        Ok(None) => return refuse("CodeConnect did not start this run, so it cannot end it."),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its run to stop it: {err:#}");
+            return refuse("This computer could not read the run.");
+        }
+    };
+    match lifecycle {
+        Lifecycle::Live => {}
+        Lifecycle::Stopping => return StopRunResult::Stopping,
+        Lifecycle::Exited | Lifecycle::Failed => return StopRunResult::AlreadyEnded,
+        Lifecycle::Starting => return refuse("It is still starting; end it once it has started."),
+        Lifecycle::Unknown => return refuse("This computer does not know whether it is running."),
+    }
+    match daemon
+        .db
+        .advance_lifecycle(uid.to_string(), Lifecycle::Live, Lifecycle::Stopping)
+        .await
+    {
+        Ok(true) => {}
+        // It moved meanwhile: another stop, or its end.
+        Ok(false) => return Box::pin(stop_run(daemon, uid)).await,
+        Err(err) => {
+            crate::log_error!("{uid}: could not mark the run stopping: {err:#}");
+            return refuse("This computer could not record the stop.");
+        }
+    }
+    match protocol::uid::uuid_v4() {
+        Ok(uuid) => {
+            // A host not attached is stopped by the escalation.
+            daemon.send_to_host(uid, ToHost::Stop { uuid }).await;
+        }
+        Err(err) => crate::log_error!("{uid}: could not name its stop: {err}"),
+    }
+    tokio::spawn(escalate_stop(Arc::clone(daemon), uid.to_string()));
+    StopRunResult::Stopping
+}
+
+/// H5's escalation for the run `uid`, sent `stop`: [`STOP_GRACE`] later, while it is still
+/// `stopping`, its host's group is stopped by the ladder if the host still runs, and the
+/// run then ends as a run whose host is gone ([`end_if_host_gone`]).
+pub(crate) async fn escalate_stop(daemon: Arc<Daemon>, uid: String) {
+    tokio::time::sleep(STOP_GRACE).await;
+    let watch = match daemon.db.watched_host(uid.clone()).await {
+        Ok(Some(watch)) if watch.lifecycle == Lifecycle::Stopping => watch,
+        Ok(_) => return,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its host to stop it: {err:#}");
+            return;
+        }
+    };
+    if liveness(&watch.host) == Liveness::Alive {
+        match watch.boot {
+            Some(boot) => {
+                if let Ladder::Refused(why) = stop_group(watch.host, boot).await {
+                    crate::log_info!("{uid}: its host did not stop; its group was not signalled: {why}");
+                }
+            }
+            None => crate::log_info!(
+                "{uid}: its host did not stop; no boot was recorded with it, so its group was not signalled"
+            ),
+        }
+    }
+    end_if_host_gone(&daemon, &uid).await;
 }
 
 #[cfg(test)]
@@ -2552,6 +2678,231 @@ mod tests {
         );
     }
 
+    /// The one `SessionEnd` the run has, whole.
+    fn the_end(rig: &Rig, uid: &str) -> serde_json::Value {
+        let ends: Vec<serde_json::Value> = stored(rig, uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        ends[0]["payload"].clone()
+    }
+
+    /// Put the run in `lifecycle` as only the store knows it: no stop sent, no escalation.
+    fn force_lifecycle(rig: &Rig, uid: &str, lifecycle: &str) {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET lifecycle = ?2 WHERE session_uid = ?1",
+                rusqlite::params![uid, lifecycle],
+            )
+            .unwrap();
+    }
+
+    /// **B7 G1: End run.** A live run asked to end is `stopping` and its host is sent
+    /// `stop`; claude's end, mid-turn code 1, ends it "Stopped", with no exit code for an app
+    /// to read as a failure. Asked again, it has already ended, and nothing more is sent.
+    #[tokio::test]
+    async fn a_run_asked_to_end_is_sent_stop_and_ends_stopped() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        assert_eq!(
+            rig.daemon.stop_run(&played.uid).await,
+            StopRunResult::Stopping
+        );
+        assert_eq!(kept(&rig, &played.uid).0, "stopping");
+        assert!(matches!(
+            next(&mut played.lines).await,
+            Some(ToHost::Stop { .. })
+        ));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(kept(&rig, &played.uid).0, "exited");
+        assert_eq!(
+            the_end(&rig, &played.uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+        assert_eq!(
+            rig.daemon.stop_run(&played.uid).await,
+            StopRunResult::AlreadyEnded
+        );
+        assert_eq!(next(&mut played.lines).await, None, "nothing more is sent");
+        stop(&played.dir);
+    }
+
+    /// **B7 G4, the other answers.** Two asks at once send one `stop`, and a third reads
+    /// `stopping`; a run still starting and a session there is not are refused, and the
+    /// starting run stays as it was.
+    #[tokio::test]
+    async fn a_run_is_sent_one_stop_however_often_it_is_asked() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let (first, second) = tokio::join!(
+            rig.daemon.stop_run(&played.uid),
+            rig.daemon.stop_run(&played.uid)
+        );
+        assert_eq!(
+            (first, second),
+            (StopRunResult::Stopping, StopRunResult::Stopping)
+        );
+        assert_eq!(
+            rig.daemon.stop_run(&played.uid).await,
+            StopRunResult::Stopping
+        );
+        assert!(matches!(
+            next(&mut played.lines).await,
+            Some(ToHost::Stop { .. })
+        ));
+        assert_eq!(next(&mut played.lines).await, None, "one stop only");
+        stop(&played.dir);
+
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (starting, _) = begun(&rig, &cwd, &host).await;
+        assert!(matches!(
+            rig.daemon.stop_run(&starting).await,
+            StopRunResult::Refused { .. }
+        ));
+        assert_eq!(kept(&rig, &starting).0, "starting");
+        assert!(matches!(
+            rig.daemon.stop_run("no-such-session").await,
+            StopRunResult::Refused { .. }
+        ));
+    }
+
+    /// **B7 G5: the watch alone ends a stopping run whose host is gone.** The run is
+    /// `stopping` in the store only, so no escalation runs; its host dies, and one pass of
+    /// the watch ends it "Stopped".
+    #[tokio::test]
+    async fn a_stopping_runs_dead_host_is_ended_by_the_watch() {
+        let rig = rig();
+        let host = stub_host_with_child(&rig);
+        let (dir, uid) = detached_run(&rig, &host).await;
+        let (stub, child) = (pid_in(&dir, "stub.pid"), pid_in(&dir, "child.pid"));
+        force_lifecycle(&rig, &uid, "stopping");
+        // SAFETY: kill(2) of the stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(stub, libc::SIGKILL) };
+        for _ in 0..100 {
+            // SAFETY: kill(2) with signal 0 only asks whether the pid is in use.
+            if unsafe { libc::kill(stub, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", Some(child)).await;
+        let child_ran = running(child);
+        if child_ran {
+            // SAFETY: kill(2) of the child this test's stand-in started, by its pid.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert!(!child_ran, "the host's group outlived it");
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        assert_eq!(
+            the_end(&rig, &uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
+    /// **B7 G5b: claude's own end racing the stop.** The run turns `stopping` before its
+    /// link has the stop, and claude's `exited` comes: the link's end from `live` changes
+    /// nothing and is acknowledged; the host gone, the watch ends the run once, "Stopped".
+    #[tokio::test]
+    async fn claudes_own_end_racing_the_stop_ends_the_run_once() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        force_lifecycle(&rig, &played.uid, "stopping");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(kept(&rig, &played.uid).0, "stopping");
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        let host = pid_in(&dir, "stub.pid");
+        drop(played);
+        stop(&dir);
+        for _ in 0..100 {
+            // SAFETY: kill(2) with signal 0 only asks whether the pid is in use.
+            if unsafe { libc::kill(host, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", None).await;
+        assert_eq!(
+            the_end(&rig, &uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
+    /// **B7 G6: a restart while stopping.** ccd stopped a working run and died before
+    /// filing the host's last messages. The restarted ccd files each replayed message once,
+    /// at its cursor, sends `stop` again after the first `state`, and claude's end ends the
+    /// run "Stopped".
+    #[tokio::test]
+    async fn a_run_stopping_across_a_restart_is_sent_stop_again_and_ends() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        assert_eq!(
+            rig.daemon.stop_run(&played.uid).await,
+            StopRunResult::Stopping
+        );
+        assert!(matches!(
+            next(&mut played.lines).await,
+            Some(ToHost::Stop { .. })
+        ));
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        let before = stored(&rig, &uid).len();
+        drop(played);
+        let (mut lines, mut write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
+        let capture = capture();
+        for (index, message) in capture.iter().enumerate().take(5) {
+            let seq = index as u64 + 3;
+            sdk(&mut write, seq, message.clone()).await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq }));
+        }
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 8, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 8 }));
+        assert!(matches!(next(&mut lines).await, Some(ToHost::Stop { .. })));
+        say(
+            &mut write,
+            serde_json::json!({"type": "exited", "seq": 9, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 9 }));
+        stop(&dir);
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        assert_eq!(cursor(&rig, &uid), 9);
+        let filed: Vec<serde_json::Value> = stored(&rig, &uid)
+            .split_off(before)
+            .into_iter()
+            .filter(|event| event["kind"] != "session_end")
+            .collect();
+        let key = SessionKey::new(&uid, &uid);
+        let expected: usize = capture
+            .iter()
+            .take(5)
+            .map(|message| protocol::sdk_map::map(&key, None, message).events.len())
+            .sum();
+        assert_eq!(filed.len(), expected, "each replayed message filed once");
+        assert_eq!(
+            the_end(&rig, &uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
     /// **G4, the warrant.** A host gone is signalled only under the warrant, and its run
     /// ends either way:
     /// - a pid reused: the recorded host's pid is now a live process of another birth,
@@ -2767,6 +3118,150 @@ mod tests {
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         let answer: serde_json::Value = serde_json::from_str(&init).unwrap();
         (claude, answer["response"]["response"]["models"].clone())
+    }
+
+    /// The built agent host `CODECONNECT_TEST_AGENT_HOST` names, and a rig whose runs start
+    /// through zsh's login shell.
+    fn real_host_rig() -> (PathBuf, Rig) {
+        let host = PathBuf::from(
+            std::env::var("CODECONNECT_TEST_AGENT_HOST")
+                .expect("CODECONNECT_TEST_AGENT_HOST names the built agent host"),
+        );
+        let mut rig = rig();
+        rig.environment
+            .insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
+        (host, rig)
+    }
+
+    /// A live run on the real host `host` with the stand-in claude, which stays until its
+    /// input ends: its uid, the host's pid and claude's.
+    async fn real_live_run(rig: &Rig, host: &Path, name: &str) -> (String, i32, i32) {
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (claude, _) = stand_in_claude(rig, host, name, serde_json::json!({}));
+        let started = start(
+            &rig.daemon,
+            Run {
+                claude_path: claude.to_str().unwrap(),
+                ..run(rig, name, &cwd, host)
+            },
+        )
+        .await;
+        let uid = started_uid(&started);
+        let host_pid = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+            .unwrap()
+            .host_pid;
+        let claude_pid = std::fs::read_to_string(rig.root.join(format!("stub-{name}.log")))
+            .unwrap()
+            .lines()
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()?["pid"].as_i64())
+            .unwrap() as i32;
+        (uid, host_pid, claude_pid)
+    }
+
+    /// Whether `pid` has stopped running, waiting up to `within` for it.
+    async fn gone_within(pid: i32, within: Duration) -> bool {
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        false
+    }
+
+    /// **B7 G3: the escalation, on the real host.** The host is SIGSTOPped, so it cannot
+    /// act on `stop`: 10 s after it, the ladder ends the host's group, claude with it, and
+    /// the run ends "Stopped". Ignored and gated as the real-host test is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
+    async fn a_real_host_that_does_not_stop_is_stopped_by_its_group() {
+        let (host, rig) = real_host_rig();
+        let (uid, host_pid, claude_pid) = real_live_run(&rig, &host, "frozen").await;
+        // SAFETY: kill(2) of the host this test's run started, by the pid it recorded.
+        unsafe { libc::kill(host_pid, libc::SIGSTOP) };
+        let asked = Instant::now();
+        assert_eq!(rig.daemon.stop_run(&uid).await, StopRunResult::Stopping);
+        let mut ended_at = None;
+        for _ in 0..300 {
+            if kept(&rig, &uid).0 == "exited" {
+                ended_at = Some(asked.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (host_gone, claude_gone) = (
+            gone_within(host_pid, Duration::from_secs(1)).await,
+            gone_within(claude_pid, Duration::from_secs(1)).await,
+        );
+        if !host_gone {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        let ended_at = ended_at.expect("the run never ended");
+        assert!(
+            ended_at >= STOP_GRACE,
+            "ended after {ended_at:?}, before the escalation"
+        );
+        assert!(
+            host_gone && claude_gone,
+            "host gone {host_gone}, claude gone {claude_gone}"
+        );
+        assert_eq!(
+            the_end(&rig, &uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+    }
+
+    /// **B7 G7 (a): uninstall's stop, on the real host.** ccd's answer comes only once the
+    /// live run's host and claude are gone, the run ended "Stopped". A run still starting is
+    /// not stopped: its recorded host (a process this test started) is counted left, by pid.
+    #[tokio::test]
+    #[ignore = "needs the built agent host: CODECONNECT_TEST_AGENT_HOST=<path>"]
+    async fn stopping_the_hosted_runs_leaves_no_host_and_no_claude() {
+        let (host, rig) = real_host_rig();
+        let (uid, host_pid, claude_pid) = real_live_run(&rig, &host, "uninstalled").await;
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (starting, _) = begun(&rig, &cwd, &host).await;
+        let mut pending = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pending_pid = pending.id() as i32;
+        rig.daemon
+            .db
+            .record_host(
+                starting.clone(),
+                ProcessIdentity {
+                    pid: pending_pid,
+                    birth: read_birth_identity(pending_pid).unwrap(),
+                },
+                protocol::proc_identity::boot_identity(),
+            )
+            .await
+            .unwrap();
+        let (stopped, left) = rig.daemon.stop_hosted_runs(Duration::from_secs(20)).await;
+        // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+        let (host_ran, claude_ran) =
+            unsafe { (libc::kill(host_pid, 0) == 0, libc::kill(claude_pid, 0) == 0) };
+        let _ = pending.kill();
+        let _ = pending.wait();
+        if host_ran {
+            // SAFETY: kill(2) of the process group this test's host leads.
+            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+        }
+        assert!(
+            !host_ran && !claude_ran,
+            "at the answer: host ran {host_ran}, claude ran {claude_ran}"
+        );
+        assert_eq!((stopped, left), (1, vec![pending_pid as u32]));
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        assert_eq!(
+            the_end(&rig, &uid),
+            serde_json::json!({"exit_code": null, "reason": "Stopped"})
+        );
+        assert_eq!(kept(&rig, &starting).0, "starting");
     }
 
     /// Against the real agent host (mac/agent-host/build.sh's `cc-agent-host`), through

@@ -154,7 +154,8 @@ extension EventSource: Codable {
 }
 
 public enum Lifecycle: String, Codable, Sendable, Hashable {
-    case starting, live, exited, failed, unknown
+    /// `stopping` (minor 35): the run was asked to end and has not ended yet.
+    case starting, live, stopping, exited, failed, unknown
 
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
@@ -989,6 +990,9 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// phone that sent one would wait on a typed reply that is never coming.
     /// Hiding the button is not the same thing as not transmitting.
     public var codexCompose: Bool { advertises(["codex_compose"]) }
+    /// This daemon ends a Claude run it started (`stop_run`, minor 35). An older one
+    /// answers `stop_run` with `bad_request`, so the frame is sent only when this is set.
+    public var endsRuns: Bool { advertises(["stop_run"]) }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1490,6 +1494,34 @@ public enum CodexResolution: Decodable, Sendable, Hashable {
 /// told. Tagged on **`status`**, like every other result on this wire.
 ///
 /// **Decode-only.** Nothing in the app constructs one to send.
+/// What became of one `stop_run` (minor 35).
+public enum StopRunResult: Decodable, Sendable, Hashable {
+    /// The stop is accepted: the run is `stopping`, and reads ended once it has exited.
+    case stopping
+    /// The run had ended; nothing was done.
+    case alreadyEnded
+    /// Nothing was done, and `reason` says why, written to be shown verbatim.
+    case refused(reason: String)
+    /// A status this build has never seen: it claims neither that the run is stopping
+    /// nor that it is not.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, reason
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        switch status {
+        case "stopping": self = .stopping
+        case "already_ended": self = .alreadyEnded
+        case "refused": self = .refused(reason: try c.decode(String.self, forKey: .reason))
+        default: self = .unknown(status: status)
+        }
+    }
+}
+
 public enum InterruptResult: Decodable, Sendable, Hashable {
     /// The turn reached its aborted boundary. `turnID` is the one the phone
     /// itself named, so returning it discloses nothing.
@@ -1982,6 +2014,9 @@ public enum ClientMessage: Sendable {
     /// own spelling), so alternating spellings under one request id is a
     /// self-inflicted `stale payload_hash`.
     case interrupt(session: String, requestID: String, turnID: String, payloadHash: String)
+    /// **End a Claude run CodeConnect started.** Minor 35, sent only when
+    /// `Capabilities.endsRuns`. `session` is the run's `session_uid`.
+    case stopRun(session: String, requestID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(session: String, requestID: String, text: String, payloadHash: String)
@@ -2185,6 +2220,10 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(turnID, forKey: .turnID)
             try c.encode(payloadHash, forKey: .payloadHash)
+        case .stopRun(let session, let requestID):
+            try c.encode("stop_run", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(requestID, forKey: .requestID)
         case .compose(let session, let requestID, let text, let payloadHash):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -2507,6 +2546,8 @@ public enum ServerMessage: Sendable {
     /// back as the phone sent them, so correlation is exact-string on the id
     /// this end minted.
     case interruptResult(sessionID: String, requestID: String, result: InterruptResult)
+    /// The answer to one `stop_run`, same correlation.
+    case stopRunResult(sessionID: String, requestID: String, result: StopRunResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
     /// The answer to `list_projects`: most recent first, and which agents the
@@ -2665,6 +2706,11 @@ extension ServerMessage: Decodable {
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 requestID: try c.decode(String.self, forKey: .requestID),
                 result: try c.decode(InterruptResult.self, forKey: .result))
+        case "stop_run_result":
+            self = .stopRunResult(
+                sessionID: try c.decode(String.self, forKey: .sessionID),
+                requestID: try c.decode(String.self, forKey: .requestID),
+                result: try c.decode(StopRunResult.self, forKey: .result))
         case "compose_result":
             self = .composeResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

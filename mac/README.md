@@ -157,7 +157,7 @@ codeconnect daemon install        # write the LaunchAgent and start it
 codeconnect daemon status         # plist, launchd job and live daemon, side by side
 codeconnect daemon restart        # launchctl kickstart -k
 codeconnect daemon folders        # let ccd open Desktop, Documents and Downloads
-codeconnect daemon uninstall      # stop it and remove the LaunchAgent
+codeconnect daemon uninstall      # end its Claude runs, stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
 codeconnect devices               # paired devices
@@ -588,8 +588,11 @@ sessions are in tmux and the log is in SQLite.
 up new binaries without rewriting the plist. A daemon too old to answer
 `daemon_info` is identified through `lsof` on its socket rather than guessed at.
 
-`codeconnect daemon uninstall` removes the plist only once `launchctl bootout` has
-actually succeeded. An unrecognised failure there means the job may still be
+`codeconnect daemon uninstall` first asks ccd to end each Claude run whose agent host
+still runs, as an app's `stop_run` ends one, since a host outlives ccd by design and would
+run on with no daemon; it prints how many it ended. When ccd is not running, it names the
+agent hosts still running by pid instead, for the person to end. It removes the plist only
+once `launchctl bootout` has actually succeeded. An unrecognised failure there means the job may still be
 loaded, and deleting its definition would leave a daemon that nothing can
 manage, restart or stop.
 
@@ -1121,6 +1124,12 @@ what was not acknowledged and the run goes on; a run still starting is sent its 
 which a host that has one ignores; and the host of a run that has ended is drained, so it
 exits. A host gone meanwhile is the liveness tick's, as above. A starting run whose ccd died
 before it recorded the run's host becomes `failed`.
+An app ends a live run with `stop_run`: the run becomes `stopping` and its host is sent
+`stop`, which interrupts claude, ends its input and closes the query; claude's end then ends
+the run `exited`, "Stopped", with no exit code, since the person asked for it. A host that
+has not exited 10 s after the stop has its group stopped by the same ladder, and the run
+ends "Stopped" too. A run still starting is refused, and one that has ended answers
+`already_ended`. A ccd restart sends a stopping run `stop` again and starts its 10 s again.
 A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
@@ -1233,7 +1242,7 @@ agent: to Claude Code's host as the run's model, and to Codex as one argument,
 agent gets none and starts with the model its settings name.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
-**`delete_session` is the only destructive verb a phone has.** It names the run
+**`delete_session` is the only verb that removes a run's record.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
 run, so it is not an identity a destructive request may be pointed at. For a
 hosted run — launched by `codeconnect claude`, or started from the app in an

@@ -10,9 +10,11 @@ export interface Connection {
   destroy(): unknown;
 }
 
-/** What the link calls on: the run's start, its facts for the state message, and its end. */
+/** What the link calls on: the run's start and stop, its facts for the state message, and its end. */
 export interface Run {
   start(command: Start): void;
+  /** ccd ends the run (H5). */
+  stop(): void;
   facts(): Facts;
   /** The run is over and ccd has acknowledged every message: nothing is left for the host to do. */
   drained(): void;
@@ -82,6 +84,7 @@ export function createLink(run: Run) {
       drop(message.seq);
       settle();
     } else if (message.type === 'start') run.start(message);
+    else if (message.type === 'stop') run.stop();
   }
 
   return {

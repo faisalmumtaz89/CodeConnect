@@ -324,6 +324,10 @@ pub enum Lifecycle {
     /// host `start` and has not yet heard how it went.
     Starting,
     Live,
+    /// The run was asked to end ([`crate::ws::ClientMessage::StopRun`]) and has not ended
+    /// yet: its host has been sent `stop`, and is stopped by its process group if it has
+    /// not exited 10 s later.
+    Stopping,
     Exited,
     /// The run never started: its host did not come up, or ended before saying how the
     /// start went, or its start was refused.
