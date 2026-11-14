@@ -677,7 +677,8 @@ function of the events:
 ## Claude's approvals
 
 A Claude approval is answered only through the hook Claude holds for that card's
-own call, never by typing into the prompt on screen, which can be another agent's.
+own call, or, in a run started in an app, through its agent host, never by typing
+into the prompt on screen, which can be another agent's.
 The card is answerable only from a daemon that advertises `hook_only_approvals`
 (protocol minor 22, `DaemonProfile.answersApprovalsByHook`) and only while its
 `question_hold` is `held` (`DecisionCard.answerSurface`); the send path refuses
@@ -687,16 +688,23 @@ old, Claude is asking at the Mac, or the phone can no longer answer it.
 
 A held card offers **Allow**, **Deny** and **Deny with a reason**. Deny with a
 reason is one answer, `{"type":"text","text":…}`, which the daemon returns to the
-agent that asked as its denial. "Always" is chosen at the Mac, where Claude's own
-dialog says exactly what it saves; the phone never offers rows read off the Mac's
-screen.
+agent that asked as its denial. In a run started in a terminal, "Always" is chosen
+at the Mac, where Claude's own dialog says exactly what it saves; the phone never
+offers rows read off the Mac's screen. A run started in an app has no dialog at the
+Mac: there the daemon marks a card whose request suggests an allow rule
+(`allow_for_session`, protocol minor 36), and its answer for "Allow for this session"
+is `option_id: "acceptForSession"`, which gives Claude that rule for this session
+only.
 
-A sent answer is recorded as sent to Claude, not confirmed (`indeterminate`, detail
-"Sent to Claude from a phone"; `AnswerOutcome.wasSentToClaude`), because Claude
-takes the first answer and may not use the phone's. The banner, the resolved card
-and the timeline say "Sent", never "Confirmed" or "Unconfirmed". The detail is a
-marker, the same whichever device answered; the words shown name that device from
-`answeredOn` (`AnswerOutcome.sentToClaudeLine(on:)`).
+In a run started in a terminal, a sent answer is recorded as sent to Claude, not
+confirmed (`indeterminate`, detail "Sent to Claude from a phone";
+`AnswerOutcome.wasSentToClaude`), because Claude takes the first answer and may not
+use the phone's. The banner, the resolved card and the timeline say "Sent", never
+"Confirmed" or "Unconfirmed". The detail is a marker, the same whichever device
+answered; the words shown name that device from `answeredOn`
+(`AnswerOutcome.sentToClaudeLine(on:)`). In a run started in an app the agent host
+says when the answer reached Claude, so the answer is recorded as applied: not
+`indeterminate`, and with no such detail.
 
 `CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
 ccd's own test emits.

@@ -3544,6 +3544,7 @@ impl Daemon {
             // Such a phone reads no hold, and a question takes no Allow.
             identity_bound: !question && hold == QuestionHold::Held,
             question_hold: Some(hold),
+            allow_for_session: false,
         };
 
         let mut payload = serde_json::json!({ "card": card, "hook": post.payload });
@@ -6861,26 +6862,6 @@ impl Daemon {
 
         let id: ApprovalId = (session_uid.clone(), request_id.to_string());
 
-        // **A Codex-only decision on the Claude answer path — refused before any
-        // mutation.** `option_id` is an opaque Codex option that no Claude hook
-        // decision can carry. It is refused here, before the serialise gate and
-        // every claim, so it takes no responder, releases no held hook, writes no
-        // durable answer_claim, removes no card and appends no resolution.
-        // Claude's allow/deny/option-index/text decisions do not reach this
-        // branch.
-        //
-        // **Claude-only now, and that is what the `codex.is_none()` says.** The
-        // same decision on a Codex session is the only one that path accepts, so
-        // the refusal keeps naming exactly the mistake it always named: an
-        // `option_id` aimed at a session that has no options to name.
-        if codex.is_none() && matches!(decision, AnswerDecision::OptionId { .. }) {
-            return AnswerResult::Rejected {
-                reason: "an option_id answer is for a Codex session; this is a Claude session, \
-                         so nothing was typed"
-                    .into(),
-            };
-        }
-
         // 0. Serialise on this one approval. Two taps arriving together used to
         //    make the second one a *rejection* ("already being applied"), which
         //    contradicts the rule that a duplicate returns the original
@@ -6945,6 +6926,20 @@ impl Daemon {
                 answered_on,
             )
             .await;
+        }
+
+        // **An option on a hook's card — refused before any claim.** No Claude hook
+        // decision carries an `option_id`, so it is refused here, after the ledger
+        // (a retry of an answered card replays its outcome) and before every claim:
+        // it takes no responder, releases no held hook, writes no durable
+        // answer_claim, removes no card and appends no resolution. A hosted run's
+        // card took its branch above, where only the option the card offers is taken.
+        if matches!(decision, AnswerDecision::OptionId { .. }) {
+            return AnswerResult::Rejected {
+                reason: "an option_id answer is for a Codex session; this is a Claude session, \
+                         so nothing was typed"
+                    .into(),
+            };
         }
 
         // 2. A claim with no terminal outcome means a previous attempt was cut
@@ -10179,6 +10174,7 @@ impl Daemon {
         let fork = option("agentID").is_some();
         // A question takes answers, never an allow, as a hook's question card does.
         let question = request.tool_name == protocol::hook::ASK_USER_QUESTION;
+        let allow_for_session = !question && session_rules(suggestions.as_ref()).is_some();
         let card = ApprovalCard {
             request_id: request_id.clone(),
             payload_hash: approval_payload_hash(&request.tool_name, &request.input),
@@ -10192,6 +10188,7 @@ impl Daemon {
             generation: 0,
             identity_bound: !question,
             question_hold: Some(QuestionHold::Held),
+            allow_for_session,
         };
         let payload = serde_json::json!({ "card": card });
         if payload.to_string().len() > self.config.max_payload_bytes {
@@ -11971,7 +11968,8 @@ fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
 /// gives a hook's: allow; a deny, which also ends the main conversation's turn; or a
 /// deny with the person's reason. A question takes only its answers, which go back
 /// as its input, or a decline, a deny that ends the main conversation's turn as a
-/// deny does. Nothing else reaches a hosted run's card yet.
+/// deny does. A card that offers "Allow for this session" also takes that option: an
+/// allow carrying claude's own allow rules for the request, made the session's.
 fn host_decision(
     entry: &PendingApproval,
     decision: &AnswerDecision,
@@ -11983,6 +11981,7 @@ fn host_decision(
                 crate::question::host_updated_input(&entry.card.tool_input, answers)
                     .map(|input| protocol::host::Decision::Allow {
                         updated_input: Some(input),
+                        updated_permissions: None,
                     })
                     .map_err(|reason| format!("{reason}. Nothing was sent."))
             }
@@ -12003,6 +12002,17 @@ fn host_decision(
         AnswerDecision::Allow | AnswerDecision::Option { index: 1 } => {
             Ok(protocol::host::Decision::Allow {
                 updated_input: None,
+                updated_permissions: None,
+            })
+        }
+        // Decided from the stored card's suggestions, never from the app's word: a card
+        // that did not offer it refuses it below.
+        AnswerDecision::OptionId { option_id }
+            if option_id == ALLOW_FOR_SESSION && entry.card.allow_for_session =>
+        {
+            Ok(protocol::host::Decision::Allow {
+                updated_input: None,
+                updated_permissions: session_rules(entry.card.permission_suggestions.as_ref()),
             })
         }
         AnswerDecision::Deny => Ok(protocol::host::Decision::Deny {
@@ -12165,6 +12175,28 @@ fn question_hook_decision(
             ..HookDecision::passthrough()
         }),
     }
+}
+
+/// The option id an app answers "Allow for this session" with, decision 175's for Codex.
+const ALLOW_FOR_SESSION: &str = "acceptForSession";
+
+/// "Allow for this session" on a hosted run's card (owner decision 200): claude's own allow
+/// rules for this request (`addRules` with behavior `allow`), each with the session as its
+/// destination and nothing else. A mode change or a folder is never among them, and nothing is
+/// written to a settings file. `None` when claude suggested no such rule, and then the card
+/// offers no session answer.
+fn session_rules(suggestions: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let rules: Vec<serde_json::Value> = suggestions?
+        .as_array()?
+        .iter()
+        .filter(|update| update["type"] == "addRules" && update["behavior"] == "allow")
+        .map(|update| {
+            let mut update = update.clone();
+            update["destination"] = "session".into();
+            update
+        })
+        .collect();
+    (!rules.is_empty()).then(|| rules.into())
 }
 
 /// What claude reads when a question is declined: which kind of device declined it.
@@ -33117,6 +33149,7 @@ mod tests {
             generation: 1,
             identity_bound: false,
             question_hold: None,
+            allow_for_session: false,
         };
         // A live receiver, because a held hook is the case that writes the most:
         // with a responder to answer through, the answer needs no supervisor and
@@ -33274,6 +33307,7 @@ mod tests {
             generation: 1,
             identity_bound: false,
             question_hold: None,
+            allow_for_session: false,
         };
         daemon.inner.lock().await.pending.insert(
             (uid.to_string(), request_id.to_string()),

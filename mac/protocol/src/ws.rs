@@ -1368,8 +1368,9 @@ pub enum AnswerDecision {
     /// options are not a 1-based list (Codex's `availableDecisions`). The daemon
     /// validates it against the exact option set it stored for the request and
     /// the payload hash over that set — the id is never interpreted here. Additive
-    /// (minor 15): a Claude answer never uses it, so Claude's `AnswerDecision`
-    /// serialization is unchanged.
+    /// (minor 15). On a Claude card it is only `"acceptForSession"`, "Allow for this
+    /// session", and only where the card offers it ([`ApprovalCard::allow_for_session`],
+    /// minor 36); every other Claude answer is refused.
     OptionId {
         option_id: String,
     },
@@ -1894,6 +1895,20 @@ pub struct ApprovalCard {
     /// [`QuestionHold`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_hold: Option<QuestionHold>,
+    /// The card offers "Allow for this session" (minor 36): a Claude approval in a run
+    /// started in an agent host whose request suggested an allow rule. The app answers it
+    /// with [`AnswerDecision::OptionId`] `"acceptForSession"`; the daemon then returns that
+    /// rule to Claude for this session only, never written to its settings. Absent and false
+    /// mean the same.
+    ///
+    /// The answer side is already one way for both engines: `option_id:
+    /// "acceptForSession"`. The offer side differs because a Codex card's `tool_input` is
+    /// ccd's own description, whose hash binds its options, while a Claude card's
+    /// `tool_input` is Claude's `canUseTool` input and must stay byte for byte Claude's.
+    /// Moving Codex's table and its hash binding across engines for one button would be
+    /// over-engineering.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_for_session: bool,
 }
 
 #[cfg(test)]
@@ -2254,12 +2269,17 @@ mod tests {
              capability) and the `stopping` lifecycle are minor 35"
         );
         const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 36,
+            "\"Allow for this session\" on a hosted Claude run's card (`allow_for_session`) \
+             is minor 36"
+        );
+        const _: () = assert!(
             crate::PROTOCOL_VERSION == 2,
             "major 2 is the one engine's protocol"
         );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 35);
+        assert_eq!(crate::PROTOCOL_MINOR, 36);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3768,6 +3788,7 @@ mod tests {
             generation: 1,
             identity_bound: true,
             question_hold: None,
+            allow_for_session: false,
         };
         assert!(!serde_json::to_string(&card).unwrap().contains("risk"));
 
