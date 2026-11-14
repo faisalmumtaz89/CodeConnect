@@ -58,14 +58,14 @@ final class PairedDeviceTests: XCTestCase {
     }
 
     /// One entry a phone or computer: the two pairings of one Tailscale device are one, allowed and blocked are
-    /// apart, and each list runs most recently seen first.
+    /// apart, and each list runs in the order it was paired, oldest first, whenever each was last seen.
     func testDevicesGroupByTheirTailscaleDevice() throws {
         let (allowed, blocked) = DeviceGroup.groups(try listed())
-        XCTAssertEqual(allowed.map(\.name), ["build-server-eu-west-1", "Jordan’s iPhone", "Jordan’s MacBook Pro"])
-        let laptop = try XCTUnwrap(allowed.last)
+        XCTAssertEqual(allowed.map(\.name), ["Jordan’s MacBook Pro", "Jordan’s iPhone", "build-server-eu-west-1"])
+        let laptop = try XCTUnwrap(allowed.first)
         XCTAssertEqual(laptop.devices.map(\.deviceID), ["e7f8a9b0c1d2", "d5e6f7a8b9c0"], "newest pairing first")
-        XCTAssertEqual(blocked.map(\.name), ["Jordan’s iPad", "Jordan’s old iPhone"])
-        XCTAssertEqual(blocked.map(\.holdsNewDevices), [false, true])
+        XCTAssertEqual(blocked.map(\.name), ["Jordan’s old iPhone", "Jordan’s iPad"])
+        XCTAssertEqual(blocked.map(\.holdsNewDevices), [true, false])
     }
 
     func testTheWordsNameTheDevice() throws {
@@ -74,12 +74,12 @@ final class PairedDeviceTests: XCTestCase {
         XCTAssertEqual(phone.blockQuestion, "Block Jordan’s iPhone?")
         XCTAssertEqual(phone.blockSentence, "Blocks Jordan’s iPhone and its messages to this computer.")
         XCTAssertTrue(phone.seenLine().hasPrefix("Last seen "))
-        let ipad = try XCTUnwrap(blocked.first)
+        let ipad = try XCTUnwrap(blocked.last)
         XCTAssertEqual(ipad.allowQuestion, "Allow Jordan’s iPad again?")
         XCTAssertEqual(ipad.allowSentence, "Jordan’s iPad can reach this computer again.")
         XCTAssertTrue(ipad.blockedLine().hasPrefix("Blocked "))
         XCTAssertEqual(
-            blocked.last?.blockedLine(),
+            blocked.first?.blockedLine(),
             "Blocked by an older CodeConnect. While it’s listed, any new device needs a code to join.")
     }
 }
