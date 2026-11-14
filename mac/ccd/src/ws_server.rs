@@ -8921,6 +8921,11 @@ mod tests {
         let (claude, _) = crate::start_session::test_claude(&root.join("claude-rig"));
         let (server, _device) = live_server(protocol::config::Config {
             claude_bin: Some(claude.display().to_string()),
+            codex_bin: Some(
+                crate::start_session::test_codex(&claude)
+                    .display()
+                    .to_string(),
+            ),
             ..Default::default()
         })
         .await;
@@ -9722,7 +9727,7 @@ mod tests {
     ///
     /// Fixed paths under `/tmp/ccd-minor-28`, so the fixture is the same on every
     /// machine. Which agents can start is set rather than checked: a check asks
-    /// this machine's launcher, and the fixture would say what it found. The check
+    /// this machine's agents, and the fixture would say what it found. The check
     /// the list starts for the next list asks the fixture's own claude.
     async fn derived_minor_28_wire() -> serde_json::Value {
         use protocol::agent::AgentKind;
@@ -9762,6 +9767,11 @@ esac
 
         let (server, _device) = live_server(protocol::config::Config {
             claude_bin: Some(claude.display().to_string()),
+            codex_bin: Some(
+                crate::start_session::test_codex(&claude)
+                    .display()
+                    .to_string(),
+            ),
             ..Default::default()
         })
         .await;
@@ -9963,6 +9973,11 @@ esac
         let (server, _) = live_server_on(
             protocol::config::Config {
                 claude_bin: Some(claude.display().to_string()),
+                codex_bin: Some(
+                    crate::start_session::test_codex(&claude)
+                        .display()
+                        .to_string(),
+                ),
                 ..Default::default()
             },
             Arc::new(crate::apns::LoggingPushSender::new()),
@@ -10009,6 +10024,11 @@ esac
         let (claude, _) = crate::start_session::test_claude(&root);
         let (server, _) = live_server(protocol::config::Config {
             claude_bin: Some(claude.display().to_string()),
+            codex_bin: Some(
+                crate::start_session::test_codex(&claude)
+                    .display()
+                    .to_string(),
+            ),
             ..Default::default()
         })
         .await;
@@ -10170,6 +10190,11 @@ esac
         let (claude, _) = crate::start_session::test_claude(&root);
         let (server, _) = live_server(protocol::config::Config {
             claude_bin: Some(claude.display().to_string()),
+            codex_bin: Some(
+                crate::start_session::test_codex(&claude)
+                    .display()
+                    .to_string(),
+            ),
             ..Default::default()
         })
         .await;

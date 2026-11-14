@@ -243,6 +243,7 @@ async fn check_and_keep(daemon: &Arc<Daemon>) -> Vec<AgentAvailability> {
         &daemon.agents,
         &phone_environment(),
         daemon.config.claude_bin.as_deref(),
+        daemon.config.codex_bin.as_deref(),
     )
     .await;
     daemon.agents.set(checked.clone());
@@ -253,12 +254,15 @@ async fn check_agents(
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
     claude_bin: Option<&str>,
+    codex_bin: Option<&str>,
 ) -> Vec<AgentAvailability> {
-    futures_util::future::join_all(
-        AGENTS
-            .iter()
-            .map(|agent| agent_availability(agent, known, environment, claude_bin)),
-    )
+    futures_util::future::join_all(AGENTS.iter().map(|agent| {
+        let configured = match agent {
+            AgentKind::Codex => codex_bin,
+            _ => claude_bin,
+        };
+        agent_availability(agent, known, environment, configured)
+    }))
     .await
 }
 
@@ -990,15 +994,14 @@ pub(crate) async fn list_projects(
     }
 }
 
-/// Whether `agent` can start here, and what it offers a start. Claude Code is what
-/// [`claude_probe`] finds; Codex is whether `codeconnect codex --version` succeeds
-/// from the user's login shell, and what Codex at the version it printed offers
-/// ([`offer`]).
+/// Whether `agent` can start here, and what it offers a start: Claude Code as
+/// [`claude_probe`] finds it, Codex as [`codex_probe`] does, `configured` being that
+/// agent's binary from config.json.
 async fn agent_availability(
     agent: &AgentKind,
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
-    claude_bin: Option<&str>,
+    configured: Option<&str>,
 ) -> AgentAvailability {
     let unavailable = |detail: String| AgentAvailability {
         agent: agent.clone(),
@@ -1008,62 +1011,41 @@ async fn agent_availability(
         signed_in: None,
     };
     if *agent == AgentKind::Claude {
-        return match claude_probe(environment, claude_bin).await {
+        return match claude_probe(environment, configured).await {
             Err((_, detail)) => unavailable(detail),
-            Ok(ready) => startable_claude(
+            Ok(ready) => startable(
+                agent,
                 ready.signed_in,
                 claude_models(known, environment, &ready).await,
                 &this_computer(),
             ),
         };
     }
-    let launcher = match crate::state::codex_launcher() {
-        Ok(launcher) => launcher,
-        Err(why) => return unavailable(why),
-    };
-    let home = protocol::home_dir();
-    let mut command = login_shell_command(
-        environment,
-        &[
-            launcher.as_os_str(),
-            agent.as_str().as_ref(),
-            "--version".as_ref(),
-        ],
-    );
-    command
-        .current_dir(&home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => return unavailable(format!("could not run the login shell: {err}")),
-        Err(_) => {
-            return unavailable(format!(
-                "the login shell did not answer within {} s",
-                PROBE_TIMEOUT.as_secs()
-            ))
+    match codex_probe(environment, configured).await {
+        Err((_, detail)) => unavailable(detail),
+        Ok(ready) => {
+            let offer = offer(known, environment, &ready.path, agent, &ready.version)
+                .await
+                .unwrap_or_default();
+            startable(agent, offer.signed_in, offer.models, &this_computer())
         }
-    };
-    if output.status.success() {
-        let version = last_line(&output.stdout).unwrap_or_default();
-        let offer = offer(known, environment, &launcher, agent, &version)
-            .await
-            .unwrap_or_default();
-        return AgentAvailability {
-            agent: agent.clone(),
-            available: true,
-            detail: None,
-            models: offer.models,
-            signed_in: offer.signed_in,
-        };
     }
-    unavailable(last_line(&output.stderr).unwrap_or_else(|| "the agent could not be found".into()))
 }
 
 /// The lowest Claude Code a start runs (decision 171).
 const CLAUDE_FLOOR: (u32, u32, u32) = (2, 1, 268);
+
+/// The lowest Codex a start runs: the version every fact of CodeConnect's Codex
+/// engine was measured on.
+const CODEX_FLOOR: (u32, u32, u32) = (0, 167, 0);
+
+/// The name the sentences give `agent`.
+fn product(agent: &AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Codex => "Codex",
+        _ => "Claude Code",
+    }
+}
 
 /// The Claude Code a start runs, as [`claude_probe`] found it: where it is, the
 /// version it reported, and whether `claude auth status` says it is signed in
@@ -1080,6 +1062,14 @@ pub(crate) struct ReadyClaude {
     pub(crate) signed_in: Option<bool>,
 }
 
+/// The Codex a start runs, as [`codex_probe`] found it: where it is and the version
+/// it reported. Its sign-in is [`offer`]'s: `login status`, or else its `account/read`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReadyCodex {
+    pub(crate) path: PathBuf,
+    pub(crate) version: String,
+}
+
 /// Whether Claude Code can start here, and the claude a start runs. A refusal is
 /// the start's own answer: it is missing, below [`CLAUDE_FLOOR`], did not say its
 /// version, or is signed out.
@@ -1093,7 +1083,7 @@ pub(crate) async fn claude_preflight(
     if ready.signed_in == Some(false) {
         return Err(failed(
             StartFailure::LaunchFailed,
-            signed_out(&this_computer()),
+            signed_out(&AgentKind::Claude, &this_computer()),
         ));
     }
     Ok(ready)
@@ -1105,22 +1095,23 @@ fn this_computer() -> String {
     crate::machine::computer_name().unwrap_or_else(|| "this computer".to_string())
 }
 
-/// The sentence a signed-out Claude Code's start is refused with.
-fn signed_out(computer: &str) -> String {
-    format!("Claude Code on {computer} isn’t signed in.")
+/// The sentence a signed-out agent's start is refused with.
+fn signed_out(agent: &AgentKind, computer: &str) -> String {
+    format!("{} on {computer} isn’t signed in.", product(agent))
 }
 
-/// What the list says of a Claude Code a start can run: its models and its sign-in,
-/// and, signed out, the sentence its start is refused with.
-fn startable_claude(
+/// What the list says of an agent a start can run: its models and its sign-in, and,
+/// signed out, the sentence its start is refused with.
+fn startable(
+    agent: &AgentKind,
     signed_in: Option<bool>,
     models: Vec<AgentModel>,
     computer: &str,
 ) -> AgentAvailability {
     AgentAvailability {
-        agent: AgentKind::Claude,
+        agent: agent.clone(),
         available: true,
-        detail: (signed_in == Some(false)).then(|| signed_out(computer)),
+        detail: (signed_in == Some(false)).then(|| signed_out(agent, computer)),
         models,
         signed_in,
     }
@@ -1133,21 +1124,59 @@ async fn claude_probe(
     environment: &HashMap<OsString, OsString>,
     claude_bin: Option<&str>,
 ) -> Result<ReadyClaude, (StartFailure, String)> {
-    let path = claude_path(environment, claude_bin).await.ok_or_else(|| {
-        (
-            StartFailure::AgentMissing,
-            format!("Claude Code isn’t installed on {}.", this_computer()),
-        )
-    })?;
+    let path = claude_path(environment, claude_bin)
+        .await
+        .ok_or_else(|| missing(&AgentKind::Claude))?;
+    let version = version_at_floor(environment, &AgentKind::Claude, &path, CLAUDE_FLOOR).await?;
+    let signed_in = claude_signed_in(environment, &path).await;
+    Ok(ReadyClaude {
+        path,
+        version,
+        signed_in,
+    })
+}
+
+/// Find the codex a start runs ([`codex_path`]) and ask it its version, from the
+/// user's login shell in `environment`, run itself, never through `codeconnect`. An
+/// error is the refusal's reason and its sentence.
+async fn codex_probe(
+    environment: &HashMap<OsString, OsString>,
+    codex_bin: Option<&str>,
+) -> Result<ReadyCodex, (StartFailure, String)> {
+    let path = codex_path(environment, codex_bin)
+        .await
+        .ok_or_else(|| missing(&AgentKind::Codex))?;
+    let version = version_at_floor(environment, &AgentKind::Codex, &path, CODEX_FLOOR).await?;
+    Ok(ReadyCodex { path, version })
+}
+
+/// The refusal for an agent found nowhere.
+fn missing(agent: &AgentKind) -> (StartFailure, String) {
+    (
+        StartFailure::AgentMissing,
+        format!("{} isn’t installed on {}.", product(agent), this_computer()),
+    )
+}
+
+/// The version the `agent` at `path` reports with `--version`, as written, refused
+/// when it reports none (or does not exit 0) or one below `floor`.
+async fn version_at_floor(
+    environment: &HashMap<OsString, OsString>,
+    agent: &AgentKind,
+    path: &Path,
+    floor: (u32, u32, u32),
+) -> Result<String, (StartFailure, String)> {
     let unread = || {
         crate::log_warn!(
-            "Claude Code at {} did not report its version",
+            "{} at {} did not report its version",
+            product(agent),
             path.display()
         );
         (
             StartFailure::LaunchFailed,
             format!(
-                "Claude Code on {} didn’t report its version.",
+                "{} on {} didn’t report its version.",
+                product(agent),
                 this_computer()
             ),
         )
@@ -1160,23 +1189,19 @@ async fn claude_probe(
         .as_deref()
         .and_then(version_in)
         .ok_or_else(unread)?;
-    if number < CLAUDE_FLOOR {
-        let (major, minor, patch) = CLAUDE_FLOOR;
+    if number < floor {
+        let (major, minor, patch) = floor;
         return Err((
             StartFailure::LaunchFailed,
             format!(
-                "Claude Code {version} on {} is older than {major}.{minor}.{patch}, the oldest \
+                "{} {version} on {} is older than {major}.{minor}.{patch}, the oldest \
                  CodeConnect works with.",
+                product(agent),
                 this_computer()
             ),
         ));
     }
-    let signed_in = claude_signed_in(environment, &path).await;
-    Ok(ReadyClaude {
-        path,
-        version,
-        signed_in,
-    })
+    Ok(version)
 }
 
 /// Where the claude a start runs is: the claude the launcher finds, from the same
@@ -1188,7 +1213,40 @@ async fn claude_path(
     claude_bin: Option<&str>,
 ) -> Option<PathBuf> {
     let home = home_in(environment);
-    let path_hits = probe_output(
+    let path_hits = login_path_hits(environment, &home, "claude").await;
+    let launcher = crate::state::codex_launcher().ok();
+    protocol::claude_bin::first_runnable(
+        protocol::claude_bin::candidates(claude_bin, None, &home, path_hits),
+        launcher.as_deref(),
+    )
+}
+
+/// Where the codex a start runs is, from the list the launcher reads
+/// ([`protocol::codex_bin`]) with the login shell's `PATH`: config.json's `codex_bin`,
+/// every `codex` on that `PATH`, then the well-known install locations; the first
+/// that is a program and not the launcher itself. Unlike the launcher it leaves out
+/// `CODECONNECT_CODEX_BIN`, as [`claude_path`] leaves out Claude's.
+async fn codex_path(
+    environment: &HashMap<OsString, OsString>,
+    codex_bin: Option<&str>,
+) -> Option<PathBuf> {
+    let home = home_in(environment);
+    let path_hits = login_path_hits(environment, &home, "codex").await;
+    let launcher = crate::state::codex_launcher().ok();
+    protocol::claude_bin::first_runnable(
+        protocol::codex_bin::candidates(codex_bin, None, &home, path_hits),
+        launcher.as_deref(),
+    )
+}
+
+/// Every `name` on the `PATH` the user's login shell in `environment` sets up, in
+/// its order.
+async fn login_path_hits(
+    environment: &HashMap<OsString, OsString>,
+    home: &Path,
+    name: &str,
+) -> Vec<PathBuf> {
+    probe_output(
         environment,
         &[
             OsStr::new("/bin/sh"),
@@ -1199,13 +1257,8 @@ async fn claude_path(
     .await
     .filter(|output| output.status.success())
     .and_then(|output| last_line(&output.stdout))
-    .map(|path| protocol::tmux::hits_on(OsStr::new(&path), Some(&home), "claude"))
-    .unwrap_or_default();
-    let launcher = crate::state::codex_launcher().ok();
-    protocol::claude_bin::first_runnable(
-        protocol::claude_bin::candidates(claude_bin, None, &home, path_hits),
-        launcher.as_deref(),
-    )
+    .map(|path| protocol::tmux::hits_on(OsStr::new(&path), Some(home), name))
+    .unwrap_or_default()
 }
 
 /// Whether `claude auth status` says the claude at `path` is signed in: exit 0 with
@@ -1305,7 +1358,13 @@ async fn claude_models(
             }
         }
     }
-    let Some(mut asked) = ask(environment, &[ready.path.as_os_str()], &AgentKind::Claude).await
+    let Some(mut asked) = ask(
+        environment,
+        &[ready.path.as_os_str()],
+        &AgentKind::Claude,
+        false,
+    )
+    .await
     else {
         return Vec::new();
     };
@@ -1321,32 +1380,43 @@ struct Offer {
     signed_in: Option<bool>,
 }
 
-/// What Codex, at `version`, offers a start.
+/// What the codex at `codex`, at `version`, offers a start.
 ///
-/// Asking starts it, and it begins a plugin sync that an ask, over in a fraction of
-/// a second, cuts short, leaving a 4 KB `~/.codex/.tmp/git-*` folder Codex never
-/// removes. So an answer that says it is signed in is kept for that version: it is
+/// Unless a signed-in answer is kept for this version, `login status`, which starts
+/// nothing and contacts nothing, is read first. Signed
+/// in, Codex is asked for its models alone: a signed-in app-server answers
+/// `model/list` at once and `account/read` not at all (0.167.0, measured). Otherwise
+/// it is asked for its account too, which says whether it is signed out or needs no
+/// OpenAI sign-in (a model provider of the user's own).
+///
+/// Asking starts it, and it reaches chatgpt.com, and signed out github.com too (its
+/// plugin sync, which leaves a 4 KB `~/.codex/.tmp/git-*` folder Codex never
+/// removes). So an answer that says it is signed in is kept for that version: it is
 /// asked again once Codex is updated or the daemon restarts. A signed-out answer is
-/// asked again only once `codex login status`, which starts nothing, says it is
-/// signed in.
+/// asked again only once `login status` says it is signed in. That status does not
+/// count a model provider of the user's own, so one set up while the daemon runs is
+/// offered once Codex is updated or the daemon restarts.
 async fn offer(
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
-    launcher: &Path,
+    codex: &Path,
     agent: &AgentKind,
     version: &str,
 ) -> Option<Offer> {
-    if let Some(kept) = known.offered(agent, version) {
-        if kept.signed_in == Some(true) || !codex_signed_in(environment, launcher).await {
-            return Some(kept);
+    let kept = known.offered(agent, version);
+    if let Some(kept) = &kept {
+        if kept.signed_in == Some(true) {
+            return Some(kept.clone());
         }
     }
-    let asked = ask(
-        environment,
-        &[launcher.as_os_str(), OsStr::new(agent.as_str())],
-        agent,
-    )
-    .await?;
+    let signed_in = codex_signed_in(environment, codex).await;
+    if let (Some(kept), false) = (&kept, signed_in) {
+        return Some(kept.clone());
+    }
+    let mut asked = ask(environment, &[codex.as_os_str()], agent, !signed_in).await?;
+    if signed_in {
+        asked.signed_in = Some(true);
+    }
     known.keep(agent, version, asked.clone());
     Some(asked)
 }
@@ -1358,8 +1428,7 @@ const CLAUDE_ASK: &str = concat!(
     "\n"
 );
 
-/// What asks Codex's app-server what it offers: its handshake, then its models
-/// and its account, which it answers in any order.
+/// What asks Codex's app-server for its models: its handshake, then `model/list`.
 const CODEX_ASK: &str = concat!(
     r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codeconnect-ccd","title":"CodeConnect daemon","version":""#,
     env!("CARGO_PKG_VERSION"),
@@ -1368,22 +1437,32 @@ const CODEX_ASK: &str = concat!(
     r#"{"method":"initialized"}"#,
     "\n",
     r#"{"id":2,"method":"model/list","params":{}}"#,
-    "\n",
-    r#"{"id":3,"method":"account/read","params":{}}"#,
     "\n"
 );
 
+/// What asks it for its account as well, when `login status` has not said it is signed
+/// in, which it answers in any order with its models.
+const CODEX_ACCOUNT_ASK: &str = concat!(r#"{"id":3,"method":"account/read","params":{}}"#, "\n");
+
 /// Ask `agent` itself what it offers, `program` run from the user's login shell
-/// with no terminal (the claude [`claude_probe`] found, or `codeconnect codex`):
+/// with no terminal (the claude [`claude_probe`] found, or the codex [`codex_probe`] found):
 /// Claude Code in print mode with no session file, no MCP server and no hook, or
-/// Codex's app-server. From the home folder, so no project's settings run. Once it
-/// has answered, its stdin is closed, which ends it. None when it could not be
-/// asked, or did not finish within [`PROBE_TIMEOUT`].
+/// Codex's app-server, asked for its account too when `account`. From the home
+/// folder, so no project's settings run. Once it has answered, its stdin is closed:
+/// Claude Code then ends, and is let end, since it writes its own files as it does;
+/// Codex's app-server is ended, since a signed-in one keeps running. None when it
+/// could not be asked, or did not answer within [`PROBE_TIMEOUT`].
 async fn ask(
     environment: &HashMap<OsString, OsString>,
     program: &[&OsStr],
     agent: &AgentKind,
+    account: bool,
 ) -> Option<Offer> {
+    let codex_ask = if account {
+        format!("{CODEX_ASK}{CODEX_ACCOUNT_ASK}")
+    } else {
+        CODEX_ASK.to_string()
+    };
     let (flags, asking): (&[&str], &str) = match agent {
         AgentKind::Claude => (
             &[
@@ -1400,7 +1479,7 @@ async fn ask(
             ],
             CLAUDE_ASK,
         ),
-        _ => (&["app-server"], CODEX_ASK),
+        _ => (&["app-server"], codex_ask.as_str()),
     };
     let mut args = program.to_vec();
     args.extend(flags.iter().map(OsStr::new));
@@ -1417,7 +1496,7 @@ async fn ask(
         stdin.write_all(asking.as_bytes()).await.ok()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
         let mut said = Vec::new();
-        while !answered(agent, &said) {
+        while !answered(agent, account, &said) {
             let line = lines.next_line().await.ok()??;
             // What the user's shell prints as it starts is not the agent's.
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -1425,19 +1504,21 @@ async fn ask(
             }
         }
         drop(stdin);
-        child.wait().await.ok()?;
+        if *agent == AgentKind::Claude {
+            child.wait().await.ok()?;
+        }
         offer_from(agent, &said)
     };
     tokio::time::timeout(PROBE_TIMEOUT, asked).await.ok()?
 }
 
-/// Whether `said` holds every answer `agent` gives to the ask.
-fn answered(agent: &AgentKind, said: &[serde_json::Value]) -> bool {
+/// Whether `said` holds every answer `agent` gives to the ask: for Codex, its
+/// models, and its account when `account` asked for it.
+fn answered(agent: &AgentKind, account: bool, said: &[serde_json::Value]) -> bool {
+    let has = |id: u64| said.iter().any(|line| line["id"] == id);
     match agent {
         AgentKind::Claude => said.iter().any(|line| line["type"] == "control_response"),
-        _ => [2, 3]
-            .iter()
-            .all(|id| said.iter().any(|line| line["id"] == *id)),
+        _ => has(2) && (!account || has(3)),
     }
 }
 
@@ -1475,33 +1556,29 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                     .find(|line| line["id"] == id)
                     .map(|line| &line["result"])
             };
-            let (models, account) = (result(2)?, result(3)?);
             Some(Offer {
-                models: models["data"]
+                models: result(2)?["data"]
                     .as_array()?
                     .iter()
                     .filter(|entry| entry["hidden"] != true)
                     .filter_map(|entry| model(entry, "model"))
                     .collect(),
-                signed_in: account.is_object().then(|| {
-                    !account["account"].is_null() || account["requiresOpenaiAuth"] == false
-                }),
+                signed_in: result(3)
+                    .filter(|account| account.is_object())
+                    .map(|account| {
+                        !account["account"].is_null() || account["requiresOpenaiAuth"] == false
+                    }),
             })
         }
     }
 }
 
-/// Whether `codex login status` says Codex is signed in. It reads the stored
+/// Whether `login status` says the codex at `codex` is signed in. It reads the stored
 /// sign-in and starts nothing, so, unlike an ask, it leaves nothing behind.
-async fn codex_signed_in(environment: &HashMap<OsString, OsString>, launcher: &Path) -> bool {
+async fn codex_signed_in(environment: &HashMap<OsString, OsString>, codex: &Path) -> bool {
     let mut command = login_shell_command(
         environment,
-        &[
-            launcher.as_os_str(),
-            OsStr::new("codex"),
-            OsStr::new("login"),
-            OsStr::new("status"),
-        ],
+        &[codex.as_os_str(), OsStr::new("login"), OsStr::new("status")],
     );
     command
         .current_dir(protocol::home_dir())
@@ -1777,6 +1854,22 @@ esac
         (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
     ]);
     (claude, environment)
+}
+
+/// A codex for tests beside `claude`, a [`test_claude`] claude, so on the `PATH` its
+/// environment's login shell sets. It answers nothing and exits 1, so a test daemon
+/// whose `codex_bin` names it lists Codex as unavailable and never reaches a codex of
+/// the person running the tests.
+#[cfg(test)]
+pub(crate) fn test_codex(claude: &Path) -> PathBuf {
+    let codex = claude.with_file_name("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 1\n").unwrap();
+    std::process::Command::new("chmod")
+        .arg("755")
+        .arg(&codex)
+        .status()
+        .unwrap();
+    codex
 }
 
 #[cfg(test)]
@@ -3382,14 +3475,14 @@ mod tests {
     const CODEX_API_KEY: &str =
         include_str!("../../../fixtures/codex/app-server-models-api-key-0.167.0.jsonl");
 
-    /// A launcher that answers Codex's ask as Codex answered it: with the recorded
-    /// reply in `<launcher>.codex`, then waiting for its stdin to close, as Codex
-    /// does; `codex login status` with the exit status in `<launcher>.login`. Each
-    /// run goes into `<launcher>.asks`, and its folder into `<launcher>.cwd`.
+    /// A codex that answers its ask as Codex answered it: with the recorded reply in
+    /// `<codex>.codex`, then waiting for its stdin to close, as Codex does; `login
+    /// status` with the exit status in `<codex>.login`. Each run goes into
+    /// `<codex>.asks`, and its folder into `<codex>.cwd`.
     const ANSWERING: &str = r#"printf '%s\n' "$*" >> "$0.asks"; pwd -P > "$0.cwd"
 case "$*" in
-"codex login status") exit "$(cat "$0.login")" ;;
-"codex app-server") [ -f "$0.$1" ] || exit 1; cat "$0.$1"; cat > /dev/null ;;
+"login status") exit "$(cat "$0.login")" ;;
+"app-server") [ -f "$0.codex" ] || exit 1; cat "$0.codex"; cat > /dev/null ;;
 esac"#;
 
     fn answer(rig: &Rig, agent: &str, recorded: &str) {
@@ -3521,22 +3614,29 @@ esac"#;
     }
 
     /// **An agent is asked as a start runs it, from the home folder, and let go**:
-    /// Claude Code itself, Codex through the launcher; each ends only when its
-    /// stdin closes.
+    /// each itself, never through the launcher, and its stdin closed once it has
+    /// answered.
     #[tokio::test]
     async fn an_agent_is_asked_as_a_start_runs_it_and_let_go() {
         let rig = Rig::new("ask", ANSWERING);
         rig.claude_says("ask", CLAUDE_SIGNED_OUT);
         answer(&rig, "codex", CODEX_API_KEY);
         assert_eq!(
-            ask(&rig.env, &[rig.claude.as_os_str()], &AgentKind::Claude).await,
+            ask(
+                &rig.env,
+                &[rig.claude.as_os_str()],
+                &AgentKind::Claude,
+                false
+            )
+            .await,
             offer_from(&AgentKind::Claude, &said(CLAUDE_SIGNED_OUT))
         );
         assert_eq!(
             ask(
                 &rig.env,
-                &[rig.launcher.as_os_str(), OsStr::new("codex")],
-                &AgentKind::Codex
+                &[rig.launcher.as_os_str()],
+                &AgentKind::Codex,
+                true
             )
             .await,
             offer_from(&AgentKind::Codex, &said(CODEX_API_KEY))
@@ -3548,7 +3648,7 @@ esac"#;
         );
         assert_eq!(
             std::fs::read_to_string(format!("{}.asks", rig.launcher.display())).unwrap(),
-            "codex app-server\n"
+            "app-server\n"
         );
         assert_eq!(
             rig.launcher_cwd(),
@@ -3577,11 +3677,8 @@ esac"#;
             );
         }
         assert_eq!(
-            (
-                asked(&rig, "codex app-server"),
-                asked(&rig, "codex login status")
-            ),
-            (1, 2)
+            (asked(&rig, "app-server"), asked(&rig, "login status")),
+            (1, 3)
         );
 
         answer(&rig, "codex", CODEX_API_KEY);
@@ -3595,14 +3692,11 @@ esac"#;
             Some(true)
         );
         assert_eq!(
-            (
-                asked(&rig, "codex app-server"),
-                asked(&rig, "codex login status")
-            ),
-            (2, 3)
+            (asked(&rig, "app-server"), asked(&rig, "login status")),
+            (2, 4)
         );
         codex("codex-cli 0.168.0").await.unwrap();
-        assert_eq!(asked(&rig, "codex app-server"), 3);
+        assert_eq!(asked(&rig, "app-server"), 3);
     }
 
     /// **A signed-out Claude Code is never asked; signed in, it is asked once per
@@ -3661,8 +3755,311 @@ esac"#;
             .await;
             assert_eq!(offered, None);
         }
-        assert_eq!(asked(&rig, "codex app-server"), 2);
-        assert_eq!(asked(&rig, "codex login status"), 0);
+        assert_eq!(asked(&rig, "app-server"), 2);
+        assert_eq!(asked(&rig, "login status"), 2);
+    }
+
+    /// A codex beside the rig's claude, so on its login shell's `PATH`. It says the
+    /// version in `<codex>.version`, exiting with `<codex>.version_exit` (else 0), and
+    /// otherwise answers as [`ANSWERING`] does, its ask from `<codex>.codex`. Each run
+    /// goes into `<codex>.asks`.
+    fn codex_on_path(rig: &Rig, version: &str) -> PathBuf {
+        let codex = rig.claude.with_file_name("codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\nif [ \"$*\" = --version ]; then printf '%s\\n' \"$*\" >> \"$0.asks\"; \
+                 cat \"$0.version\"; exit \"$(cat \"$0.version_exit\" 2>/dev/null || echo 0)\"; \
+                 fi\n{ANSWERING}\n"
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&codex)
+            .status()
+            .unwrap();
+        codex_says(&codex, "version", version);
+        codex
+    }
+
+    fn codex_says(codex: &Path, what: &str, text: &str) {
+        std::fs::write(format!("{}.{what}", codex.display()), text).unwrap();
+    }
+
+    fn codex_runs(codex: &Path) -> String {
+        std::fs::read_to_string(format!("{}.asks", codex.display())).unwrap_or_default()
+    }
+
+    async fn codex_listed(rig: &Rig, known: &KnownAgents) -> AgentAvailability {
+        agent_availability(&AgentKind::Codex, known, &rig.env, None).await
+    }
+
+    /// **Codex is the user's own codex, run itself**: one on the login shell's `PATH`
+    /// at the floor is listed with what its own ask answers, and the launcher runs
+    /// nothing.
+    #[tokio::test]
+    async fn a_codex_at_the_floor_is_listed_from_its_own_answers() {
+        let rig = Rig::new("codex-listed", ANSWERING);
+        let codex = codex_on_path(&rig, "codex-cli 0.167.0\n");
+        codex_says(&codex, "codex", CODEX_API_KEY);
+        assert_eq!(
+            codex_listed(&rig, &KnownAgents::default()).await,
+            AgentAvailability {
+                agent: AgentKind::Codex,
+                available: true,
+                detail: None,
+                models: offer_from(&AgentKind::Codex, &said(CODEX_API_KEY))
+                    .unwrap()
+                    .models,
+                signed_in: Some(true),
+            }
+        );
+        assert_eq!(codex_runs(&codex), "--version\nlogin status\napp-server\n");
+        assert!(
+            !rig.launcher.with_extension("asks").exists(),
+            "the launcher ran"
+        );
+    }
+
+    /// **A codex below the floor is refused with the floor sentence**, before it is
+    /// asked anything else.
+    #[tokio::test]
+    async fn a_codex_below_the_floor_is_refused_with_the_floor_sentence() {
+        let rig = Rig::new("codex-floor", ANSWERING);
+        let codex = codex_on_path(&rig, "codex-cli 0.166.9\n");
+        codex_says(&codex, "codex", CODEX_API_KEY);
+        let listed = codex_listed(&rig, &KnownAgents::default()).await;
+        let floor = format!(
+            "Codex 0.166.9 on {} is older than 0.167.0, the oldest CodeConnect works with.",
+            this_computer()
+        );
+        assert_eq!(
+            (listed.available, listed.detail.as_deref()),
+            (false, Some(floor.as_str()))
+        );
+        assert_eq!(codex_runs(&codex), "--version\n", "asked nothing more");
+    }
+
+    /// **A codex whose version cannot be read is refused with the version sentence**:
+    /// no number, or one printed by a `--version` that failed.
+    #[tokio::test]
+    async fn a_codex_that_does_not_say_its_version_is_refused() {
+        let rig = Rig::new("codex-unread", ANSWERING);
+        let codex = codex_on_path(&rig, "codex-cli\n");
+        let unread = format!("Codex on {} didn’t report its version.", this_computer());
+        let listed = codex_listed(&rig, &KnownAgents::default()).await;
+        assert_eq!(
+            (listed.available, listed.detail.as_deref()),
+            (false, Some(unread.as_str()))
+        );
+        codex_says(&codex, "version", "codex-cli 0.167.0\n");
+        codex_says(&codex, "version_exit", "1");
+        let listed = codex_listed(&rig, &KnownAgents::default()).await;
+        assert_eq!(
+            (listed.available, listed.detail.as_deref()),
+            (false, Some(unread.as_str()))
+        );
+    }
+
+    /// A codex in one of the list's system locations, which no rig can take away.
+    fn system_codex() -> Option<PathBuf> {
+        let home = Path::new("/nonexistent-home");
+        protocol::codex_bin::candidates(None, None, home, Vec::new())
+            .into_iter()
+            .filter(|candidate| !candidate.starts_with(home))
+            .find(|candidate| candidate.exists())
+    }
+
+    /// **A codex that cannot be found is not available**, with the sentence that says
+    /// so: none on the login shell's `PATH` and none in the install locations.
+    #[tokio::test]
+    async fn a_codex_that_is_not_there_is_missing() {
+        if let Some(codex) = system_codex() {
+            eprintln!("skipped: {} is a codex no rig can hide", codex.display());
+            return;
+        }
+        let rig = Rig::new("no-codex", ANSWERING);
+        let listed = codex_listed(&rig, &KnownAgents::default()).await;
+        assert_eq!(
+            (listed.available, listed.detail),
+            (
+                false,
+                Some(format!("Codex isn’t installed on {}.", this_computer()))
+            )
+        );
+    }
+
+    /// **A signed-out codex is listed with the sign-in sentence; one whose own model
+    /// provider needs no OpenAI sign-in is signed in; and nothing of an account its
+    /// `account/read` names is kept or sent.**
+    #[tokio::test]
+    async fn a_signed_out_codex_is_listed_with_the_sign_in_sentence() {
+        let rig = Rig::new("codex-signed-out", ANSWERING);
+        let codex = codex_on_path(&rig, "codex-cli 0.167.0\n");
+        codex_says(&codex, "codex", CODEX_SIGNED_OUT);
+        let listed = codex_listed(&rig, &KnownAgents::default()).await;
+        let sentence = format!("Codex on {} isn’t signed in.", this_computer());
+        assert_eq!(
+            (listed.available, listed.signed_in, listed.detail.as_deref()),
+            (true, Some(false), Some(sentence.as_str()))
+        );
+
+        let provider = CODEX_SIGNED_OUT.replace(
+            r#""requiresOpenaiAuth":true"#,
+            r#""requiresOpenaiAuth":false"#,
+        );
+        assert_ne!(provider, CODEX_SIGNED_OUT);
+        codex_says(&codex, "codex", &provider);
+        let listed = codex_listed(&rig, &KnownAgents::default()).await;
+        assert_eq!((listed.signed_in, listed.detail), (Some(true), None));
+
+        let marked = CODEX_API_KEY.replace(
+            r#"{"type":"apiKey"}"#,
+            r#"{"type":"chatgpt","email":"x10-marker@example.invalid","planType":"plus"}"#,
+        );
+        assert_ne!(marked, CODEX_API_KEY);
+        codex_says(&codex, "codex", &marked);
+        let known = KnownAgents::default();
+        let listed = codex_listed(&rig, &known).await;
+        assert_eq!(listed.signed_in, Some(true));
+        let kept = format!("{:?}", known.offered(&AgentKind::Codex, "0.167.0"));
+        assert!(kept.starts_with("Some"), "the ask was kept: {kept}");
+        let frame = serde_json::to_string(&ServerMessage::Projects {
+            projects: Vec::new(),
+            agents: vec![listed],
+        })
+        .unwrap();
+        for seen in [&kept, &frame] {
+            assert!(!seen.contains("x10-marker"), "{seen}");
+        }
+    }
+
+    /// **A signed-in Codex is listed with its models at once, and asked once per
+    /// version.** A signed-in app-server answers `model/list` but never `account/read`,
+    /// and keeps running after its stdin closes (0.167.0, measured four times). `login
+    /// status` says it is signed in, so the ask waits for the models alone and ends the
+    /// app-server; the next list asks nothing.
+    #[tokio::test]
+    async fn a_signed_in_codex_is_listed_with_its_models_at_once_and_asked_once() {
+        let rig = Rig::new("codex-signed-in", ANSWERING);
+        let codex = codex_on_path(&rig, "codex-cli 0.167.0\n");
+        std::fs::write(
+            &codex,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.asks\"\ncase \"$*\" in\n\
+             --version) cat \"$0.version\" ;;\n\"login status\") exit 0 ;;\n\
+             app-server) cat \"$0.codex\"; exec sleep 60 ;;\nesac\n",
+        )
+        .unwrap();
+        let models_only: String = CODEX_API_KEY
+            .lines()
+            .filter(|line| !line.contains(r#""id":3"#))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        codex_says(&codex, "codex", &models_only);
+        let known = KnownAgents::default();
+        let started = std::time::Instant::now();
+        let listed = codex_listed(&rig, &known).await;
+        assert!(
+            started.elapsed() < PROBE_TIMEOUT / 2,
+            "listed after {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            (listed.available, listed.signed_in, listed.detail.as_deref()),
+            (true, Some(true), None)
+        );
+        assert_eq!(
+            listed.models,
+            offer_from(&AgentKind::Codex, &said(&models_only))
+                .unwrap()
+                .models
+        );
+        assert!(!listed.models.is_empty());
+        codex_listed(&rig, &known).await;
+        assert_eq!(
+            codex_runs(&codex),
+            "--version\nlogin status\napp-server\n--version\n",
+            "the second list asks nothing"
+        );
+    }
+
+    /// **What the list says of Codex, emitted by this build**: below the floor, its
+    /// version unread, signed out and signed in, each a `projects` frame whose one
+    /// agent is that Codex, the computer named "this computer". It is the contract for
+    /// the apps' readers of Codex's sentences.
+    #[tokio::test]
+    async fn the_codex_availability_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/availability-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_codex_availability_wire().await,
+            committed,
+            "the committed Codex availability wire no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_codex_availability_wire_fixture"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/availability-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_codex_availability_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_codex_availability_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/availability-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// Codex as the list finds it, a stub codex on the login shell's `PATH` saying
+    /// each version and answering with the recorded signed-out and API-key answers.
+    async fn derived_codex_availability_wire() -> serde_json::Value {
+        let rig = Rig::new("codex-wire", ANSWERING);
+        let codex = codex_on_path(&rig, "codex-cli 0.166.9\n");
+        // Only the sentence names the computer, so only the sentence is normalised.
+        let frame = |mut listed: AgentAvailability| {
+            listed.detail = listed
+                .detail
+                .map(|detail| detail.replace(&this_computer(), "this computer"));
+            serde_json::to_value(ServerMessage::Projects {
+                projects: Vec::new(),
+                agents: vec![listed],
+            })
+            .unwrap()
+        };
+        let below_the_floor = frame(codex_listed(&rig, &KnownAgents::default()).await);
+        codex_says(&codex, "version", "codex-cli\n");
+        let version_unread = frame(codex_listed(&rig, &KnownAgents::default()).await);
+        codex_says(&codex, "version", "codex-cli 0.167.0\n");
+        codex_says(&codex, "codex", CODEX_SIGNED_OUT);
+        let signed_out = frame(codex_listed(&rig, &KnownAgents::default()).await);
+        codex_says(&codex, "codex", CODEX_API_KEY);
+        let signed_in = frame(codex_listed(&rig, &KnownAgents::default()).await);
+        serde_json::json!({
+            "below_the_floor": below_the_floor,
+            "version_unread": version_unread,
+            "signed_out": signed_out,
+            "signed_in": signed_in,
+        })
+    }
+
+    /// **The codex a check finds is config.json's before any on the `PATH`.**
+    #[tokio::test]
+    async fn a_configured_codex_comes_before_the_one_on_the_path() {
+        let rig = Rig::new("codex-configured", ANSWERING);
+        let on_path = codex_on_path(&rig, "codex-cli 0.167.0\n");
+        let configured = rig.root.join("configured-codex");
+        std::fs::copy(&on_path, &configured).unwrap();
+        assert_eq!(
+            codex_path(&rig.env, configured.to_str()).await,
+            Some(configured.clone())
+        );
+        assert_eq!(codex_path(&rig.env, None).await, Some(on_path));
     }
 
     /// A claude in one of the list's system locations, which no rig can take away:
@@ -4155,7 +4552,8 @@ esac"#;
     /// Claude Code's entry pairs the signed-out sentence with its recorded answer's
     /// models, for the apps' decoders; a list sends a signed-out Claude Code with none.
     fn derived_minor_33_wire() -> serde_json::Value {
-        let claude = startable_claude(
+        let claude = startable(
+            &AgentKind::Claude,
             auth_reading(Some(1), AUTH_SIGNED_OUT.as_bytes()),
             offer_from(&AgentKind::Claude, &said(CLAUDE_SIGNED_OUT))
                 .unwrap()

@@ -858,31 +858,16 @@ pub(crate) fn verify_codex_identity(path: &Path, expected: &str, when: &str) -> 
     Ok(())
 }
 
-/// The ordered candidate list, factored out so the precedence is unit-tested
-/// without touching the process environment: config `codex_bin`, then the
-/// `CODECONNECT_CODEX_BIN` env override, then every `codex` on `PATH` in the order
-/// the shell tries them — so the codex a launch runs is the one typing `codex` runs —
-/// and the well-known install locations last, for a `PATH` that has none.
+/// The ordered candidate list ([`protocol::codex_bin::candidates`], the one the
+/// daemon's check reads too), factored out so the precedence is unit-tested without
+/// touching the process environment.
 fn codex_candidates(
     config: &Config,
     env_override: Option<PathBuf>,
     home: &Path,
     path_hits: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(configured) = &config.codex_bin {
-        candidates.push(PathBuf::from(configured));
-    }
-    if let Some(env) = env_override {
-        candidates.push(env);
-    }
-    candidates.extend(path_hits);
-    // The standalone installer's entry point, then the two generic bin dirs a
-    // package manager would link a `codex` into.
-    candidates.push(home.join(".local/bin/codex"));
-    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
-    candidates.push(PathBuf::from("/usr/local/bin/codex"));
-    candidates
+    protocol::codex_bin::candidates(config.codex_bin.as_deref(), env_override, home, path_hits)
 }
 
 /// The candidates a launch may run, in order: each an executable file, made absolute
