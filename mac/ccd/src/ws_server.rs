@@ -633,6 +633,21 @@ where
                                 )
                                 .await;
                             let ack = match outcome {
+                                AuthOutcome::Revoked => {
+                                    crate::log_info!(
+                                        "ws: a revoked device's token tried to connect"
+                                    );
+                                    // Only a holder of that pairing's token reaches this. It
+                                    // is told "revoked", not "unauthorized", so it waits and
+                                    // reconnects when the computer allows it again instead of
+                                    // being sent to pair with a new code. A stranger, lacking
+                                    // the token, still learns nothing.
+                                    send(&mut sink, &ServerMessage::Error {
+                                        code: "revoked".into(),
+                                        message: "this device has been revoked".into(),
+                                    }).await?;
+                                    return Ok(());
+                                }
                                 AuthOutcome::Rejected(reason) => {
                                     crate::log_warn!("ws: rejected a client ({reason})");
                                     // One opaque message for every failure: a
@@ -2737,6 +2752,7 @@ fn describe(outcome: &AuthOutcome) -> String {
             format!("newly paired device {device_id} ({device_name})")
         }
         AuthOutcome::Rejected(reason) => format!("rejected: {reason}"),
+        AuthOutcome::Revoked => "a revoked device's token".to_string(),
     }
 }
 
@@ -4120,6 +4136,64 @@ mod tests {
         let ack = next_json(&mut socket).await.unwrap();
         assert_eq!(ack["type"], "hello_ack", "a code still pairs: {ack}");
         assert_eq!(server.daemon.list_devices().await.unwrap().len(), 2);
+    }
+
+    /// **Block → Allow, proven at the wire.** A blocked pairing's own token is answered
+    /// `revoked` — not `unauthorized` — so the phone keeps it and waits; an unknown token
+    /// stays `unauthorized`, so `revoked` is reachable only by a token that matches a
+    /// blocked pairing; and once the pairing is unblocked the same token is admitted
+    /// again, with no new code. This is the daemon half of the contract the app's
+    /// reconnect rests on, read end to end from the handshake frame rather than from a
+    /// fixture the app wrote itself: it fails if `TokenAuth::Revoked` is mapped to
+    /// `Rejected` in `state.rs`, or if `ws_server` sends `unauthorized` for
+    /// `AuthOutcome::Revoked`.
+    #[tokio::test]
+    async fn a_blocked_pairings_token_is_answered_revoked_and_readmitted_once_unblocked() {
+        let (server, device_id) = live_server(protocol::config::Config::default()).await;
+        let token = "device-token-for-tests";
+
+        // Live: the held token admits.
+        let (_s, ack) = server.hello(protocol::PROTOCOL_VERSION, Some(token)).await;
+        assert_eq!(
+            ack["type"], "hello_ack",
+            "the held token admits while live: {ack}"
+        );
+
+        // Blocked: the same token is answered `revoked`, not `unauthorized`.
+        server
+            .store
+            .revoke_device(&device_id, &protocol::time::now_rfc3339())
+            .unwrap();
+        let (_s, blocked) = server.hello(protocol::PROTOCOL_VERSION, Some(token)).await;
+        assert_eq!(
+            blocked["type"], "error",
+            "a blocked token is refused: {blocked}"
+        );
+        assert_eq!(
+            blocked["code"], "revoked",
+            "a blocked pairing's own token is answered `revoked`: {blocked}"
+        );
+
+        // A stranger's token stays `unauthorized`: `revoked` is not a free oracle.
+        let (_s, stranger) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("no-such-token"))
+            .await;
+        assert_eq!(
+            stranger["type"], "error",
+            "an unknown token is refused: {stranger}"
+        );
+        assert_eq!(
+            stranger["code"], "unauthorized",
+            "an unknown token is `unauthorized`, not `revoked`: {stranger}"
+        );
+
+        // Allowed again: the same held token is admitted, no new code.
+        server.store.unblock_device(&device_id).unwrap();
+        let (_s, readmitted) = server.hello(protocol::PROTOCOL_VERSION, Some(token)).await;
+        assert_eq!(
+            readmitted["type"], "hello_ack",
+            "the unblocked token is admitted again: {readmitted}"
+        );
     }
 
     /// **One computer's agent messages another computer's, over the real

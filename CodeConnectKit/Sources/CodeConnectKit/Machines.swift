@@ -218,6 +218,10 @@ public final class Machines {
         case .connecting: return 3
         case .rejected: return 4
         case .offline: return 5
+        // Blocked is the most stuck: offline may self-recover, but this needs the
+        // computer to allow the device again. Ranked worst so a blocked machine is
+        // the app-wide link only when every machine is at least as stuck.
+        case .blocked: return 6
         }
     }
 

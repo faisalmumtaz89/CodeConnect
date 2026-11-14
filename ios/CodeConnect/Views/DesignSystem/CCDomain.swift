@@ -75,6 +75,7 @@ extension LinkHealth.Level {
         case .connecting: return .info
         case .offline: return .neutral
         case .rejected: return .danger
+        case .blocked: return .neutral
         }
     }
 }
@@ -220,6 +221,7 @@ extension LinkHealth.Level {
         case .connecting: return (CC.color.info, false, "Connecting")
         case .offline: return (CC.text.tertiary, true, "Offline")
         case .rejected: return (CC.color.danger, false, "Not paired")
+        case .blocked: return (CC.color.danger, false, "Blocked")
         }
     }
 }
@@ -285,6 +287,13 @@ extension LinkHealth {
             return CCBannerItem(
                 .rejected, title: "Pair again", message: detail, tone: .danger,
                 icon: "lock-open", actionTitle: "Settings", action: onSettings)
+        case .blocked:
+            // The pairing is still held, so this is not "Pair again" — no Settings/code
+            // action. The app reconnects when the computer allows it again; Retry only
+            // asks now.
+            return CCBannerItem(
+                .offline, title: word, message: detail, tone: .neutral,
+                icon: "lock", actionTitle: "Retry", action: onRetry)
         case .offline:
             switch cause {
             case .tailnetHostUnresolvable(let host):
