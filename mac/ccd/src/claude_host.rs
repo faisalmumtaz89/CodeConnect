@@ -4669,11 +4669,12 @@ mod tests {
         (uid, host_pid, claude_pid)
     }
 
-    /// Whether `pid` has stopped running, waiting up to `within` for it.
+    /// Whether `pid` has stopped running, waiting up to `within` for it. A negative `pid`
+    /// names a process group, gone once it has no member.
     async fn gone_within(pid: i32, within: Duration) -> bool {
         let until = Instant::now() + within;
         while Instant::now() < until {
-            // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+            // SAFETY: kill(2) with signal 0 only asks whether the process, or the group, exists.
             if unsafe { libc::kill(pid, 0) } != 0 {
                 return true;
             }
@@ -5359,21 +5360,47 @@ mod tests {
         )
     }
 
-    /// Whether a tool result the run `uid` filed holds `text`.
-    fn tool_printed(rig: &Rig, uid: &str, text: &str) -> bool {
-        stored(rig, uid).iter().any(|event| {
-            event["kind"] == "tool_result" && event["payload"].to_string().contains(text)
-        })
+    /// What G9's command wrote into the run's folder, `rang.txt`, if it ran. A command that
+    /// writes asks for permission; one that only reads runs without a card.
+    fn rang(rig: &Rig) -> Option<String> {
+        std::fs::read_to_string(rig.root.join("rang.txt")).ok()
+    }
+
+    /// The members of the process group `group`, each its pid and command, as pgrep
+    /// lists them.
+    fn group_members(group: i32) -> Vec<String> {
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-a", "-l", "-f", "-g", &group.to_string()])
+            .output()
+            .map(|listed| {
+                String::from_utf8_lossy(&listed.stdout)
+                    .lines()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Wait up to 10 s for the process group `group` to have no member: none left, or
+    /// each one still there, named before the group is ended.
+    async fn left_in_group(group: i32) -> Vec<String> {
+        if gone_within(-group, Duration::from_secs(10)).await {
+            return Vec::new();
+        }
+        let left = group_members(group);
+        // SAFETY: kill(2) of a process group this test's run started.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        left
     }
 
     /// End run on the run `uid`, as G2 sends it: the answer, whether the run then ended
-    /// `exited` within 20 s, whether its host `host_pid` is gone, and whether its group
-    /// still has a member. A group still there is ended.
+    /// `exited` within 20 s, whether its host `host_pid` is gone, and what is left in its
+    /// group ([`left_in_group`]).
     async fn end_real_run(
         rig: &Rig,
         uid: &str,
         host_pid: i32,
-    ) -> (StopRunResult, bool, bool, bool) {
+    ) -> (StopRunResult, bool, bool, Vec<String>) {
         let answer = rig.daemon.stop_run(uid).await;
         let mut ended = false;
         for _ in 0..200 {
@@ -5392,56 +5419,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let host_gone = gone_within(host_pid, Duration::from_secs(5)).await;
-        // SAFETY: kill(2) with signal 0 only asks whether the group has a member.
-        let group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
-        if group_left {
-            // SAFETY: kill(2) of the process group this test's host leads.
-            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
-        }
-        (answer, ended, host_gone, group_left)
+        (answer, ended, host_gone, left_in_group(host_pid).await)
     }
 
     /// **B6 G9 (a): an allowed command, and a message while it runs, with a real claude**
-    /// (app-qa's rig). claude asks to run a Bash command that sleeps 8 s; the iPhone's
-    /// Allow is `Applied`; a message sent 2 s later, before the command has printed, is
-    /// `sent` and filed once; the command runs and prints what it was asked to; the run
-    /// settles with no card open, and claude's transcript holds the message once. Then End
-    /// run, as G2. Ignored and gated as G2 is.
+    /// (app-qa's rig). claude asks to run a Bash command that sleeps 8 s, then writes a
+    /// file in the run's folder (a command that only reads runs without a card); the
+    /// iPhone's Allow is `Applied`; a message sent 2 s later, before the file is written, is
+    /// `sent` and filed once; the command writes what it was asked to; the run settles with
+    /// no card open, and claude's transcript holds the message once. Then End run, as G2.
+    /// Ignored and gated as G2 is.
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_real_claude_runs_an_allowed_command_while_a_message_waits() {
-        let prompt =
-            "Use the Bash tool to run exactly this command, once: sleep 8 && echo $((6*7))-rang";
+        let prompt = "Use the Bash tool to run exactly this command, once: sleep 8 && echo $((6*7))-rang > rang.txt";
         let message = "Then say goodbye in one word.";
         let (rig, uid, host_pid) = real_claude_run("g9a", prompt).await;
         let card = first_card(&rig, &uid).await;
         let answer = allow_from_app(&rig, &uid, &card).await;
         // While the command sleeps.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let printed_before = tool_printed(&rig, &uid, "42-rang");
+        let written_before = rang(&rig);
         let sent = send_as_app(&rig.daemon, &uid, "g9a-1", message).await;
         let settled = settled_after_words(&rig, &uid).await;
-        let printed = tool_printed(&rig, &uid, "42-rang");
+        let written = rang(&rig);
         let open = cards(&rig.daemon, &uid).await;
         let config = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap());
         let transcript = row_of(&rig, &uid)
             .0
             .and_then(|session_id| transcript_counts(&config, &session_id, &[message]));
         println!(
-            "G9: allow: card {card:?}; answer {answer:?}; printed before the message {printed_before}; sent {sent:?}; settled {settled}; printed {printed}; open {open:?}; claude's transcript holds the message {transcript:?} times"
+            "G9: allow: card {card:?}; answer {answer:?}; written before the message {written_before:?}; sent {sent:?}; settled {settled}; written {written:?}; open {open:?}; claude's transcript holds the message {transcript:?} times"
         );
-        let (stopping, ended, host_gone, group_left) = end_real_run(&rig, &uid, host_pid).await;
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
         println!(
-            "G9: allow: End run {stopping:?}; ended {ended}; host gone {host_gone}; group left {group_left}"
+            "G9: allow: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}"
         );
         assert!(card.is_some(), "claude asked nothing");
         assert!(
             matches!(answer, Some(AnswerResult::Applied { .. })),
             "{answer:?}"
         );
-        assert!(
-            !printed_before,
-            "the command had printed before the message was sent"
+        assert_eq!(
+            written_before, None,
+            "the command had written before the message was sent"
         );
         assert_eq!(
             sent,
@@ -5454,7 +5475,11 @@ mod tests {
             vec![prompt.to_string(), message.to_string()],
             "each filed once, in order"
         );
-        assert!(printed, "the allowed command never printed");
+        assert_eq!(
+            written.as_deref(),
+            Some("42-rang\n"),
+            "the allowed command never wrote"
+        );
         assert!(settled, "the run did not settle");
         assert_eq!(
             open,
@@ -5464,8 +5489,8 @@ mod tests {
         assert_eq!(transcript, Some(vec![1]), "claude got the message once");
         assert_eq!(stopping, StopRunResult::Stopping);
         assert!(
-            ended && host_gone && !group_left,
-            "ended {ended}, host gone {host_gone}, group left {group_left}"
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
         );
     }
 
@@ -5477,10 +5502,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_real_claude_ended_with_a_card_open_leaves_it_unanswered() {
-        let prompt = "Use the Bash tool to run exactly this command, once: echo $((6*7))-rang";
+        let prompt =
+            "Use the Bash tool to run exactly this command, once: echo $((6*7))-rang > rang.txt";
         let (rig, uid, host_pid) = real_claude_run("g9b", prompt).await;
         let card = first_card(&rig, &uid).await;
-        let (stopping, ended, host_gone, group_left) = end_real_run(&rig, &uid, host_pid).await;
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
         let closed: Vec<serde_json::Value> = stored(&rig, &uid)
             .into_iter()
             .filter(|event| event["kind"] == "approval_resolved")
@@ -5488,15 +5514,15 @@ mod tests {
             .collect();
         let open = cards(&rig.daemon, &uid).await;
         let late = allow_from_app(&rig, &uid, &card).await;
-        let printed = tool_printed(&rig, &uid, "42-rang");
+        let written = rang(&rig);
         println!(
-            "G9: end: card {card:?}; End run {stopping:?}; ended {ended}; host gone {host_gone}; group left {group_left}; closed {closed:?}; open {open:?}; late answer {late:?}; printed {printed}"
+            "G9: end: card {card:?}; End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}; closed {closed:?}; open {open:?}; late answer {late:?}; written {written:?}"
         );
         assert!(card.is_some(), "claude asked nothing");
         assert_eq!(stopping, StopRunResult::Stopping);
         assert!(
-            ended && host_gone && !group_left,
-            "ended {ended}, host gone {host_gone}, group left {group_left}"
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
         );
         assert_eq!(closed.len(), 1, "closed once: {closed:?}");
         assert_eq!(closed[0]["resolved_by"], "timeout", "nobody answered");
@@ -5510,14 +5536,15 @@ mod tests {
             matches!(late, Some(AnswerResult::Rejected { .. })),
             "{late:?}"
         );
-        assert!(!printed, "the command ran with nobody answering");
+        assert_eq!(written, None, "the command ran with nobody answering");
     }
 
     /// **B6 G9 (c): SIGTERM mid-command, with a real claude.** claude's allowed command,
     /// a shell that writes its pid and sleeps 60 s, is running when the host's group is
     /// sent SIGTERM: the host and the command's shell are gone within 10 s, and neither
-    /// the host's group nor the shell's has a member left. Whatever is left is ended, by
-    /// the pids and groups this run started. Ignored and gated as G2 is.
+    /// the host's group nor the shell's has a member left 10 s later. What is left is
+    /// named, then ended by the pids and groups this run started. Ignored and gated as G2
+    /// is.
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_real_claude_sent_sigterm_mid_command_leaves_nothing() {
@@ -5554,25 +5581,18 @@ mod tests {
             Some(pid) => gone_within(pid, Duration::from_secs(10)).await,
             None => false,
         };
-        // SAFETY: kill(2) with signal 0 only asks whether a group has a member.
-        let host_group_left = unsafe { libc::kill(-host_pid, 0) } == 0;
-        let shell_group_left = shell_group
-            .is_some_and(|group| group != own_group && unsafe { libc::kill(-group, 0) } == 0);
-        println!(
-            "G9: sigterm: card {card:?}; answer {answer:?}; shell {shell:?} in group {shell_group:?}; host gone {host_gone}; shell gone {shell_gone}; host's group left {host_group_left}; shell's group left {shell_group_left}"
-        );
-        if host_group_left {
-            // SAFETY: kill(2) of the process group this test's host leads.
-            unsafe { libc::kill(-host_pid, libc::SIGKILL) };
-        }
-        if let (true, Some(group)) = (shell_group_left, shell_group) {
-            // SAFETY: kill(2) of the group of the shell this test's claude started.
-            unsafe { libc::kill(-group, libc::SIGKILL) };
-        }
+        let host_group_left = left_in_group(host_pid).await;
+        let shell_group_left = match shell_group {
+            Some(group) if group != own_group && group != host_pid => left_in_group(group).await,
+            _ => Vec::new(),
+        };
         if let (false, Some(pid)) = (shell_gone, shell) {
             // SAFETY: kill(2) of the shell this test's claude started, by its pid.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
+        println!(
+            "G9: sigterm: card {card:?}; answer {answer:?}; shell {shell:?} in group {shell_group:?}; host gone {host_gone}; shell gone {shell_gone}; left in the host's group {host_group_left:?}; left in the shell's group {shell_group_left:?}"
+        );
         assert!(card.is_some(), "claude asked nothing");
         assert!(
             matches!(answer, Some(AnswerResult::Applied { .. })),
@@ -5580,8 +5600,8 @@ mod tests {
         );
         assert!(shell.is_some(), "the command never started");
         assert!(
-            host_gone && shell_gone && !host_group_left && !shell_group_left,
-            "host gone {host_gone}, shell gone {shell_gone}, host's group left {host_group_left}, shell's group left {shell_group_left}"
+            host_gone && shell_gone && host_group_left.is_empty() && shell_group_left.is_empty(),
+            "host gone {host_gone}, shell gone {shell_gone}, left in the host's group {host_group_left:?}, left in the shell's group {shell_group_left:?}"
         );
     }
 
