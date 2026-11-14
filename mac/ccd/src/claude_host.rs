@@ -5878,6 +5878,90 @@ mod tests {
         );
     }
 
+    /// **B6 part 2a G8e: a real claude's question answered from the app** (app-qa's rig).
+    /// claude is asked to put one question with two options through AskUserQuestion. Its
+    /// card is a question; the iPhone picks "Coffee" and the answer is `Applied`, not
+    /// unconfirmed; claude's tool result holds that answer; the run settles with no card
+    /// open. Then End run, as G2. Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_question_is_answered_from_the_app() {
+        let prompt = "Use the AskUserQuestion tool once to ask me exactly this question, with exactly these two options and nothing else: question \"Tea or coffee?\", header \"Drink\", options \"Tea\" and \"Coffee\". Then tell me which one I picked.";
+        let (rig, uid, host_pid) = real_claude_run("g8e", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let asked = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| event["kind"] == "approval_request")
+            .map(|event| event["payload"]["card"].clone());
+        let coffee = asked.as_ref().and_then(|card| {
+            card["tool_input"]["questions"][0]["options"]
+                .as_array()?
+                .iter()
+                .position(|option| option["label"] == "Coffee")
+        });
+        let answer = match (&card, coffee) {
+            (Some((request_id, hash)), Some(index)) => Some(
+                rig.daemon
+                    .answer(
+                        request_id,
+                        hash,
+                        AnswerDecision::Answers {
+                            answers: vec![protocol::ws::QuestionAnswer {
+                                selected: vec![index as u32],
+                                ..Default::default()
+                            }],
+                        },
+                        Some(&uid),
+                        AnsweredOn::Iphone,
+                    )
+                    .await,
+            ),
+            _ => None,
+        };
+        let settled = settled_after_words(&rig, &uid).await;
+        let tool_result = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "tool_result")
+            .map(|event| event["payload"].to_string())
+            .find(|payload| payload.contains("Tea or coffee?"));
+        let open = cards(&rig.daemon, &uid).await;
+        println!(
+            "G8e: card {card:?}; tool {:?}; Coffee at {coffee:?}; answer {answer:?}; settled {settled}; tool result {tool_result:?}; open {open:?}",
+            asked.as_ref().map(|card| card["tool_name"].clone())
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!(
+            "G8e: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}"
+        );
+        assert!(card.is_some(), "claude asked nothing");
+        assert_eq!(
+            asked.as_ref().map(|card| card["tool_name"].clone()),
+            Some(serde_json::json!("AskUserQuestion"))
+        );
+        assert!(coffee.is_some(), "the question has no Coffee option");
+        let Some(AnswerResult::Applied { outcome }) = &answer else {
+            panic!("not applied: {answer:?}");
+        };
+        assert!(!outcome.indeterminate);
+        assert!(
+            tool_result
+                .as_deref()
+                .is_some_and(|text| text.contains("Coffee")),
+            "claude's tool result does not hold the answer: {tool_result:?}"
+        );
+        assert!(settled, "the run did not settle");
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
     /// claude's `can_use_tool` request for the Bash call `toolu_rh`, as claude writes it.
     fn claude_asks() -> String {
         serde_json::json!({"type": "control_request", "request_id": "req-toolu_rh",
