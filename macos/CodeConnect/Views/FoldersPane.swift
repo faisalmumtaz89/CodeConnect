@@ -33,7 +33,8 @@ enum FolderWords {
 /// and every five seconds while the pane is open, so an answer given in the start sheet meanwhile shows. A computer is
 /// sent one request at a time: every reply is its whole list, and the replies to two requests sent together can arrive
 /// in either order. A change that fails says so, then the list is read again; what it said stays until the pane opens
-/// again or a change succeeds.
+/// again or a change succeeds. A paired computer whose link is down, or not yet connected, has not said whether it can
+/// start an agent: it stays listed, and while it can't be read it shows the sentence that says so.
 struct FoldersPane: View {
     @Environment(Machines.self) private var machines
     /// Each computer's answers, by its id, once read.
@@ -43,7 +44,9 @@ struct FoldersPane: View {
     @State private var refusal: String?
 
     var body: some View {
-        let contexts = machines.startContexts
+        let contexts = machines.models
+            .filter { $0.machineID != nil && ($0.connection.capabilities?.startsSessions ?? true) }
+            .map(StartContext.init(model:))
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
