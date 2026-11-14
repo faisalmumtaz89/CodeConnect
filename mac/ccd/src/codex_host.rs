@@ -23,7 +23,9 @@
 //! only MCP server added is CodeConnect's mail server. A start that fails once the
 //! app-server is launched, before or after the answer, marks the run `failed` and stops
 //! its process group with the ladder ([`crate::claude_host::stop_group`]): an app-server
-//! never ends by itself.
+//! never ends by itself. A start that a restarted ccd finds still `starting` is failed the
+//! same way, whatever became of it ([`crate::state::Daemon::recover_hosted_runs`]): a
+//! start is never sent again.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -190,7 +192,7 @@ fn failed(detail: String) -> StartSessionResult {
 }
 
 /// The ladder on a failed start's process group, under the warrant of its recorded leader.
-async fn stop(uid: &str, leader: ProcessIdentity, boot: Option<BootIdentity>) {
+pub(crate) async fn stop(uid: &str, leader: ProcessIdentity, boot: Option<BootIdentity>) {
     use crate::claude_host::Ladder;
     let Some(boot) = boot else {
         crate::log_info!(
@@ -203,9 +205,9 @@ async fn stop(uid: &str, leader: ProcessIdentity, boot: Option<BootIdentity>) {
         Ladder::Refused(why) => {
             crate::log_info!("{uid}: its app-server's group was not signalled: {why}")
         }
-        Ladder::Deferred => {
-            crate::log_info!("{uid}: its app-server is not yet reaped; the liveness sweep takes it")
-        }
+        Ladder::Deferred => crate::log_info!(
+            "{uid}: its app-server is not yet reaped, so its group was not signalled"
+        ),
     }
 }
 
@@ -1117,6 +1119,154 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.lifecycle, Lifecycle::Failed);
+    }
+
+    /// A start left as a ccd that dies mid-start leaves it: abandoned once its app-server's
+    /// leader is recorded, codex running on in its own session. The run's uid and leader.
+    async fn abandoned_start(
+        rig: &Rig,
+        request_id: &str,
+        codex: &Path,
+    ) -> (String, ProcessIdentity) {
+        let recorded = async {
+            loop {
+                let run = rig
+                    .daemon
+                    .db
+                    .hosted_run_for_request(request_id.into())
+                    .await
+                    .unwrap();
+                if let Some(run) = run {
+                    let watch = rig
+                        .daemon
+                        .db
+                        .watched_host(run.session_uid.clone())
+                        .await
+                        .unwrap();
+                    if let Some(watch) = watch {
+                        return (run.session_uid, watch.host);
+                    }
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        };
+        tokio::select! {
+            result = start_within(&rig.daemon, run(rig, request_id, codex), Duration::from_secs(60)) => {
+                panic!("the start ended before its leader was recorded: {result:?}")
+            }
+            recorded = recorded => recorded,
+        }
+    }
+
+    /// A ccd restarted on the rig's store, recovered as `main` recovers it before it listens.
+    async fn restarted(rig: &Rig) -> Arc<Daemon> {
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        restarted
+    }
+
+    /// The row `uid` is `failed` on `daemon`, and a repeat of its request is told so.
+    async fn failed_at_restart(daemon: &Arc<Daemon>, uid: &str, request_id: &str) {
+        let row = daemon
+            .db
+            .get_session(uid.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.lifecycle, Lifecycle::Failed);
+        let repeat = daemon
+            .db
+            .hosted_run_for_request(request_id.into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            crate::claude_host::answer_for(repeat),
+            StartSessionResult::Failed { detail, .. } if detail == "did not start"
+        ));
+    }
+
+    /// **G1 (a): a start with no app-server recorded** (the ccd died between the row and the
+    /// record) is failed when the restarted ccd recovers.
+    #[tokio::test]
+    async fn a_codex_start_with_no_recorded_app_server_fails_at_a_restart() {
+        let rig = rig();
+        let uid = protocol::uid::new().unwrap();
+        let now = protocol::time::now_rfc3339();
+        let row = SessionRow {
+            session_uid: uid.clone(),
+            session_id: uid.clone(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: rig.project.clone(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Starting,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: AgentKind::Codex,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        let begun = rig
+            .daemon
+            .db
+            .begin_run(
+                row,
+                "req-unrecorded".into(),
+                r#"{"thread":{},"turn":{}}"#.into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(begun, None);
+        failed_at_restart(&restarted(&rig).await, &uid, "req-unrecorded").await;
+    }
+
+    /// **G1 (b): a start whose recorded app-server is alive** is failed when the restarted ccd
+    /// recovers, and the ladder empties its group: the start is not sent again.
+    #[tokio::test]
+    async fn a_codex_start_whose_app_server_lives_is_failed_and_stopped_at_a_restart() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let (uid, leader) = abandoned_start(&rig, "req-alive", &codex).await;
+        assert!(group_alive(leader.pid));
+        failed_at_restart(&restarted(&rig).await, &uid, "req-alive").await;
+        assert!(
+            group_ends(leader.pid).await,
+            "the run's group outlived the restart"
+        );
+    }
+
+    /// **G1 (c): a start whose recorded leader is gone but whose group is not** (the npm
+    /// launcher killed alone, its app-server orphaned in the group) is failed when the
+    /// restarted ccd recovers, and the ladder empties the group.
+    #[tokio::test]
+    async fn a_codex_start_whose_leader_died_alone_is_failed_and_its_group_emptied_at_a_restart() {
+        let rig = rig();
+        let codex = stand_in(&rig, "sleep 30 &\necho $! > child\nwait");
+        let (uid, leader) = abandoned_start(&rig, "req-orphan", &codex).await;
+        let dir = run_folder(&rig).await;
+        while !dir.join("child").exists() {
+            tokio::time::sleep(POLL).await;
+        }
+        // SAFETY: kill(2) of the rig's own stand-in leader, which this test launched.
+        unsafe { libc::kill(leader.pid, libc::SIGKILL) };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while protocol::proc_identity::liveness(&leader)
+                != protocol::proc_identity::Liveness::Gone
+            {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the killed leader is gone");
+        assert!(group_alive(leader.pid), "the leader's child left its group");
+        failed_at_restart(&restarted(&rig).await, &uid, "req-orphan").await;
+        assert!(
+            group_ends(leader.pid).await,
+            "the orphaned child outlived the restart"
+        );
     }
 
     /// `git -C dir <args>`, quietly.

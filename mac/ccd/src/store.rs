@@ -2857,6 +2857,41 @@ impl Store {
         )?)
     }
 
+    /// Every `starting` Codex run ccd hosts becomes `failed`: a restarted ccd never goes on
+    /// with a start that a ccd before it began. The number of runs failed, and the recorded
+    /// app-server of each that has one, for the ladder. Only before this ccd starts any run
+    /// of its own.
+    pub fn fail_codex_starts(&self) -> Result<(usize, Vec<WatchedHost>)> {
+        let (table, _) = session_tables_for(&AgentKind::Codex);
+        let mut conn = self.write();
+        let tx = conn.transaction()?;
+        let hosts = tx
+            .prepare(&format!(
+                "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
+                        h.boot_sec, h.boot_usec
+                   FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
+                  WHERE s.lifecycle = ?1 AND h.host_pid IS NOT NULL"
+            ))?
+            .query_map(
+                params![lifecycle_str(Lifecycle::Starting)],
+                watched_host_from,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let failed = tx.execute(
+            &format!(
+                "UPDATE {table} SET lifecycle = ?1, updated_at = ?2
+                  WHERE lifecycle = ?3 AND session_uid IN (SELECT session_uid FROM run_hosts)"
+            ),
+            params![
+                lifecycle_str(Lifecycle::Failed),
+                protocol::time::now_rfc3339(),
+                lifecycle_str(Lifecycle::Starting)
+            ],
+        )?;
+        tx.commit()?;
+        Ok((failed, hosts))
+    }
+
     /// What a link to the hosted run `session_uid`'s host starts from: the run's
     /// lifecycle, its cursor, its stored `start`, and its turn, the uuid its last SDK
     /// init stamped on its `SessionStart`. `None` when the run has no `run_hosts` row.
