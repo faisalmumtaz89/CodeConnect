@@ -154,11 +154,13 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 AgentKind::Codex => {
                     let start = codex_start(
                         daemon,
+                        crate::state::codex_launcher(),
                         &state_dir,
                         &request_id,
                         &path,
                         prompt,
                         worktree.as_ref(),
+                        model.as_deref(),
                         &environment,
                         trust,
                     );
@@ -319,18 +321,21 @@ async fn existing_run(db: &crate::db::Db, request_id: &str) -> Option<StartSessi
 }
 
 /// A Codex start: the run its request already has (H1), or the start's checks, then its
-/// row and its app-server ([`crate::codex_host`]). The checks come before the row, so a
-/// start they refuse leaves none: the cheap refusals, the folder question and the codex
-/// check, all before the place, the one step that can change the repository. ccd makes
-/// a Codex worktree itself, a new one included.
+/// row, its app-server and its first message ([`crate::codex_host`]). The checks come
+/// before the row, so a start they refuse leaves none: the cheap refusals, the folder
+/// question, the codex check and `launcher` (the `codeconnect` that runs the mail server),
+/// all before the place, the one step that can change the repository. ccd makes a Codex
+/// worktree itself, a new one included.
 #[allow(clippy::too_many_arguments)]
 async fn codex_start(
     daemon: &Arc<Daemon>,
+    launcher: Result<PathBuf, String>,
     root: &Path,
     request_id: &str,
     path: &str,
     prompt: &str,
     worktree: Option<&StartWorktree>,
+    model: Option<&str>,
     environment: &HashMap<OsString, OsString>,
     trust: Option<Trust>,
 ) -> StartSessionResult {
@@ -347,6 +352,10 @@ async fn codex_start(
         Ok(ready) => ready,
         Err((reason, detail)) => return failed(reason, detail),
     };
+    let codeconnect = match launcher {
+        Ok(codeconnect) => codeconnect,
+        Err(why) => return failed(StartFailure::LaunchFailed, why),
+    };
     let git_bin = daemon.config.git_bin.as_deref();
     let cwd = match worktree {
         None => path.to_string(),
@@ -361,7 +370,10 @@ async fn codex_start(
             root,
             request_id,
             cwd: &cwd,
+            prompt,
+            model,
             codex: &ready.path,
+            codeconnect: &codeconnect,
             git_bin,
             environment,
         },
@@ -1893,11 +1905,13 @@ mod tests {
                 AgentKind::Codex => {
                     codex_start(
                         &self.daemon,
+                        Ok(self.launcher.clone()),
                         &self.root,
                         request_id,
                         path,
                         prompt,
                         worktree,
+                        None,
                         &self.env,
                         trust,
                     )
@@ -2808,6 +2822,38 @@ mod tests {
             failed(StartFailure::LaunchFailed, "did not start".into())
         );
         assert_eq!(rig.runs(), 1);
+    }
+
+    /// **A Codex start with no `codeconnect` to run its mail server is refused before its
+    /// row**, with nothing launched.
+    #[tokio::test]
+    async fn a_codex_start_with_no_codeconnect_is_refused_before_its_row() {
+        let rig = counting("no-codeconnect");
+        let result = codex_start(
+            &rig.daemon,
+            Err("no codeconnect here".into()),
+            &rig.root,
+            "r-no-cc",
+            &rig.project(),
+            "fix it",
+            None,
+            None,
+            &rig.env,
+            Some(Trust::Trusted),
+        )
+        .await;
+        assert_eq!(
+            result,
+            failed(StartFailure::LaunchFailed, "no codeconnect here".into())
+        );
+        assert_eq!(
+            rig.db
+                .hosted_run_for_request("r-no-cc".into())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(rig.runs(), 0);
     }
 
     /// **A Codex start's check and its launch see one environment**, the start's own:

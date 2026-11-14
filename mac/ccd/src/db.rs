@@ -242,6 +242,25 @@ impl Db {
             .await
     }
 
+    pub async fn advance_lifecycle(
+        &self,
+        session_uid: String,
+        from: Lifecycle,
+        to: Lifecycle,
+    ) -> Result<bool> {
+        self.run(move |store| store.advance_lifecycle(&session_uid, from, to))
+            .await
+    }
+
+    pub async fn record_hosted_thread(
+        &self,
+        session_uid: String,
+        thread_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| store.record_hosted_thread(&session_uid, &thread_id))
+            .await
+    }
+
     pub async fn hosted_run_for_request(
         &self,
         request_id: String,

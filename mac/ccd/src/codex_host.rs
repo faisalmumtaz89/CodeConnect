@@ -1,4 +1,4 @@
-//! A Codex run's app-server, from ccd's side (P3 L1-L3, R1, R5).
+//! A Codex run's app-server, from ccd's side (P3 L1-L5, L9, R1, R5).
 //!
 //! ccd writes the run's row first, with the app's start request id, so a repeated
 //! request finds the run instead of starting another (H1, as for a Claude run). Then it
@@ -11,15 +11,19 @@
 //! the claim and codex in turn: the run's identity is that pid and the birth time the
 //! kernel gives it, recorded at once, while ccd still holds the child. Its process group,
 //! whose id is that pid, holds the app-server whether codex runs it itself or as the
-//! npm launcher's child. ccd then connects over `as.sock` and initializes.
+//! npm launcher's child. ccd then connects over `as.sock` and initializes, and the start
+//! answers `started`.
 //!
-//! A start that fails once the app-server is launched marks the run `failed` and stops
+//! The run's first message is sent by the run's own task, after the answer, on the same
+//! connection ([`first_send`]): `thread/start` with the run's preset, model and thread
+//! config, the thread recorded on the row, then `turn/start` with the first message under
+//! the start's uuid, and the run is `live`. The thread config keeps the project out (P3
+//! L4): each folder from the repository's top down to the run's own (or the run's folder
+//! alone outside git) is untrusted, the repository's own skills are disabled, and the
+//! only MCP server added is CodeConnect's mail server. A start that fails once the
+//! app-server is launched, before or after the answer, marks the run `failed` and stops
 //! its process group with the ladder ([`crate::claude_host::stop_group`]): an app-server
 //! never ends by itself.
-//!
-//! codex is told each folder from the repository's top down to the run's own, or the
-//! run's folder alone outside git, as untrusted (`-c projects=`), so a folder's trust is
-//! CodeConnect's answer and not one codex kept from elsewhere.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -32,6 +36,7 @@ use protocol::agent::AgentKind;
 use protocol::event::Lifecycle;
 use protocol::proc_identity::{read_birth_identity, BootIdentity, ProcessIdentity};
 use protocol::ws::{StartFailure, StartSessionResult};
+use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use crate::codex_client::Client;
@@ -53,8 +58,15 @@ pub(crate) struct Run<'a> {
     pub request_id: &'a str,
     /// The folder the run starts in.
     pub cwd: &'a str,
+    /// The run's first message.
+    pub prompt: &'a str,
+    /// The app's model. Codex's own `default` is sent as none, so the thread starts with
+    /// the model its settings name.
+    pub model: Option<&'a str>,
     /// The codex the start's check found.
     pub codex: &'a Path,
+    /// The `codeconnect` binary, which runs the run's mail server.
+    pub codeconnect: &'a Path,
     /// The git the trust list's repository read runs.
     pub git_bin: Option<&'a str>,
     /// The start's environment, the one its codex check read: codex gets it as it is,
@@ -62,23 +74,43 @@ pub(crate) struct Run<'a> {
     pub environment: &'a HashMap<OsString, OsString>,
 }
 
-/// Start `run`: its row, its folder, its app-server, the connection and `initialize`.
-/// The connection is then let go: until a thread is started on it, it carries nothing.
+/// What the run's task needs for the first message, owned: it outlives the start.
+struct FirstSend {
+    uid: String,
+    /// The start's uuid, minted with the uid: the first message's `clientUserMessageId`.
+    start_uuid: String,
+    cwd: String,
+    prompt: String,
+    model: Option<String>,
+    codeconnect: String,
+    /// The trust list's folders, top down.
+    folders: Vec<PathBuf>,
+    /// The recorded leader and boot, for the ladder if the first send fails.
+    leader: ProcessIdentity,
+    boot: Option<BootIdentity>,
+    /// The start's own deadline.
+    deadline: Instant,
+}
+
+/// Start `run`: its row, its folder, its app-server, the connection and `initialize`, then
+/// `started`, with the first message left to the run's own task ([`first_send`]).
 pub(crate) async fn start(daemon: &Arc<Daemon>, run: Run<'_>) -> StartSessionResult {
     start_within(daemon, run, crate::start_session::START_TIMEOUT).await
 }
 
-/// [`start`], with `timeout` from the launch to `initialize`'s answer: the tests' way to
-/// a deadline shorter than START_TIMEOUT.
+/// [`start`], with `timeout` from the launch to the first message's answer: the tests' way
+/// to a deadline shorter than START_TIMEOUT.
 async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> StartSessionResult {
-    let projects = match projects(run.cwd, run.git_bin).await {
-        Ok(projects) => projects,
+    let folders = match folders(run.cwd, run.git_bin).await {
+        Ok(folders) => folders,
         Err(why) => return failed(why),
     };
-    let uid = match protocol::uid::new() {
-        Ok(uid) => uid,
-        Err(err) => return failed(format!("could not name the run: {err}")),
-    };
+    // The run and its first message are named together, before the row, as a Claude run's.
+    let (uid, start_uuid) =
+        match protocol::uid::new().and_then(|uid| Ok((uid, protocol::uid::uuid_v4()?))) {
+            Ok(names) => names,
+            Err(err) => return failed(format!("could not name the run: {err}")),
+        };
     let now = protocol::time::now_rfc3339();
     let row = SessionRow {
         session_uid: uid.clone(),
@@ -102,9 +134,25 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     }
     let deadline = Instant::now() + timeout;
     let mut launched = None;
-    match bring_up(daemon, &uid, &run, &projects, deadline, &mut launched).await {
+    match bring_up(daemon, &uid, &run, &folders, deadline, &mut launched).await {
         Ok(client) => {
-            drop(client);
+            let (leader, boot) = launched.expect("an app-server that answered was recorded");
+            let send = FirstSend {
+                uid: uid.clone(),
+                start_uuid,
+                cwd: run.cwd.to_string(),
+                prompt: run.prompt.to_string(),
+                model: run
+                    .model
+                    .filter(|model| *model != "default")
+                    .map(str::to_string),
+                codeconnect: run.codeconnect.to_string_lossy().into_owned(),
+                folders,
+                leader,
+                boot,
+                deadline,
+            };
+            tokio::spawn(first_send(Arc::clone(daemon), client, send));
             StartSessionResult::Started {
                 session_uid: uid,
                 cwd: Some(run.cwd.to_string()),
@@ -153,13 +201,134 @@ async fn stop(uid: &str, leader: ProcessIdentity, boot: Option<BootIdentity>) {
     }
 }
 
+/// The run's own task after `started` (L9 i-v): the first message sent by the start's
+/// deadline, then the run `live`. A failure ends the run `failed` and stops its group;
+/// either way a run the sweep has ended meanwhile stays as the sweep left it. The
+/// connection is then let go: a turn Codex has taken runs on without it.
+async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
+    let uid = send.uid.clone();
+    let sent = tokio::time::timeout_at(send.deadline, send_first(&daemon, &client, &send))
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "Codex did not take the first message within {} s",
+                crate::start_session::START_TIMEOUT.as_secs()
+            ))
+        });
+    drop(client);
+    let to = match &sent {
+        Ok(()) => Lifecycle::Live,
+        Err(why) => {
+            crate::log_info!("{uid}: did not start: {why}");
+            Lifecycle::Failed
+        }
+    };
+    match daemon
+        .db
+        .advance_lifecycle(uid.clone(), Lifecycle::Starting, to)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => crate::log_info!("{uid}: the run had already ended; it is left as it is"),
+        Err(err) => crate::log_error!("{uid}: could not mark the run {to:?}: {err:#}"),
+    }
+    if sent.is_err() {
+        stop(&uid, send.leader, send.boot).await;
+    }
+}
+
+/// `skills/list`, `thread/start`, the thread recorded, then `turn/start` with the first
+/// message: each call's error, or a run ended meanwhile, stops it.
+async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Result<(), String> {
+    let skills = client
+        .call(
+            "skills/list",
+            json!({"cwds": [&send.cwd], "forceReload": true}),
+        )
+        .await
+        .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
+    let started = client
+        .call(
+            "thread/start",
+            json!({
+                "cwd": send.cwd,
+                "model": send.model,
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+                "config": thread_config(send, &skills),
+            }),
+        )
+        .await
+        .map_err(|err| format!("Codex did not start a thread: {err}"))?;
+    let thread = started["thread"]["id"]
+        .as_str()
+        .ok_or("Codex's thread/start named no thread")?;
+    match daemon
+        .db
+        .record_hosted_thread(send.uid.clone(), thread.to_string())
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return Err("the run ended before its thread was recorded".into()),
+        Err(err) => return Err(format!("could not record the run's thread: {err:#}")),
+    }
+    client
+        .call(
+            "turn/start",
+            json!({
+                "threadId": thread,
+                "input": [{"type": "text", "text": send.prompt}],
+                "clientUserMessageId": send.start_uuid,
+            }),
+        )
+        .await
+        .map_err(|err| format!("Codex did not take the first message: {err}"))?;
+    Ok(())
+}
+
+/// The run's thread config (P3 L4): its folders untrusted, the repository's own skills
+/// that `skills/list` reported disabled, and CodeConnect's mail server with the run's uid,
+/// which Codex hands an MCP server only through its `env`.
+fn thread_config(send: &FirstSend, skills: &Value) -> Value {
+    let projects: serde_json::Map<String, Value> = send
+        .folders
+        .iter()
+        .map(|folder| {
+            (
+                folder.to_string_lossy().into_owned(),
+                json!({"trust_level": "untrusted"}),
+            )
+        })
+        .collect();
+    let mut config = json!({
+        "projects": projects,
+        "mcp_servers.codeconnect": {
+            "command": send.codeconnect,
+            "args": protocol::ipc::mail_server_args(&send.uid, &protocol::socket_path()),
+            "env": {protocol::ENV_SESSION_UID: send.uid},
+        },
+    });
+    let disabled: Vec<Value> = skills["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+        .filter(|skill| skill["scope"] == "repo")
+        .map(|skill| json!({"path": skill["path"], "enabled": false}))
+        .collect();
+    if !disabled.is_empty() {
+        config["skills.config"] = Value::Array(disabled);
+    }
+    config
+}
+
 /// The run's folder, its app-server launched and recorded in `launched`, connected and
 /// initialized, by `deadline`.
 async fn bring_up(
     daemon: &Arc<Daemon>,
     uid: &str,
     run: &Run<'_>,
-    projects: &str,
+    folders: &[PathBuf],
     deadline: Instant,
     launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
 ) -> Result<Client, String> {
@@ -169,7 +338,7 @@ async fn bring_up(
     let socket = dir.join("as.sock");
     let mut listen = OsString::from("unix://");
     listen.push(&socket);
-    let projects = format!("projects={projects}");
+    let projects = format!("projects={}", launch_projects(folders));
     let mut child = crate::start_session::spawn_detached(
         run.environment,
         &[
@@ -261,11 +430,9 @@ fn not_listening(err: &anyhow::Error) -> bool {
     })
 }
 
-/// The folders codex is told the trust of, as the TOML inline table `-c projects=` takes:
-/// by their real paths, every folder from the repository's top down to `cwd`, or `cwd`
-/// alone outside git, each untrusted. Each path is a TOML basic string, written as JSON
-/// writes a string.
-async fn projects(cwd: &str, git_bin: Option<&str>) -> Result<String, String> {
+/// The folders codex is told the trust of, by their real paths, top down: every folder from
+/// the repository's top down to `cwd`, or `cwd` alone outside git.
+async fn folders(cwd: &str, git_bin: Option<&str>) -> Result<Vec<PathBuf>, String> {
     let folder = std::fs::canonicalize(cwd).map_err(|err| format!("{cwd}: {err}"))?;
     let top = crate::git::toplevel(cwd, git_bin, crate::start_session::GIT_READ_TIMEOUT)
         .await
@@ -279,6 +446,12 @@ async fn projects(cwd: &str, git_bin: Option<&str>) -> Result<String, String> {
         _ => vec![folder],
     };
     folders.reverse();
+    Ok(folders)
+}
+
+/// `folders`, each untrusted, as the TOML inline table the launch's `-c projects=` takes.
+/// Each path is a TOML basic string, written as JSON writes a string.
+fn launch_projects(folders: &[PathBuf]) -> String {
     let entries: Vec<String> = folders
         .iter()
         .map(|folder| {
@@ -287,7 +460,7 @@ async fn projects(cwd: &str, git_bin: Option<&str>) -> Result<String, String> {
             format!(r#"{key} = {{ trust_level = "untrusted" }}"#)
         })
         .collect();
-    Ok(format!("{{ {} }}", entries.join(", ")))
+    format!("{{ {} }}", entries.join(", "))
 }
 
 #[cfg(test)]
@@ -300,6 +473,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
     use tokio_tungstenite::tungstenite::protocol::Message;
+
+    type Socket = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
 
     /// A state folder of its own, short and under `/tmp` so `runs/<uid>/as.sock` fits
     /// `sun_path`, with a daemon on a store in it. Removed when dropped.
@@ -320,7 +495,7 @@ mod tests {
 
     fn rig() -> Rig {
         let uid = protocol::uid::new().unwrap();
-        let root = PathBuf::from(format!("/tmp/ccx2.{}", &uid[16..]));
+        let root = PathBuf::from(format!("/tmp/ccx3.{}", &uid[16..]));
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::create_dir(root.join("project")).unwrap();
         let environment = HashMap::from([
@@ -371,12 +546,17 @@ mod tests {
         path
     }
 
+    const CODECONNECT: &str = "/nonexistent/codeconnect";
+
     fn run<'a>(rig: &'a Rig, request_id: &'a str, codex: &'a Path) -> Run<'a> {
         Run {
             root: &rig.root,
             request_id,
             cwd: &rig.project,
+            prompt: "fix the tests",
+            model: Some("gpt-test"),
             codex,
+            codeconnect: Path::new(CODECONNECT),
             git_bin: None,
             environment: &rig.environment,
         }
@@ -401,13 +581,38 @@ mod tests {
         }
     }
 
+    /// A repository skill and a user skill, as `skills/list` reports them.
+    const REPO_SKILL: &str = "/repo/.codex/skills/deploy/SKILL.md";
+
+    /// What a stand-in app-server answers, in order, for a run that starts its thread and
+    /// takes its first message.
+    fn whole_start() -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            ("initialize", json!({"result": {"userAgent": "stand-in"}})),
+            (
+                "skills/list",
+                json!({"result": {"data": [{"cwd": "/repo", "errors": [], "skills": [
+                    {"name": "deploy", "path": REPO_SKILL, "scope": "repo", "enabled": true},
+                    {"name": "mine", "path": "/home/.codex/skills/mine/SKILL.md", "scope": "user",
+                     "enabled": true}
+                ]}]}}),
+            ),
+            (
+                "thread/start",
+                json!({"result": {"thread": {"id": "thr-x3"}, "model": "gpt-test"}}),
+            ),
+            ("turn/start", json!({"result": {"turn": {"id": "turn-1"}}})),
+        ]
+    }
+
     /// The test's side of `as.sock`: it waits for the stand-in to be launched, listens
-    /// where the app-server would, takes ccd's connection, and answers `initialize` with
-    /// `answer`. It gives back the request it answered and the frame after it.
+    /// where the app-server would, takes ccd's connection, and answers each of `script`'s
+    /// methods, in order, with its answer. It gives back every frame ccd sent so far, and
+    /// the connection.
     async fn play_app_server(
         rig: &Rig,
-        answer: serde_json::Value,
-    ) -> (serde_json::Value, serde_json::Value) {
+        script: Vec<(&str, serde_json::Value)>,
+    ) -> (Vec<serde_json::Value>, Socket) {
         let dir = run_folder(rig).await;
         while launches(rig) == 0 {
             tokio::time::sleep(POLL).await;
@@ -418,19 +623,37 @@ mod tests {
             .expect("ccd connected")
             .unwrap();
         let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let asked = next_frame(&mut ws).await;
-        let mut reply = answer;
-        reply["id"] = asked["id"].clone();
-        ws.send(Message::Text(reply.to_string())).await.unwrap();
-        (asked, next_frame(&mut ws).await)
+        let mut seen = Vec::new();
+        for (method, answer) in script {
+            let asked = loop {
+                let frame = next_frame(&mut ws).await.expect("ccd hung up mid-script");
+                seen.push(frame.clone());
+                if frame["method"] == method && frame.get("id").is_some() {
+                    break frame;
+                }
+            };
+            let mut reply = answer;
+            reply["id"] = asked["id"].clone();
+            ws.send(Message::Text(reply.to_string())).await.unwrap();
+        }
+        (seen, ws)
     }
 
-    async fn next_frame(
-        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
-    ) -> serde_json::Value {
+    /// Every frame ccd sends until it lets the connection go.
+    async fn until_closed(mut ws: Socket) -> Vec<serde_json::Value> {
+        let mut seen = Vec::new();
+        while let Some(frame) = next_frame(&mut ws).await {
+            seen.push(frame);
+        }
+        seen
+    }
+
+    async fn next_frame(ws: &mut Socket) -> Option<serde_json::Value> {
         loop {
-            if let Message::Text(text) = ws.next().await.unwrap().unwrap() {
-                return serde_json::from_str(&text).unwrap();
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => return Some(serde_json::from_str(&text).unwrap()),
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return None,
+                Some(Ok(_)) => continue,
             }
         }
     }
@@ -444,43 +667,75 @@ mod tests {
         protocol::proc_identity::group_has_members(pgid)
     }
 
+    /// The run's row once it is `want`, within 10 s.
+    async fn row_once(rig: &Rig, uid: &str, want: Lifecycle) -> SessionRow {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let row = rig
+                .daemon
+                .db
+                .get_session(uid.to_string())
+                .await
+                .unwrap()
+                .unwrap();
+            if row.lifecycle == want || Instant::now() >= deadline {
+                return row;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// Whether `pgid`'s group is empty within 15 s (the ladder's zombie wait and grace).
+    async fn group_ends(pgid: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while group_alive(pgid) && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        !group_alive(pgid)
+    }
+
     /// The ladder on the run's recorded group, so a test leaves no process behind.
     async fn end_run(rig: &Rig, uid: &str) {
-        let watch = rig
-            .daemon
-            .db
-            .watched_host(uid.to_string())
-            .await
-            .unwrap()
-            .unwrap();
-        crate::claude_host::stop_group(watch.host, watch.boot.unwrap()).await;
+        if let Some(watch) = rig.daemon.db.watched_host(uid.to_string()).await.unwrap() {
+            crate::claude_host::stop_group(watch.host, watch.boot.unwrap()).await;
+        }
+    }
+
+    fn started_uid(result: &StartSessionResult) -> String {
+        match result {
+            StartSessionResult::Started { session_uid, .. } => session_uid.clone(),
+            other => panic!("expected a start, got {other:?}"),
+        }
+    }
+
+    fn methods(frames: &[serde_json::Value]) -> Vec<&str> {
+        frames.iter().filter_map(|f| f["method"].as_str()).collect()
     }
 
     /// **A Codex start writes its row, launches codex in a session of its own after the
     /// claim, records the launch's leader, connects and initializes**, then answers
-    /// `started`. The leader is the spawned pid, which the claim wrote and which leads
-    /// the group and the session. A repeat of the request, on this daemon or on a
-    /// restarted one, answers the same run and launches nothing.
+    /// `started` with its folder. The leader is the spawned pid, which the claim wrote. A
+    /// repeat of the request, on this daemon or on a restarted one, answers the same run
+    /// and launches nothing.
     #[tokio::test]
     async fn a_codex_start_launches_after_the_claim_records_its_leader_and_initializes() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
-        let (result, (asked, then)) = tokio::join!(
+        let (result, (seen, ws)) = tokio::join!(
             start(&rig.daemon, run(&rig, "req-1", &codex)),
-            play_app_server(
-                &rig,
-                serde_json::json!({"result": {"userAgent": "stand-in"}})
-            )
+            play_app_server(&rig, whole_start())
         );
-        let project = rig.project.clone();
-        let uid = match &result {
-            StartSessionResult::Started { session_uid, cwd } => {
-                assert_eq!(cwd.as_deref(), Some(project.as_str()));
-                session_uid.clone()
+        until_closed(ws).await;
+        let uid = started_uid(&result);
+        assert_eq!(
+            result,
+            StartSessionResult::Started {
+                session_uid: uid.clone(),
+                cwd: Some(rig.project.clone())
             }
-            other => panic!("expected a start, got {other:?}"),
-        };
+        );
         let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        row_once(&rig, &uid, Lifecycle::Live).await;
         let watch = rig
             .daemon
             .db
@@ -490,10 +745,9 @@ mod tests {
             .unwrap();
         end_run(&rig, &uid).await;
 
-        assert_eq!(asked["method"], "initialize");
-        assert_eq!(asked["params"]["capabilities"]["experimentalApi"], true);
-        assert_eq!(then, serde_json::json!({"method": "initialized"}));
-        assert_eq!(watch.lifecycle, Lifecycle::Starting);
+        assert_eq!(seen[0]["method"], "initialize");
+        assert_eq!(seen[0]["params"]["capabilities"]["experimentalApi"], true);
+        assert_eq!(seen[1], json!({"method": "initialized"}));
         let claimed: i32 = std::fs::read_to_string(dir.join("as.pid"))
             .unwrap()
             .trim()
@@ -508,7 +762,7 @@ mod tests {
             .filter(|arg| !arg.is_empty())
             .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
             .collect();
-        let real = std::fs::canonicalize(&project)
+        let real = std::fs::canonicalize(&rig.project)
             .unwrap()
             .display()
             .to_string();
@@ -525,13 +779,7 @@ mod tests {
 
         let again = start(&rig.daemon, run(&rig, "req-1", &codex)).await;
         let restarted = start(&daemon_on(&rig.root), run(&rig, "req-1", &codex)).await;
-        assert_eq!(
-            again,
-            StartSessionResult::Started {
-                session_uid: uid.clone(),
-                cwd: Some(project.clone())
-            }
-        );
+        assert_eq!(again, result);
         assert_eq!(restarted, again);
         assert_eq!(launches(&rig), 1, "a repeat launched another app-server");
     }
@@ -541,26 +789,218 @@ mod tests {
     async fn the_leader_leads_its_own_group_and_session() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
-        let (result, _) = tokio::join!(
+        let (result, (_, ws)) = tokio::join!(
             start(&rig.daemon, run(&rig, "req-group", &codex)),
-            play_app_server(&rig, serde_json::json!({"result": {}}))
+            play_app_server(&rig, whole_start())
         );
-        let StartSessionResult::Started { session_uid, .. } = result else {
-            panic!("expected a start, got {result:?}");
-        };
+        until_closed(ws).await;
+        let uid = started_uid(&result);
         let watch = rig
             .daemon
             .db
-            .watched_host(session_uid.clone())
+            .watched_host(uid.clone())
             .await
             .unwrap()
             .unwrap();
         let pid = watch.host.pid;
         // SAFETY: getpgid(2) and getsid(2) only read.
         let (group, session) = unsafe { (libc::getpgid(pid), libc::getsid(pid)) };
-        end_run(&rig, &session_uid).await;
+        end_run(&rig, &uid).await;
         assert_eq!((group, session), (pid, pid));
         assert_ne!(group, unsafe { libc::getpgid(0) });
+    }
+
+    /// **A started Codex run sends its first message on a thread of its own, then is
+    /// `live`** (L9 i-v): `skills/list` for the run's folder, `thread/start` with the
+    /// folder, the start's model, the preset and the keep-out config (the folder
+    /// untrusted, the repository's skill disabled and the user's kept, CodeConnect's mail
+    /// server with the run's uid), the thread recorded on the row, then `turn/start` with
+    /// the first message under the start's uuid. The connection is let go after it.
+    #[tokio::test]
+    async fn a_started_codex_run_sends_its_first_message_on_its_own_thread_and_goes_live() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let (result, (mut seen, ws)) = tokio::join!(
+            start(&rig.daemon, run(&rig, "req-first", &codex)),
+            play_app_server(&rig, whole_start())
+        );
+        seen.extend(until_closed(ws).await);
+        let uid = started_uid(&result);
+        let row = row_once(&rig, &uid, Lifecycle::Live).await;
+        end_run(&rig, &uid).await;
+
+        assert_eq!(row.lifecycle, Lifecycle::Live);
+        assert_eq!(row.codex_thread_id.as_deref(), Some("thr-x3"));
+        assert_eq!(
+            methods(&seen),
+            [
+                "initialize",
+                "initialized",
+                "skills/list",
+                "thread/start",
+                "turn/start"
+            ]
+        );
+        let params = |method: &str| {
+            seen.iter().find(|frame| frame["method"] == method).unwrap()["params"].clone()
+        };
+        assert_eq!(
+            params("skills/list"),
+            json!({"cwds": [rig.project], "forceReload": true})
+        );
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        assert_eq!(
+            params("thread/start"),
+            json!({
+                "cwd": rig.project,
+                "model": "gpt-test",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+                "config": {
+                    "projects": {real: {"trust_level": "untrusted"}},
+                    "skills.config": [{"path": REPO_SKILL, "enabled": false}],
+                    "mcp_servers.codeconnect": {
+                        "command": CODECONNECT,
+                        "args": protocol::ipc::mail_server_args(&uid, &protocol::socket_path()),
+                        "env": {"CODECONNECT_SESSION_UID": uid},
+                    },
+                },
+            })
+        );
+        let turn = params("turn/start");
+        assert_eq!(turn["threadId"], "thr-x3");
+        assert_eq!(
+            turn["input"],
+            json!([{"type": "text", "text": "fix the tests"}])
+        );
+        let uuid = turn["clientUserMessageId"].as_str().unwrap();
+        assert_eq!((uuid.len(), uuid.matches('-').count()), (36, 4), "{uuid}");
+    }
+
+    /// **The start answers before the thread is made, and a `skills/list` that fails ends
+    /// the run**: `started` reaches the app while `skills/list` is still unanswered; then
+    /// its error makes the run `failed` and the ladder empties its group.
+    #[tokio::test]
+    async fn the_start_answers_before_its_thread_and_a_failed_skills_list_ends_the_run() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let (answered, unanswered) = tokio::sync::oneshot::channel();
+        let starting = async {
+            let result = start(&rig.daemon, run(&rig, "req-scan", &codex)).await;
+            answered.send(()).unwrap();
+            result
+        };
+        let serving = async {
+            let (_, mut ws) = play_app_server(&rig, whole_start()[..1].to_vec()).await;
+            assert_eq!(next_frame(&mut ws).await.unwrap()["method"], "initialized");
+            let asked = next_frame(&mut ws).await.unwrap();
+            assert_eq!(asked["method"], "skills/list");
+            tokio::time::timeout(Duration::from_secs(5), unanswered)
+                .await
+                .expect("the start waited for skills/list")
+                .unwrap();
+            let refused = json!({"id": asked["id"], "error": {"code": -32603, "message": "no"}});
+            ws.send(Message::Text(refused.to_string())).await.unwrap();
+            until_closed(ws).await
+        };
+        let (result, after) = tokio::join!(starting, serving);
+        let uid = started_uid(&result);
+        let row = row_once(&rig, &uid, Lifecycle::Failed).await;
+        let claimed: i32 =
+            std::fs::read_to_string(crate::claude_host::run_dir(&rig.root, &uid).join("as.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+        assert_eq!(row.lifecycle, Lifecycle::Failed);
+        assert!(group_ends(claimed).await, "the run's group outlived it");
+        assert!(methods(&after).is_empty(), "{after:?}");
+    }
+
+    /// **A refused `thread/start` ends the run**, `failed` with its group emptied and no
+    /// first message sent; Codex's own `default` model reaches `thread/start` as none, and
+    /// a folder with no repository skill gets no skills override.
+    #[tokio::test]
+    async fn a_refused_thread_start_fails_the_run_and_sends_nothing() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let mut default = run(&rig, "req-refused", &codex);
+        default.model = Some("default");
+        let script = [
+            whole_start()[0].clone(),
+            ("skills/list", json!({"result": {"data": []}})),
+            (
+                "thread/start",
+                json!({"error": {"code": -32600, "message": "invalid config"}}),
+            ),
+        ];
+        let (result, (mut seen, ws)) = tokio::join!(
+            start(&rig.daemon, default),
+            play_app_server(&rig, script.to_vec())
+        );
+        seen.extend(until_closed(ws).await);
+        let uid = started_uid(&result);
+        let row = row_once(&rig, &uid, Lifecycle::Failed).await;
+        let claimed: i32 =
+            std::fs::read_to_string(crate::claude_host::run_dir(&rig.root, &uid).join("as.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+        assert_eq!(row.lifecycle, Lifecycle::Failed);
+        assert_eq!(row.codex_thread_id, None);
+        assert!(group_ends(claimed).await, "the run's group outlived it");
+        assert_eq!(
+            methods(&seen),
+            ["initialize", "initialized", "skills/list", "thread/start"]
+        );
+        let thread = &seen
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .unwrap()["params"];
+        assert_eq!(thread["model"], serde_json::Value::Null);
+        assert!(thread["config"].get("skills.config").is_none(), "{thread}");
+    }
+
+    /// **A live Codex run whose app-server dies ends, and can be removed** (T11): the
+    /// liveness sweep's check finds its leader gone and ends the row `exited` in Codex's
+    /// own table, as a Claude run's ends.
+    #[tokio::test]
+    async fn a_live_codex_run_whose_app_server_dies_ends_and_can_be_removed() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let (result, (_, ws)) = tokio::join!(
+            start(&rig.daemon, run(&rig, "req-dies", &codex)),
+            play_app_server(&rig, whole_start())
+        );
+        until_closed(ws).await;
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        end_run(&rig, &uid).await;
+        assert!(group_ends(leader).await);
+        crate::claude_host::end_if_host_gone(&rig.daemon, &uid).await;
+        let row = row_once(&rig, &uid, Lifecycle::Exited).await;
+        assert_eq!(row.lifecycle, Lifecycle::Exited);
+        assert!(matches!(
+            rig.daemon
+                .db
+                .delete_exited_session(uid.clone())
+                .await
+                .unwrap(),
+            crate::store::DeleteOutcome::Deleted { .. }
+        ));
     }
 
     /// **A codex that never listens is stopped, and its run failed**: at the deadline the
@@ -651,8 +1091,13 @@ mod tests {
                 .unwrap()
         };
         let entry = |path: &Path| format!(r#"{} = {{ trust_level = "untrusted" }}"#, real(path));
+        let projects = |cwd: PathBuf| async move {
+            folders(cwd.to_str().unwrap(), None)
+                .await
+                .map(|folders| launch_projects(&folders))
+        };
         assert_eq!(
-            projects(deep.to_str().unwrap(), None).await.unwrap(),
+            projects(deep.clone()).await.unwrap(),
             format!(
                 "{{ {}, {}, {} }}",
                 entry(&top),
@@ -662,7 +1107,7 @@ mod tests {
         );
         let plain = rig.root.join("project");
         assert_eq!(
-            projects(plain.to_str().unwrap(), None).await.unwrap(),
+            projects(plain.clone()).await.unwrap(),
             format!("{{ {} }}", entry(&plain))
         );
         assert!(
@@ -670,6 +1115,8 @@ mod tests {
             "the folder is listed by its real path: {}",
             real(&plain)
         );
-        assert!(projects("/nonexistent/folder", None).await.is_err());
+        assert!(projects(PathBuf::from("/nonexistent/folder"))
+            .await
+            .is_err());
     }
 }
