@@ -3487,7 +3487,7 @@ public final class AppModel {
         if sampleFleetActive {
             return .failed("These agents are not real. Pair with \(HostDevice.current.computer("your computer")) to talk to your own.")
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = Self.normalizedSendText(text)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
             return .failed("\(HostDevice.current.computer("The computer"))'s CodeConnect can't take typed text.")
@@ -3551,11 +3551,29 @@ public final class AppModel {
         }
     }
 
+    /// How send text becomes a mutation identity: leading and trailing whitespace is
+    /// not part of the message. The send's mutation key, `holdsSendIdentity`,
+    /// `dropSendIdentity`, and the composer's abandon-on-edit guard all compare through
+    /// this one function, so a whitespace-only edit never drops or keeps the wrong one.
+    static func normalizedSendText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Whether this exact text to `key` still has the identity of an attempt whose
     /// outcome is unknown, so sending it again is a retry and not a second typing.
     public func holdsSendIdentity(text: String, to key: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = Self.normalizedSendText(text)
         return pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] != nil
+    }
+
+    /// Drops one unanswered send's identity (its exact session, trimmed text and
+    /// submit flag), so the same words sent again are a new send and not the retry
+    /// the daemon would replay as "already applied". The composer decides when,
+    /// through `abandonHeldSend(whenDraftChangesFrom:to:in:)`, which drops the words the
+    /// draft just left.
+    func dropSendIdentity(text: String, to key: String) {
+        let trimmed = Self.normalizedSendText(text)
+        pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] = nil
     }
 
     /// Keeps an unsettled mutation's identity — unless its session departed
