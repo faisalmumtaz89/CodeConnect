@@ -9798,7 +9798,9 @@ impl Daemon {
     /// from its cursor ([`crate::claude_host::attach_run`]), each in a task of its own, its
     /// runs' folders in `root`: a run going on gets the rest of its messages, and a host
     /// whose run has ended is drained, so it can exit. A host gone is the liveness
-    /// watch's ([`Self::watch_hosted_runs`]).
+    /// watch's ([`Self::watch_hosted_runs`]). Last, every Codex run still `starting` becomes
+    /// `failed`, whatever became of its start, and each recorded app-server's group gets the
+    /// ladder under its warrant, each in a task of its own: a start is never sent again.
     pub async fn recover_hosted_runs(self: &Arc<Self>, root: &std::path::Path) {
         match self.db.fail_unhosted_starts().await {
             Ok(0) => {}
@@ -9826,6 +9828,20 @@ impl Daemon {
                 watch.session_uid,
                 watch.host,
             ));
+        }
+        match self.db.fail_codex_starts().await {
+            Ok((0, _)) => {}
+            Ok((failed, hosts)) => {
+                crate::log_info!(
+                    "{failed} Codex run(s) were starting when ccd stopped, so they did not start"
+                );
+                for watch in hosts {
+                    tokio::spawn(async move {
+                        crate::codex_host::stop(&watch.session_uid, watch.host, watch.boot).await;
+                    });
+                }
+            }
+            Err(err) => crate::log_error!("could not fail the Codex runs still starting: {err:#}"),
         }
     }
 

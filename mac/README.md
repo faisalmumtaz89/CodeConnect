@@ -1156,9 +1156,11 @@ refused before its row. A start that fails once codex is launched (codex ends, d
 listen, or does not take the first message within 80 s, before or after the answer) is
 `failed`, and so is its run, whose process group then gets SIGTERM, and SIGKILL 5 s
 later only while members remain, under the same warrant. A `live` run whose app-server
-dies ends `exited`, "Stopped: its process ended", as a Claude run does. A daemon that
-stops mid-start leaves the run `starting`, its first message absent or taken, with
-nothing replayed after a restart.
+dies ends `exited`, "Stopped: its process ended", as a Claude run does. A run that a
+restarted daemon finds still `starting` is `failed`, whatever became of its start, before
+the daemon listens, and its recorded process group gets the same ladder under the same
+warrant. Nothing is sent again, so a first message Codex had already taken is lost with
+the run, and the person starts again.
 Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
 same environment. The shell starts from the
@@ -1763,3 +1765,8 @@ fails the suite instead of failing silently in production.
 * **A `send_text` from a client below minor 3 is not idempotent.** There is
   nothing to recognise a retry by, so a retried takeover types twice. The daemon
   logs it rather than pretending otherwise.
+* **A daemon that dies just after launching a Codex run's app-server can orphan it.**
+  The app-server's identity is recorded right after the launch, in one database
+  write. A daemon that dies in those few milliseconds leaves the run with no recorded
+  identity: the restarted daemon fails the run, but has nothing it may signal, and
+  Codex's app-server never exits by itself, so it runs until logout or reboot.

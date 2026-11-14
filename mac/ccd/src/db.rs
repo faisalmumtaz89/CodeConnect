@@ -329,6 +329,10 @@ impl Db {
         self.run(|store| store.fail_unhosted_starts()).await
     }
 
+    pub async fn fail_codex_starts(&self) -> Result<(usize, Vec<crate::store::WatchedHost>)> {
+        self.run(|store| store.fail_codex_starts()).await
+    }
+
     pub async fn hosted_link(
         &self,
         session_uid: String,
