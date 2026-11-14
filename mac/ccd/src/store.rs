@@ -2747,20 +2747,18 @@ impl Store {
                 return Ok(None);
             }
         }
-        // A hosted run is Claude's, so its row is in Claude's table.
-        let (table, _) = session_tables_for(&AgentKind::Claude);
-        let ended = tx.execute(
-            &format!(
-                "UPDATE {table} SET lifecycle = ?3, updated_at = ?4
-                  WHERE session_uid = ?1 AND lifecycle = ?2"
-            ),
-            params![
-                session_uid,
-                lifecycle_str(from),
-                lifecycle_str(to),
-                protocol::time::now_rfc3339()
-            ],
-        )?;
+        // The row is in its agent's table, the one of the two that holds it.
+        let now = protocol::time::now_rfc3339();
+        let mut ended = 0;
+        for table in SESSION_TABLES {
+            ended += tx.execute(
+                &format!(
+                    "UPDATE {table} SET lifecycle = ?3, updated_at = ?4
+                      WHERE session_uid = ?1 AND lifecycle = ?2"
+                ),
+                params![session_uid, lifecycle_str(from), lifecycle_str(to), now],
+            )?;
+        }
         let mut filed = Vec::new();
         if ended == 1 {
             filed.extend(append_in_tx(&tx, end)?);
@@ -3271,6 +3269,45 @@ impl Store {
             )?;
         }
         Ok(())
+    }
+
+    /// Move the run `session_uid` from `from` to `to`, only while it is still `from`, in
+    /// whichever table holds it. Whether it moved.
+    pub fn advance_lifecycle(
+        &self,
+        session_uid: &str,
+        from: Lifecycle,
+        to: Lifecycle,
+    ) -> Result<bool> {
+        let conn = self.write();
+        let now = protocol::time::now_rfc3339();
+        let mut moved = 0;
+        for table in SESSION_TABLES {
+            moved += conn.execute(
+                &format!(
+                    "UPDATE {table} SET lifecycle = ?3, updated_at = ?4
+                      WHERE session_uid = ?1 AND lifecycle = ?2"
+                ),
+                params![session_uid, lifecycle_str(from), lifecycle_str(to), now],
+            )?;
+        }
+        Ok(moved == 1)
+    }
+
+    /// Record the thread a ccd-hosted Codex run's first `thread/start` made, only while the
+    /// run is still `starting`. A run ccd hosts has no control-link generation, so
+    /// [`Store::bind_codex_thread`] cannot reach it. Whether it was recorded.
+    pub fn record_hosted_thread(&self, session_uid: &str, thread_id: &str) -> Result<bool> {
+        let (table, _) = session_tables_for(&AgentKind::Codex);
+        let recorded = self.write().execute(
+            &format!(
+                "UPDATE {table} SET codex_thread_id = ?2
+                  WHERE session_uid = ?1 AND lifecycle = ?3
+                    AND EXISTS (SELECT 1 FROM run_hosts WHERE session_uid = ?1)"
+            ),
+            params![session_uid, thread_id, lifecycle_str(Lifecycle::Starting)],
+        )?;
+        Ok(recorded == 1)
     }
 
     /// **Write down the thread a control link has actually adopted**, against the
@@ -12836,6 +12873,58 @@ mod tests {
         row.lifecycle = Lifecycle::Starting;
         assert_eq!(store.begin_run(&row, request_id).unwrap(), None);
         session
+    }
+
+    /// A hosted Codex run, in Codex's table: written with its start request.
+    fn begun_codex(store: &Store, tag: &str, request_id: &str) -> SessionKey {
+        let session = key(tag, &format!("run-{tag}"));
+        let mut row = session_row(&session);
+        row.tmux_session.clear();
+        row.tmux_socket.clear();
+        row.lifecycle = Lifecycle::Starting;
+        row.agent = AgentKind::Codex;
+        assert_eq!(store.begin_run(&row, request_id).unwrap(), None);
+        session
+    }
+
+    /// **A hosted Codex run's thread and its `live` are written only while it is still
+    /// starting**, so its first send never revives a run that has ended meanwhile; and a
+    /// Codex row ccd does not host gets no thread from here.
+    #[test]
+    fn a_hosted_codex_runs_thread_and_live_are_written_only_while_it_is_starting() {
+        let (store, _path) = temp_store();
+        let run = begun_codex(&store, "AA", "req-1");
+        assert!(store.record_hosted_thread(&run.uid, "thr-1").unwrap());
+        assert!(store
+            .advance_lifecycle(&run.uid, Lifecycle::Starting, Lifecycle::Live)
+            .unwrap());
+        assert!(!store.record_hosted_thread(&run.uid, "thr-2").unwrap());
+        let row = store.get_session(&run.uid).unwrap().unwrap();
+        assert_eq!(
+            (row.lifecycle, row.codex_thread_id.as_deref()),
+            (Lifecycle::Live, Some("thr-1"))
+        );
+
+        let ended = begun_codex(&store, "BB", "req-2");
+        store.set_lifecycle(&ended.uid, Lifecycle::Failed).unwrap();
+        assert!(!store
+            .advance_lifecycle(&ended.uid, Lifecycle::Starting, Lifecycle::Live)
+            .unwrap());
+        assert!(!store.record_hosted_thread(&ended.uid, "thr-3").unwrap());
+        let row = store.get_session(&ended.uid).unwrap().unwrap();
+        assert_eq!(
+            (row.lifecycle, row.codex_thread_id),
+            (Lifecycle::Failed, None)
+        );
+
+        let registered = key("CC", "cc-3");
+        let mut row = session_row(&registered);
+        row.agent = AgentKind::Codex;
+        row.lifecycle = Lifecycle::Starting;
+        store.upsert_session(&row).unwrap().assert_present();
+        assert!(!store
+            .record_hosted_thread(&registered.uid, "thr-4")
+            .unwrap());
     }
 
     #[test]

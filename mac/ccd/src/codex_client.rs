@@ -138,7 +138,7 @@ impl Client {
     }
 
     /// Call `method` and wait for its answer. No deadline of its own: the caller bounds it.
-    async fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
+    pub(crate) async fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = oneshot::channel();
         match self

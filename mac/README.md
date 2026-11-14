@@ -1133,11 +1133,28 @@ app-server --listen unix://<run folder>/as.sock`. The list is every folder from 
 repository's top down to the start's, by its real path, or that folder alone outside
 git, each `trust_level = "untrusted"`. The run's process is that one pid throughout,
 recorded with the birth time the kernel gives it. The daemon connects over `as.sock`,
-sends `initialize` and `initialized`, and answers started with the folder; the run
-stays `starting`, and the first message is not yet sent: no thread is started on it
-yet. A start that fails once codex is launched (codex ends, does not listen or does not
-initialize within 80 s) is `failed`, and so is its run, whose process group then gets
-SIGTERM, and SIGKILL 5 s later only while members remain, under the same warrant.
+sends `initialize` and `initialized`, and answers started with the folder. The run's
+own task then sends the first message on that connection:
+- `skills/list` for the folder;
+- `thread/start` with the folder, the start's model (none for Codex's own `default`),
+  `approvalPolicy: "on-request"`, `sandbox: "workspace-write"` and a thread config that
+  keeps the project out:
+  - the same folder list, each untrusted;
+  - every repository-scope skill `skills/list` reported, disabled;
+  - CodeConnect's mail server (`codeconnect mcp`) with the run's uid in its `env`;
+- the thread recorded on the run's row;
+- `turn/start` with the first message under the start's own uuid as its
+  `clientUserMessageId`.
+
+The run is then `live`, and the connection is let go: the turn runs on. Nothing is
+written to Codex's own config. A start with no `codeconnect` to run the mail server is
+refused before its row. A start that fails once codex is launched (codex ends, does not
+listen, or does not take the first message within 80 s, before or after the answer) is
+`failed`, and so is its run, whose process group then gets SIGTERM, and SIGKILL 5 s
+later only while members remain, under the same warrant. A `live` run whose app-server
+dies ends `exited`, "Stopped: its process ended", as a Claude run does. A daemon that
+stops mid-start leaves the run `starting`, its first message absent or taken, with
+nothing replayed after a restart.
 Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
 same environment. The shell starts from the
@@ -1243,8 +1260,8 @@ model provider of the user's own, so one set up while the daemon runs is offered
 once Codex is updated or the daemon restarts. An agent that does not answer
 within the check's 10 s offers no models. `start_session`'s `model` is given to Claude
 Code's host as the run's model; absent, or Claude Code's own `default`, it gets none
-and starts with the model its settings name. A Codex run starts no thread yet, so its
-model is not yet used.
+and starts with the model its settings name. A Codex run's goes on its `thread/start`,
+and Codex's own `default` as none, the same way.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
