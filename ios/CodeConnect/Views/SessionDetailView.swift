@@ -2391,7 +2391,16 @@ private struct SessionComposeBar: View {
     /// tall enough to push the pending card's own controls off screen.
     @ViewBuilder
     private var standingNote: some View {
-        if let note = model.outcomeNote(for: key, lastSend: result) {
+        // A reason that sending cannot work wins over a stale outcome note: the
+        // reader cannot send now (e.g. a card waits on this Codex run), so the
+        // standing reason — "answer the card first" — is what they need, not the
+        // last send's verdict (R2T3-F1). Only a block wins here; the neutral
+        // "observe only" note stays below the outcome, as before.
+        if model.sendBlockedReason(for: key, draft: text) != nil,
+            let note = model.standingNote(for: key, draft: text)
+        {
+            composeNote(note)
+        } else if let note = model.outcomeNote(for: key, lastSend: result) {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)

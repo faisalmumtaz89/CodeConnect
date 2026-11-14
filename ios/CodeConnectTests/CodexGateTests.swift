@@ -504,17 +504,82 @@ final class CodexGateTests: XCTestCase {
         }
     }
 
+    // MARK: R2T3-F1 — a message to a Codex run while a card waits
+
+    private static let cardWaitLine = "Answer the card first. Your draft will stay here."
+
+    private func codexFleet(agent: String = "codex", link: String = "subscribed", pending: Bool)
+        -> AppModel
+    {
+        let model = AppModel(
+            cache: EventCache(),
+            codexSpentLedger: CodexSpentLedger(
+                defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(extra: ["codex_interrupt": .bool(true), "codex_compose": .bool(true)]),
+            minor: 18)
+        model.connection.injectForTesting(
+            .sessions([Self.summary(uid: "u", agent: agent, link: link, pending: pending)]))
+        return model
+    }
+
+    /// (gate 1) A card waiting on a Codex run blocks compose: the line is shown and no
+    /// frame leaves; the draft is the view's to keep (it clears only on a landed result).
+    func testACardWaitingOnACodexRunBlocksCompose() async {
+        let model = codexFleet(pending: true)
+        XCTAssertEqual(model.composeUnavailable(for: "u"), Self.cardWaitLine)
+        let wire = wired(model.connection)
+        let result = await model.composeToCodex(sessionKey: "u", text: "steer me")
+        XCTAssertNil(result, "a blocked compose does not send")
+        XCTAssertFalse(wire.types.contains { $0 == "compose" }, "no compose frame left: \(wire.types)")
+    }
+
+    /// (gate 2) The submit race: the card is named in `summary.pending` but no
+    /// approval_request event has been built into `pendingApprovals`, yet the submit is
+    /// still refused and no frame leaves.
+    func testTheSubmitIsRefusedWhenTheCardIsKnownButNotYetBuilt() async {
+        let model = codexFleet(pending: true)
+        XCTAssertTrue(
+            model.shown(for: "u")?.pendingApprovals.isEmpty ?? true,
+            "no card is built from an event — only the summary names it")
+        let wire = wired(model.connection)
+        let result = await model.composeToCodex(sessionKey: "u", text: "steer me")
+        XCTAssertNil(result, "the submit refuses on the summary's pending ref alone")
+        XCTAssertFalse(wire.types.contains { $0 == "compose" }, "no compose frame left: \(wire.types)")
+    }
+
+    /// (gate 3) Claude is left alone: a waiting card does not raise the Codex card-wait line.
+    func testACardWaitingOnAClaudeRunKeepsClaudeUnchanged() {
+        let model = codexFleet(agent: "claude", link: "none", pending: true)
+        XCTAssertNotEqual(
+            model.composeUnavailable(for: "u"), Self.cardWaitLine, "the card-wait rule is Codex-only")
+    }
+
+    /// (gate 4 source) The composer's standing reason carries the card-wait line, so the
+    /// note slot can show it (the view prefers it over a stale outcome).
+    func testTheCardWaitLineIsTheStandingReason() {
+        let model = codexFleet(pending: true)
+        XCTAssertEqual(model.sendBlockedReason(for: "u", draft: "hi"), Self.cardWaitLine)
+    }
+
     // MARK: Helpers
 
-    private static func summary(uid: String, agent: String, link: String) -> SessionSummary {
-        try! JSONDecoder().decode(
+    private static func summary(uid: String, agent: String, link: String, pending: Bool = false)
+        -> SessionSummary
+    {
+        // A waiting card is named by a `pending` ref — present even before its
+        // approval_request event is ingested and built into `pendingApprovals`.
+        let pendingJSON = pending
+            ? ",\"pending\":[{\"request_id\":\"\(uid)-card\",\"seq\":2,\"turn_id\":\"t1\"}]" : ""
+        return try! JSONDecoder().decode(
             SessionSummary.self,
             from: Data(
                 """
                 {"session_uid":"\(uid)","session_id":"\(uid)","tmux_session":"\(uid)",
                  "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
                  "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
-                 "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],
+                 "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[]\(pendingJSON),
                  "agent":"\(agent)","codex_link":"\(link)"}
                 """.utf8))
     }
