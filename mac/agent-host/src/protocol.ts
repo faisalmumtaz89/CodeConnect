@@ -35,8 +35,10 @@ export interface StartOptions {
   mail: McpCommand;
 }
 
-/** An answer to a permission request, as the SDK's `PermissionResult` takes it. */
-export type Decision = { behavior: 'allow'; updated_input?: Json } | { behavior: 'deny'; message: string; interrupt?: boolean };
+/** An answer to a permission request, as the SDK's `PermissionResult` takes it. `updated_permissions` is its `updatedPermissions`: "Allow for this session"'s rules. */
+export type Decision =
+  | { behavior: 'allow'; updated_input?: Json; updated_permissions?: Json }
+  | { behavior: 'deny'; message: string; interrupt?: boolean };
 
 /** A line ccd sends the host. `attach` is the first line of every connection; every command carries ccd's uuid. */
 export type ToHost =
@@ -47,7 +49,7 @@ export type ToHost =
   | { type: 'answer'; uuid: string; tool_use_id: string; decision: Decision }
   | { type: 'set_model'; uuid: string; model: string; effort?: string }
   | { type: 'set_mode'; uuid: string; mode: string }
-  | { type: 'interrupt'; uuid: string }
+  | { type: 'interrupt'; uuid: string; turn_id: string }
   | { type: 'stop'; uuid: string };
 
 /** A `canUseTool` call: `options` is the SDK's, without its signal, tool-use id and control request id. */
@@ -83,6 +85,7 @@ export type FromHost =
       detail?: string;
       initialize?: InitializeAnswer;
       cancelled?: string[];
+      terminal_reason?: string;
     }
   | {
       type: 'state';

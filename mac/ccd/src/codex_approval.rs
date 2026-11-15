@@ -1266,6 +1266,7 @@ impl Approval {
             // this true.
             identity_bound: false,
             question_hold: None,
+            allow_for_session: false,
         }
     }
 }

@@ -375,7 +375,8 @@ pub enum ClientMessage {
         attachment_id: String,
     },
 
-    /// Abort the running turn named by `turn_id` on a Codex session.
+    /// Abort the running turn named by `turn_id`, on a Codex session or on a Claude run
+    /// CodeConnect started.
     ///
     /// A mutating operation, so it carries a ledger identity like every other:
     /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
@@ -384,11 +385,13 @@ pub enum ClientMessage {
     ///
     /// **Honoured**: the daemon genuinely aborts the turn a Codex session is
     /// running, and answers with a typed [`ServerMessage::InterruptResult`]
-    /// whatever becomes of it. A Claude client never sends it — Claude's stop
-    /// control is the keyboard at the Mac, and a Claude session is refused with
-    /// the sentence that says so rather than by a bare no.
+    /// whatever becomes of it. For a Claude run CodeConnect started (minor 37,
+    /// [`Capabilities::claude_interrupt`]) the turn is the `turn_id` of its events, its
+    /// `system/init` uuid, and the run's agent host stops it only while claude is running
+    /// it. Any other Claude session is refused with the sentence that says where its stop
+    /// control is, rather than by a bare no.
     ///
-    /// Two gates stand between this message and a stopped turn, and they bind
+    /// For a Codex session, two gates stand between this message and a stopped turn, and they bind
     /// different things, which is why neither is redundant. The daemon's own gate
     /// binds the ask to the exact `turn_id` the hash names, to the thread its
     /// control link is *subscribed* to, and to that link's current visit
@@ -1053,8 +1056,8 @@ pub enum InterruptResult {
     /// untouched by this ask, which no other status licenses.
     ///
     /// The reason is ccd's sentence, which can carry the app-server's own turn
-    /// status. It says the run is not a Codex
-    /// session (a Claude one is told where its stop control actually is), the
+    /// status. It says the run cannot be stopped from here (a Claude session
+    /// CodeConnect did not start is told where its stop control actually is), the
     /// control link is not watching the turn's thread so no stop could be
     /// confirmed, the hash does not bind this ask to the turn it names, or a
     /// settled claim that stopped nothing is being replayed.
@@ -1316,6 +1319,14 @@ pub struct Capabilities {
     /// is advertised.
     #[serde(default)]
     pub stop_run: bool,
+    /// **This daemon stops the running turn of a Claude run it started**
+    /// ([`ClientMessage::Interrupt`], minor 37), through the run's agent host. Absent
+    /// decodes `false`: an older daemon refuses every Claude Stop, so a client offers
+    /// Stop on a Claude run only when this is advertised. It is
+    /// [`Self::codex_interrupt`]'s twin for the other engine, and the two fold into one
+    /// once the tmux-era Codex path is removed (X12), so no third is added.
+    #[serde(default)]
+    pub claude_interrupt: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -1368,8 +1379,9 @@ pub enum AnswerDecision {
     /// options are not a 1-based list (Codex's `availableDecisions`). The daemon
     /// validates it against the exact option set it stored for the request and
     /// the payload hash over that set — the id is never interpreted here. Additive
-    /// (minor 15): a Claude answer never uses it, so Claude's `AnswerDecision`
-    /// serialization is unchanged.
+    /// (minor 15). On a Claude card it is only `"acceptForSession"`, "Allow for this
+    /// session", and only where the card offers it ([`ApprovalCard::allow_for_session`],
+    /// minor 36); every other Claude answer is refused.
     OptionId {
         option_id: String,
     },
@@ -1381,9 +1393,10 @@ pub enum AnswerDecision {
         answers: Vec<QuestionAnswer>,
     },
     /// Decline a Claude `AskUserQuestion` card (minor 21): the daemon denies it
-    /// through its held hook. The main conversation's question is denied with
-    /// an interrupt, so the turn stops as Escape at its dialog does; a
-    /// background agent's is denied without one.
+    /// through its held hook, or, for a run started in an agent host, through
+    /// that host. The main conversation's question is denied with an interrupt,
+    /// so the turn stops as Escape at its dialog does; a background agent's is
+    /// denied without one.
     Decline,
 }
 
@@ -1893,6 +1906,20 @@ pub struct ApprovalCard {
     /// [`QuestionHold`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_hold: Option<QuestionHold>,
+    /// The card offers "Allow for this session" (minor 36): a Claude approval in a run
+    /// started in an agent host whose request suggested an allow rule. The app answers it
+    /// with [`AnswerDecision::OptionId`] `"acceptForSession"`; the daemon then returns that
+    /// rule to Claude for this session only, never written to its settings. Absent and false
+    /// mean the same.
+    ///
+    /// The answer side is already one way for both engines: `option_id:
+    /// "acceptForSession"`. The offer side differs because a Codex card's `tool_input` is
+    /// ccd's own description, whose hash binds its options, while a Claude card's
+    /// `tool_input` is Claude's `canUseTool` input and must stay byte for byte Claude's.
+    /// Moving Codex's table and its hash binding across engines for one button would be
+    /// over-engineering.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_for_session: bool,
 }
 
 #[cfg(test)]
@@ -2253,12 +2280,21 @@ mod tests {
              capability) and the `stopping` lifecycle are minor 35"
         );
         const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 36,
+            "\"Allow for this session\" on a hosted Claude run's card (`allow_for_session`) \
+             is minor 36"
+        );
+        const _: () = assert!(
             crate::PROTOCOL_VERSION == 2,
             "major 2 is the one engine's protocol"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 37,
+            "Stop on a Claude run CodeConnect started (`claude_interrupt`) is minor 37"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 35);
+        assert_eq!(crate::PROTOCOL_MINOR, 37);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2770,6 +2806,7 @@ mod tests {
             browse_folders: true,
             machine_stats: true,
             stop_run: true,
+            claude_interrupt: true,
         }
     }
 
@@ -3767,6 +3804,7 @@ mod tests {
             generation: 1,
             identity_bound: true,
             question_hold: None,
+            allow_for_session: false,
         };
         assert!(!serde_json::to_string(&card).unwrap().contains("risk"));
 

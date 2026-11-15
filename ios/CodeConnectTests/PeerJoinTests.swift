@@ -26,24 +26,45 @@ final class PeerJoinTests: XCTestCase {
         connection.stop()
     }
 
-    /// Blocked, then allowed again: refused by its token and then without one,
-    /// the device keeps its token, so the next try (a return to the app, or
-    /// Retry) asks with it, and the computer that restored its pairing lets it
-    /// in as it was.
+    /// Blocked, then allowed again (T5-F1): the computer answers the held token with
+    /// "revoked", not "unauthorized", so the link reads blocked and keeps dialling with
+    /// that same token — it never asks for a code, never sends "none", and never reaches
+    /// the terminal refused state. The instant the pairing is restored the next dial is
+    /// admitted, as the same device, with no new code.
     func testABlockedDeviceAllowedAgainIsBackWithItsOwnToken() async throws {
         let blocked = OSAllocatedUnfairLock(initialState: true)
         let daemon = try StubDaemon { credential in
-            credential == "token kept" && !blocked.withLock { $0 }
-                ? .admit(token: "kept", machineID: "daemon-1") : .refuse
+            guard credential == "token kept" else { return .refuse }
+            return blocked.withLock { $0 } ? .revoked : .admit(token: "kept", machineID: "daemon-1")
         }
         let connection = DaemonConnection()
         connection.start(
             endpoint: DaemonEndpoint(host: "127.0.0.1", port: daemon.port, credential: .token("kept"), useTLS: false))
-        try await until { if case .failed = connection.phase { true } else { false } }
+        // A block is retryable, not terminal: the link reads blocked and never fails.
+        try await until { connection.dialFailure == .blocked }
+        XCTAssertNotEqual(connection.phase, .failed(reason: ConnectionError.revoked.localizedDescription))
+        // Allowed again: the loop reconnects on its own, on the token it already held.
         blocked.withLock { $0 = false }
-        connection.retryNow()
         try await until { connection.phase.isConnected }
-        XCTAssertEqual(daemon.hellos, ["token kept", "none", "token kept"])
+        XCTAssertTrue(daemon.hellos.allSatisfy { $0 == "token kept" }, "no code, no none: \(daemon.hellos)")
+        connection.stop()
+    }
+
+    /// A typed token (a pairing dial) for a blocked pairing is not a shape a real person
+    /// produces, but if it happens it must not promise a reconnect it cannot make: a pairing
+    /// dial takes the plain refused-token path — terminal, with the refused-token words — not
+    /// the retryable blocked state a saved-token dial gets.
+    func testATypedTokenForABlockedPairingTakesTheRefusedTokenPath() async throws {
+        let daemon = try StubDaemon { _ in .revoked }
+        let connection = DaemonConnection()
+        connection.start(
+            endpoint: DaemonEndpoint(
+                host: "127.0.0.1", port: daemon.port, credential: .token("blocked"), useTLS: false),
+            forPairing: true)
+        try await until { if case .failed = connection.phase { true } else { false } }
+        XCTAssertEqual(connection.phase, .failed(reason: ConnectionError.unauthorized.localizedDescription))
+        XCTAssertNotEqual(
+            connection.dialFailure, .blocked, "a pairing dial does not enter the retryable blocked state")
         connection.stop()
     }
 
@@ -119,6 +140,9 @@ final class PeerJoinTests: XCTestCase {
 private final class StubDaemon: @unchecked Sendable {
     enum Answer {
         case refuse
+        /// The handshake refused a token whose pairing the computer has blocked: the
+        /// daemon's "revoked" answer, distinct from "unauthorized".
+        case revoked
         case admit(token: String, machineID: String)
     }
 
@@ -174,6 +198,14 @@ private final class StubDaemon: @unchecked Sendable {
                 switch answer(credential) {
                 case .refuse:
                     send(["type": "error", "code": "unauthorized", "message": "refused"], on: connection) {
+                        connection.cancel()
+                    }
+                    return
+                case .revoked:
+                    send(
+                        ["type": "error", "code": "revoked", "message": "this device has been revoked"],
+                        on: connection
+                    ) {
                         connection.cancel()
                     }
                     return

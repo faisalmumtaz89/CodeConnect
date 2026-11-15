@@ -677,7 +677,8 @@ function of the events:
 ## Claude's approvals
 
 A Claude approval is answered only through the hook Claude holds for that card's
-own call, never by typing into the prompt on screen, which can be another agent's.
+own call, or, in a run started in an app, through its agent host, never by typing
+into the prompt on screen, which can be another agent's.
 The card is answerable only from a daemon that advertises `hook_only_approvals`
 (protocol minor 22, `DaemonProfile.answersApprovalsByHook`) and only while its
 `question_hold` is `held` (`DecisionCard.answerSurface`); the send path refuses
@@ -687,16 +688,26 @@ old, Claude is asking at the Mac, or the phone can no longer answer it.
 
 A held card offers **Allow**, **Deny** and **Deny with a reason**. Deny with a
 reason is one answer, `{"type":"text","text":…}`, which the daemon returns to the
-agent that asked as its denial. "Always" is chosen at the Mac, where Claude's own
-dialog says exactly what it saves; the phone never offers rows read off the Mac's
-screen.
+agent that asked as its denial. In a run started in a terminal, "Always" is chosen
+at the Mac, where Claude's own dialog says exactly what it saves; the phone never
+offers rows read off the Mac's screen. A run started in an app has no dialog at the
+Mac: there the daemon marks a card whose request suggests an allow rule
+(`allow_for_session`, protocol minor 36), and the phone then offers **Allow for this
+session** beside Allow and Deny, under a one-line caption naming the rule it would
+grant as Claude writes it (e.g. `Bash(touch m1.txt)`) — the rule can be broader than
+the one command on the card, so a person reads what they grant before granting it.
+Its answer is `option_id: "acceptForSession"`, which gives Claude that rule for this
+session only.
 
-A sent answer is recorded as sent to Claude, not confirmed (`indeterminate`, detail
-"Sent to Claude from a phone"; `AnswerOutcome.wasSentToClaude`), because Claude
-takes the first answer and may not use the phone's. The banner, the resolved card
-and the timeline say "Sent", never "Confirmed" or "Unconfirmed". The detail is a
-marker, the same whichever device answered; the words shown name that device from
-`answeredOn` (`AnswerOutcome.sentToClaudeLine(on:)`).
+In a run started in a terminal, a sent answer is recorded as sent to Claude, not
+confirmed (`indeterminate`, detail "Sent to Claude from a phone";
+`AnswerOutcome.wasSentToClaude`), because Claude takes the first answer and may not
+use the phone's. The banner, the resolved card and the timeline say "Sent", never
+"Confirmed" or "Unconfirmed". The detail is a marker, the same whichever device
+answered; the words shown name that device from `answeredOn`
+(`AnswerOutcome.sentToClaudeLine(on:)`). In a run started in an app the agent host
+says when the answer reached Claude, so the answer is recorded as applied: not
+`indeterminate`, and with no such detail.
 
 `CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
 ccd's own test emits.
@@ -733,8 +744,8 @@ falls back to the approval layout, read-only):
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
 (`AnswerDecision`, `CodeConnectKit/Sources/CodeConnectKit/QuestionCard.swift`). The daemon builds Claude's answer
-from the question it stored and returns it through Claude's held hook; nothing is
-typed.
+from the question it stored and returns it through Claude's held hook, or, for a
+session started from an app, through its agent host; nothing is typed.
 
 Whether the phone may answer is the card's `question_hold` — `held`, `at_mac` or
 `ended` — and a later `question_hold` event for the same request overrides it
@@ -745,8 +756,10 @@ the questions read-only and says why (`QuestionCardStatus`): *Asking at the Mac*
 (Claude ran with exactly those answers; the kind of device that sent them is named
 when the record says, which one is not recorded, and the same answers chosen at the
 Mac would read the same), *Answered at the Mac*,
-*Declined* (a decline from a phone recorded as taken, which only an older Mac
-records), *Unconfirmed* (a current Mac's decline among them), and
+*Declined* (a decline from a phone recorded as taken: an older Mac records it so,
+and so does a current Mac for a session started from an app, whose agent host
+confirms it), *Unconfirmed* (a current Mac's decline of a terminal session's
+question among them), and
 *Closed* when the question left the Mac (Escape, the session or turn ending)
 without anyone being seen to answer it. Neither age nor a newer prompt closes a
 question card: one still open at the Mac stays *Asking at the Mac*. A refusal saying the question was "answered at the Mac"

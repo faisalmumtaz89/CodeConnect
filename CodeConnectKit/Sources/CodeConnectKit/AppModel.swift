@@ -3268,7 +3268,9 @@ public final class AppModel {
         // **The decision must match the agent, checked on the send path.**
         //
         // The two vocabularies are mutually exclusive and the Mac refuses each
-        // one aimed at the other by name. The view already picks the right
+        // one aimed at the other by name, but for a Claude card's
+        // `acceptForSession` where the card offers it (`allow_for_session`,
+        // minor 36). The view already picks the right
         // surface, but a view is not a guarantee: this closes the path itself,
         // so a deep link, a stale sheet or a future caller cannot transmit a
         // decision the daemon will only send back.
@@ -3368,6 +3370,12 @@ public final class AppModel {
             (.codex, .text), (.codex, .answers), (.codex, .decline):
             return "A Codex card is answered by naming one of the options it offered, "
                 + "so nothing was sent."
+        case (.claude, .optionId("acceptForSession")):
+            // The one option id a Claude card accepts: "Allow for this session",
+            // shown only when the card offered it (`allowForSession`) and refused
+            // by the computer on a card that did not. Every other option id is a
+            // Codex vocabulary the Mac refuses by name.
+            return nil
         case (.claude, .optionId):
             return "An option id is for a Codex session; this is a Claude session, "
                 + "so nothing was sent."

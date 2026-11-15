@@ -39,7 +39,7 @@ final class HookOnlyApprovalTests: XCTestCase {
         XCTAssertEqual(
             DecisionCard.answerSurface(
                 card: held, agent: .claude, hold: held.questionHold, hookOnlyApprovals: true),
-            .allowDeny)
+            .allowDeny(allowForSession: false))
     }
 
     /// The phone grants no standing permission: "always" is chosen at the Mac,

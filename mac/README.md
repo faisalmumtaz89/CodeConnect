@@ -209,8 +209,11 @@ store by it.
 ## Card identity
 
 A Claude approval card is answered only through the `PermissionRequest` hook
-Claude holds for its own call, never by typing into the prompt on screen — see
+Claude holds for its own call, or, for a run started from an app, through the
+agent host's return to that call's `canUseTool` request, never by typing into the
+prompt on screen — see
 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#approving-something-safely).
+What follows in this section is the hook's.
 The card is joined to its call's `tool_use_id` by that call's `PreToolUse`,
 keyed by run, prompt, tool, input and background agent; a request with two open
 calls under one key joins neither, and its card is read-only. A call whose
@@ -999,7 +1002,7 @@ gate then refuses.
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
-`send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`,
+`send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages` and `supported_agents` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
@@ -1043,7 +1046,8 @@ well. `>= 21` answers Claude's `AskUserQuestion` from the phone: the
 `question_card` capability, `ApprovalCard.question_hold` (`held`, `at_mac`,
 `ended`, updated by `question_hold` events), and the `answers` and `decline`
 decisions; `allow` and `option` on a question card are refused for every client.
-`>= 22` answers every Claude card only through its own call's hook, and nothing
+`>= 22` answers every Claude card only through its own call's hook (or, for a run
+started from an app, through its agent host), and nothing
 is typed: the `hook_only_approvals` capability, `question_hold` on every Claude
 card, and `text` on a Claude approval as a denial with that reason. For every
 client, any `option` but `1` on an approval is refused, and so is any decision
@@ -1154,14 +1158,26 @@ For such a run the model and effort sheets are refused ("Changing the model isn'
 available for this session yet.", and the same for the effort), and so are `/status`,
 `/usage`, `/cost` and `/clear` ("This isn't available for this session yet.").
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
-a card the apps answer: allow, deny, or deny with a reason. The answer goes to claude through
-the host, and the card closes as answered once the host has written it into claude's input;
-a request claude stops waiting on (End run, or claude's end) closes with nobody having
-answered. A card stays answerable across a ccd restart, and an answer sent just before one
+a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
+suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
+the app answers `option_id: "acceptForSession"`): claude gets its own allow rules for the call
+with the session as their destination, so they last only while this session runs and are never
+written to claude's settings; a mode change or a folder claude suggested with them is not sent.
+ccd decides that from the card it stored, and refuses the answer on a card that does not offer
+it, nothing sent. A command claude's own rule cannot match (one with arithmetic expansion or a
+redirect, for example) is asked about again, as when claude runs directly. The answer goes to
+claude through the host, and the card closes as answered once the host has written it into
+claude's input; a request claude stops waiting on (End run, or claude's end) closes with
+nobody having answered. A card stays answerable across a ccd restart, and an answer sent just before one
 is never sent twice: the host's replay says whether it reached claude. A request whose card
-would be too large for an app to show is refused at once, and claude is told why. Claude's
-questions are not cards yet: claude is told so and asks in its reply instead. A shell command
-that only reads raises no card: claude runs it without asking, as it does when run directly.
+would be too large for an app to show is refused at once, and claude is told why. A question
+claude asks (`AskUserQuestion`) is a card too, answered with the options picked (and any
+"Other" text or notes), which go back to claude as the call's input, or declined, which
+denies it, "Declined from iPhone" or "Declined from Mac", and stops the main conversation's
+turn but not a subagent's; nothing about how the terminal would draw its text keeps it from
+the apps, and an allow, an option or a reason on it is refused. Once the host confirms either
+answer, the card reads answered or declined. A shell command that only reads raises no card:
+claude runs it without asking, as it does when run directly.
 An app ends a live Claude run with `stop_run`: the run becomes `stopping` and its host, if its link
 is attached, is sent `stop`, which interrupts claude, ends its input and closes the query;
 claude's end then ends the run `exited`, "Stopped", with no exit code, since the person asked
@@ -1169,6 +1185,18 @@ for it. A host that has not exited 10 s after the stop, told or not, has its gro
 the same ladder, and the run ends "Stopped" too. A run still starting is refused, and one that has ended answers
 `already_ended`. A ccd restart sends a stopping run `stop` again and starts its 10 s again. A run CodeConnect
 did not start is refused.
+An app stops the turn a Claude run CodeConnect started is running with `interrupt`, Codex's
+Stop with the same frames and answers (`claude_interrupt`, minor 37), naming the turn by its
+events' `turn_id`. ccd sends
+the host `interrupt` with that turn, and the host interrupts claude, its queued messages cancelled
+(`cancel_queued`), only while that turn is the one claude is running; otherwise it refuses and
+nothing is sent. The Stop reads `aborted` when the turn ends interrupted, and "that turn ended on
+its own" when it finished first. A second Stop of the turn while one waits, and a Stop of a run
+that is ending, has ended or is still starting, are refused at once. A message the Stop cancelled
+before claude ran it gets a `send_not_sent` notice ("Not sent: stopped", with its `request_id`,
+which the person's own row of it carries too). A card open when the Stop ends the turn closes
+"The turn was stopped before anyone answered." A Stop in flight when ccd restarts reads unknown,
+and is never sent again.
 A Codex start that goes on is checked the same way: the daemon finds the codex the
 launcher would run, from the same list as `codex_bin` without `CODECONNECT_CODEX_BIN`,
 and asks it its `--version`. It is `agent_missing` when none is found, and
@@ -1498,6 +1526,10 @@ to probe credentials.
   from a paired device: the Mac app's when its connection said hello as
   "CodeConnect Mac", an iPhone's otherwise. Absent on every other outcome, from
   an older daemon, and on an answer a restart settled. It chooses words only.
+* **`ApprovalCard.allow_for_session`** (minor 36) — `true` on a card from a run
+  started in an app whose request suggests an allow rule: the card offers "Allow for
+  this session", answered `option_id: "acceptForSession"`. Left out when false, so an
+  older app reads every card as before.
 * **`ApprovalCard.question_hold` / `identity_bound`** — see
   [Card identity](#card-identity). Before minor 22, `identity_bound` meant the
   prompt on screen had been fingerprinted for typing, announced by an
@@ -1810,6 +1842,11 @@ fails the suite instead of failing silently in production.
   the retry: the same words typed again later are a new message. One case is not
   guarded: a reply typed character for character the same as a diff comment just left
   unconfirmed on the same session, where the comment's retry could type it twice.
+* **A Stop at the instant a turn ends can stop the next one.** If a turn has just ended inside
+  Claude and a message sent at that moment starts the next one, a Stop of the first reaches the
+  second: that turn is interrupted, or its message is cancelled before it runs, and the Stop reads
+  that the turn ended on its own. Claude's interrupt names no turn, so this cannot be told apart;
+  nothing the person asked to stop goes on running.
 * **A permission request too large to show is refused.** In a session started from an
   app, a request whose details are too large for the app to show (a very large file
   write, for example) is refused at once rather than approved unseen. Claude is told
@@ -1817,11 +1854,11 @@ fails the suite instead of failing silently in production.
   timeline; a subagent's calls are not shown there, so its refusal is not either.
 * **An approval tapped in the first moment after ccd restarts may not stick.** While
   ccd catches up with a session started from an app, which takes a fraction of a
-  second, an answer to one of its approval cards may reach Claude without being
-  recorded. The app then says the answer could not be confirmed and the card stays
-  open until the session ends. In that same moment, denying a subagent's request
-  also stops Claude's main reply. Nothing is ever allowed that the person did not
-  allow.
+  second, an answer to one of its approval or question cards may reach Claude
+  without being recorded. The app then says the answer could not be confirmed and
+  the card stays open until the session ends. In that same moment, denying a
+  subagent's request, or declining its question, also stops Claude's main reply.
+  Nothing is ever allowed that the person did not allow.
 * **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
   repaints the session from tmux's record of it, and tmux does not track kitty
   keyboard flags or focus reporting: an agent that turned them on when it started

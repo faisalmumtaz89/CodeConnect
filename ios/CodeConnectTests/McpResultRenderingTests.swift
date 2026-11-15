@@ -82,8 +82,8 @@ final class McpResultRenderingTests: XCTestCase {
     /// `EventKind.other("codex_mcpToolCall")` — call+result in one event. Without a reader it drew NO
     /// row (the person never saw what mail Codex read or sent). It now draws a tool row: name
     /// `mcp__<server>__<tool>`, the arguments as input, the result via `mcpBlocksText`. Fixture is
-    /// daemon-emitted, verbatim — codex-mcp-wire.json (run 01M7B2BW…, seq 9 read_messages + seq 11
-    /// send_message, events.db ccqa.pp47cN). Mutant: the reader's guard never matches → no row.
+    /// daemon-emitted, verbatim — codex-mcp-wire.json (an app-qa G24 capture, run 01M7DKX9…, seq 9
+    /// read_messages + seq 12 send_message). Mutant: the reader's guard never matches → no row.
     func testACodexMcpCallDrawsAToolRowWithItsResult() throws {
         let rows = TimelineBuilder.build(try events("codex-mcp-wire")).compactMap { item -> ToolItem? in
             if case .tool(let tool) = item.content { return tool }
@@ -93,7 +93,7 @@ final class McpResultRenderingTests: XCTestCase {
             rows.first { $0.name == "mcp__codeconnect__read_messages" },
             "the Codex read_messages call draws a tool row (it drew none before)")
         XCTAssertEqual(
-            read.output?.contains("Message 01M7B2CV") ?? false, true,
+            read.output?.contains("Message 01M7DKY8") ?? false, true,
             "the row shows what read_messages returned: \(String(describing: read.output))")
         let send = try XCTUnwrap(
             rows.first { $0.name == "mcp__codeconnect__send_message" },

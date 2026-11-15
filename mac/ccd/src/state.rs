@@ -364,6 +364,10 @@ pub enum AuthOutcome {
     /// because telling an unauthenticated caller which of "wrong", "expired"
     /// and "already used" applies is a free oracle.
     Rejected(String),
+    /// A token that matches a pairing the computer has blocked (`revoked_at` set): the
+    /// device keeps its token, so the phone is told "revoked" and waits to be allowed
+    /// again, not sent to pair with a new code.
+    Revoked,
 }
 
 /// What `codeconnect revoke` did.
@@ -491,6 +495,17 @@ struct Inner {
     /// answer reached claude. A restarted daemon holds none, and records the
     /// outcome from the answer's claim instead.
     host_answers: HashMap<String, AnswerOutcome>,
+    /// App Stops sent to a run's agent host and waiting for its outcome, by the
+    /// interrupt's uuid, each with its run's `session_uid`: told what became of the Stop
+    /// once the host's outcome is applied ([`crate::claude_host::interrupt`]). Dropped when
+    /// the run's link ends, so a waiter then hears nothing more.
+    host_stops: HashMap<
+        String,
+        (
+            String,
+            tokio::sync::oneshot::Sender<crate::codex_link::InterruptReport>,
+        ),
+    >,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -3558,6 +3573,7 @@ impl Daemon {
             // Such a phone reads no hold, and a question takes no Allow.
             identity_bound: !question && hold == QuestionHold::Held,
             question_hold: Some(hold),
+            allow_for_session: false,
         };
 
         let mut payload = serde_json::json!({ "card": card, "hook": post.payload });
@@ -5774,7 +5790,8 @@ impl Daemon {
         }
     }
 
-    /// **Stop the turn a Codex session is running, from a phone.**
+    /// **Stop the turn a Codex session is running, from a phone**, or a Claude run
+    /// CodeConnect started, through its agent host ([`crate::claude_host::interrupt`]).
     ///
     /// Idempotent by `(session, request_id)` in the generalized mutation ledger, and
     /// bound to one turn by `payload_hash` — so a retry can never abort a *different*
@@ -5832,12 +5849,20 @@ impl Daemon {
                 return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
+        // A Claude run CodeConnect started: its lifecycle, for its own branch below.
+        let mut hosted = None;
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
-            // Claude has no interrupt on this wire. Its stop control is the keyboard
-            // at the Mac, and saying so is more useful than a bare refusal.
+            // A Claude run CodeConnect started is stopped through its agent host. Any
+            // other has no interrupt on this wire: its stop control is the keyboard at
+            // the Mac, and saying so is more useful than a bare refusal.
             protocol::agent::AgentKind::Claude => {
-                return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
+                match self.db.hosted_link(row.session_uid.clone()).await {
+                    Ok(Some(linked)) => hosted = Some(linked.lifecycle),
+                    _ => {
+                        return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
+                    }
+                }
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::interrupt_on_unsupported(
@@ -5931,6 +5956,17 @@ impl Daemon {
                 );
                 return refuse(crate::codex_refusals::INTERRUPT_LEDGER_UNREADABLE.to_string());
             }
+        }
+
+        // **A Claude run CodeConnect started is stopped through its agent host**, which
+        // runs the turn and refuses one it is not running ([`crate::claude_host::interrupt`]).
+        // First, since the engine branch below knows a run only by its `run_hosts` row, which
+        // a Claude run with a host has too.
+        if let Some(lifecycle) = hosted {
+            return Daemon::interrupt_result(
+                crate::claude_host::interrupt(self, &session.uid, request_id, turn_id, lifecycle)
+                    .await,
+            );
         }
 
         // **A run started on the engine is stopped through its own link**, which claims the
@@ -6987,26 +7023,6 @@ impl Daemon {
 
         let id: ApprovalId = (session_uid.clone(), request_id.to_string());
 
-        // **A Codex-only decision on the Claude answer path — refused before any
-        // mutation.** `option_id` is an opaque Codex option that no Claude hook
-        // decision can carry. It is refused here, before the serialise gate and
-        // every claim, so it takes no responder, releases no held hook, writes no
-        // durable answer_claim, removes no card and appends no resolution.
-        // Claude's allow/deny/option-index/text decisions do not reach this
-        // branch.
-        //
-        // **Claude-only now, and that is what the `codex.is_none()` says.** The
-        // same decision on a Codex session is the only one that path accepts, so
-        // the refusal keeps naming exactly the mistake it always named: an
-        // `option_id` aimed at a session that has no options to name.
-        if codex.is_none() && matches!(decision, AnswerDecision::OptionId { .. }) {
-            return AnswerResult::Rejected {
-                reason: "an option_id answer is for a Codex session; this is a Claude session, \
-                         so nothing was typed"
-                    .into(),
-            };
-        }
-
         // 0. Serialise on this one approval. Two taps arriving together used to
         //    make the second one a *rejection* ("already being applied"), which
         //    contradicts the rule that a duplicate returns the original
@@ -7071,6 +7087,20 @@ impl Daemon {
                 answered_on,
             )
             .await;
+        }
+
+        // **An option on a hook's card — refused before any claim.** No Claude hook
+        // decision carries an `option_id`, so it is refused here, after the ledger
+        // (a retry of an answered card replays its outcome) and before every claim:
+        // it takes no responder, releases no held hook, writes no durable
+        // answer_claim, removes no card and appends no resolution. A hosted run's
+        // card took its branch above, where only the option the card offers is taken.
+        if matches!(decision, AnswerDecision::OptionId { .. }) {
+            return AnswerResult::Rejected {
+                reason: "an option_id answer is for a Codex session; this is a Claude session, \
+                         so nothing was typed"
+                    .into(),
+            };
         }
 
         // 2. A claim with no terminal outcome means a previous attempt was cut
@@ -10258,6 +10288,41 @@ impl Daemon {
         let mut inner = self.inner.lock().await;
         inner.host_links.remove(session_uid);
         inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
+        inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
+    }
+
+    /// Whether this daemon is attached to the hosted run `session_uid`'s agent host now.
+    pub(crate) async fn host_attached(&self, session_uid: &str) -> bool {
+        self.inner.lock().await.host_links.contains_key(session_uid)
+    }
+
+    /// Wait for the outcome of the app's Stop `uuid` this daemon is sending the run
+    /// `session_uid`'s agent host ([`Self::host_stop_told`]).
+    pub(crate) async fn await_host_stop(
+        &self,
+        session_uid: &str,
+        uuid: &str,
+    ) -> tokio::sync::oneshot::Receiver<crate::codex_link::InterruptReport> {
+        let (tell, told) = tokio::sync::oneshot::channel();
+        self.inner
+            .lock()
+            .await
+            .host_stops
+            .insert(uuid.to_string(), (session_uid.to_string(), tell));
+        told
+    }
+
+    /// What became of the app's Stop `uuid`, or nobody waits any more (`None`): whoever
+    /// waits for it hears so.
+    pub(crate) async fn host_stop_told(
+        &self,
+        uuid: &str,
+        report: Option<crate::codex_link::InterruptReport>,
+    ) {
+        let waiter = self.inner.lock().await.host_stops.remove(uuid);
+        if let (Some((_, tell)), Some(report)) = (waiter, report) {
+            let _ = tell.send(report);
+        }
     }
 
     /// Wait for the outcome of the message `uuid` this daemon is sending the run
@@ -10421,6 +10486,9 @@ impl Daemon {
         .then(|| option("suggestions").cloned())
         .flatten();
         let fork = option("agentID").is_some();
+        // A question takes answers, never an allow, as a hook's question card does.
+        let question = request.tool_name == protocol::hook::ASK_USER_QUESTION;
+        let allow_for_session = !question && session_rules(suggestions.as_ref()).is_some();
         let card = ApprovalCard {
             request_id: request_id.clone(),
             payload_hash: approval_payload_hash(&request.tool_name, &request.input),
@@ -10432,8 +10500,9 @@ impl Daemon {
             prompt_id: None,
             permission_mode: None,
             generation: 0,
-            identity_bound: true,
+            identity_bound: !question,
             question_hold: Some(QuestionHold::Held),
+            allow_for_session,
         };
         let payload = serde_json::json!({ "card": card });
         if payload.to_string().len() > self.config.max_payload_bytes {
@@ -10482,7 +10551,7 @@ impl Daemon {
                         rejected: false,
                         fork,
                         link: true,
-                        question: None,
+                        question: question.then(QuestionState::default),
                     });
                     true
                 }
@@ -10531,9 +10600,11 @@ impl Daemon {
     }
 
     /// The agent host of the hosted run `uid` withdrew the request `request_id`, as
-    /// message `seq` from the host `host`: claude no longer waits on it (an interrupt,
+    /// message `seq` from the host `host`: claude no longer waits on it (an app's Stop,
     /// End run, or claude's end), so its card closes, nobody having answered, with no
-    /// answer recorded. `false` when the cursor did not move.
+    /// answer recorded. While an app's Stop of the run waits (its claim `applying`), the
+    /// card says the turn was stopped; otherwise that the session ended. `false` when the
+    /// cursor did not move.
     pub(crate) async fn host_card_withdrawn(
         &self,
         uid: &str,
@@ -10541,7 +10612,18 @@ impl Daemon {
         seq: u64,
         request_id: &str,
     ) -> Result<bool> {
-        let closure = host_card_closure(&SessionKey::new(uid, uid), request_id);
+        let stopped = matches!(
+            self.db
+                .unsettled_claims_for(crate::store::OPERATION_INTERRUPT, uid.to_string())
+                .await,
+            Ok(claims) if !claims.is_empty()
+        );
+        let detail = if stopped {
+            STOPPED_BEFORE_ANSWER
+        } else {
+            RUN_ENDED
+        };
+        let closure = host_card_closure(&SessionKey::new(uid, uid), request_id, detail);
         if self
             .commit_host_card(uid, host, seq, request_id, None, vec![closure])
             .await?
@@ -10638,7 +10720,11 @@ impl Daemon {
             .delete_pending_approval(uid.to_string(), request_id.to_string())
             .await;
         if let Err(err) = self
-            .ingest(host_card_closure(&SessionKey::new(uid, uid), request_id))
+            .ingest(host_card_closure(
+                &SessionKey::new(uid, uid),
+                request_id,
+                RUN_ENDED,
+            ))
             .await
         {
             crate::log_error!("{uid}: could not close the card {request_id}: {err:#}");
@@ -10682,6 +10768,7 @@ impl Daemon {
         request_id: &str,
         payload_hash: &str,
         decision: &AnswerDecision,
+        answered_on: AnsweredOn,
     ) -> std::result::Result<(SessionKey, protocol::host::Decision), String> {
         let mut inner = self.inner.lock().await;
         let Some(entry) = inner
@@ -10693,7 +10780,7 @@ impl Daemon {
         if entry.card.payload_hash != payload_hash {
             return Err("stale payload_hash: the card you answered is out of date".into());
         }
-        let host_decision = host_decision(entry, decision)?;
+        let host_decision = host_decision(entry, decision, answered_on)?;
         entry.claimed = true;
         Ok((entry.session.clone(), host_decision))
     }
@@ -11801,14 +11888,19 @@ impl Daemon {
                 }
             }
             return match self.db.device_by_token_hash(token_hash).await {
-                Ok(Some(device)) => {
+                Ok(crate::store::TokenAuth::Active(device)) => {
                     let _ = self
                         .db
                         .touch_device(device.device_id.clone(), protocol::time::now_rfc3339())
                         .await;
-                    AuthOutcome::Device(Box::new(device))
+                    AuthOutcome::Device(device)
                 }
-                Ok(None) => AuthOutcome::Rejected("token matches no device".into()),
+                Ok(crate::store::TokenAuth::Revoked) => AuthOutcome::Revoked,
+                Ok(crate::store::TokenAuth::Missing) => {
+                    AuthOutcome::Rejected("token matches no device".into())
+                }
+                // A lookup that errored is not a block: stay "unauthorized" so a transient
+                // database fault cannot read as "this device is blocked".
                 Err(err) => AuthOutcome::Rejected(format!("device lookup failed: {err:#}")),
             };
         }
@@ -12180,13 +12272,16 @@ const SENT_TO_CLAUDE: &str = "Sent to Claude from a phone";
 const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the computer";
 /// How a card closes when the run that asked it ends first.
 const RUN_ENDED: &str = "the session ended before anyone answered";
+
+/// Why a hosted run's card closed when an app's Stop ended its turn before anyone answered.
+const STOPPED_BEFORE_ANSWER: &str = "The turn was stopped before anyone answered.";
 /// What claude is told of a hosted run's request whose card no app could show.
 const TOO_LARGE_TO_SHOW: &str = "This request is too large to show in the app, so it was refused.";
 
 /// The closing of a hosted run's card nobody answered: its host withdrew the
 /// request, or its run ended. It closes the card; no answer is recorded, so a late
 /// answer to it finds no card rather than an answer.
-fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
+fn host_card_closure(session: &SessionKey, request_id: &str, detail: &str) -> PendingEvent {
     let outcome = AnswerOutcome {
         request_id: request_id.to_string(),
         session_id: session.name.clone(),
@@ -12195,7 +12290,7 @@ fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
         answered_on: None,
         applied_via: AnswerPath::HookReturn,
         resolved_at: protocol::time::now_rfc3339(),
-        detail: Some(RUN_ENDED.into()),
+        detail: Some(detail.into()),
         inferred: false,
         indeterminate: false,
     };
@@ -12210,15 +12305,53 @@ fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
 
 /// The host's decision for an answer to a hosted run's card, as [`hook_decision`]
 /// gives a hook's: allow; a deny, which also ends the main conversation's turn; or a
-/// deny with the person's reason. Nothing else reaches a hosted run's card yet.
+/// deny with the person's reason. A question takes only its answers, which go back
+/// as its input, or a decline, a deny that ends the main conversation's turn as a
+/// deny does. A card that offers "Allow for this session" also takes that option: an
+/// allow carrying claude's own allow rules for the request, made the session's.
 fn host_decision(
     entry: &PendingApproval,
     decision: &AnswerDecision,
+    answered_on: AnsweredOn,
 ) -> std::result::Result<protocol::host::Decision, String> {
+    if entry.question.is_some() {
+        return match decision {
+            AnswerDecision::Answers { answers } => {
+                crate::question::host_updated_input(&entry.card.tool_input, answers)
+                    .map(|input| protocol::host::Decision::Allow {
+                        updated_input: Some(input),
+                        updated_permissions: None,
+                    })
+                    .map_err(|reason| format!("{reason}. Nothing was sent."))
+            }
+            AnswerDecision::Decline | AnswerDecision::Deny => Ok(protocol::host::Decision::Deny {
+                message: declined_from(answered_on).into(),
+                interrupt: !entry.fork,
+            }),
+            _ => Err(QUESTION_NEEDS_CARD.into()),
+        };
+    }
+    if matches!(
+        decision,
+        AnswerDecision::Answers { .. } | AnswerDecision::Decline
+    ) {
+        return Err(NOT_A_QUESTION.into());
+    }
     match decision {
         AnswerDecision::Allow | AnswerDecision::Option { index: 1 } => {
             Ok(protocol::host::Decision::Allow {
                 updated_input: None,
+                updated_permissions: None,
+            })
+        }
+        // Decided from the stored card's suggestions, never from the app's word: a card
+        // that did not offer it refuses it below.
+        AnswerDecision::OptionId { option_id }
+            if option_id == ALLOW_FOR_SESSION && entry.card.allow_for_session =>
+        {
+            Ok(protocol::host::Decision::Allow {
+                updated_input: None,
+                updated_permissions: session_rules(entry.card.permission_suggestions.as_ref()),
             })
         }
         AnswerDecision::Deny => Ok(protocol::host::Decision::Deny {
@@ -12377,15 +12510,39 @@ fn question_hook_decision(
         _ => Ok(HookDecision {
             interrupt: !entry.fork,
             decision: Decision::Deny,
-            reason: Some(
-                match answered_on {
-                    AnsweredOn::Iphone => "Declined from iPhone",
-                    AnsweredOn::Mac => "Declined from Mac",
-                }
-                .into(),
-            ),
+            reason: Some(declined_from(answered_on).into()),
             ..HookDecision::passthrough()
         }),
+    }
+}
+
+/// The option id an app answers "Allow for this session" with, decision 175's for Codex.
+const ALLOW_FOR_SESSION: &str = "acceptForSession";
+
+/// "Allow for this session" on a hosted run's card (owner decision 200): claude's own allow
+/// rules for this request (`addRules` with behavior `allow`), each with the session as its
+/// destination and nothing else. A mode change or a folder is never among them, and nothing is
+/// written to a settings file. `None` when claude suggested no such rule, and then the card
+/// offers no session answer.
+fn session_rules(suggestions: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let rules: Vec<serde_json::Value> = suggestions?
+        .as_array()?
+        .iter()
+        .filter(|update| update["type"] == "addRules" && update["behavior"] == "allow")
+        .map(|update| {
+            let mut update = update.clone();
+            update["destination"] = "session".into();
+            update
+        })
+        .collect();
+    (!rules.is_empty()).then(|| rules.into())
+}
+
+/// What claude reads when a question is declined: which kind of device declined it.
+fn declined_from(answered_on: AnsweredOn) -> &'static str {
+    match answered_on {
+        AnsweredOn::Iphone => "Declined from iPhone",
+        AnsweredOn::Mac => "Declined from Mac",
     }
 }
 
@@ -14270,7 +14427,7 @@ mod tests {
             daemon
                 .authenticate(STATIC_TOKEN, Some(&token), None, None, Ok("n3"))
                 .await,
-            AuthOutcome::Rejected(_)
+            AuthOutcome::Revoked
         ));
         assert!(matches!(
             hello_through_tailscale(&daemon, Some("n3")).await,
@@ -14655,7 +14812,7 @@ mod tests {
                     Err(protocol::tailnet::Refusal::Unknown)
                 )
                 .await,
-            AuthOutcome::Rejected(_)
+            AuthOutcome::Revoked
         ));
         // Still listed, so "revoked on the 3rd" survives as a fact.
         let devices = daemon.list_devices().await.unwrap();
@@ -33331,6 +33488,7 @@ mod tests {
             generation: 1,
             identity_bound: false,
             question_hold: None,
+            allow_for_session: false,
         };
         // A live receiver, because a held hook is the case that writes the most:
         // with a responder to answer through, the answer needs no supervisor and
@@ -33488,6 +33646,7 @@ mod tests {
             generation: 1,
             identity_bound: false,
             question_hold: None,
+            allow_for_session: false,
         };
         daemon.inner.lock().await.pending.insert(
             (uid.to_string(), request_id.to_string()),
@@ -37340,6 +37499,100 @@ mod tests {
             "unchecked": held,
             "unchecked_answered": event(&unchecked, EventKind::ApprovalResolved),
         });
+        fn normalise(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "resolved_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be a clock read, and is {slot}"
+                            );
+                            *slot = json!("2026-10-03T00:00:00.000Z");
+                        } else {
+                            normalise(slot);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
+                _ => {}
+            }
+        }
+        normalise(&mut out);
+        out
+    }
+
+    /// **ExitPlanMode's plan, as this build emits the card.** `fixtures/claude/
+    /// exit-plan-input.json` is one ExitPlanMode `tool_input` — a plan and its
+    /// `planFilePath` — raised through the held approval path a real plan card
+    /// takes. The daemon builds `display_text` and `payload_hash`; only clock
+    /// reads are normalised. R2T1-F2: the phone must draw the plan, not this
+    /// `{tool}\n{input}`. The phone's copy under `ios/` is byte-identical
+    /// (`fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_exit_plan_card_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/exit-plan-card-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_exit_plan_card().await,
+            committed,
+            "the committed ExitPlanMode card no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_exit_plan_card_fixture, then copy it over its copy under \
+             ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/exit-plan-card-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_exit_plan_card_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_exit_plan_card().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/exit-plan-card-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn derived_exit_plan_card() -> serde_json::Value {
+        const INPUT: &str = include_str!("../../../fixtures/claude/exit-plan-input.json");
+        let input: serde_json::Value = serde_json::from_str(INPUT).unwrap();
+        let uid = TEST_UID;
+        let daemon = test_daemon();
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        // The same held path the real plan card takes: a PreToolUse, then a held
+        // PermissionRequest that raises the card. Only the tool and its input change;
+        // the hook envelope (and its already-vetted paths) is the question fixture's.
+        let mut pre = question_hook("PreToolUse");
+        pre["tool_name"] = json!("ExitPlanMode");
+        pre["tool_input"] = input.clone();
+        daemon.handle_hook(post(uid, pre, false)).await;
+        let mut request = question_hook("PermissionRequest");
+        request["tool_name"] = json!("ExitPlanMode");
+        request["tool_input"] = input;
+        let request = post(uid, request, true);
+        let hook = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let mut gone = Box::pin(std::future::pending::<()>());
+                daemon.handle_hook_held(request, &mut gone).await
+            })
+        };
+        for _ in 0..200 {
+            if !approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut events = approval_events(&daemon, uid, EventKind::ApprovalRequest);
+        assert_eq!(events.len(), 1, "one ExitPlanMode card");
+        hook.abort();
+        let mut out = json!({ "exit_plan": serde_json::to_value(events.remove(0)).unwrap() });
         fn normalise(value: &mut serde_json::Value) {
             match value {
                 serde_json::Value::Object(map) => {

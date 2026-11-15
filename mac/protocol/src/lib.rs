@@ -527,14 +527,16 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         (`{request_id, question_hold}`), and the latest one wins.
 ///       - [`ws::AnswerDecision::Answers`] and [`ws::AnswerDecision::Decline`] —
 ///         the only decisions a question card takes. The daemon returns them
-///         through Claude's held hook; nothing is typed.
+///         through Claude's held hook, or, for a run started in an agent host,
+///         through that host; nothing is typed.
 ///
 ///     What changed for every client, including older ones: `allow` and `option`
 ///     on a question card are refused before anything is claimed or typed, and
 ///     `deny` on one is a decline. A minor-20 phone still shows the question as an
 ///     approval; nothing it can tap chooses an answer for the person.
 ///   * `22` — **Every Claude card is answered only through the hook Claude holds
-///     for its own call. Nothing is typed into a permission prompt.**
+///     for its own call (or, for a run started in an agent host, through that
+///     host). Nothing is typed into a permission prompt.**
 ///
 ///     A phone's answer used to be typed into whichever prompt was on screen,
 ///     and Claude queues background agents' prompts there, so it could answer
@@ -718,7 +720,28 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         client sends it only when the capability is advertised.
 ///       - [`event::Lifecycle::Stopping`] — the run was asked to end and has not yet.
 ///         A client from before 35 reads the word as `unknown`.
-pub const PROTOCOL_MINOR: u32 = 35;
+///   * `36` — **"Allow for this session" on a hosted Claude run's card.**
+///
+///     Additive:
+///       - [`ws::ApprovalCard::allow_for_session`] — the card offers it: a hosted
+///         run's approval whose request carries Claude's own allow rule. Left out
+///         when false, so a client from before 36 reads every card as it did.
+///       - The app answers it with [`ws::AnswerDecision::OptionId`]
+///         `"acceptForSession"`, the id a Codex card's session option already has.
+///         The daemon refuses it on a card that does not offer it, nothing sent, and
+///         on one that does it returns Claude's allow rules for this session only,
+///         never written to Claude's settings.
+///   * `37` — **Stop on a Claude run CodeConnect started.**
+///
+///     Additive:
+///       - [`ws::Capabilities::claude_interrupt`]: this daemon stops the running turn
+///         of such a run. [`ws::ClientMessage::Interrupt`] and
+///         [`ws::InterruptResult`] are Codex's, unchanged; the turn is the
+///         `turn_id` of the run's events. A daemon below 37 refuses every Claude Stop.
+///       - A `notification` event `send_not_sent` (`{request_id, reason: "stopped"}`):
+///         a Stop cancelled the person's message before claude ran it. The person's
+///         own row of a message sent to such a run carries its `request_id`.
+pub const PROTOCOL_MINOR: u32 = 37;
 
 #[cfg(test)]
 mod ledger_tests {

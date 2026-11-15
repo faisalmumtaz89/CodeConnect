@@ -1,5 +1,5 @@
-//! **Every sentence this daemon can send a phone when a Codex interrupt or
-//! compose did not happen.**
+//! **Every sentence this daemon can send a phone when a Stop (a Codex run's, or
+//! a Claude run's CodeConnect started) or a compose did not happen.**
 //!
 //! One table, and production formats FROM it. The phone greys its Stop and
 //! Compose controls for a few seconds when it recognises a refusal as a fact
@@ -260,6 +260,12 @@ pub(crate) const INTERRUPT_THREAD_SWITCHING: &str =
     "this Codex session is moving to another thread, so nothing was sent; try \
     again once it has settled";
 
+/// [`INTERRUPT_TURN_NOT_RUNNING`]'s twin for a Claude run CodeConnect started: its agent host
+/// is not running that turn (another one, or the turn has ended), so nothing reached claude.
+pub(crate) const CLAUDE_TURN_NOT_RUNNING: &str =
+    "that turn is not the one Claude is running, so nothing was sent; it may have \
+    finished already";
+
 pub(crate) const INTERRUPT_ALREADY_WAITING: &str =
     "an interrupt for that turn is already waiting to take effect, so nothing \
     was sent again";
@@ -460,6 +466,12 @@ pub(crate) const REPLAY_COMPOSE_REFUSED: &str =
 
 pub(crate) const REPLAY_COMPOSE_SETTLED: &str =
     "this message is already settled and will not be sent again; check the computer";
+
+/// [`INTERRUPT_CONNECTION_ENDED`]'s twin for a Claude run CodeConnect started: its agent host's
+/// link ended after the stop was sent and before its outcome came.
+pub(crate) const CLAUDE_CONNECTION_ENDED: &str =
+    "the computer's connection to Claude ended while this request to stop the turn was in \
+    flight";
 
 pub(crate) const INTERRUPT_CONNECTION_ENDED: &str =
     "the link's connection to Codex ended while this request to stop the turn \
@@ -732,6 +744,13 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             interrupt_settled_unknown(INTERRUPT_CONNECTION_ENDED),
         ),
         row(
+            "claude_stop_settled_unknown",
+            "interrupt",
+            "indeterminate",
+            "permanent",
+            interrupt_settled_unknown(CLAUDE_CONNECTION_ENDED),
+        ),
+        row(
             "interrupt_settled_unrecorded",
             "interrupt",
             "indeterminate",
@@ -800,6 +819,13 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "rejected",
             "permanent",
             INTERRUPT_TURN_NOT_RUNNING.to_string(),
+        ),
+        row(
+            "claude_turn_not_running",
+            "interrupt",
+            "rejected",
+            "permanent",
+            CLAUDE_TURN_NOT_RUNNING.to_string(),
         ),
         row(
             "interrupt_thread_switching",

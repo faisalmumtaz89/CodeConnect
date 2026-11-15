@@ -1,0 +1,90 @@
+{
+  "answer": {
+    "decision": {
+      "option_id": "acceptForSession",
+      "type": "option_id"
+    },
+    "payload_hash": "40dec10e276cbc6a611deea61ee0def8af09afb0f1e5026941ea9f37cb2aa5d7",
+    "request_id": "toolu_offered",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "answer"
+  },
+  "card_not_offering": {
+    "display_text": "Bash\n{\"command\":\"touch m1.txt\"}",
+    "generation": 0,
+    "identity_bound": true,
+    "payload_hash": "40dec10e276cbc6a611deea61ee0def8af09afb0f1e5026941ea9f37cb2aa5d7",
+    "permission_suggestions": [
+      {
+        "destination": "session",
+        "directories": [
+          "/tmp/ccd-minor-36/app"
+        ],
+        "type": "addDirectories"
+      },
+      {
+        "destination": "session",
+        "mode": "acceptEdits",
+        "type": "setMode"
+      }
+    ],
+    "question_hold": "held",
+    "request_id": "toolu_not_offered",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "command": "touch m1.txt"
+    },
+    "tool_name": "Bash"
+  },
+  "card_offering": {
+    "allow_for_session": true,
+    "display_text": "Bash\n{\"command\":\"touch m1.txt\"}",
+    "generation": 0,
+    "identity_bound": true,
+    "payload_hash": "40dec10e276cbc6a611deea61ee0def8af09afb0f1e5026941ea9f37cb2aa5d7",
+    "permission_suggestions": [
+      {
+        "behavior": "allow",
+        "destination": "localSettings",
+        "rules": [
+          {
+            "ruleContent": "touch m1.txt",
+            "toolName": "Bash"
+          }
+        ],
+        "type": "addRules"
+      },
+      {
+        "destination": "session",
+        "directories": [
+          "/tmp/ccd-minor-36/app"
+        ],
+        "type": "addDirectories"
+      },
+      {
+        "destination": "session",
+        "mode": "acceptEdits",
+        "type": "setMode"
+      }
+    ],
+    "question_hold": "held",
+    "request_id": "toolu_offered",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "command": "touch m1.txt"
+    },
+    "tool_name": "Bash"
+  },
+  "refused": {
+    "request_id": "toolu_not_offered",
+    "result": {
+      "reason": "the app can allow or deny this card, or deny it with a reason; nothing else is available for this session yet. Nothing was sent.",
+      "status": "rejected"
+    },
+    "type": "answer_result"
+  }
+}

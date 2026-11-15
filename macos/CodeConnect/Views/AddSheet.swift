@@ -43,14 +43,15 @@ extension KeyHint {
 /// The one way anything is added: a sheet with Agent, Computer and iPhone side by side.
 struct AddSheet: View {
     @State private var kind: AddKind
-    /// The address Add a computer starts with: a refused computer pairing again.
-    private let address: String?
+    /// The address Add a computer starts with: a refused computer pairing again. A binding, so the sheet reads the
+    /// address as it is when it opens, not as the window last rendered it.
+    @Binding private var address: String?
     /// An agent was started and is in the list.
     private let started: () -> Void
 
-    init(kind: AddKind, address: String? = nil, started: @escaping () -> Void = {}) {
+    init(kind: AddKind, address: Binding<String?> = .constant(nil), started: @escaping () -> Void = {}) {
         _kind = State(initialValue: kind)
-        self.address = address
+        _address = address
         self.started = started
     }
 

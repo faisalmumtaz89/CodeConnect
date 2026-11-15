@@ -86,14 +86,28 @@
             return try? JSONDecoder().decode(PeerDirectory.self, from: Data(arguments[flag + 1].utf8))
         }
 
+        /// `-CC_MACHINE_STATS <frame>`: the `machine_stats` frame every computer is taken to have answered last (one
+        /// serialised by ccd), in place of its own; a row still shows it only while its link is live. Read from the
+        /// arguments as given.
+        static var machineStats: MachineStats? {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-CC_MACHINE_STATS"), flag + 1 < arguments.count else { return nil }
+            return try? JSONDecoder().decode(MachineStats.self, from: Data(arguments[flag + 1].utf8))
+        }
+
         /// `-CC_FLEET_SCOPE finished`: the list opens on the runs that have ended.
         static var fleetScope: FleetScope {
             FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE")?.capitalized ?? "") ?? .active
         }
 
-        /// `-CC_FLEET_GROUPING project`: the list opens grouped by project.
-        static var fleetGrouping: FleetGroup.Kind {
-            UserDefaults.standard.string(forKey: "CC_FLEET_GROUPING") == "project" ? .project : .computer
+        /// `-CC_FLEET_GROUPING project` or `computer`: the list opens grouped so, whatever this Mac keeps, and keeps
+        /// nothing of it; nil when not given.
+        static var fleetGrouping: FleetGroup.Kind? {
+            switch UserDefaults.standard.string(forKey: "CC_FLEET_GROUPING") {
+            case "project": .project
+            case "computer": .computer
+            default: nil
+            }
         }
 
         /// `-CC_FILTER computer` or `project`: the list opens narrowed to the sidebar's first computer or project.
