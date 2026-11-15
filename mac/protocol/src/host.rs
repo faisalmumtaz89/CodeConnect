@@ -151,7 +151,9 @@ pub enum Decision {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FromHost {
-    /// A message the SDK yielded, untouched.
+    /// A message the SDK yielded, untouched but for a `system/commands_changed`'s
+    /// claude.ai connectors' commands, which the host leaves out as it does from the
+    /// initialize answer's.
     Sdk { seq: u64, message: Value },
     /// A `canUseTool` call, held in the host until it is answered or withdrawn.
     Permission {
@@ -230,6 +232,9 @@ pub struct InitializeAnswer {
     /// The SDK's model list, as it gives it.
     pub models: Vec<Value>,
     pub account: Account,
+    /// The version of the claude that answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_version: Option<String>,
 }
 
 /// Of the account, only which provider Claude uses. Every other key the SDK gives (the
@@ -423,6 +428,7 @@ mod tests {
                     account: Account {
                         api_provider: Some("firstParty".into()),
                     },
+                    claude_code_version: Some("2.1.322".into()),
                 }),
                 cancelled: None,
                 terminal_reason: None,

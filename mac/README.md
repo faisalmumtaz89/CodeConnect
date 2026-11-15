@@ -1132,6 +1132,8 @@ its host's end ends a starting run: one whose host lost its link but still runs 
 message becomes the run's events (`sdk` source, through `protocol::sdk_map`), filed with
 the run's cursor in one transaction before it is acknowledged, and each init also names
 the run's Claude session id and the folder claude runs in, a new worktree's included.
+A command's own output (`/usage`'s, `/effort low`'s, `/compact`'s "Compacted") is filed as a
+terminal run's is: a `user_message` whose content is claude's `<local-command-stdout>` string.
 A live run ends when claude does: its `exited` is filed with the run's cursor in one
 transaction, the run `exited` and its `SessionEnd` carrying the exit code and any signal. It
 also ends when its host is gone, seen when the run's link ends or by the liveness tick. ccd
@@ -1149,9 +1151,16 @@ included, are filed once the host has taken them. A message sent while one of Cl
 tools is running reaches Claude with that tool's result; one sent at any other time in a
 turn runs as Claude's next turn. A retry with the same request id is answered from its
 first send, so nothing is sent twice.
-For such a run the model and effort sheets are refused ("Changing the model isn't
-available for this session yet.", and the same for the effort), and so are `/status`,
-`/usage`, `/cost` and `/clear` ("This isn't available for this session yet.").
+For such a run the Model and Effort sheets and the Clear dialog are refused ("Changing
+the model isn't available for this session yet.", the same for the effort, and "This isn't
+available for this session yet." for `/clear`), and so is `/status`, which claude does not
+offer such a run ("Claude doesn't offer /status in this session."); `/usage` and `/cost` are
+messages. The run's command menu (`get_command_catalog`, minor 38) is what its claude last
+reported: the start's initialize answer, then each `commands_changed`, without a claude.ai
+connector's commands (the host leaves them out of both), the ones the latest init keeps to
+claude's own screen, or those three refused screens, each with claude's description and
+argument hint (`entries`); it is `unavailable` until an init names the commands claude keeps
+to its own screen.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

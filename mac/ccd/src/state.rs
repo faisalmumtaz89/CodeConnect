@@ -2952,8 +2952,7 @@ impl Daemon {
         host: protocol::proc_identity::ProcessIdentity,
         seq: u64,
         pendings: Vec<PendingEvent>,
-        session_id: Option<String>,
-        cwd: Option<String>,
+        notes: crate::store::RunNotes,
     ) -> Result<bool> {
         let mut pendings = pendings;
         for pending in &mut pendings {
@@ -2965,14 +2964,7 @@ impl Daemon {
             let _ordered = gate.lock().await;
             let Some(events) = self
                 .db
-                .append_host_message(
-                    session_uid.to_string(),
-                    host,
-                    seq,
-                    pendings,
-                    session_id,
-                    cwd,
-                )
+                .append_host_message(session_uid.to_string(), host, seq, pendings, notes)
                 .await?
             else {
                 return Ok(false);
@@ -7639,9 +7631,10 @@ impl Daemon {
     }
 
     /// Which slash commands this session's Claude Code has, from the binary
-    /// itself. `Unavailable` is a complete answer — the phone falls back to
-    /// its conservative static policy — so every failure path returns one
-    /// with its reason rather than an error.
+    /// itself, or, for a run CodeConnect started, from what its claude last
+    /// reported ([`crate::claude_host::catalog`]). `Unavailable` is a complete
+    /// answer — the phone falls back to its conservative static policy — so
+    /// every failure path returns one with its reason rather than an error.
     pub async fn command_catalog(&self, session_ref: &str) -> protocol::ws::CommandCatalogResult {
         use protocol::ws::CommandCatalogResult;
 
@@ -7670,6 +7663,17 @@ impl Daemon {
             .reason()
         {
             return CommandCatalogResult::Unavailable { reason };
+        }
+        // A run CodeConnect started has no binary of its own to probe: its menu is what
+        // its claude last reported.
+        match self.db.hosted_commands(row.session_uid.clone()).await {
+            Ok(Some(kept)) => return crate::claude_host::catalog(kept),
+            Ok(None) => {}
+            Err(err) => {
+                return CommandCatalogResult::Unavailable {
+                    reason: format!("{err:#}"),
+                }
+            }
         }
         let claude_bin = {
             let inner = self.inner.lock().await;
@@ -7738,6 +7742,7 @@ impl Daemon {
             if let Some(cached) = inner.command_catalogs.get(fingerprint).cloned() {
                 return CommandCatalogResult::Available {
                     commands: cached.commands,
+                    entries: Vec::new(),
                     claude_version: cached.claude_version,
                     probed_at: cached.probed_at,
                 };
@@ -7759,6 +7764,7 @@ impl Daemon {
             Ok(catalog) => {
                 let result = CommandCatalogResult::Available {
                     commands: catalog.commands.clone(),
+                    entries: Vec::new(),
                     claude_version: catalog.claude_version.clone(),
                     probed_at: catalog.probed_at.clone(),
                 };
@@ -14927,6 +14933,7 @@ mod tests {
         let first = daemon.command_catalog(&uid).await;
         let protocol::ws::CommandCatalogResult::Available {
             commands,
+            entries,
             claude_version,
             probed_at,
         } = first
@@ -14934,6 +14941,7 @@ mod tests {
             panic!("first read must be available: {first:?}");
         };
         assert!(commands.iter().any(|c| c == "model"));
+        assert!(entries.is_empty(), "a probed list has names only");
         assert_eq!(claude_version.as_deref(), Some("2.1.221"));
 
         let second = daemon.command_catalog(&uid).await;

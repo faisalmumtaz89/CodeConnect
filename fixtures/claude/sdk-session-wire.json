@@ -1615,6 +1615,18 @@
     "turn_id": "1cc58cf5-85aa-43cc-ae02-81b89a5b6b42"
   },
   {
+    "item_id": "8a2381fc-1a9d-4370-a712-c6381a27ea13",
+    "kind": "user_message",
+    "payload": {
+      "message": {
+        "content": "<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>"
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "8a2381fc-1a9d-4370-a712-c6381a27ea13/user_message/0",
+    "turn_id": "1cc58cf5-85aa-43cc-ae02-81b89a5b6b42"
+  },
+  {
     "item_id": "e4de448b-c5e0-4bf6-bb35-d957d28c4964",
     "kind": "session_start",
     "payload": {
@@ -1719,6 +1731,18 @@
     },
     "source": "sdk",
     "source_event_id": "d1280241-7f1c-4dfc-9dca-8b4dba7ff316/notification/0",
+    "turn_id": "0732db90-272a-4771-85bf-2abc8d6c5474"
+  },
+  {
+    "item_id": "e7812bfa-d5ca-4311-97b8-5a658e76663e",
+    "kind": "user_message",
+    "payload": {
+      "message": {
+        "content": "<local-command-stdout>Compacted </local-command-stdout>"
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "e7812bfa-d5ca-4311-97b8-5a658e76663e/user_message/0",
     "turn_id": "0732db90-272a-4771-85bf-2abc8d6c5474"
   },
   {
@@ -1948,20 +1972,14 @@
   },
   {
     "item_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7",
-    "kind": "agent_message",
+    "kind": "user_message",
     "payload": {
       "message": {
-        "content": [
-          {
-            "text": "Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead",
-            "type": "text"
-          }
-        ],
-        "model": "<synthetic>"
+        "content": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"
       }
     },
     "source": "sdk",
-    "source_event_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7/agent_message/0",
+    "source_event_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7/user_message/0",
     "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
   },
   {

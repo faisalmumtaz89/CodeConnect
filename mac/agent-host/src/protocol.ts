@@ -70,6 +70,7 @@ export interface InitializeAnswer {
   commands: Json[];
   models: Json[];
   account: Account;
+  claude_code_version?: string;
 }
 
 /** A line the host sends ccd. Each carries its sequence number and is kept until ccd acknowledges it. */
