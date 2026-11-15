@@ -692,9 +692,12 @@ agent that asked as its denial. In a run started in a terminal, "Always" is chos
 at the Mac, where Claude's own dialog says exactly what it saves; the phone never
 offers rows read off the Mac's screen. A run started in an app has no dialog at the
 Mac: there the daemon marks a card whose request suggests an allow rule
-(`allow_for_session`, protocol minor 36), and its answer for "Allow for this session"
-is `option_id: "acceptForSession"`, which gives Claude that rule for this session
-only.
+(`allow_for_session`, protocol minor 36), and the phone then offers **Allow for this
+session** beside Allow and Deny, under a one-line caption naming the rule it would
+grant as Claude writes it (e.g. `Bash(touch m1.txt)`) — the rule can be broader than
+the one command on the card, so a person reads what they grant before granting it.
+Its answer is `option_id: "acceptForSession"`, which gives Claude that rule for this
+session only.
 
 In a run started in a terminal, a sent answer is recorded as sent to Claude, not
 confirmed (`indeterminate`, detail "Sent to Claude from a phone";

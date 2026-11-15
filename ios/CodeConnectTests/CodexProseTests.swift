@@ -191,7 +191,7 @@ final class CodexProseTests: XCTestCase {
         XCTAssertEqual(
             DecisionCard.answerSurface(
                 card: claude, agent: .claude, hold: .held, hookOnlyApprovals: true),
-            .allowDeny)
+            .allowDeny(allowForSession: false))
         for (hold, hookOnly) in [
             (QuestionHold.held, false), (.atMac, true), (.ended, true), (nil, true),
         ] {
