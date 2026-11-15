@@ -1,0 +1,30 @@
+{
+  "method": "item/tool/requestUserInput",
+  "id": 0,
+  "params": {
+    "threadId": "01a1e105-1040-7363-8557-bec0daa95b25",
+    "turnId": "01a1e105-10df-7663-a02e-677597116d96",
+    "itemId": "call_1",
+    "questions": [
+      {
+        "id": "colour",
+        "header": "Colour",
+        "question": "Which colour?",
+        "isOther": true,
+        "isSecret": false,
+        "options": [
+          {
+            "label": "Red",
+            "description": "the red one"
+          },
+          {
+            "label": "Blue",
+            "description": "the blue one"
+          }
+        ]
+      }
+    ],
+    "isBlocking": true,
+    "autoResolutionMs": null
+  }
+}

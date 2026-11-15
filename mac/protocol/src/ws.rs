@@ -1418,7 +1418,10 @@ pub enum AnswerDecision {
     /// Answers to a Claude `AskUserQuestion` card, one per question in the order
     /// the card lists them (minor 21). The daemon builds Claude's answer from the
     /// question it stored and these indices, and refuses anything incomplete or
-    /// out of range; nothing is typed.
+    /// out of range; nothing is typed. A Codex question card
+    /// (`request_user_input`) takes the same answers, one option or "Other" with
+    /// its text per question and no notes, which the daemon sends Codex as
+    /// Codex's own terminal does.
     Answers {
         answers: Vec<QuestionAnswer>,
     },
@@ -1426,7 +1429,8 @@ pub enum AnswerDecision {
     /// through its held hook, or, for a run started in an agent host, through
     /// that host. The main conversation's question is denied with an interrupt,
     /// so the turn stops as Escape at its dialog does; a background agent's is
-    /// denied without one.
+    /// denied without one. A Codex question card declined is answered with no
+    /// answers, and Codex's turn goes on.
     Decline,
 }
 
@@ -1645,7 +1649,9 @@ pub enum WriteStage {
 /// Claude's `decision + resolved_by + applied_via` shape, and forcing it in
 /// would have changed Claude's serialization. Claude's `AnswerOutcome` and
 /// `AnswerResult` are left byte-identical; this rides its own event. The
-/// `decision`, when present, may be an opaque [`AnswerDecision::OptionId`].
+/// `decision`, when present, may be an opaque [`AnswerDecision::OptionId`], or a
+/// question card's [`AnswerDecision::Answers`] or [`AnswerDecision::Decline`] as
+/// the app sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CodexResolution {

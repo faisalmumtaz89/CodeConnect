@@ -505,8 +505,9 @@ pub struct CodexPendingApprovalRow {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
-    /// `commandExecution` | `fileChange`. The observe-only families never reach
-    /// this table, because no card is built for them.
+    /// `commandExecution` | `fileChange` | `mcpToolCall` | `requestUserInput`
+    /// ([`crate::codex_approval::Family::as_str`]). The observe-only families never
+    /// reach this table, because no card is built for them.
     pub family: String,
 }
 
@@ -880,10 +881,16 @@ pub struct ClaimedMaterial {
     /// **The snapshotted route, in the operation kind's own vocabulary.** A
     /// compose is `"turn_start"` or `"turn_steer"`; an answer is the id of the
     /// option the phone named, which is the only thing "which way did this
-    /// actuation go?" can mean for a decision.
+    /// actuation go?" can mean for a decision, and an answer to a Codex question
+    /// card is `"answers"` or `"decline"`.
     pub route: String,
     pub target_turn_id: Option<String>,
     pub claimed_hash: String,
+    /// **An answer to a Codex question card, kept whole**: the `Answers` or `Decline`
+    /// the app sent, so the resolution filed and the reply sent again after a restart
+    /// are built from the person's own answers rather than from `route`. `None` for
+    /// every other claim.
+    pub question_decision: Option<protocol::ws::AnswerDecision>,
 }
 
 /// **How a phone answer's ledger row is closed in the commit that retires its
@@ -953,6 +960,24 @@ pub struct MutationClaimRow {
     /// terminal say what was attempted.
     pub claimed: ClaimedMaterial,
     pub started_at: String,
+}
+
+/// A `mutation_ledger` row's `question_decision` column at `index`, read back as the
+/// decision it was written from ([`ClaimedMaterial::question_decision`]).
+fn question_decision_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<protocol::ws::AnswerDecision>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            )
+        })
 }
 
 /// One SQL string literal, quotes doubled. Test fixture only — every production
@@ -5664,12 +5689,17 @@ impl Store {
         claimed: &ClaimedMaterial,
         now: &str,
     ) -> Result<MutationClaim> {
+        let question_decision = claimed
+            .question_decision
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing: Option<(String, String, Option<String>, String, ClaimedMaterial)> = tx
             .query_row(
                 "SELECT claimed_hash, status, outcome, started_at,
-                        thread_id, generation, route, target_turn_id
+                        thread_id, generation, route, target_turn_id, question_decision
                    FROM mutation_ledger
                   WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3",
                 params![operation_kind, session_uid, client_request_id],
@@ -5685,6 +5715,7 @@ impl Store {
                             route: row.get(6)?,
                             target_turn_id: row.get(7)?,
                             claimed_hash: row.get(0)?,
+                            question_decision: question_decision_column(row, 8)?,
                         },
                     ))
                 },
@@ -5700,8 +5731,8 @@ impl Store {
                     "INSERT INTO mutation_ledger(operation_kind, session_uid, client_request_id,
                                                  claimed_hash, thread_id, generation, route,
                                                  target_turn_id, status, outcome, started_at,
-                                                 settled_at)
-                     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'applying', NULL, ?9, NULL
+                                                 settled_at, question_decision)
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'applying', NULL, ?9, NULL, ?10
                       WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?2)",
                     params![
                         operation_kind,
@@ -5713,6 +5744,7 @@ impl Store {
                         claimed.route,
                         claimed.target_turn_id,
                         now,
+                        question_decision,
                     ],
                 )?;
                 if inserted == 1 {
@@ -5894,7 +5926,7 @@ impl Store {
             .read()
             .query_row(
                 "SELECT status, outcome, claimed_hash, thread_id, generation, route,
-                        target_turn_id
+                        target_turn_id, question_decision
                    FROM mutation_ledger
                   WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3",
                 params![operation_kind, session_uid, client_request_id],
@@ -5908,6 +5940,7 @@ impl Store {
                             route: row.get(5)?,
                             target_turn_id: row.get(6)?,
                             claimed_hash: row.get(2)?,
+                            question_decision: question_decision_column(row, 7)?,
                         },
                     ))
                 },
@@ -5938,7 +5971,7 @@ impl Store {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT session_uid, client_request_id, claimed_hash, thread_id, generation,
-                    route, target_turn_id, started_at
+                    route, target_turn_id, started_at, question_decision
                FROM mutation_ledger
               WHERE operation_kind = ?1 AND status = 'applying'
               ORDER BY started_at ASC",
@@ -5953,6 +5986,7 @@ impl Store {
                     route: row.get(5)?,
                     target_turn_id: row.get(6)?,
                     claimed_hash: row.get(2)?,
+                    question_decision: question_decision_column(row, 8)?,
                 },
                 started_at: row.get(7)?,
             })
@@ -5982,7 +6016,7 @@ impl Store {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT session_uid, client_request_id, claimed_hash, thread_id, generation,
-                    route, target_turn_id, started_at
+                    route, target_turn_id, started_at, question_decision
                FROM mutation_ledger
               WHERE operation_kind = ?1 AND session_uid = ?2 AND status = 'applying'
               ORDER BY started_at ASC",
@@ -5997,6 +6031,7 @@ impl Store {
                     route: row.get(5)?,
                     target_turn_id: row.get(6)?,
                     claimed_hash: row.get(2)?,
+                    question_decision: question_decision_column(row, 8)?,
                 },
                 started_at: row.get(7)?,
             })
@@ -6835,6 +6870,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             outcome           TEXT,
             started_at        TEXT NOT NULL,
             settled_at        TEXT,
+            -- An answer to a Codex question card, kept whole: the app's `Answers`
+            -- or `Decline` as JSON. NULL for every other claim.
+            question_decision TEXT,
             PRIMARY KEY(operation_kind, session_uid, client_request_id)
         );
 
@@ -7401,6 +7439,8 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
         "paired_before_nodes",
         "INTEGER NOT NULL DEFAULT 0",
     ),
+    // A Codex question card's answer, kept whole (X7b).
+    ("mutation_ledger", "question_decision", "TEXT"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -8342,6 +8382,7 @@ mod tests {
             route: "turn_start".into(),
             target_turn_id: None,
             claimed_hash: hash.into(),
+            question_decision: None,
         };
 
         // First claim owns the id.
@@ -8519,6 +8560,7 @@ mod tests {
             route: "accept".into(),
             target_turn_id: Some("turn-1".into()),
             claimed_hash: hash.into(),
+            question_decision: None,
         };
         assert_eq!(
             store
@@ -8624,6 +8666,7 @@ mod tests {
             route: "accept".into(),
             target_turn_id: Some("turn-1".into()),
             claimed_hash: "hashA".into(),
+            question_decision: None,
         };
         assert_eq!(
             store
@@ -8735,6 +8778,7 @@ mod tests {
             route: "accept".into(),
             target_turn_id: Some("turn-1".into()),
             claimed_hash: "hashA".into(),
+            question_decision: None,
         };
         assert_eq!(
             store
@@ -8803,6 +8847,7 @@ mod tests {
             route: route.into(),
             target_turn_id: None,
             claimed_hash: "hashA".into(),
+            question_decision: None,
         };
         store
             .claim_mutation("answer", &session.uid, "req-1", &material("accept"), &now)
@@ -11514,6 +11559,7 @@ mod tests {
                         route: "turn_start".into(),
                         target_turn_id: None,
                         claimed_hash: "hash".into(),
+                        question_decision: None,
                     },
                     &now,
                 )

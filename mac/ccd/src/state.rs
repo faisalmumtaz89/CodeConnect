@@ -2006,7 +2006,10 @@ impl Waiting {
                 [label] => Some(label.to_string()),
                 _ => None,
             },
-            question: matches!(open.as_slice(), [entry] if entry.question.is_some()),
+            // A Claude question carries its question state; a Codex one is a card of Codex's
+            // own question tool.
+            question: matches!(open.as_slice(), [entry] if entry.question.is_some()
+                || entry.card.tool_name == crate::codex_approval::QUESTION_TOOL_NAME),
         }
     }
 }
@@ -5584,8 +5587,9 @@ impl Daemon {
     ///
     /// Everything this function checks is a property of the STORED card: that it is
     /// still open, that the hash the phone echoed is the one it was displayed under,
-    /// and that the option named is one the app-server itself proposed. None of that
-    /// needs a socket. Everything that needs the socket — whether the connection
+    /// and that the option named is one the app-server itself proposed, or, on a question
+    /// card, that the answers fit the questions it stored. None of that needs a socket.
+    /// Everything that needs the socket — whether the connection
     /// holds a live wire id for this card, on the card's own thread, with no switch
     /// in flight — is asked of the link, and the link takes the durable claim at the
     /// one moment it knows the answer is about to be written. That is what keeps a
@@ -5599,13 +5603,21 @@ impl Daemon {
         decision: AnswerDecision,
         answered_on: AnsweredOn,
     ) -> AnswerResult {
-        let AnswerDecision::OptionId { option_id } = &decision else {
-            return AnswerResult::Rejected {
-                reason: "a Codex card is answered by naming one of the options it \
-                         offered; this decision names none of them, so nothing was sent"
-                    .into(),
-            };
+        // An approval card is answered by naming one of its options and a question card
+        // with its answers or a decline; no Codex card takes any other decision.
+        let names_no_option = || AnswerResult::Rejected {
+            reason: "a Codex card is answered by naming one of the options it \
+                     offered; this decision names none of them, so nothing was sent"
+                .into(),
         };
+        if !matches!(
+            decision,
+            AnswerDecision::OptionId { .. }
+                | AnswerDecision::Answers { .. }
+                | AnswerDecision::Decline
+        ) {
+            return names_no_option();
+        }
         let session = SessionKey::new(&row.session_uid, &row.session_id);
 
         // 1. **The durable ledger wins over everything, including the card.** A
@@ -5697,32 +5709,48 @@ impl Daemon {
             };
         }
         // 3. The wire decision, rebuilt from the card's own options. A phone sends
-        //    an opaque id; the body of an amendment is never anything it supplied.
-        let Some(wire) =
-            crate::codex_approval::wire_decision(&card.tool_input["options"], option_id)
-        else {
-            return AnswerResult::Rejected {
-                reason: format!(
-                    "{option_id:?} is not one of the options this card offered; nothing was sent"
-                ),
+        //    an opaque id; the body of an amendment is never anything it supplied. A
+        //    question card's whole reply is built from the questions it stored, and the
+        //    answers are kept whole for its resolution and for a restart's resend.
+        let question = crate::codex_approval::Family::of_item_type(&held.family)
+            == Some(crate::codex_approval::Family::Question);
+        let (route, wire, question_decision) = if question {
+            match crate::codex_approval::question_reply(&card.tool_input, &decision) {
+                Ok((route, reply)) => (route.to_string(), reply, Some(decision.clone())),
+                Err(why) => {
+                    return AnswerResult::Rejected {
+                        reason: format!("{why}. Nothing was sent."),
+                    }
+                }
+            }
+        } else {
+            let AnswerDecision::OptionId { option_id } = &decision else {
+                return names_no_option();
             };
+            let Some(wire) =
+                crate::codex_approval::wire_decision(&card.tool_input["options"], option_id)
+            else {
+                return AnswerResult::Rejected {
+                    reason: format!(
+                        "{option_id:?} is not one of the options this card offered; nothing was sent"
+                    ),
+                };
+            };
+            (option_id.clone(), wire, None)
         };
 
         // 4. The material this answer will be claimed with — the whole authorization
         //    surface, so the same id carrying a different decision, a different card
         //    or a different thread is a conflict rather than a replay.
+        let claimed_hash =
+            protocol::hash::answer_hash(request_id, payload_hash, &route, &held.thread_id, &wire);
         let claimed = crate::store::ClaimedMaterial {
             thread_id: held.thread_id.clone(),
             generation: held.generation,
-            route: option_id.clone(),
+            route,
             target_turn_id: Some(held.turn_id.clone()),
-            claimed_hash: protocol::hash::answer_hash(
-                request_id,
-                payload_hash,
-                option_id,
-                &held.thread_id,
-                &wire,
-            ),
+            claimed_hash,
+            question_decision,
         };
 
         // 5. The link claims and writes, in that order, and files the terminal
@@ -6070,6 +6098,7 @@ impl Daemon {
             // that the same ask about the same turn is the same ask however it was
             // addressed.
             claimed_hash: protocol::hash::interrupt_hash(&row.session_uid, turn_id),
+            question_decision: None,
         };
 
         // 6. **The link claims and writes, in that order, and settles the terminal
@@ -19807,6 +19836,7 @@ mod tests {
         ClaudeApproval,
         ClaudeQuestion,
         CodexApproval,
+        CodexQuestion,
         CodexCompleted,
     }
 
@@ -19834,6 +19864,35 @@ mod tests {
                             "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
                             "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
                             "commandExecution",
+                        )
+                        .await,
+                    "the card is filed"
+                );
+                None
+            }
+            Ring::CodexQuestion => {
+                register_codex_session(daemon, TEST_UID, "cc-1").await;
+                let asked: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../../fixtures/codex/plan-question-0.167.0.json"
+                ))
+                .unwrap();
+                let params = &asked["params"];
+                let card = crate::codex_approval::Approval::read(
+                    crate::codex_approval::Family::Question,
+                    params,
+                    None,
+                )
+                .expect("the production parser reads the measured Plan question")
+                .card("rq-away-question".into(), 1);
+                assert!(
+                    daemon
+                        .raise_codex_approval(
+                            &SessionKey::new(TEST_UID, "cc-1"),
+                            card,
+                            params["threadId"].as_str().unwrap(),
+                            params["turnId"].as_str().unwrap(),
+                            params["itemId"].as_str().unwrap(),
+                            crate::codex_approval::Family::Question.as_str(),
                         )
                         .await,
                     "the card is filed"
@@ -19907,6 +19966,7 @@ mod tests {
             (Ring::ClaudeApproval, PushKind::Approval, false),
             (Ring::ClaudeQuestion, PushKind::Question, false),
             (Ring::CodexApproval, PushKind::Approval, false),
+            (Ring::CodexQuestion, PushKind::Question, false),
             (Ring::CodexCompleted, PushKind::Approval, true),
         ] {
             let (daemon, capture) = capture_daemon();
@@ -30665,6 +30725,7 @@ mod tests {
                             route: "accept".into(),
                             target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
                             claimed_hash: admitted.payload_hash.clone(),
+                            question_decision: None,
                         },
                         protocol::time::now_rfc3339(),
                     )
@@ -30837,6 +30898,7 @@ mod tests {
                             route: "accept".into(),
                             target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
                             claimed_hash: admitted.payload_hash.clone(),
+                            question_decision: None,
                         },
                         protocol::time::now_rfc3339(),
                     )
@@ -30866,6 +30928,7 @@ mod tests {
                             route: crate::store::INTERRUPT_ROUTE.into(),
                             target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
                             claimed_hash: "h".into(),
+                            question_decision: None,
                         },
                         protocol::time::now_rfc3339(),
                     )
@@ -31035,6 +31098,7 @@ mod tests {
             route: "accept".into(),
             target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
             claimed_hash: "h".into(),
+            question_decision: None,
         };
         for (kind, request_id) in [
             (crate::store::OPERATION_ANSWER, answer_id),
@@ -31667,6 +31731,7 @@ mod tests {
                             route: "accept".into(),
                             target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
                             claimed_hash: "hash".into(),
+                            question_decision: None,
                         },
                         &protocol::time::now_rfc3339(),
                     )
@@ -31751,6 +31816,7 @@ mod tests {
             route: "accept".into(),
             target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
             claimed_hash: "hash".into(),
+            question_decision: None,
         };
         store
             .claim_mutation(
@@ -31922,6 +31988,7 @@ mod tests {
                         route: "accept".into(),
                         target_turn_id: Some("tu-1".into()),
                         claimed_hash: card.payload_hash.clone(),
+                        question_decision: None,
                     },
                     protocol::time::now_rfc3339(),
                 )
@@ -32028,6 +32095,7 @@ mod tests {
                         route: "accept".into(),
                         target_turn_id: Some("tu-1".into()),
                         claimed_hash: card.payload_hash.clone(),
+                        question_decision: None,
                     },
                     protocol::time::now_rfc3339(),
                 )
@@ -32098,6 +32166,7 @@ mod tests {
             route: "accept".into(),
             target_turn_id: Some("tu-1".into()),
             claimed_hash: card.payload_hash.clone(),
+            question_decision: None,
         };
         let now = protocol::time::now_rfc3339();
         assert_eq!(
@@ -32494,6 +32563,7 @@ mod tests {
                 route: crate::store::INTERRUPT_ROUTE.into(),
                 target_turn_id: Some("turn-1".into()),
                 claimed_hash: interrupt_hash(uid, "turn-1"),
+                question_decision: None,
             };
             let now = protocol::time::now_rfc3339();
             assert_eq!(
@@ -32574,6 +32644,7 @@ mod tests {
             route: crate::store::INTERRUPT_ROUTE.into(),
             target_turn_id: Some("turn-1".into()),
             claimed_hash: interrupt_hash(uid, "turn-1"),
+            question_decision: None,
         };
         store
             .claim_mutation(
@@ -32642,6 +32713,7 @@ mod tests {
                         route: "accept".into(),
                         target_turn_id: Some("turn-1".into()),
                         claimed_hash: "h".into(),
+                        question_decision: None,
                     },
                     &protocol::time::now_rfc3339(),
                 )
@@ -32819,6 +32891,7 @@ mod tests {
             route: crate::store::INTERRUPT_ROUTE.into(),
             target_turn_id: Some("turn-1".into()),
             claimed_hash: interrupt_hash(uid, "turn-1"),
+            question_decision: None,
         };
         let now = protocol::time::now_rfc3339();
         store
@@ -32917,6 +32990,7 @@ mod tests {
             route: crate::store::INTERRUPT_ROUTE.into(),
             target_turn_id: Some(turn.to_string()),
             claimed_hash: hash.to_string(),
+            question_decision: None,
         };
         store
             .claim_mutation(
@@ -33024,6 +33098,7 @@ mod tests {
             route: crate::store::INTERRUPT_ROUTE.into(),
             target_turn_id: Some("turn-1".into()),
             claimed_hash: interrupt_hash(uid, "turn-1"),
+            question_decision: None,
         };
         store
             .claim_mutation(
@@ -33112,6 +33187,7 @@ mod tests {
                     route: crate::store::INTERRUPT_ROUTE.into(),
                     target_turn_id: Some("turn-1".into()),
                     claimed_hash: interrupt_hash(uid, "turn-1"),
+                    question_decision: None,
                 },
                 &protocol::time::now_rfc3339(),
             )
@@ -33610,6 +33686,7 @@ mod tests {
                         route: crate::store::COMPOSE_ROUTE_START.into(),
                         target_turn_id: None,
                         claimed_hash: claimed_hash.to_string(),
+                        question_decision: None,
                     },
                     &now,
                 )

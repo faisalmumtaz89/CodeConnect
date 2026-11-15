@@ -1628,6 +1628,7 @@ pub(crate) async fn interrupt(
         route: INTERRUPT_ROUTE.to_string(),
         target_turn_id: Some(turn_id.to_string()),
         claimed_hash: protocol::hash::interrupt_hash(uid, turn_id),
+        question_decision: None,
     };
     let claim = daemon
         .db
