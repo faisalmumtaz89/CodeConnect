@@ -77,6 +77,13 @@ private struct Composer: View {
             if !new.isEmpty, case .failed = running?.phase { running = nil }
             if !new.isEmpty, case .neutral = running?.phase { running = nil }
         }
+        // A send a live Stop cancelled hands its words back here, but only into an empty reply, so a draft being typed
+        // is never overwritten. Taken or not, Kit's offer is consumed, so the words are offered once.
+        .onChange(of: model.composerRestore[key]) { _, restore in
+            guard let restore else { return }
+            if kept.reply.isEmpty { kept.reply = restore }
+            model.consumeComposerRestore(for: key)
+        }
         // A new handshake is the link back, and so is the box coming back, from another tab or another run: the
         // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
