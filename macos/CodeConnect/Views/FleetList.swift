@@ -280,7 +280,7 @@ private struct FleetLine: View {
     let selected: Bool
     @State private var lastTick = Date()
 
-    private var since: Date { row.lastEventAt ?? row.summary.updatedDate }
+    private var since: Date { row.lastActive }
 
     var body: some View {
         HStack(spacing: 10) {

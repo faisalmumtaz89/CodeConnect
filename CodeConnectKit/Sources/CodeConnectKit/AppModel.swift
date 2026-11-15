@@ -1818,7 +1818,7 @@ public final class AppModel {
                     capability: FleetStatusRule.capability(
                         summary: summary, capabilities: connection.capabilities),
                     blockedCount: max(summary.blockedOn.count, pending.count),
-                    lastEventAt: shown?.lastEventAt,
+                    lastActivityAt: shown?.lastActivityAt,
                     cachedAt: (shown?.hasLiveData ?? false) ? nil : shown?.loadedFromCacheAt,
                     machineID: machineID, machineName: name)
             })

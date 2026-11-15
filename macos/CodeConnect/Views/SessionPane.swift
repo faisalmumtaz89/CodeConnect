@@ -123,7 +123,7 @@ private struct Heading: View {
     @Binding var tab: SessionTab
 
     var body: some View {
-        let since = row.lastEventAt ?? row.summary.updatedDate
+        let since = row.lastActive
         VStack(alignment: .leading, spacing: 10) {
             Text(row.label.inline)
                 .font(Theme.ui(18, .semibold))

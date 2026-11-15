@@ -179,7 +179,6 @@ public final class SessionState {
         let beforeSeq: UInt64
         let limit: UInt64
     }
-    private(set) var lastEventAt: Date? { didSet { unpublished = true } }
     /// The permission mode this run is operating under, tracked on ingest
     /// because the fleet reads it continuously and it changes about once a
     /// session.
@@ -396,7 +395,9 @@ public final class SessionState {
         // first difference, and the timeline is the costly one.
         public var drawnThrough: UInt64 = 0
         var lastPromptSeq: UInt64 = 0
-        var lastEventAt: Date?
+        /// When the run last did something: its newest event that is not a link fact. A daemon restart files a
+        /// `link_state` for every run it finds still running, and that is not the run doing anything.
+        var lastActivityAt: Date?
         public var gap: GapNotice?
         public var windowStart: UInt64?
         public var headTruncated = false
@@ -447,7 +448,8 @@ public final class SessionState {
     var current: Shown {
         let turns = codexTurns()
         return Shown(
-            drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq, lastEventAt: lastEventAt,
+            drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq,
+            lastActivityAt: events.last(where: { $0.kind != .linkState })?.date,
             gap: gap,
             windowStart: windowStart, headTruncated: headTruncated,
             loadingPage: pageRequest != nil,
@@ -523,7 +525,6 @@ public final class SessionState {
         noteEndedTurns(cached.events)
         loadedFromCacheAt = cached.cachedAt
         cacheRestoredAt = Date()
-        lastEventAt = cached.events.last?.date
         if let moded = cached.events.reversed().first(where: { $0.permissionModeChange != nil }) {
             permissionMode = moded.permissionModeChange
             permissionModeSeq = moded.seq
@@ -603,7 +604,6 @@ public final class SessionState {
             }
             events.append(event)
             noteEndedTurns([event])
-            lastEventAt = event.date
             if let mode = event.permissionModeChange {
                 permissionMode = mode
                 permissionModeSeq = event.seq
@@ -883,7 +883,6 @@ public final class SessionState {
         missingRanges.removeAll()
         loadedFromCacheAt = nil
         cacheRestoredAt = nil
-        lastEventAt = nil
         truncatedByBackfill = false
         windowStart = nil
         dropPage()
