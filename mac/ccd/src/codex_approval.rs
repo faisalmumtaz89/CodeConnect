@@ -136,6 +136,7 @@
 //!   echoes back rather than the payload hash.
 
 use protocol::composite_id::{CompositeId, ServerRequestId};
+use protocol::ws::AnswerDecision;
 use serde_json::{Map, Value};
 
 /// `item/commandExecution/requestApproval` — a shell command wants to run.
@@ -145,6 +146,12 @@ pub(crate) const FILE_CHANGE_METHOD: &str = "item/fileChange/requestApproval";
 /// `mcpServer/elicitation/request` — how Codex asks for an MCP tool call's approval, among
 /// other elicitations (measured on 0.167.0, cx/x7/p76b.out).
 pub(crate) const ELICITATION_METHOD: &str = "mcpServer/elicitation/request";
+/// `item/tool/requestUserInput` — how Codex's model asks the person questions in Plan mode
+/// (measured on 0.167.0, cx/x7b/p/probe.out P1).
+pub(crate) const QUESTION_METHOD: &str = "item/tool/requestUserInput";
+/// A question card's `tool_name`: Codex's own name for the tool, which the apps' question
+/// card and the doorbell's question sentence read.
+pub(crate) const QUESTION_TOOL_NAME: &str = "request_user_input";
 /// The `_meta.codex_approval_kind` that makes an elicitation an MCP tool approval.
 const MCP_TOOL_APPROVAL_KIND: &str = "mcp_tool_call";
 /// The ending that makes a server request one the broker will hand to this leg.
@@ -267,6 +274,10 @@ pub(crate) enum Family {
     /// An MCP tool call Codex asks to run, by elicitation (P7-6b): a server's tool, such as
     /// CodeConnect's own `send_message`.
     McpTool,
+    /// Questions Codex's model asks the person in Plan mode, on a run started from an app
+    /// (X7b). The card offers no approval choices: each question carries its own options, and
+    /// the card is answered with the person's answers or declined ([`question_reply`]).
+    Question,
 }
 
 impl Family {
@@ -283,12 +294,14 @@ impl Family {
     /// It is deliberately the app-server's own `item.type` spelling, which is
     /// what makes [`Family::of_item_type`] the exact inverse of this and lets an
     /// item's terminal be matched against a card's family without a second
-    /// vocabulary to keep in step.
+    /// vocabulary to keep in step. A question is no item of Codex's, so it is named
+    /// after its method, a name no `item.type` carries.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Family::Command => "commandExecution",
             Family::FileChange => "fileChange",
             Family::McpTool => "mcpToolCall",
+            Family::Question => "requestUserInput",
         }
     }
 
@@ -297,12 +310,14 @@ impl Family {
     ///
     /// The cheap question the retirement path asks before it reads anything: an
     /// `item/completed` for a `reasoning` or an `agentMessage` can retire no
-    /// card, and those are most of the frames a turn produces.
+    /// card, and those are most of the frames a turn produces. It is also how a
+    /// restart reads a stored card's family back (`codex_host::standing_cards`).
     pub(crate) fn of_item_type(item_type: &str) -> Option<Family> {
         match item_type {
             "commandExecution" => Some(Family::Command),
             "fileChange" => Some(Family::FileChange),
             "mcpToolCall" => Some(Family::McpTool),
+            "requestUserInput" => Some(Family::Question),
             _ => None,
         }
     }
@@ -316,11 +331,14 @@ impl Family {
     /// `Views/DecisionCard.swift`). Borrowing `"Bash"` would buy a terminal
     /// glyph at the price of a title that names a tool Codex does not have, so
     /// these say what the request is. What the app makes of them is the app's.
+    /// A question is called by Codex's own name for the tool, `request_user_input`
+    /// (X7b's D7), which the apps' question card reads.
     fn tool_name(self) -> &'static str {
         match self {
             Family::Command => "command",
             Family::FileChange => "file change",
             Family::McpTool => "MCP tool",
+            Family::Question => QUESTION_TOOL_NAME,
         }
     }
 
@@ -357,6 +375,8 @@ impl Family {
                 ("acceptForSession", "Allow for this session"),
                 ("decline", "Deny"),
             ],
+            // A question's options are its own, read off the request.
+            Family::Question => &[],
         }
     }
 
@@ -676,6 +696,11 @@ pub(crate) enum Context {
         message: String,
         arguments: Value,
     },
+    /// A question card's questions, each in the shape the apps draw a question card in
+    /// (`question`, `header`, `multiSelect: false`, `options: [{label, description}]`), with
+    /// Codex's own `id` inside it, so the id an answer is filed under is stored and hashed
+    /// with the options it was chosen from ([`card_question`]).
+    Question { questions: Vec<Value> },
 }
 
 /// A `*/requestApproval` this daemon is prepared to raise a card for.
@@ -723,6 +748,14 @@ pub(crate) enum Refusal {
     /// `thread/start` key is refused: a capability nobody has measured is not
     /// a capability this build may quietly exercise.
     UnmeasuredEnvironment,
+    /// A question in a shape no capture holds. P1's is the one carded (cx/x7b/p/probe.out):
+    /// each question with an id, its words, a header and options that each carry a label and
+    /// a description, "Other" offered (`isOther`) and nothing secret (`isSecret`). Codex's
+    /// other askers on this method, an MCP tool's approval and a skill's dependency prompt,
+    /// set `isOther` false (core/src/mcp_tool_call.rs:2065, mcp_skill_dependencies.rs:270 in
+    /// 0.167.0), and a secret question would put the person's answer on a phone's screen, so
+    /// each stays answered with an error, as before there were question cards.
+    UnmeasuredQuestion,
 }
 
 impl std::fmt::Display for Refusal {
@@ -742,6 +775,12 @@ impl std::fmt::Display for Refusal {
                 "the request does not name environmentId {LOCAL_ENVIRONMENT:?}, which is the \
                  only place this build has ever measured a command running and the only one \
                  it can honestly describe on a card"
+            ),
+            Refusal::UnmeasuredQuestion => write!(
+                f,
+                "the questions are not in the one shape this build cards: each with an id, its \
+                 words, a header and options with a label and a description, Other offered and \
+                 nothing secret"
             ),
         }
     }
@@ -856,13 +895,19 @@ pub(crate) fn wire_decision(options: &Value, option_id: &str) -> Option<Value> {
 }
 
 /// The family a server request is carded as, if any: the two `*/requestApproval` methods,
-/// and an elicitation whose `_meta.codex_approval_kind` says it asks for an MCP tool call
-/// (P7-6b). Any other request, a plain MCP form included, is none of them.
+/// an elicitation whose `_meta.codex_approval_kind` says it asks for an MCP tool call
+/// (P7-6b), and a question that holds the turn until it is answered (`isBlocking: true`,
+/// Plan mode's, P1). Any other request, a plain MCP form included, is none of them; so is a
+/// question that does not block (the person's own under-development
+/// `default_mode_request_user_input`), which is answered with an error, as Codex then
+/// submits empty answers and goes on (app-server/src/bespoke_event_handling.rs:1715-1735 in
+/// 0.167.0).
 pub(crate) fn card_family(method: &str, params: &Value) -> Option<Family> {
     match method {
         ELICITATION_METHOD => (params.pointer("/_meta/codex_approval_kind")
             == Some(&Value::String(MCP_TOOL_APPROVAL_KIND.into())))
         .then_some(Family::McpTool),
+        QUESTION_METHOD => (params["isBlocking"] == true).then_some(Family::Question),
         _ => Family::of_method(method),
     }
 }
@@ -870,7 +915,8 @@ pub(crate) fn card_family(method: &str, params: &Value) -> Option<Family> {
 /// The response that answers a card of `family` with `decision`, the wire decision
 /// [`wire_decision`] rebuilt from the stored card. A command or file change takes
 /// `{"decision": …}`; an MCP tool approval takes the elicitation's own reply, with "Allow
-/// for this session" as `_meta.persist: "session"` (P7-6b).
+/// for this session" as `_meta.persist: "session"` (P7-6b); a question takes the reply
+/// [`question_reply`] built, as it is.
 pub(crate) fn reply(family: Family, decision: Value) -> Value {
     match family {
         Family::Command | Family::FileChange => serde_json::json!({ "decision": decision }),
@@ -883,7 +929,114 @@ pub(crate) fn reply(family: Family, decision: Value) -> Value {
             }
             _ => serde_json::json!({"action": "accept", "content": null, "_meta": null}),
         },
+        Family::Question => decision,
     }
+}
+
+/// The route a question card's answer claim records
+/// ([`crate::store::ClaimedMaterial::route`]) when it answers the questions, and when it
+/// declines them. The decision itself is kept beside it
+/// ([`crate::store::ClaimedMaterial::question_decision`]).
+pub(crate) const QUESTION_ANSWERED: &str = "answers";
+pub(crate) const QUESTION_DECLINED: &str = "decline";
+/// Codex's own label for "Other" (tui/src/bottom_pane/request_user_input/mod.rs:65 in
+/// 0.167.0).
+const OTHER_LABEL: &str = "None of the above";
+
+/// **Codex's reply to a question card, built from the card's stored questions as Codex's
+/// own TUI builds it** (tui/src/bottom_pane/request_user_input/mod.rs:880-895 in 0.167.0,
+/// and its tests at :3186 and :3298), with the route its claim records; or why `decision`
+/// is refused, as a sentence.
+///
+/// One answer per question, in the card's order, each filed under that question's own `id`:
+/// an option is its label, `["Blue"]`; "Other" is Codex's own label and then the person's
+/// words, trimmed, as a note, `["None of the above", "user_note: <text>"]`. A decline
+/// answers no question, `{"answers": {}}`, and the turn goes on. Notes on a chosen option,
+/// which Codex's TUI also takes, are refused: the apps offer an option or "Other", and
+/// "Other" carries the person's words.
+pub(crate) fn question_reply(
+    tool_input: &Value,
+    decision: &AnswerDecision,
+) -> Result<(&'static str, Value), String> {
+    let answers = match decision {
+        AnswerDecision::Decline => {
+            return Ok((QUESTION_DECLINED, serde_json::json!({ "answers": {} })))
+        }
+        AnswerDecision::Answers { answers } => answers,
+        _ => {
+            return Err(
+                "a Codex question is answered with an answer to each question, or declined".into(),
+            )
+        }
+    };
+    let questions = tool_input["questions"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if answers.len() != questions.len() {
+        return Err(format!(
+            "{} answer(s) for {} question(s); every question needs exactly one answer",
+            answers.len(),
+            questions.len()
+        ));
+    }
+    let mut replies = Map::new();
+    for (number, (question, answer)) in questions.iter().zip(answers).enumerate() {
+        let number = number + 1;
+        let given = match (
+            answer.selected.as_slice(),
+            answer.other.as_deref().map(str::trim),
+        ) {
+            ([index], None) => {
+                let Some(label) = question["options"][*index as usize]["label"].as_str() else {
+                    return Err(format!(
+                        "question {number} has no option {}",
+                        u64::from(*index) + 1
+                    ));
+                };
+                vec![label.to_string()]
+            }
+            ([], Some("")) => return Err(format!("question {number}'s \"Other\" answer is empty")),
+            ([], Some(text)) => vec![OTHER_LABEL.to_string(), format!("user_note: {text}")],
+            ([], None) => return Err(format!("question {number} has no answer")),
+            _ => return Err(format!("question {number} takes one answer")),
+        };
+        if answer.notes.is_some() {
+            return Err(format!("question {number} takes no notes"));
+        }
+        replies.insert(
+            question["id"].as_str().unwrap_or_default().to_string(),
+            serde_json::json!({ "answers": given }),
+        );
+    }
+    Ok((QUESTION_ANSWERED, serde_json::json!({ "answers": replies })))
+}
+
+/// One of a question request's questions as the card shows it, or `None` for a shape no
+/// capture holds ([`Refusal::UnmeasuredQuestion`]). Every string is kept as Codex sent it: a
+/// label goes back to Codex as the answer.
+fn card_question(asked: &Value) -> Option<Value> {
+    if asked["isOther"] != true || asked["isSecret"] == true {
+        return None;
+    }
+    let options = asked["options"]
+        .as_array()
+        .filter(|options| !options.is_empty())?
+        .iter()
+        .map(|option| {
+            Some(serde_json::json!({
+                "label": option["label"].as_str()?,
+                "description": option["description"].as_str()?,
+            }))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(serde_json::json!({
+        "id": asked["id"].as_str().filter(|id| !id.is_empty())?,
+        "question": asked["question"].as_str()?,
+        "header": asked["header"].as_str()?,
+        "multiSelect": false,
+        "options": options,
+    }))
 }
 
 /// The decisions to offer, in the order they will be shown.
@@ -907,6 +1060,7 @@ fn choices(family: Family, params: &Value) -> Vec<Choice> {
     };
     match family {
         Family::FileChange => fixed(&|_| true),
+        Family::Question => Vec::new(),
         // "Allow for this session" only when the request offers it (`_meta.persist`);
         // "always" never (decision 175).
         Family::McpTool => {
@@ -953,6 +1107,9 @@ impl Approval {
     ) -> Result<Approval, Refusal> {
         if family == Family::McpTool {
             return Approval::read_mcp_tool(params);
+        }
+        if family == Family::Question {
+            return Approval::read_question(params);
         }
         let thread_id = non_empty(params, "threadId")?;
         let turn_id = non_empty(params, "turnId")?;
@@ -1006,7 +1163,7 @@ impl Approval {
                     grant_root: optional(params, "grantRoot"),
                 }
             }
-            Family::McpTool => unreachable!("read above"),
+            Family::McpTool | Family::Question => unreachable!("read above"),
         };
 
         let choices = choices(family, params);
@@ -1047,6 +1204,31 @@ impl Approval {
                     .unwrap_or(Value::Null),
             },
             choices: choices(Family::McpTool, params),
+        })
+    }
+
+    /// Read a question request (X7b): its identity, and each of its questions in the shape the
+    /// card shows. A request with no questions names nothing to answer.
+    fn read_question(params: &Value) -> Result<Approval, Refusal> {
+        let thread_id = non_empty(params, "threadId")?;
+        let turn_id = non_empty(params, "turnId")?;
+        let item_id = non_empty(params, "itemId")?;
+        let asked = params["questions"]
+            .as_array()
+            .filter(|asked| !asked.is_empty())
+            .ok_or(Refusal::NoContent)?;
+        let questions = asked
+            .iter()
+            .map(card_question)
+            .collect::<Option<Vec<_>>>()
+            .ok_or(Refusal::UnmeasuredQuestion)?;
+        Ok(Approval {
+            family: Family::Question,
+            thread_id,
+            turn_id,
+            item_id,
+            context: Context::Question { questions },
+            choices: Vec::new(),
         })
     }
 
@@ -1176,6 +1358,11 @@ impl Approval {
                 );
                 input.insert("arguments".into(), arguments.clone());
             }
+            // A question card is its questions and nothing else: it offers no approval
+            // choices.
+            Context::Question { questions } => {
+                return serde_json::json!({ "questions": questions });
+            }
         }
         input.insert(
             "options".into(),
@@ -1210,6 +1397,8 @@ impl Approval {
             Context::McpTool {
                 tool, arguments, ..
             } => serde_json::json!({ "tool": tool, "arguments": arguments }),
+            // The words the person reads, as a Claude question card's are classified.
+            Context::Question { questions } => serde_json::json!({ "questions": questions }),
         }
     }
 
@@ -2246,6 +2435,146 @@ mod tests {
         }
         for other in ["reasoning", "agentMessage", "userMessage", "todoList", ""] {
             assert_eq!(Family::of_item_type(other), None);
+        }
+    }
+
+    /// The question codex 0.167.0 sent in Plan mode (cx/x7b/p/probe.out P1), verbatim.
+    const PLAN_QUESTION: &str = include_str!("../../../fixtures/codex/plan-question-0.167.0.json");
+
+    /// **Only a question that holds its turn, in the one shape a capture holds, becomes a
+    /// card, and its family reads back from the store's name for it** (X7b). P1's request is
+    /// a question card; the same request not blocking is no card, and is answered with an
+    /// error. A question whose `isOther` is false (Codex's MCP tool approval and skill prompt
+    /// on this method) or whose `isSecret` is true is refused. A restart reads a stored
+    /// card's family back through `of_item_type`, so a question card it found standing is
+    /// still one.
+    ///
+    /// **Mutation:** drop the `isBlocking` test from `card_family`, or the `isOther` and
+    /// `isSecret` test from `card_question`, or `"requestUserInput"` from `of_item_type`, and
+    /// the matching assertion fails.
+    #[test]
+    fn only_a_blocking_question_in_the_measured_shape_is_carded_and_read_back_after_a_restart() {
+        let asked: Value = serde_json::from_str(PLAN_QUESTION).unwrap();
+        let params = &asked["params"];
+        assert_eq!(card_family(QUESTION_METHOD, params), Some(Family::Question));
+        let mut not_blocking = params.clone();
+        not_blocking["isBlocking"] = json!(false);
+        assert_eq!(card_family(QUESTION_METHOD, &not_blocking), None);
+        assert!(Approval::read(Family::Question, params, None).is_ok());
+        for (key, value) in [("isOther", json!(false)), ("isSecret", json!(true))] {
+            let mut unmeasured = params.clone();
+            unmeasured["questions"][0][key] = value;
+            assert_eq!(
+                Approval::read(Family::Question, &unmeasured, None),
+                Err(Refusal::UnmeasuredQuestion),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            Family::of_item_type(Family::Question.as_str()),
+            Some(Family::Question)
+        );
+    }
+
+    /// **A question card's reply is the one Codex's own TUI sends for the same choices**
+    /// (X7b's D4; tui/src/bottom_pane/request_user_input/mod.rs:880-895 in 0.167.0, tests
+    /// :3186 and :3298). Each answer is filed under its own question's id in the card's order:
+    /// an option as its label, "Other" as `"None of the above"` and the person's words,
+    /// trimmed, as a `user_note`; a decline as no answers. Every answer that does not fit the
+    /// stored questions is refused with the reason, and so is a decision that is not an answer
+    /// or a decline.
+    ///
+    /// **Mutation:** encode "Other" as the bare text (Claude's rule), or key the answers by
+    /// position rather than by id, and the first assertion fails.
+    #[test]
+    fn a_question_cards_reply_is_the_one_codexs_own_tui_sends() {
+        let input = json!({"questions": [
+            {"id": "colour", "question": "Which colour?", "header": "Colour", "multiSelect": false,
+             "options": [{"label": "Red", "description": "the red one"},
+                         {"label": "Blue", "description": "the blue one"}]},
+            {"id": "size", "question": "Which size?", "header": "Size", "multiSelect": false,
+             "options": [{"label": "Small", "description": "a small one"},
+                         {"label": "Large", "description": "a large one"}]}
+        ]});
+        let pick = |index: u32| protocol::ws::QuestionAnswer {
+            selected: vec![index],
+            ..Default::default()
+        };
+        let other = |text: &str| protocol::ws::QuestionAnswer {
+            other: Some(text.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            question_reply(
+                &input,
+                &AnswerDecision::Answers {
+                    answers: vec![pick(1), other("  a big one\n")]
+                }
+            ),
+            Ok((
+                QUESTION_ANSWERED,
+                json!({"answers": {
+                    "colour": {"answers": ["Blue"]},
+                    "size": {"answers": ["None of the above", "user_note: a big one"]}
+                }})
+            ))
+        );
+        assert_eq!(
+            question_reply(&input, &AnswerDecision::Decline),
+            Ok((QUESTION_DECLINED, json!({"answers": {}})))
+        );
+        let both = protocol::ws::QuestionAnswer {
+            selected: vec![0],
+            other: Some("Green".into()),
+            notes: None,
+        };
+        let noted = protocol::ws::QuestionAnswer {
+            selected: vec![0],
+            other: None,
+            notes: Some("darker".into()),
+        };
+        let answers = |answers| AnswerDecision::Answers { answers };
+        for (refused, why) in [
+            (
+                answers(vec![pick(1)]),
+                "1 answer(s) for 2 question(s); every question needs exactly one answer",
+            ),
+            (
+                answers(vec![pick(2), pick(0)]),
+                "question 1 has no option 3",
+            ),
+            (
+                answers(vec![pick(0), other(" \n")]),
+                "question 2's \"Other\" answer is empty",
+            ),
+            (
+                answers(vec![Default::default(), pick(0)]),
+                "question 1 has no answer",
+            ),
+            (
+                answers(vec![
+                    protocol::ws::QuestionAnswer {
+                        selected: vec![0, 1],
+                        ..Default::default()
+                    },
+                    pick(0),
+                ]),
+                "question 1 takes one answer",
+            ),
+            (answers(vec![both, pick(0)]), "question 1 takes one answer"),
+            (answers(vec![noted, pick(0)]), "question 1 takes no notes"),
+            (
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                "a Codex question is answered with an answer to each question, or declined",
+            ),
+        ] {
+            assert_eq!(
+                question_reply(&input, &refused),
+                Err(why.to_string()),
+                "{refused:?}"
+            );
         }
     }
     // ------------------------------------------- what the risk class is, pinned

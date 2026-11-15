@@ -1271,9 +1271,15 @@ accept for this session, decline and cancel, under the words the apps show: a co
 turn); a file change's also "Yes, and don't ask again for these files"; an MCP tool
 call's "Allow", "Allow for this session" and "Deny". It never offers Codex's permanent
 "don't ask again for commands that start with …", which would write Codex's settings. The answer goes to
-Codex, and the card closes once Codex confirms it, or when its item or turn ends. Any
-other request Codex sends, a question for the person or a form an MCP server asks for
-among them, is answered at once with an error, so the turn goes on. Nothing is
+Codex, and the card closes once Codex confirms it, or when its item or turn ends. The
+questions Codex asks the person in Plan mode become a question card too (`tool_name`
+`request_user_input`, each question with Codex's own id): an app answers each question
+with one of its options or "Other" and its own words, or declines, and ccd sends Codex
+the answers as Codex's own terminal does (an option's label; "Other" as `None of the
+above` and the words as a `user_note`; a decline as no answers). An answer sent as ccd
+restarts is sent again when Codex asks again. Any other request Codex sends, a question
+that does not hold the turn or a form an MCP server asks for among them, is answered at
+once with an error, so the turn goes on. Nothing is
 written to Codex's own config. A start with no `codeconnect` to run the mail server is
 refused before its row. A start that fails once codex is launched (codex ends, does not
 listen, or does not take the first message within 80 s, before or after the answer) is
@@ -1863,13 +1869,15 @@ fails the suite instead of failing silently in production.
 
 ## Known limits
 
-* **On a Codex run started from an app, a question or a form from Codex gets no answer
-  yet, and Codex carries on.** Codex asks the person a question only with its
-  under-development `default_mode_request_user_input` feature turned on, and a form only
-  when a person's own MCP server asks for one. The app shows neither: Codex is told nobody
-  answered, so a question gets an empty answer and a form is declined. With Codex's
-  `tool_call_mcp_elicitation` turned off, an MCP tool's approval is asked that way too,
-  and the call is cancelled.
+* **On a Codex run started from an app, only a question Codex asks in Plan mode is
+  answered from an app, and only with one of its options or "Other".** Notes on a chosen
+  option, which Codex's own terminal also takes, are not offered; "Other" carries the
+  person's words. A question outside Plan mode (Codex's under-development
+  `default_mode_request_user_input`) does not hold the turn and is not shown: Codex is told
+  nobody answered, so it gets an empty answer and carries on. A form, which only a person's
+  own MCP server asks for, is not shown either and is declined. With Codex's
+  `tool_call_mcp_elicitation` turned off, an MCP tool's approval is asked as a question
+  that is not shown, and the call is cancelled.
 * **On a Codex run started from an app, a file change Codex first asks for while ccd is
   restarting is declined.** Codex asks before a file change only when it writes outside
   the folders the run may write, or into `.git`, `.codex` or `.agents`. If it asks in the

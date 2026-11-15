@@ -645,9 +645,10 @@ fn card_id(uid: &str, thread: &str, wire: &Value) -> Option<String> {
 }
 
 /// One of Codex's requests: a card for a command, a file change or an MCP tool call to
-/// approve, and an error answer for anything else, so no turn waits on a request nobody
-/// will answer. A request whose card a restart found standing is bound to it again, and an
-/// answer claimed for it before the restart is sent once more (R6).
+/// approve, or for Plan mode's questions to answer, and an error answer for anything else,
+/// so no turn waits on a request nobody will answer. A request whose card a restart found
+/// standing is bound to it again, and an answer claimed for it before the restart is sent
+/// once more (R6).
 async fn request(
     daemon: &Arc<Daemon>,
     session: &SessionKey,
@@ -735,7 +736,8 @@ async fn request(
 
 /// After a restart: the answer claimed for the card `id`, if its claim is still
 /// `applying`, sent once more to the request Codex replayed, rebuilt from the stored card
-/// and the claim's option, never from anything a phone sends now.
+/// and the claim's option, or a question card's claimed answers, never from anything a
+/// phone sends now.
 async fn resend(daemon: &Daemon, session: &SessionKey, client: &Client, id: &str, card: &Card) {
     let uid = &session.uid;
     let Ok(Some(state)) = daemon
@@ -755,8 +757,14 @@ async fn resend(daemon: &Daemon, session: &SessionKey, client: &Client, id: &str
         .ok()
         .and_then(|rows| rows.into_iter().find(|row| row.request_id == id))
         .and_then(|row| serde_json::from_str::<Value>(&row.card).ok());
-    let Some(decision) = stored.and_then(|card| {
-        crate::codex_approval::wire_decision(&card["tool_input"]["options"], &state.claimed.route)
+    let Some(decision) = stored.and_then(|card| match &state.claimed.question_decision {
+        Some(answered) => crate::codex_approval::question_reply(&card["tool_input"], answered)
+            .ok()
+            .map(|(_, reply)| reply),
+        None => crate::codex_approval::wire_decision(
+            &card["tool_input"]["options"],
+            &state.claimed.route,
+        ),
     }) else {
         crate::log_error!(
             "{uid}: the answer claimed for {id} could not be rebuilt; not sent again"
@@ -767,6 +775,18 @@ async fn resend(daemon: &Daemon, session: &SessionKey, client: &Client, id: &str
     if client.respond(&card.wire, body).await.is_ok() {
         crate::log_info!("{uid}: the answer claimed for {id} before the restart was sent again");
     }
+}
+
+/// The decision an answer claim records, which the card's resolution files: a question
+/// card's own `Answers` or `Decline`, kept whole beside the claim, or the option an
+/// approval's route names.
+fn claimed_decision(claimed: &crate::store::ClaimedMaterial) -> AnswerDecision {
+    claimed
+        .question_decision
+        .clone()
+        .unwrap_or_else(|| AnswerDecision::OptionId {
+            option_id: claimed.route.clone(),
+        })
 }
 
 /// What an answer to a card is told while an earlier answer to it waits for Codex to confirm
@@ -839,9 +859,7 @@ async fn answer(
             );
         }
     }
-    let decision = AnswerDecision::OptionId {
-        option_id: ask.claimed.route.clone(),
-    };
+    let decision = claimed_decision(&ask.claimed);
     let body = crate::codex_approval::reply(card.family, ask.decision);
     if client.respond(&card.wire, body).await.is_err() {
         let _ = ask.reply.send(AnswerReport::Unknown(
@@ -894,6 +912,7 @@ async fn interrupt_turn(
         route: crate::store::INTERRUPT_ROUTE.to_string(),
         target_turn_id: Some(turn.clone()),
         claimed_hash: protocol::hash::interrupt_hash(uid, &turn),
+        question_decision: None,
     };
     let claim = daemon
         .db
@@ -1082,6 +1101,7 @@ async fn compose(
         route: crate::store::COMPOSE_ROUTE_START.to_string(),
         target_turn_id: None,
         claimed_hash: ask.claimed_hash.clone(),
+        question_decision: None,
     };
     let claim = daemon
         .db
@@ -1608,9 +1628,7 @@ async fn standing_cards(
             .await
         {
             Ok(Some(state)) if state.status == AnswerStatus::Applying => Some(Answer::Claimed {
-                decision: AnswerDecision::OptionId {
-                    option_id: state.claimed.route,
-                },
+                decision: claimed_decision(&state.claimed),
             }),
             _ => None,
         };
@@ -3105,13 +3123,29 @@ mod tests {
         card: &protocol::ws::ApprovalCard,
         option: &str,
     ) -> protocol::ws::AnswerResult {
+        decided(
+            daemon,
+            uid,
+            card,
+            AnswerDecision::OptionId {
+                option_id: option.into(),
+            },
+        )
+        .await
+    }
+
+    /// A phone's answer to `card` with `decision`.
+    async fn decided(
+        daemon: &Daemon,
+        uid: &str,
+        card: &protocol::ws::ApprovalCard,
+        decision: AnswerDecision,
+    ) -> protocol::ws::AnswerResult {
         daemon
             .answer(
                 &card.request_id,
                 &card.payload_hash,
-                AnswerDecision::OptionId {
-                    option_id: option.into(),
-                },
+                decision,
                 Some(uid),
                 protocol::ws::AnsweredOn::Iphone,
             )
@@ -3126,8 +3160,25 @@ mod tests {
         card: &protocol::ws::ApprovalCard,
         option: &'static str,
     ) -> tokio::task::JoinHandle<protocol::ws::AnswerResult> {
+        deciding(
+            daemon,
+            uid,
+            card,
+            AnswerDecision::OptionId {
+                option_id: option.into(),
+            },
+        )
+    }
+
+    /// [`answering`] with `decision`.
+    fn deciding(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        card: &protocol::ws::ApprovalCard,
+        decision: AnswerDecision,
+    ) -> tokio::task::JoinHandle<protocol::ws::AnswerResult> {
         let (daemon, uid, card) = (Arc::clone(daemon), uid.to_string(), card.clone());
-        tokio::spawn(async move { answered(&daemon, &uid, &card, option).await })
+        tokio::spawn(async move { decided(&daemon, &uid, &card, decision).await })
     }
 
     async fn ledger(daemon: &Daemon, uid: &str, id: &str) -> Option<AnswerStatus> {
@@ -3255,7 +3306,8 @@ mod tests {
     }
 
     /// **G1b (X7a): a request with no card is answered at once with an error**, so no turn
-    /// waits on it: a question, an MCP form, a request ccd has no use for, and an unknown one.
+    /// waits on it: a question that does not hold its turn (X7b's written limit: [`PLAN_QUESTION`]
+    /// with `isBlocking: false`), an MCP form, a request ccd has no use for, and an unknown one.
     /// A stand-in that waited for these answers before going on would wait for ever without
     /// them.
     #[tokio::test]
@@ -3264,8 +3316,11 @@ mod tests {
         let (thread, turn) = ("thread-b", "turn-b");
         let (uid, mut ws) = engine_run(&rig, "req-none", thread, turn).await;
         let params = json!({"threadId": thread, "turnId": turn, "itemId": "item-b"});
+        let (mut not_blocking, _, _) = plan_question();
+        not_blocking["id"] = json!(1);
+        not_blocking["params"]["isBlocking"] = json!(false);
         let requests = [
-            json!({"id": 1, "method": "item/tool/requestUserInput", "params": params}),
+            not_blocking,
             json!({"id": 2, "method": "mcpServer/elicitation/request", "params":
                 {"threadId": thread, "serverName": "theirs", "mode": "form", "message": "Name?",
                  "requestedSchema": {"type": "object", "properties": {}}}}),
@@ -3578,6 +3633,514 @@ mod tests {
         );
         drop(ws);
         end_run(&rig, &uid).await;
+    }
+
+    // ------------------------------- Plan mode's questions (X7b)
+
+    /// The question codex 0.167.0 sent in Plan mode (cx/x7b/p/probe.out P1), verbatim.
+    const PLAN_QUESTION: &str = include_str!("../../../fixtures/codex/plan-question-0.167.0.json");
+
+    /// [`PLAN_QUESTION`]'s frame, its thread and its turn.
+    fn plan_question() -> (serde_json::Value, String, String) {
+        let asked: serde_json::Value = serde_json::from_str(PLAN_QUESTION).unwrap();
+        let thread = asked["params"]["threadId"].as_str().unwrap().to_string();
+        let turn = asked["params"]["turnId"].as_str().unwrap().to_string();
+        (asked, thread, turn)
+    }
+
+    /// [`PLAN_QUESTION`] with a second question after its own, as Codex asks one to three.
+    fn two_questions() -> (serde_json::Value, String, String) {
+        let (mut asked, thread, turn) = plan_question();
+        let mut size = asked["params"]["questions"][0].clone();
+        size["id"] = json!("size");
+        size["header"] = json!("Size");
+        size["question"] = json!("Which size?");
+        size["options"] = json!([
+            {"label": "Small", "description": "a small one"},
+            {"label": "Large", "description": "a large one"}
+        ]);
+        asked["params"]["questions"]
+            .as_array_mut()
+            .unwrap()
+            .push(size);
+        (asked, thread, turn)
+    }
+
+    /// The answer that picks `index` of a question's options.
+    fn pick(index: u32) -> protocol::ws::QuestionAnswer {
+        protocol::ws::QuestionAnswer {
+            selected: vec![index],
+            ..Default::default()
+        }
+    }
+
+    /// The resolution filed for the card `id`, as an app decodes it, once it is filed (within
+    /// 10 s).
+    async fn resolution_of(daemon: &Daemon, uid: &str, id: &str) -> CodexResolution {
+        let source = format!("resolved:{id}");
+        filed_until(daemon, uid, &source).await;
+        let event = daemon
+            .db
+            .events_after(uid.to_string(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                event
+                    .source_event_id
+                    .as_deref()
+                    .is_some_and(|filed| filed.ends_with(&source))
+            })
+            .expect("the card's resolution was filed");
+        serde_json::from_value(event.payload).unwrap()
+    }
+
+    /// **G1 (X7b): a question Codex asks in Plan mode becomes a question card**
+    /// ([`PLAN_QUESTION`] on the run's link). Its `tool_name` is Codex's own
+    /// `request_user_input`; its `tool_input` is the questions in the shape the apps draw a
+    /// question card in, each with Codex's `id` inside it, so the id an answer is filed under is
+    /// stored and hashed with the options; `display_text` is `"{tool_name}\n{tool_input}"` and
+    /// `payload_hash` its SHA-256, the apps' two checks (CardVerification.swift); and the stored
+    /// family reads back as a question, as a restart reads it.
+    ///
+    /// **Must-fail:** take the question arm out of `codex_approval::card_family`, and Codex's
+    /// request is answered -32601 and no card is filed.
+    #[tokio::test]
+    async fn a_plan_question_becomes_a_question_card_with_codexs_ids_inside_it() {
+        let rig = rig();
+        let (asked, thread, turn) = plan_question();
+        let (uid, mut ws) = engine_run(&rig, "req-question", &thread, &turn).await;
+        tell(&mut ws, &asked).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert_eq!(card.tool_name, "request_user_input");
+        assert_eq!(
+            card.tool_input,
+            json!({"questions": [{
+                "id": "colour", "question": "Which colour?", "header": "Colour",
+                "multiSelect": false,
+                "options": [{"label": "Red", "description": "the red one"},
+                            {"label": "Blue", "description": "the blue one"}]
+            }]})
+        );
+        assert_eq!(
+            card.display_text,
+            format!("request_user_input\n{}", card.tool_input)
+        );
+        assert_eq!(
+            card.payload_hash,
+            protocol::hash::sha256_hex(card.display_text.as_bytes())
+        );
+        let rows = rig
+            .daemon
+            .db
+            .codex_pending_approvals(uid.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            Family::of_item_type(&rows[0].family),
+            Some(Family::Question)
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G2 (X7b): a question card's answers reach Codex as Codex's own TUI sends them, and the
+    /// resolution filed is the answers sent.** Two questions, each answered under its own id in
+    /// the card's order: an option as its label, "Other" as `"None of the above"` and the
+    /// person's words, trimmed, as a note. An answer with the wrong count, one naming an option
+    /// its question does not have, and an option id as an approval is answered with, are each
+    /// refused with no claim and nothing written: the first reply Codex is sent is the right
+    /// one. Codex's resolved notice retires the card, files the answers and settles the claim
+    /// delivered.
+    ///
+    /// **Must-fail:** take the question branch out of `Daemon::answer_codex`, and every answer
+    /// is refused as "a Codex card is answered by naming one of the options".
+    #[tokio::test]
+    async fn a_question_cards_answers_reach_codex_as_its_own_tui_sends_them_and_are_filed() {
+        let rig = rig();
+        let (asked, thread, turn) = two_questions();
+        let (uid, mut ws) = engine_run(&rig, "req-answers", &thread, &turn).await;
+        tell(&mut ws, &asked).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        for (refused, why) in [
+            (
+                AnswerDecision::Answers {
+                    answers: vec![pick(1)],
+                },
+                "1 answer(s) for 2 question(s)",
+            ),
+            (
+                AnswerDecision::Answers {
+                    answers: vec![pick(2), pick(0)],
+                },
+                "question 1 has no option 3",
+            ),
+            (
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                "answered with an answer to each question, or declined",
+            ),
+        ] {
+            match decided(&rig.daemon, &uid, card, refused).await {
+                protocol::ws::AnswerResult::Rejected { reason } => {
+                    assert!(reason.contains(why), "{reason}")
+                }
+                other => panic!("an answer that does not fit the card was taken: {other:?}"),
+            }
+            assert_eq!(
+                ledger(&rig.daemon, &uid, &card.request_id).await,
+                None,
+                "a refused answer was claimed"
+            );
+        }
+        let answers = AnswerDecision::Answers {
+            answers: vec![
+                pick(1),
+                protocol::ws::QuestionAnswer {
+                    other: Some("  a big one\n".into()),
+                    ..Default::default()
+                },
+            ],
+        };
+        let id = &asked["id"];
+        let (result, response) =
+            tokio::join!(decided(&rig.daemon, &uid, card, answers.clone()), async {
+                let response = response_to(&mut ws, id, Duration::from_secs(20)).await;
+                tell(&mut ws, &resolved(&asked["params"]["threadId"], id)).await;
+                response
+            });
+        assert_eq!(
+            response,
+            Some(json!({"id": id, "result": {"answers": {
+                "colour": {"answers": ["Blue"]},
+                "size": {"answers": ["None of the above", "user_note: a big one"]}
+            }}}))
+        );
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        assert_eq!(
+            resolution_of(&rig.daemon, &uid, &card.request_id).await,
+            CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(answers)
+            }
+        );
+        assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
+        assert_eq!(
+            ledger(&rig.daemon, &uid, &card.request_id).await,
+            Some(AnswerStatus::Settled("delivered".into()))
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G2 (X7b): a declined question card answers no question, `{"answers": {}}`, and files
+    /// the decline**: Codex is told nothing was chosen, and the turn goes on.
+    #[tokio::test]
+    async fn a_declined_question_card_answers_no_question_and_files_the_decline() {
+        let rig = rig();
+        let (asked, thread, turn) = plan_question();
+        let (uid, mut ws) = engine_run(&rig, "req-decline", &thread, &turn).await;
+        tell(&mut ws, &asked).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let id = &asked["id"];
+        let (result, response) = tokio::join!(
+            decided(&rig.daemon, &uid, &cards[0], AnswerDecision::Decline),
+            async {
+                let response = response_to(&mut ws, id, Duration::from_secs(20)).await;
+                tell(&mut ws, &resolved(&asked["params"]["threadId"], id)).await;
+                response
+            }
+        );
+        assert_eq!(response, Some(json!({"id": id, "result": {"answers": {}}})));
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        assert_eq!(
+            resolution_of(&rig.daemon, &uid, &cards[0].request_id).await,
+            CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(AnswerDecision::Decline)
+            }
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **G3 (X7b): a question's answer in flight across a restart is sent once more, with the
+    /// answers it was claimed with, and filed as those answers.** [`PLAN_QUESTION`], moved onto
+    /// the running turn of [`RUNNING_TURN`]'s thread, is answered, and ccd's connection ends
+    /// before Codex resolves it. The restarted daemon takes the card back from the store
+    /// (`standing_cards`: its family read back, its claim `applying`), Codex asks again under the
+    /// same id (P3), and the claimed reply is sent once and only once. One card throughout; the
+    /// resolved notice files the answers sent and settles the claim delivered.
+    ///
+    /// **Must-fail:** claim the answer without its decision (`question_decision: None` in
+    /// `Daemon::answer_codex`), and the restarted link cannot rebuild the reply ("could not be
+    /// rebuilt; not sent again") and sends nothing.
+    #[tokio::test]
+    async fn a_question_answer_in_flight_at_a_restart_is_sent_once_more_and_filed_as_sent() {
+        let rig = rig();
+        let resume: serde_json::Value = serde_json::from_str(RUNNING_TURN).unwrap();
+        let thread = resume["result"]["thread"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let turn = resume["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (mut asked, _, _) = plan_question();
+        asked["params"]["threadId"] = json!(thread);
+        asked["params"]["turnId"] = json!(turn);
+        let id = asked["id"].clone();
+        let (uid, mut ws) = engine_run(&rig, "req-question-r6", &thread, &turn).await;
+        tell(&mut ws, &asked).await;
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let answers = AnswerDecision::Answers {
+            answers: vec![pick(1)],
+        };
+        let reply =
+            Some(json!({"id": id, "result": {"answers": {"colour": {"answers": ["Blue"]}}}}));
+        let _phone = deciding(&rig.daemon, &uid, &cards[0], answers.clone());
+        assert_eq!(
+            response_to(&mut ws, &id, Duration::from_secs(20)).await,
+            reply
+        );
+        assert_eq!(
+            ledger(&rig.daemon, &uid, &cards[0].request_id).await,
+            Some(AnswerStatus::Applying)
+        );
+        let (restarted, mut ws) = restarted_under(&rig, ws).await;
+        tell(&mut ws, &asked).await;
+        assert_eq!(
+            response_to(&mut ws, &id, Duration::from_secs(20)).await,
+            reply,
+            "the claimed answers were not sent again"
+        );
+        assert_eq!(
+            response_to(&mut ws, &id, Duration::from_secs(3)).await,
+            None,
+            "the claimed answers were sent again more than once"
+        );
+        assert_eq!(cards_of(&restarted, &uid, 1).await.len(), 1);
+        tell(&mut ws, &resolved(&json!(thread), &id)).await;
+        assert_eq!(
+            resolution_of(&restarted, &uid, &cards[0].request_id).await,
+            CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(answers)
+            }
+        );
+        assert!(cards_of(&restarted, &uid, 0).await.is_empty());
+        assert_eq!(
+            ledger(&restarted, &uid, &cards[0].request_id).await,
+            Some(AnswerStatus::Settled("delivered".into()))
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    // ------------------------------- a Codex question card, as the apps are sent it
+
+    /// The run the question-card fixture is emitted for, written in place of the run's own uid.
+    const QUESTION_CARD_UID: &str = "01K1B3XQ8ZC0DE5FGH7QCARD00";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const QUESTION_CARD_AT: &str = "2026-11-16T00:00:00.000Z";
+    const QUESTION_CARD: &str = include_str!("../../../fixtures/codex/question-card-wire.json");
+    const REGENERATE_QUESTION_CARD: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_codex_question_card_fixture";
+
+    /// The fixture's runs, each with the decision an app answers the card with: the second
+    /// option, and a decline.
+    fn question_card_runs() -> [(&'static str, AnswerDecision); 2] {
+        [
+            (
+                "answered",
+                AnswerDecision::Answers {
+                    answers: vec![pick(1)],
+                },
+            ),
+            ("declined", AnswerDecision::Decline),
+        ]
+    }
+
+    /// The events this build files for a run started on the engine whose link carries
+    /// [`PLAN_QUESTION`], answered from an app with `decision` and then resolved by Codex, as the
+    /// `event` frames a subscribed app is sent, in seq order: the link's `attached`, the card
+    /// (`approval_request`), its resolution (`approval_resolved`). The run's uid is written
+    /// [`QUESTION_CARD_UID`], the card's request id the one the daemon derives under that uid,
+    /// and each clock read [`QUESTION_CARD_AT`].
+    async fn question_card_run(decision: AnswerDecision) -> serde_json::Value {
+        let rig = rig();
+        let (asked, thread, turn) = plan_question();
+        let (uid, mut ws) = engine_run(&rig, "req-question-card", &thread, &turn).await;
+        link_states_once(&rig.daemon, &uid, 1).await;
+        tell(&mut ws, &asked).await;
+        let card = cards_of(&rig.daemon, &uid, 1).await.remove(0);
+        let (result, _) = tokio::join!(decided(&rig.daemon, &uid, &card, decision), async {
+            response_to(&mut ws, &asked["id"], Duration::from_secs(20)).await;
+            tell(
+                &mut ws,
+                &resolved(&asked["params"]["threadId"], &asked["id"]),
+            )
+            .await;
+        });
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        filed_until(&rig.daemon, &uid, &format!("resolved:{}", card.request_id)).await;
+        let frames: Vec<serde_json::Value> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|event| {
+                serde_json::to_value(protocol::ws::ServerMessage::Event { event }).unwrap()
+            })
+            .collect();
+        drop(ws);
+        end_run(&rig, &uid).await;
+        let pinned = card_id(QUESTION_CARD_UID, &thread, &asked["id"]).unwrap();
+        let mut out: serde_json::Value = serde_json::from_str(
+            &json!({ "frames": frames })
+                .to_string()
+                .replace(&card.request_id, &pinned)
+                .replace(&uid, QUESTION_CARD_UID),
+        )
+        .unwrap();
+        for frame in out["frames"].as_array_mut().unwrap() {
+            let ts = &mut frame["event"]["ts"];
+            assert!(
+                ts.as_str()
+                    .is_some_and(|read| read.len() == 24 && read.ends_with('Z')),
+                "ts was expected to be an RFC3339 clock read, and is {ts}"
+            );
+            *ts = json!(QUESTION_CARD_AT);
+        }
+        out
+    }
+
+    /// Every run of the question-card fixture, by name.
+    async fn question_card_wire() -> serde_json::Value {
+        let mut runs = serde_json::Map::new();
+        for (run, decision) in question_card_runs() {
+            runs.insert(run.to_string(), question_card_run(decision).await);
+        }
+        serde_json::Value::Object(runs)
+    }
+
+    /// **A Codex question card and its resolution reach the apps as this file says, and this
+    /// file is what this build sends for them.**
+    ///
+    /// `fixtures/codex/question-card-wire.json` is the apps' input for a Codex question card:
+    /// drawn from its `tool_input`, answered with `Answers` or `Decline`, and closed, on an app
+    /// that did not answer it, with the decision its resolution carries. Gate one reads the
+    /// committed bytes: in each run, one card whose `tool_name` is `request_user_input` and whose
+    /// `display_text` hashes to its `payload_hash`, and one resolution naming that card and
+    /// carrying that run's decision, from a phone. Gate two re-derives the file from this build
+    /// and requires the same bytes.
+    ///
+    /// **Mutation:** edit a question's words in the checked-in file and gate one fails at the
+    /// hash; change the card's shape in `codex_approval` and gate two fails, naming the command
+    /// that rewrites the file.
+    #[tokio::test]
+    async fn the_codex_question_card_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(QUESTION_CARD).expect("the fixture must be JSON");
+        let runs = question_card_runs();
+        assert_eq!(
+            committed
+                .as_object()
+                .expect("the file is its runs, by name")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            runs.iter().map(|(run, _)| *run).collect::<Vec<_>>(),
+        );
+        for (run, decision) in runs {
+            let events: Vec<protocol::event::Event> = committed[run]["frames"]
+                .as_array()
+                .expect("a run is a list of frames")
+                .iter()
+                .map(|frame| {
+                    serde_json::from_value(frame["event"].clone())
+                        .expect("an Event the apps decode")
+                })
+                .collect();
+            let of_kind = |kind: EventKind| {
+                events
+                    .iter()
+                    .filter(|event| event.kind == kind)
+                    .collect::<Vec<_>>()
+            };
+            let cards = of_kind(EventKind::ApprovalRequest);
+            assert_eq!(cards.len(), 1, "{run}: one card");
+            let card: protocol::ws::ApprovalCard =
+                serde_json::from_value(cards[0].payload["card"].clone())
+                    .expect("a card the apps decode");
+            assert_eq!(card.tool_name, "request_user_input", "{run}");
+            assert_eq!(
+                card.payload_hash,
+                protocol::hash::sha256_hex(card.display_text.as_bytes()),
+                "{run}: the hash the apps check"
+            );
+            let resolutions = of_kind(EventKind::ApprovalResolved);
+            assert_eq!(resolutions.len(), 1, "{run}: one resolution");
+            let resolved: protocol::ws::CodexResolutionPayload =
+                serde_json::from_value(resolutions[0].payload.clone())
+                    .expect("a resolution the apps decode");
+            assert_eq!(resolved.request_id, card.request_id, "{run}");
+            assert_eq!(
+                resolved.resolution,
+                CodexResolution::Answered {
+                    by: ResolutionActor::Phone,
+                    decision: Some(decision)
+                },
+                "{run}"
+            );
+        }
+
+        let derived = question_card_wire().await;
+        assert_eq!(
+            derived, committed,
+            "the committed question card no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_QUESTION_CARD}"
+        );
+        assert_eq!(
+            QUESTION_CARD,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate it: {REGENERATE_QUESTION_CARD}"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/question-card-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_codex_question_card_fixture() {
+        let wire = serde_json::to_string_pretty(&question_card_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/question-card-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
     }
 
     /// `git -C dir <args>`, quietly.
@@ -4448,6 +5011,7 @@ mod tests {
             route: crate::store::COMPOSE_ROUTE_START.into(),
             target_turn_id: None,
             claimed_hash: protocol::hash::compose_hash(&uid, text),
+            question_decision: None,
         };
         assert_eq!(
             rig.daemon

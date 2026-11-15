@@ -5026,6 +5026,7 @@ fn compose_material(
         route: route.to_string(),
         target_turn_id: composed_against.map(str::to_string),
         claimed_hash: claimed_hash.to_string(),
+        question_decision: None,
     }
 }
 
@@ -9430,6 +9431,7 @@ mod tests {
             route: crate::store::INTERRUPT_ROUTE.to_string(),
             target_turn_id: Some(turn.to_string()),
             claimed_hash: "h".into(),
+            question_decision: None,
         }
     }
 
@@ -19633,6 +19635,7 @@ mod tests {
             route: crate::store::INTERRUPT_ROUTE.into(),
             target_turn_id: Some(turn.to_string()),
             claimed_hash: "h".into(),
+            question_decision: None,
         };
         assert_eq!(
             daemon
@@ -19664,6 +19667,7 @@ mod tests {
             route: route.into(),
             target_turn_id: against.map(str::to_string),
             claimed_hash: protocol::hash::compose_hash(uid, text),
+            question_decision: None,
         };
         assert_eq!(
             daemon
@@ -20878,6 +20882,7 @@ mod tests {
                     route: crate::store::COMPOSE_ROUTE_START.into(),
                     target_turn_id: None,
                     claimed_hash: protocol::hash::compose_hash(uid, "hello"),
+                    question_decision: None,
                 },
                 &protocol::time::now_rfc3339(),
             )
@@ -20926,6 +20931,7 @@ mod tests {
                     route: crate::store::INTERRUPT_ROUTE.into(),
                     target_turn_id: Some(APPROVAL_TURN.into()),
                     claimed_hash: "h".into(),
+                    question_decision: None,
                 },
                 &protocol::time::now_rfc3339(),
             )
@@ -21318,6 +21324,7 @@ mod tests {
             route: crate::store::COMPOSE_ROUTE_START.into(),
             target_turn_id: None,
             claimed_hash: protocol::hash::compose_hash(&session.uid, "hello"),
+            question_decision: None,
         };
         let claim = || {
             daemon
@@ -21529,6 +21536,7 @@ mod tests {
             route: crate::store::COMPOSE_ROUTE_START.into(),
             target_turn_id: None,
             claimed_hash: protocol::hash::compose_hash(&session.uid, "say something else"),
+            question_decision: None,
         };
         assert_eq!(
             daemon
@@ -23197,6 +23205,7 @@ mod tests {
                     route: "accept".into(),
                     target_turn_id: Some(APPROVAL_TURN.into()),
                     claimed_hash: "h".into(),
+                    question_decision: None,
                 },
                 reply,
                 gate: a_gate_guard().await,
