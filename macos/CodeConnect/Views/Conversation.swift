@@ -239,26 +239,32 @@ private struct TableBlock: View {
     }
 }
 
-/// A tool call folded to one line: how it ended, its name, what it was given and how long it took. One with output
-/// opens to show it.
+/// A tool call folded to one line: how it ended, its name, what it was given and how long it took. One with what it was
+/// sent or what came back opens to show them, in that order, as the iPhone does.
 private struct ToolLine: View {
     let tool: ToolItem
     let id: String
     @State private var open = false
     @Environment(\.conversationTail) private var tail
 
+    /// What it was sent, what came back, or that the computer cut it short: something to open.
+    private var opens: Bool { tool.input?.isNull == false || tool.output?.isEmpty == false || tool.isTruncated }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let output = tool.output, !output.isEmpty {
+            if opens {
                 Button { toggle() } label: { line(opens: true) }
                     .buttonStyle(.hover(outset: 4, id: "session.tool.\(id)"))
                     .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")
                 if open {
-                    CodeBlock(text: output)
+                    if let input = tool.input, !input.isNull { CodeBlock(text: input.prettyJSONString) }
+                    if let output = tool.output, !output.isEmpty { CodeBlock(text: output) }
+                    // Kit marks the call or its result cut whole by the computer: which one, the row cannot tell.
                     if tool.isTruncated {
-                        Text("The rest of the output was cut").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                        Text("Too large to send whole: \(HostDevice.current.computer("the computer")) cut it short")
+                            .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                     }
                 }
             } else {
@@ -271,7 +277,7 @@ private struct ToolLine: View {
         }
     }
 
-    /// Opening the output is choosing to read it: the follow hears first, before the row grows.
+    /// Opening the row is choosing to read it: the follow hears first, before the row grows.
     private func toggle() {
         if !open { tail?.leave() }
         open.toggle()
