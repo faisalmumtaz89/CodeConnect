@@ -44,7 +44,8 @@ use std::time::Duration;
 use protocol::agent::AgentKind;
 use protocol::event::{Lifecycle, PendingEvent, SessionKey};
 use protocol::proc_identity::{
-    liveness, read_birth_identity, BootIdentity, Liveness, ProcessIdentity,
+    group_has_members, group_warrant, liveness, read_birth_identity, BootIdentity, GroupWarrant,
+    Liveness, ProcessIdentity,
 };
 use protocol::ws::{StartFailure, StartSessionResult};
 use serde_json::{json, Value};
@@ -298,6 +299,9 @@ struct WaitingStop {
 /// connections a moment before its process ends.
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 
+/// How often the link records the run's tool groups while a turn runs ([`record_tools`]).
+const TOOL_SCAN: Duration = Duration::from_secs(1);
+
 /// The run's link (P3 R1): every notification its one connection brings, in order, mapped
 /// by the Codex adapter and filed ([`Daemon::ingest`]) for both apps, until the connection
 /// ends; then the run is ended if its app-server is gone, as at a Claude link's end
@@ -318,6 +322,12 @@ const EXIT_WAIT: Duration = Duration::from_secs(5);
 ///
 /// When the connection ends, the run is ended once its app-server's leader is gone, within
 /// [`EXIT_WAIT`]: Codex closes its connections a moment before it exits.
+///
+/// Codex runs each command in a group of its own, which outlives the app-server, so the link
+/// keeps the run's tool groups ([`record_tools`]): at attach, every [`TOOL_SCAN`] while a turn
+/// runs, at each turn's end, and before ccd's own SIGTERM. Once the leader is gone, each
+/// recorded group that still has members and that the warrant allows is sent SIGKILL
+/// ([`end_tools`]).
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
@@ -336,8 +346,20 @@ async fn link(
         .as_ref()
         .map(|owed| (owed.thread.clone(), owed.turn.clone()));
     let mut stops: Vec<WaitingStop> = Vec::new();
+    let host = daemon
+        .db
+        .watched_host(uid.clone())
+        .await
+        .ok()
+        .flatten()
+        .map(|watch| watch.host);
+    let mut tools: Vec<ProcessIdentity> = Vec::new();
+    record_tools(host.as_ref(), &mut tools);
+    let mut scan = tokio::time::interval(TOOL_SCAN);
+    scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = scan.tick(), if running.is_some() => record_tools(host.as_ref(), &mut tools),
             frame = client.server_frame() => {
                 let Some(frame) = frame else { break };
                 if frame.get("id").is_some() {
@@ -353,6 +375,7 @@ async fn link(
                         running = Some((thread.to_string(), turn.to_string()));
                     }
                     (Some("turn/completed"), _, Some(turn)) => {
+                        record_tools(host.as_ref(), &mut tools);
                         if running.as_ref().is_some_and(|(_, on)| on == turn) {
                             running = None;
                         }
@@ -411,6 +434,7 @@ async fn link(
                     }
                 }
                 LinkCommand::Stop => {
+                    record_tools(host.as_ref(), &mut tools);
                     stop_gracefully(&daemon, &uid, &client, &mut running).await;
                 }
             },
@@ -439,12 +463,69 @@ async fn link(
     daemon.host_link_detached(&uid).await;
     if let Ok(Some(watch)) = daemon.db.watched_host(uid.clone()).await {
         let deadline = Instant::now() + EXIT_WAIT;
-        // Until proven gone: a dying process reads `Unknown` before `Gone`.
-        while liveness(&watch.host) != Liveness::Gone && Instant::now() < deadline {
+        // Until proven gone. A dying process can read `Unknown` just before and just after it
+        // reads `Gone`, so the reading that proved it gone is the one acted on.
+        let mut gone = liveness(&watch.host) == Liveness::Gone;
+        while !gone && Instant::now() < deadline {
             tokio::time::sleep(POLL).await;
+            gone = liveness(&watch.host) == Liveness::Gone;
+        }
+        if gone {
+            end_tools(&uid, &tools, watch.boot);
+        } else {
+            crate::log_info!(
+                "{uid}: its app-server was not seen to exit within {} s, so its commands' groups were left to it",
+                EXIT_WAIT.as_secs()
+            );
         }
     }
     crate::claude_host::end_if_host_gone(&daemon, &uid).await;
+}
+
+/// The group rule's one record (ruling D5), kept in the link's memory (D6): each group the
+/// run's members started and lead themselves
+/// ([`protocol::proc_identity::tool_groups`]) that the link does not hold yet.
+fn record_tools(host: Option<&ProcessIdentity>, tools: &mut Vec<ProcessIdentity>) {
+    let Some(host) = host else { return };
+    for found in protocol::proc_identity::tool_groups(host.pid) {
+        if !tools.contains(&found) {
+            tools.push(found);
+        }
+    }
+}
+
+/// Once the run's app-server is gone: SIGKILL to each recorded tool group that still has a
+/// member, under B3's warrant on the leader recorded for it (the same boot; the leader's pid
+/// unoccupied or still its recorded birth). Nothing else is signalled, and a group the warrant
+/// refuses says why in the log, as does a record that holds none.
+fn end_tools(uid: &str, tools: &[ProcessIdentity], boot: Option<BootIdentity>) {
+    if tools.is_empty() {
+        crate::log_info!("{uid}: its app-server is gone; no group of its commands was recorded");
+        return;
+    }
+    let Some(boot) = boot else {
+        crate::log_info!(
+            "{uid}: no boot was recorded with its app-server, so its commands' groups were not signalled"
+        );
+        return;
+    };
+    for tool in tools {
+        match group_warrant(tool, boot) {
+            GroupWarrant::Warranted if group_has_members(tool.pid) => {
+                // SAFETY: kill(2) of a recorded tool group, which the warrant ties to its leader.
+                unsafe { libc::kill(-tool.pid, libc::SIGKILL) };
+                crate::log_info!(
+                    "{uid}: its app-server is gone; the group of {} it started was ended",
+                    tool.pid
+                );
+            }
+            GroupWarrant::Warranted => {}
+            GroupWarrant::Refused(why) => crate::log_info!(
+                "{uid}: its app-server is gone; the group of {} it started was not signalled: {why}",
+                tool.pid
+            ),
+        }
+    }
 }
 
 /// A card the run's link raised, or took back after a restart, by its card id.
@@ -3436,5 +3517,87 @@ mod tests {
         .await;
         assert_eq!(refused().await, expected, "after a failed reconnect");
         end_run(&rig, &uid).await;
+    }
+
+    /// **X8-2, G1's clause: End run ends the groups the run's app-server started.** The
+    /// stand-in starts a child that leads its own group, as Codex runs a command, and the link
+    /// records it. End run's SIGTERM ends the app-server's group alone; once the app-server is
+    /// gone, the link's end SIGKILLs the recorded group.
+    #[tokio::test]
+    async fn end_run_ends_the_groups_its_app_server_started() {
+        let rig = rig();
+        let (uid, ws) = engine_run_on(
+            &rig,
+            "req-tools",
+            "thr-tools",
+            "turn-1",
+            "perl -e 'setpgrp(0, 0); sleep 60' &\necho $! > tool.pid\nexec sleep 30",
+        )
+        .await;
+        let tool: i32 = std::fs::read_to_string(run_folder(&rig).await.join("tool.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            group_alive(tool),
+            "the stand-in's command leads its own group"
+        );
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        assert!(
+            group_ends(leader).await,
+            "the app-server outlived its SIGTERM"
+        );
+        assert!(
+            group_alive(tool),
+            "End run's SIGTERM reached the command's own group"
+        );
+        drop(ws);
+        let ended = group_ends(tool).await;
+        if !ended {
+            // SAFETY: kill(2) of the group this test's stand-in started, so none is left behind.
+            unsafe { libc::kill(-tool, libc::SIGKILL) };
+        }
+        assert!(ended, "the command's group outlived its app-server");
+    }
+
+    /// **X8-2's warrant control: a recorded group whose leader is now another process gets no
+    /// signal.** The same group recorded with its leader's true birth is ended.
+    #[test]
+    fn a_recorded_group_whose_leader_has_another_birth_gets_no_signal() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let recorded = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        let mut another = recorded;
+        another.birth.start_usec ^= 0x5A5A;
+        let boot = protocol::proc_identity::boot_identity();
+        end_tools("warrant", &[another], boot);
+        std::thread::sleep(POLL);
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a group whose leader has another birth was signalled"
+        );
+        end_tools("warrant", &[recorded], boot);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 }
