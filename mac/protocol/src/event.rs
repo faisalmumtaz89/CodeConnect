@@ -610,6 +610,14 @@ pub struct ModelFact {
 pub struct RunMenus {
     pub models: Vec<MenuModel>,
     pub modes: Vec<MenuMode>,
+    /// The value in `models` the run's model fact names, for an app to show as chosen (display
+    /// only: the run's model is claude's). Read off claude's own start answer: the fact itself,
+    /// the alias of claude's receipt of a change (`sonnet (claude-sonnet-5-5)`), or the one model
+    /// claude resolves to the fact's id. When two do (`default` and `opus` both resolve to
+    /// `claude-opus-5-5`), the alias of the run's newest receipt if it is one of them, else
+    /// `default`. Omitted when none matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<String>,
 }
 
 /// One model of a run's menu: claude's own `value`, its name, what claude says of it, and

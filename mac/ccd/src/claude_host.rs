@@ -1081,6 +1081,57 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
                 label: label.to_string(),
             })
             .collect(),
+        selected_model: None,
+    }
+}
+
+/// Which `value` of `models` (the start's answer, as [`menus`] reads it) claude's model fact
+/// `fact` names, `receipt` being the run's newest receipt of a model change: the fact is a
+/// value; else its text before " (" is one (claude's receipt, `sonnet (claude-sonnet-5-5)`); else
+/// the one model whose `resolvedModel` is the fact (each init's full id). Two models resolving
+/// to it (`default` and `opus` to `claude-opus-5-5`): the receipt's alias when it is one of
+/// them, else `default`. None otherwise.
+pub(crate) fn selected_model(
+    models: &[serde_json::Value],
+    fact: &str,
+    receipt: Option<&str>,
+) -> Option<String> {
+    let entries: Vec<(&str, Option<&str>)> = models
+        .iter()
+        .filter_map(|model| {
+            let value = model
+                .get("value")?
+                .as_str()
+                .filter(|value| !value.is_empty())?;
+            Some((
+                value,
+                model
+                    .get("resolvedModel")
+                    .and_then(serde_json::Value::as_str),
+            ))
+        })
+        .collect();
+    let is_value = |text: &str| entries.iter().any(|(value, _)| *value == text);
+    let alias_of = |text: &str| text.split(" (").next().unwrap_or(text).to_string();
+    if is_value(fact) {
+        return Some(fact.to_string());
+    }
+    let receipt_alias = alias_of(fact);
+    if is_value(&receipt_alias) {
+        return Some(receipt_alias);
+    }
+    let named: Vec<&str> = entries
+        .iter()
+        .filter(|(_, resolved)| *resolved == Some(fact))
+        .map(|(value, _)| *value)
+        .collect();
+    match named.as_slice() {
+        [] => None,
+        [one] => Some(one.to_string()),
+        several => receipt
+            .map(alias_of)
+            .filter(|chosen| several.contains(&chosen.as_str()))
+            .or_else(|| several.contains(&"default").then(|| "default".to_string())),
     }
 }
 
@@ -6743,10 +6794,106 @@ mod tests {
                     label: label.into(),
                 })
                 .to_vec(),
+                selected_model: None,
             })
         );
         let (tmux, _supervisor) = register_tmux_run(&rig).await;
         assert_eq!(summary(&rig.daemon, &tmux).await.menus, None);
+        stop(&played.dir);
+    }
+
+    /// claude's recorded start answer (claude 2.1.319), whose models carry `resolvedModel`.
+    fn recorded_start_answer() -> serde_json::Value {
+        let line = include_str!("../../../fixtures/claude/initialize-api-key-2.1.319.jsonl")
+            .lines()
+            .find(|line| line.contains("\"models\""))
+            .expect("the answer's line");
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["response"]["response"].clone()
+    }
+
+    /// **The menu value a hosted run's model fact names** (`selected_model`), for each shape
+    /// the fact takes, against claude's recorded start answer: an init's full id (and a receipt
+    /// naming the bare id, sdk-session-0.3.322.jsonl:108), claude's receipt of an app's change
+    /// (S7's), a menu value, a typed `/model`'s display name (transcript-local-commands-wire.json),
+    /// and `claude-opus-5-5`, which `default` and `opus` both resolve to.
+    #[test]
+    fn the_menu_value_a_model_fact_names() {
+        let answer = recorded_start_answer();
+        let models = answer["models"].as_array().unwrap();
+        for (fact, receipt, chosen) in [
+            ("claude-sonnet-5-5", None, Some("sonnet")),
+            ("claude-fable-5-1", None, Some("fable")),
+            ("claude-haiku-5-5", None, Some("haiku")),
+            ("sonnet (claude-sonnet-5-5)", None, Some("sonnet")),
+            ("opus", None, Some("opus")),
+            ("Sonnet 5.5", None, None),
+            ("claude-opus-5-5", None, Some("default")),
+            (
+                "claude-opus-5-5",
+                Some("opus (claude-opus-5-5)"),
+                Some("opus"),
+            ),
+            ("claude-opus-5-5", Some("claude-opus-5-5"), Some("default")),
+            (
+                "claude-opus-5-5",
+                Some("sonnet (claude-sonnet-5-5)"),
+                Some("default"),
+            ),
+        ] {
+            assert_eq!(
+                selected_model(models, fact, receipt).as_deref(),
+                chosen,
+                "{fact} after the receipt {receipt:?}"
+            );
+        }
+    }
+
+    /// **A hosted run's summary names the menu value of its model fact**, its newest receipt
+    /// read from the store: with claude's recorded start answer, an init's `claude-opus-5-5`
+    /// reads `default`, claude's receipt of an app's `opus` reads `opus`, and the next init's
+    /// `claude-opus-5-5` still reads `opus`.
+    #[tokio::test]
+    async fn a_hosted_runs_menus_name_its_model() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET initialize = ?1 WHERE session_uid = ?2",
+                (recorded_start_answer().to_string(), &uid),
+            )
+            .unwrap();
+        let init = |uuid: &str| {
+            serde_json::json!({"type": "system", "subtype": "init", "uuid": uuid,
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "model": "claude-opus-5-5"})
+        };
+        let mut chosen = Vec::new();
+        for (seq, line) in [
+            (3, init("9d1f0000-0000-4000-8000-000000000071")),
+            (
+                4,
+                serde_json::json!({"type": "user", "isReplay": true,
+                    "uuid": "9d1f0000-0000-4000-8000-000000000072",
+                    "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                    "message": {"role": "user",
+                        "content": "<local-command-stdout>Set model to `opus (claude-opus-5-5)`</local-command-stdout>"}}),
+            ),
+            (5, init("9d1f0000-0000-4000-8000-000000000073")),
+        ] {
+            sdk(&mut played.write, seq, line).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+            chosen.push(
+                summary(&rig.daemon, &uid)
+                    .await
+                    .menus
+                    .and_then(|menus| menus.selected_model),
+            );
+        }
+        assert_eq!(
+            chosen,
+            [Some("default"), Some("opus"), Some("opus")].map(|value| value.map(str::to_string))
+        );
         stop(&played.dir);
     }
 
@@ -6784,9 +6931,10 @@ mod tests {
     /// whose link ended before its answer; the effort's `model_set` notice; the capabilities
     /// a paired phone is offered; and the fleet's summaries an app decides from, pinned as
     /// minor 37's are: the run still starting (no menus yet), the run with its menus, the
-    /// effort set and claude's echoes of the model and the mode filed, that run as an older
-    /// daemon sends it (minor 38's summary has neither `effort` nor `menus`), and a tmux
-    /// Claude run (none).
+    /// effort set and claude's echoes of the model and the mode filed, then after claude's
+    /// next init (the model by its full id, the menu's choice found by its `resolvedModel`),
+    /// that run as an older daemon sends it (minor 38's summary has neither `effort` nor
+    /// `menus`), and a tmux Claude run (none).
     async fn derived_minor_39_wire() -> serde_json::Value {
         let rig = rig();
         let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
@@ -6859,6 +7007,18 @@ mod tests {
             }
         );
         let hosted = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        // claude's next init names the model by its full id, as each init does (the recorded
+        // session's line 109, after line 108's change to sonnet).
+        sdk(
+            &mut played.write,
+            11,
+            serde_json::json!({"type": "system", "subtype": "init", "uuid": "9d1f0000-0000-4000-8000-000000000052",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "model": "claude-sonnet-5-5", "permissionMode": "plan"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 11 }));
+        let hosted_init = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
         let mut older = hosted.clone();
         for field in ["effort", "menus"] {
             assert!(
@@ -6929,6 +7089,7 @@ mod tests {
             "effort_notice": notice,
             "session_hosted_starting": starting,
             "session_hosted_live": hosted,
+            "session_hosted_live_init": hosted_init,
             "session_hosted_live_minor_38": older,
             "session_tmux_live": tmux_live,
         })

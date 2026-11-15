@@ -766,7 +766,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         (`applied {applies: now | next_turn}`, `refused`, `indeterminate`), for a Claude
 ///         run CodeConnect started. A daemon below 39 answers both `bad_request`.
 ///       - [`event::SessionSummary`]'s `menus` ([`event::RunMenus`]: the run's models with
-///         their efforts, and its permission modes) on such a run while it is live, once its
+///         their efforts, its permission modes, and `selected_model`, the model the run's
+///         model fact names, for display) on such a run while it is live, once its
 ///         start is answered; and `effort`, the effort the run last took (an app's change, or
 ///         claude's own receipt for a typed `/effort`). No capability: a client offers the
 ///         controls where a summary carries `menus`, which a daemon below 39 never sends.
