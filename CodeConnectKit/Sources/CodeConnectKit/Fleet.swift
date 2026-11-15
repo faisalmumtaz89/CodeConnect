@@ -444,8 +444,9 @@ public enum FleetStatusRule {
                 reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn't said what it can do yet.")
         }
         // Before any link reason: an ended run has no supervisor because it has
-        // ended, and nothing can answer it anywhere, the Mac included.
-        if summary.lifecycle == .exited {
+        // ended, and nothing can answer it anywhere, the Mac included. A failed
+        // run never started, which ccd counts as ended too.
+        if summary.lifecycle == .exited || summary.lifecycle == .failed {
             return .observe(reason: "This session has ended.")
         }
         guard capabilities.canApproveReliably else {
@@ -458,6 +459,13 @@ public enum FleetStatusRule {
         case .degraded:
             return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
+            // A run with no tmux session is one ccd hosts: it has no supervisor and no
+            // pane to answer from, and its link is ccd's connection to its host.
+            if summary.tmuxSession.isEmpty {
+                return .observe(
+                    reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
+                )
+            }
             return .observe(
                 reason: "No supervisor is attached to this session. It can only be answered at \(HostDevice.current.computer("the computer"))."
             )
