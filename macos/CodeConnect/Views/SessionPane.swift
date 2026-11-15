@@ -30,9 +30,10 @@ struct SessionPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Place(summary: row.summary, computer: row.machineName) {
-                // Only on the conversation, where the composer's note says what became of the stop. On the terminal,
-                // Codex's own Esc stops the turn.
-                if tab == .conversation, row.summary.isCodex, model.stopUnavailable(for: row.id) == nil {
+                // A Codex run or a Claude run started from the app, whenever Kit says it can be stopped; only on the
+                // conversation, where the composer's note says what became of the stop. On the terminal, Codex's own
+                // Esc stops the turn.
+                if tab == .conversation, model.stopUnavailable(for: row.id) == nil {
                     StopTurn(model: model, key: row.id)
                 }
             }
@@ -242,8 +243,8 @@ struct LineDelta: View {
     }
 }
 
-/// Stops the turn a Codex run is running, over Codex's own link: no keyboard involved. Greyed for a moment after a
-/// turn changes, as Kit rules.
+/// Stops the turn the run is running, a Codex run's over Codex's own link and a Claude run's through the host it was
+/// started on: no keyboard involved. Greyed for a moment after a turn changes, as Kit rules.
 private struct StopTurn: View {
     let model: AppModel
     let key: String
