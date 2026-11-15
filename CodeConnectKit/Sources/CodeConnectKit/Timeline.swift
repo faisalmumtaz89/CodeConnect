@@ -131,6 +131,19 @@ public struct TimelineItem: Sendable, Hashable, Identifiable {
     public let seq: UInt64
     public let date: Date
     public let content: Content
+    /// A person's message a Stop cancelled ("Not sent: stopped"): set only on a
+    /// `userMessage` row whose send a `send_not_sent` notice named. Every other row
+    /// is false. The row model carries it rather than the enum, so nothing that
+    /// pattern-matches `Content` changes.
+    public let notSent: Bool
+
+    public init(id: String, seq: UInt64, date: Date, content: Content, notSent: Bool = false) {
+        self.id = id
+        self.seq = seq
+        self.date = date
+        self.content = content
+        self.notSent = notSent
+    }
 
     var pendingApproval: ApprovalItem? {
         if case .approval(let item) = content, item.isPending { return item }
@@ -260,6 +273,9 @@ public enum TimelineBuilder {
         var questionToolUseIDs: Set<String> = []
         var lastTurnEndSeq: UInt64 = 0
         var lastUserMessageSeq: UInt64 = 0
+        // The sends a Stop cancelled, by request_id: their person-message rows read
+        // "Not sent: stopped" and the `send_not_sent` notice itself draws no row.
+        var stoppedSends: Set<String> = []
 
         for event in events {
             switch event.kind {
@@ -299,6 +315,9 @@ public enum TimelineBuilder {
                     let promptID = event.payload["prompt_id"]?.stringValue
                 {
                     panesByPrompt[promptID] = pane
+                }
+                if let requestID = event.sendNotSentStoppedRequestID {
+                    stoppedSends.insert(requestID)
                 }
             case .sessionEnd, .turnComplete:
                 // Both close a turn, which is what an unresolved tool call is
@@ -368,7 +387,10 @@ public enum TimelineBuilder {
                                                 detail: nil,
                                                 severity: .info))))
                             } else {
-                                items.append(event.item(.userMessage(text, isCommand: true)))
+                                items.append(
+                                    event.item(
+                                        .userMessage(text, isCommand: true),
+                                        notSent: event.sendRequestID.map(stoppedSends.contains) ?? false))
                             }
                         }
                     case .output(let text):
@@ -443,7 +465,10 @@ public enum TimelineBuilder {
                                     detail: nil,
                                     severity: .info))))
                 } else if event.isPersonsWords, let text = event.userText {
-                    items.append(event.item(.userMessage(text)))
+                    items.append(
+                        event.item(
+                            .userMessage(text),
+                            notSent: event.sendRequestID.map(stoppedSends.contains) ?? false))
                 }
 
             case .agentMessage:
@@ -570,6 +595,9 @@ public enum TimelineBuilder {
                 break  // shown on the card it resolves
 
             case .notification:
+                // A send_not_sent notice is consumed into the person's row it cancelled
+                // (its `notSent`, set above), not drawn as its own row.
+                if event.sendNotSentStoppedRequestID != nil { break }
                 guard let notice = notice(for: event, approvalPromptIDs: approvalPromptIDs) else {
                     break
                 }
@@ -829,7 +857,9 @@ public enum TimelineBuilder {
 // MARK: - Helpers
 
 extension Event {
-    fileprivate func item(_ content: TimelineItem.Content, suffix: String = "") -> TimelineItem {
-        TimelineItem(id: id + suffix, seq: seq, date: date, content: content)
+    fileprivate func item(_ content: TimelineItem.Content, suffix: String = "", notSent: Bool = false)
+        -> TimelineItem
+    {
+        TimelineItem(id: id + suffix, seq: seq, date: date, content: content, notSent: notSent)
     }
 }

@@ -145,15 +145,24 @@ extension AppModel {
     /// "the composer did not come back" — describes machinery that is not there. A stop and a message share
     /// this one slot, where the reader is looking after they act.
     public func outcomeNote(for key: String, lastSend: ComposeAttempt?) -> ComposeProse.Note? {
-        if shownSummary(for: key)?.isCodex == true {
-            let stop = codexStop(for: key)
-            if case .settled(let result) = stop { return ComposeProse.note(CodexProse.interrupt(result)) }
-            if case .notSent(let reason) = stop {
-                return ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill")
-            }
-            if case .sentNoAnswer(let reason) = stop {
-                return ComposeProse.Note(text: reason, tone: .warning, icon: "question-fill")
-            }
+        let summary = shownSummary(for: key)
+        // **A Stop's outcome shows for any agent that can be stopped** — a Codex
+        // run or a hosted Claude run — because the reader is looking at this slot
+        // right after they tapped Stop. It used to sit behind `isCodex`, so a
+        // Claude Stop executed but its answer never appeared here.
+        let stop = codexStop(for: key)
+        if case .settled(let result) = stop {
+            return ComposeProse.note(CodexProse.interrupt(result, agent: summary?.agent ?? .codex))
+        }
+        if case .notSent(let reason) = stop {
+            return ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill")
+        }
+        if case .sentNoAnswer(let reason) = stop {
+            return ComposeProse.Note(text: reason, tone: .warning, icon: "question-fill")
+        }
+        // **Compose is a Codex-only road** (`send_text` is Claude's; `compose` is a
+        // Codex message), so its outcomes stay behind that gate.
+        if summary?.isCodex == true {
             let compose = codexControls(for: key).compose
             if case .settled(let result) = compose { return CodexProse.compose(result).map(ComposeProse.note) }
             if case .notSent(let reason) = compose {

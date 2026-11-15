@@ -889,6 +889,16 @@ enum Fixtures {
             event("fx-7", 14, 112, "tool_result", "transcript", result("toolu_tl_4", "0 problems")),
             event("fx-7", 15, 112, "turn_complete", "hook", stop),
             event("fx-7", 16, 50, "notification", "hook", idle),
+
+            // A follow-up the person sent during the next turn and then Stopped: the daemon files
+            // the person's row carrying its `request_id`, then `send_not_sent {reason:"stopped"}` for
+            // the same id. The Kit joins them so the row reads "Not sent: stopped".
+            event("fx-7", 17, 30, "user_message", "hook",
+                  "{\"type\":\"user\",\"request_id\":\"fx-stop-1\","
+                      + "\"message\":{\"role\":\"user\",\"content\":\(quoted("and update the changelog"))}}"),
+            event("fx-7", 18, 29, "notification", "daemon",
+                  "{\"notification_type\":\"send_not_sent\",\"request_id\":\"fx-stop-1\","
+                      + "\"reason\":\"stopped\",\"message\":\"Not sent: stopped\"}"),
         ]
     }
 

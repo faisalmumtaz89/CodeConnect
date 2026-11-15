@@ -1174,10 +1174,14 @@ public final class DaemonConnection {
     /// `session` must be the `session_uid`: `payloadHash` is computed over the
     /// exact string this argument becomes on the wire.
     public func interrupt(
-        session: String, requestID: String, turnID: String, payloadHash: String
+        session: String, requestID: String, turnID: String, payloadHash: String,
+        requires agent: AgentKind
     ) async throws -> InterruptResult {
-        guard capabilities?.codexInterrupt == true else {
-            throw CodexRefusal.notAdvertised("codex_interrupt")
+        let (advertised, flag): (Bool?, String) = agent == .claude
+            ? (capabilities?.claudeInterrupt, "claude_interrupt")
+            : (capabilities?.codexInterrupt, "codex_interrupt")
+        guard advertised == true else {
+            throw CodexRefusal.notAdvertised(flag)
         }
         guard !turnID.isEmpty else {
             throw CodexRefusal.nothingToSend("This app is not holding a running turn to stop.")

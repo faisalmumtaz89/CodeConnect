@@ -203,6 +203,14 @@ public final class CodexControls {
         stopGreyedUntil = nil
     }
 
+    /// A committed send supersedes the last Stop's note in the shared outcome slot: the reader has
+    /// moved from stopping to sending, exactly as a new turn would. Codex clears it inside
+    /// `beginCompose`; the Claude send path has no compose state and calls this instead.
+    func retireStopForSend() {
+        stop = .idle
+        stopGreyedUntil = nil
+    }
+
     /// The daemon answered a stop.
     ///
     /// A **link-state** refusal greys the control for a bounded window; every

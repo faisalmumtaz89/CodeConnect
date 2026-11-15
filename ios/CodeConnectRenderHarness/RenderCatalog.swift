@@ -703,6 +703,18 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.require(driver.text(containing: "Turn complete", in: app), "the line")
             }),
+        // **"Not sent: stopped."** A follow-up a Stop cancelled marks the person's own row.
+        RenderScenario(
+            name: "session-not-sent-stopped",
+            purpose: "a follow-up a Stop cancelled: the person's row reads 'Not sent: stopped'",
+            arguments: [
+                "-CC_FIXTURE", "timeline", "-CC_DEEPLINK", "codeconnect://session/fx-7",
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    driver.text(containing: "Not sent: stopped", in: app),
+                    "the cancelled send's marker on the person's own row")
+            }),
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",

@@ -23,7 +23,9 @@ import XCTest
 final class CodexGateTests: XCTestCase {
 
     /// A connection that has shaken hands, advertising exactly these Codex flags.
-    private func connected(interrupt: Bool, compose: Bool) -> DaemonConnection {
+    private func connected(interrupt: Bool, compose: Bool, claudeInterrupt: Bool = false)
+        -> DaemonConnection
+    {
         let connection = DaemonConnection()
         connection.simulateConnectedForTesting()
         connection.simulateCapabilitiesForTesting(
@@ -33,6 +35,7 @@ final class CodexGateTests: XCTestCase {
                 extra: [
                     "codex_interrupt": .bool(interrupt),
                     "codex_compose": .bool(compose),
+                    "claude_interrupt": .bool(claudeInterrupt),
                 ]),
             minor: 18)
         return connection
@@ -83,7 +86,8 @@ final class CodexGateTests: XCTestCase {
 
         do {
             _ = try await connection.interrupt(
-                session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h")
+                session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h",
+                requires: .codex)
             XCTFail("an interrupt must not be transmitted to a daemon that would always refuse it")
         } catch let refusal as DaemonConnection.CodexRefusal {
             XCTAssertEqual(refusal, .notAdvertised("codex_interrupt"))
@@ -133,7 +137,50 @@ final class CodexGateTests: XCTestCase {
         }
         let pending = Task { @MainActor in
             try await connection.interrupt(
-                session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h")
+                session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h",
+                requires: .codex)
+        }
+        await fulfillment(of: [sent], timeout: 2)
+        XCTAssertEqual(wire.types, ["interrupt"])
+
+        connection.injectForTesting(
+            .interruptResult(
+                sessionID: "u-1", requestID: "stop-1", result: .aborted(turnID: "t-1")))
+        let result = try await pending.value
+        XCTAssertEqual(result, .aborted(turnID: "t-1"))
+    }
+
+    /// A hosted Claude Stop is gated on `claude_interrupt`, not `codex_interrupt`:
+    /// a daemon that answers Codex but not Claude must not let a Claude frame leave.
+    func testClaudeInterruptIsNotTransmittedWithoutTheCapability() async {
+        let connection = connected(interrupt: true, compose: true, claudeInterrupt: false)
+        let wire = wired(connection)
+
+        do {
+            _ = try await connection.interrupt(
+                session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h",
+                requires: .claude)
+            XCTFail("a Claude interrupt must not be transmitted without claude_interrupt")
+        } catch let refusal as DaemonConnection.CodexRefusal {
+            XCTAssertEqual(refusal, .notAdvertised("claude_interrupt"))
+        } catch {
+            XCTFail("expected a typed refusal, got \(error)")
+        }
+        XCTAssertTrue(wire.frames.isEmpty, "sent \(wire.types)")
+    }
+
+    func testClaudeInterruptIsTransmittedWithTheCapability() async throws {
+        let connection = connected(interrupt: false, compose: false, claudeInterrupt: true)
+        let wire = Wire()
+        let sent = expectation(description: "one Claude interrupt left the socket")
+        connection.sendStub = { message in
+            wire.frames.append(message)
+            sent.fulfill()
+        }
+        let pending = Task { @MainActor in
+            try await connection.interrupt(
+                session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h",
+                requires: .claude)
         }
         await fulfillment(of: [sent], timeout: 2)
         XCTAssertEqual(wire.types, ["interrupt"])
@@ -154,7 +201,8 @@ final class CodexGateTests: XCTestCase {
         _ = try? await connection.compose(
             session: "u-1", requestID: "say-1", text: "x", payloadHash: "h")
         _ = try? await connection.interrupt(
-            session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h")
+            session: "u-1", requestID: "stop-1", turnID: "t-1", payloadHash: "h",
+            requires: .codex)
         XCTAssertTrue(
             wire.frames.isEmpty,
             "no view was involved and nothing may leave: sent \(wire.types)")

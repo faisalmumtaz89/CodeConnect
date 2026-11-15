@@ -204,6 +204,25 @@ extension Event {
     public var notificationType: String? { payload["notification_type"]?.stringValue }
     public var notificationMessage: String? { payload["message"]?.stringValue }
 
+    /// A `send_not_sent` notice (B7 part 2 / X5), returning the `request_id` of the
+    /// send a Stop cancelled. Only `reason: "stopped"` is consumed, and only to mark
+    /// the person's own message row (joined by `request_id`) "Not sent: stopped";
+    /// the notice is never drawn as its own row.
+    public var sendNotSentStoppedRequestID: String? {
+        guard notificationType == "send_not_sent",
+            payload["reason"]?.stringValue == "stopped",
+            let requestID = payload["request_id"]?.stringValue, !requestID.isEmpty
+        else { return nil }
+        return requestID
+    }
+
+    /// The `request_id` the daemon puts on a `user_message` event (additive), so a
+    /// `send_not_sent` notice can find the row of the send it cancelled.
+    public var sendRequestID: String? {
+        guard kind == .userMessage else { return nil }
+        return payload["request_id"]?.stringValue
+    }
+
     /// `capture-pane` text the daemon attaches to a `permission_prompt`
     /// notification — the only place the phone can learn Claude's *exact*
     /// option list, which is what makes `Option{index}` safe to offer. Drawn

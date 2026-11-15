@@ -42,7 +42,7 @@ struct TimelineRow: View {
     var body: some View {
         switch item.content {
         case .userMessage(let text, let isCommand):
-            UserMessageRow(text: text, date: item.date, isCommand: isCommand)
+            UserMessageRow(text: text, date: item.date, isCommand: isCommand, notSent: item.notSent)
         case .agentMessage(let text, let isInterrupted):
             AgentMessageRow(
                 text: text, isInterrupted: isInterrupted,
@@ -127,6 +127,9 @@ struct UserMessageRow: View {
     /// kit's command typography rather than prose, because every character
     /// position in a command is load-bearing.
     var isCommand: Bool = false
+    /// The daemon told us a Stop cancelled this send: the row reads "Not sent:
+    /// stopped" and its words are handed back to the composer.
+    var notSent: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
@@ -134,6 +137,11 @@ struct UserMessageRow: View {
                 Text("YOU")
                     .ccType(CC.type.micro)
                     .foregroundStyle(CC.text.tertiary)
+                if notSent {
+                    Text("Not sent: stopped")
+                        .ccType(CC.type.micro)
+                        .foregroundStyle(CC.color.warning)
+                }
                 Spacer(minLength: CC.space.xs)
                 Text(date, format: .dateTime.hour().minute())
                     .ccType(CC.type.monoSmall)
@@ -160,7 +168,7 @@ struct UserMessageRow: View {
                     in: RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous))
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("You said: \(text)")
+        .accessibilityLabel(notSent ? "You said: \(text). Not sent: stopped." : "You said: \(text)")
     }
 }
 
