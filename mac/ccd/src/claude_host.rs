@@ -6781,14 +6781,15 @@ mod tests {
                 .set_setting(&uid, set_model(Some("sonnet"), None)),
             host_answers_setting(&mut played, 3, "done", None)
         );
-        // claude's own echoes of a change, as the recorded session has them (its lines 108
-        // and 29): its receipt of a model, and its status of a mode.
+        // claude's own echoes of a change: its receipt of the app's `sonnet`, as claude's
+        // transcript of a real run kept it (B8 part 2's S7, claude 2.1.322), replayed as the
+        // recorded session's line 108 replays a receipt; and its status of a mode (line 29).
         sdk(
             &mut played.write,
             4,
             serde_json::json!({"type": "user", "isReplay": true, "uuid": "9d1f0000-0000-4000-8000-000000000061",
                 "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
-                "message": {"role": "user", "content": "<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>"}}),
+                "message": {"role": "user", "content": "<local-command-stdout>Set model to `sonnet (claude-sonnet-5-5)`</local-command-stdout>"}}),
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
