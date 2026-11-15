@@ -225,6 +225,11 @@ public final class AppModel {
     /// outcome, the cooldown — still drive redraws. Only the act of minting an
     /// empty one is invisible, and an empty one has nothing to draw.
     @ObservationIgnored private var codexControlsByKey: [String: CodexControls] = [:]
+    /// **One hosted Claude run's model / effort / mode call state** (B8, minor 39): whether a set call
+    /// is in flight — the menus are then disabled — and the last answer still worth showing. Observed
+    /// (not `@ObservationIgnored`), so a change redraws the controls. The selection is never kept here:
+    /// it follows the summary's facts, read through `RunSettings`.
+    private var settingStateByKey: [String: SettingState] = [:]
     /// **What this phone has sent and cannot account for, across launches.**
     /// See `CodexSpentLedger`; the per-session controllers read and write it.
     ///
@@ -3314,6 +3319,115 @@ public final class AppModel {
             controls.composeNotSent(error.localizedDescription)
             return nil
         }
+    }
+
+    // MARK: - Hosted Claude settings (model, effort, mode)
+
+    /// **What one run's model / effort / mode controls draw**, computed in the one place both apps read.
+    /// The selection follows the summary's facts; the only client state folded in is whether a call is
+    /// in flight and the last answer — and a retained answer is dropped once that setting's own fact has
+    /// moved past the one it was recorded against: the notice bridged the wait, and the wait is over.
+    public func runSettings(for key: String) -> RunSettings {
+        guard let summary = summary(for: key) else { return .deferToOtherPath }
+        let state = settingStateByKey[key] ?? SettingState()
+        var outcome = state.outcome
+        if let setting = state.outcomeSetting, factSeq(summary, setting) > state.outcomeBaselineSeq {
+            outcome = nil
+        }
+        return RunSettings.of(summary: summary, inFlight: state.inFlight, lastOutcome: outcome)
+    }
+
+    /// Set this run's model. The label the outcome names is the menu's own.
+    @discardableResult
+    public func setModel(for key: String, modelValue: String) async -> SettingResult? {
+        await applySetting(
+            key: key, setting: .model, label: menuLabel(key: key, setting: .model, value: modelValue)
+        ) { try await self.connection.setModel(session: $0, requestID: $1, model: modelValue, effort: nil) }
+    }
+
+    /// Set this run's effort — it rides `set_model` with no model.
+    @discardableResult
+    public func setEffort(for key: String, effortValue: String) async -> SettingResult? {
+        await applySetting(
+            key: key, setting: .effort, label: menuLabel(key: key, setting: .effort, value: effortValue)
+        ) { try await self.connection.setModel(session: $0, requestID: $1, model: nil, effort: effortValue) }
+    }
+
+    /// Set this run's permission mode. The label the outcome names is the menu's own.
+    @discardableResult
+    public func setMode(for key: String, modeValue: String) async -> SettingResult? {
+        await applySetting(
+            key: key, setting: .mode, label: menuLabel(key: key, setting: .mode, value: modeValue)
+        ) { try await self.connection.setMode(session: $0, requestID: $1, mode: modeValue) }
+    }
+
+    /// **One call in flight per run.** A second tap while one is in flight is dropped — the menus are
+    /// disabled for exactly that reason, and queuing a change whose state nobody can still see is worse
+    /// than losing it. Beginning a call clears the last notice; the answer records the next. The send
+    /// path itself is where the frame is gated and the daemon validates the value.
+    @discardableResult
+    private func applySetting(
+        key: String, setting: SettingKind, label: String,
+        send: (String, String) async throws -> SettingResult
+    ) async -> SettingResult? {
+        var state = settingStateByKey[key] ?? SettingState()
+        guard !state.inFlight else { return nil }
+        guard let summary = summary(for: key), let reference = Self.sessionReference(summary) else {
+            return nil
+        }
+        let baseline = factSeq(summary, setting)
+        state.inFlight = true
+        state.outcome = nil
+        settingStateByKey[key] = state
+        func record(_ outcome: SettingOutcome?) {
+            settingStateByKey[key] = SettingState(
+                inFlight: false, outcome: outcome, outcomeSetting: setting, outcomeBaselineSeq: baseline)
+        }
+        do {
+            let result = try await send(reference, UUID().uuidString)
+            record(SettingOutcome.of(setting: setting, label: label, result: result))
+            return result
+        } catch ConnectionError.sentButUnanswered {
+            // The frame left and no answer came — the same promise as the wire's `indeterminate`.
+            record(SettingOutcome(text: Self.sentNoAnswerSentence, tone: .warning))
+            return nil
+        } catch {
+            record(
+                SettingOutcome(
+                    text: "The change could not reach \(HostDevice.current.computer("the computer")).",
+                    tone: .warning))
+            return nil
+        }
+    }
+
+    /// The display name for a setting's value: the menu's own label for a model or mode, and
+    /// `EffortConfirmation`'s for an effort. The raw value when the menu does not list it.
+    private func menuLabel(key: String, setting: SettingKind, value: String) -> String {
+        let menus = summary(for: key)?.menus
+        switch setting {
+        case .model: return menus?.models.first { $0.value == value }?.label ?? value
+        case .mode: return menus?.modes.first { $0.value == value }?.label ?? value
+        case .effort: return EffortConfirmation.label(for: value)
+        }
+    }
+
+    private func factSeq(_ summary: SessionSummary, _ setting: SettingKind) -> UInt64 {
+        switch setting {
+        case .model: return summary.model?.seq ?? 0
+        case .effort: return summary.effort?.seq ?? 0
+        case .mode: return summary.permissionMode?.seq ?? 0
+        }
+    }
+
+    /// One run's model / effort / mode call state. The selection is never kept here — it follows the
+    /// summary's facts, read through `RunSettings`.
+    private struct SettingState: Sendable {
+        var inFlight = false
+        var outcome: SettingOutcome?
+        var outcomeSetting: SettingKind?
+        /// The seq of `outcomeSetting`'s fact when the outcome was recorded; the notice drops once the
+        /// run's fact passes it.
+        var outcomeBaselineSeq: UInt64 = 0
     }
 
     /// The one string a mutation may name a session by: its uid. `nil` when
