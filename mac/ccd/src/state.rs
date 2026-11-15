@@ -5594,6 +5594,7 @@ impl Daemon {
         //    operator needs to be told which of those it is, not merely refused. The
         //    link would refuse this on its own claim; asking here is what makes the
         //    refusal a sentence rather than "there is no link".
+        let mut in_flight = false;
         match self
             .db
             .answer_status(session.uid.clone(), request_id.to_string())
@@ -5615,10 +5616,11 @@ impl Daemon {
                         .into(),
                 }
             }
-            // `Applying` is an attempt this very daemon has in flight, and the
-            // per-approval gate above means it cannot be for this card. Left to the
-            // link's own claim, which is the one that decides.
-            Ok(_) => {}
+            // `Applying` is an answer sent and not yet confirmed, by this daemon or, across a
+            // restart, by the one before it. A link decides it; an engine run with no link
+            // answers it from here, below.
+            Ok(Some(crate::store::AnswerStatus::Applying)) => in_flight = true,
+            Ok(None) => {}
             // Logged here, not carried: a store `Display` is an anyhow chain whose open
             // paths name absolute filesystem locations. The phone is told the fact and
             // the consequence, which is all it can act on.
@@ -5736,10 +5738,14 @@ impl Daemon {
         };
         let report = match link {
             Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
+            // An engine run with no link. An answer already sent stays claimed for the run's
+            // reconnect, which sends it once more if Codex asks again.
             None if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) => {
-                crate::codex_link::AnswerReport::NotApplied(
-                    crate::codex_refusals::ENGINE_NO_CONNECTION.into(),
-                )
+                crate::codex_link::AnswerReport::NotApplied(if in_flight {
+                    crate::codex_host::ANSWER_ALREADY_WAITING.into()
+                } else {
+                    crate::codex_refusals::ENGINE_NO_CONNECTION.into()
+                })
             }
             None => crate::codex_link::AnswerReport::NotApplied(
                 "there is no live link to this Codex session, so nothing was sent; \
@@ -5875,6 +5881,7 @@ impl Daemon {
         //    this daemon's own bookkeeping — a person who reused an id has done
         //    nothing wrong about a visit they cannot see — and they stay where they
         //    can mean something, as the live pre-write checks the link makes.
+        let mut in_flight = false;
         match self
             .db
             .mutation_status(
@@ -5909,9 +5916,9 @@ impl Daemon {
                             reason: crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
                         }
                     }
-                    // `Applying` is an attempt this very daemon has in flight. Left to
-                    // the link's own claim, which is the one that decides.
-                    crate::store::AnswerStatus::Applying => {}
+                    // `Applying` is an attempt this very daemon has made. A link decides
+                    // it; an engine run with no link answers it from here, below.
+                    crate::store::AnswerStatus::Applying => in_flight = true,
                 }
             }
             Ok(None) => {}
@@ -5928,7 +5935,8 @@ impl Daemon {
 
         // **A run started on the engine is stopped through its own link**, which claims the
         // ask, sends `turn/interrupt` and settles it ([`crate::codex_host`]). With its link
-        // not attached, nothing is sent and the person is told so.
+        // not attached, nothing is sent and the person is told so; an ask already sent is
+        // answered from the ledger, since startup records it unknown and never sends it again.
         let engine = match self.inner.lock().await.host_links.get(&session.uid) {
             Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
             _ => None,
@@ -5940,6 +5948,11 @@ impl Daemon {
             );
         }
         if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) {
+            if in_flight {
+                return InterruptResult::Indeterminate {
+                    reason: crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
+                };
+            }
             return refuse(crate::codex_refusals::ENGINE_NO_CONNECTION.into());
         }
 

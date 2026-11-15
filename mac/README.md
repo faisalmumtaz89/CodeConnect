@@ -1232,7 +1232,9 @@ turn was waiting on closes. A retry with the same request id is answered from th
 and a Stop for a turn whose stop is already on its way is refused at once. While a run's
 link is not attached, before its reconnect or after one that failed, an answer and a Stop
 are refused with "CodeConnect has no connection to this run right now, so nothing was
-sent." A run that a
+sent." A retry of one already sent and not yet settled is answered from what was recorded
+instead: a Stop is told it was sent and what became of it is not known, and an answer that
+it is already waiting to be confirmed. A run that a
 restarted daemon finds still `starting` is `failed`, whatever became of its start, before
 the daemon listens, and its recorded process group gets the same ladder under the same
 warrant. Nothing is sent again, so a first message Codex had already taken is lost with
