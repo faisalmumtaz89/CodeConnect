@@ -7257,6 +7257,174 @@ mod tests {
         );
     }
 
+    /// The run `uid`'s turn running now: its last `session_start`'s `turn_id`, once a turn has
+    /// begun since `after` (that many such starts). Waits 120 s at most.
+    async fn turn_after(rig: &Rig, uid: &str, after: usize) -> Option<String> {
+        for _ in 0..1200 {
+            let starts: Vec<String> = stored(rig, uid)
+                .into_iter()
+                .filter(|event| event["kind"] == "session_start")
+                .filter_map(|event| event["turn_id"].as_str().map(str::to_string))
+                .collect();
+            if starts.len() > after {
+                return starts.last().cloned();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    }
+
+    /// Whether the run `uid` filed a tool call in its turn `turn`, waiting 120 s at most.
+    async fn tool_called(rig: &Rig, uid: &str, turn: &str) -> bool {
+        for _ in 0..1200 {
+            let called = stored(rig, uid).iter().any(|event| {
+                event["kind"] == "agent_message"
+                    && event["turn_id"] == turn
+                    && event["payload"]["message"]["content"]
+                        .as_array()
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| block["type"] == "tool_use")
+                        })
+            });
+            if called {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// Whether the run `uid` filed the end of its turn `turn`, waiting 30 s at most.
+    async fn turn_ended(rig: &Rig, uid: &str, turn: &str) -> bool {
+        for _ in 0..300 {
+            if stored(rig, uid)
+                .iter()
+                .any(|event| event["kind"] == "turn_complete" && event["turn_id"] == turn)
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// **B7 part 2 S11: a real claude's turn stopped from the app** (app-qa's rig). Turn 1:
+    /// claude runs `sleep 20` (a command that only reads, so no card); 3 s after its call the
+    /// person sends a message, and 3 s later the app's Stop. The Stop is `aborted`, the message
+    /// reads not sent, and claude runs no further turn. Turn 2: the person asks for a command
+    /// that writes; its card is left open, and the app's Stop closes it saying the turn was
+    /// stopped, and is `aborted`. Then End run, as G2. Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_turn_is_stopped_from_the_app() {
+        let prompt =
+            "Use the Bash tool to run exactly this command, once: sleep 20. Then say done.";
+        let (rig, uid, host_pid) = real_claude_run("s11", prompt).await;
+        let first = turn_after(&rig, &uid, 0).await;
+        let called = match &first {
+            Some(turn) => tool_called(&rig, &uid, turn).await,
+            None => false,
+        };
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let sent = send_as_app(&rig.daemon, &uid, "s11-message", "Also say hello.").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let stopped = match &first {
+            Some(turn) => Some(stop_as_app(&rig.daemon, &uid, "s11-stop-1", turn).await),
+            None => None,
+        };
+        let ended = match &first {
+            Some(turn) => turn_ended(&rig, &uid, turn).await,
+            None => false,
+        };
+        // Long enough for a queued message to start a turn of its own, as it does without
+        // `cancel_queued`.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let starts = stored(&rig, &uid)
+            .iter()
+            .filter(|event| event["kind"] == "session_start")
+            .count();
+        let not_sent = not_sent_notices(&rig, &uid);
+        println!(
+            "S11: turn 1 {first:?}; tool called {called}; message {sent:?}; Stop {stopped:?}; turn ended {ended}; turns {starts}; not sent {not_sent:?}"
+        );
+        let asked = send_as_app(
+            &rig.daemon,
+            &uid,
+            "s11-ask",
+            "Use the Bash tool to run exactly this command, once: touch s11.txt",
+        )
+        .await;
+        let second = turn_after(&rig, &uid, starts).await;
+        let mut card = None;
+        for _ in 0..1200 {
+            card = cards(&rig.daemon, &uid).await.1.into_iter().next();
+            if card.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let stopped_again = match &second {
+            Some(turn) => Some(stop_as_app(&rig.daemon, &uid, "s11-stop-2", turn).await),
+            None => None,
+        };
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let detail = card.as_ref().and_then(|request_id| {
+            stored(&rig, &uid)
+                .into_iter()
+                .find(|event| event["source_event_id"] == format!("resolved:{request_id}"))
+                .map(|event| event["payload"]["detail"].clone())
+        });
+        let open = cards(&rig.daemon, &uid).await;
+        println!(
+            "S11: turn 2 {second:?}; message {asked:?}; card {card:?}; Stop {stopped_again:?}; card closed with {detail:?}; open {open:?}"
+        );
+        let (stopping, run_ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!(
+            "S11: End run {stopping:?}; ended {run_ended}; host gone {host_gone}; left in its group {left:?}"
+        );
+        let turn = first.expect("claude began no turn");
+        assert!(called, "claude made no tool call");
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(
+            stopped,
+            Some(protocol::ws::InterruptResult::Aborted { turn_id: turn })
+        );
+        assert!(ended, "the stopped turn never ended");
+        assert_eq!(starts, 1, "claude ran a further turn after the Stop");
+        assert_eq!(
+            not_sent
+                .iter()
+                .map(|notice| notice["request_id"].clone())
+                .collect::<Vec<_>>(),
+            [serde_json::json!("s11-message")],
+            "the message the Stop cancelled is not marked"
+        );
+        assert!(matches!(asked, SendTextResult::Sent { .. }), "{asked:?}");
+        let turn = second.expect("the second message began no turn");
+        assert!(card.is_some(), "claude asked nothing in the second turn");
+        assert_eq!(
+            stopped_again,
+            Some(protocol::ws::InterruptResult::Aborted { turn_id: turn })
+        );
+        assert_eq!(
+            detail,
+            Some(serde_json::json!(
+                "The turn was stopped before anyone answered."
+            )),
+            "the card the Stop ended"
+        );
+        assert_eq!(
+            open,
+            (Vec::<String>::new(), Vec::<String>::new()),
+            "a card left open"
+        );
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            run_ended && host_gone && left.is_empty(),
+            "ended {run_ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
     /// claude's `can_use_tool` request for the Bash call `toolu_rh`, as claude writes it.
     fn claude_asks() -> String {
         serde_json::json!({"type": "control_request", "request_id": "req-toolu_rh",
