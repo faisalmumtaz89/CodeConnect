@@ -986,6 +986,11 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// — so an unflagged daemon gets the button offered-and-silently-broken,
     /// which is why this gates the send and not only the control.
     public var codexInterrupt: Bool { advertises(["codex_interrupt"]) }
+    /// This daemon **honours** a stop for a hosted Claude run (minor 37). Its own
+    /// flag, not folded into `codexInterrupt`: a daemon can carry one Stop and not
+    /// the other, and a Claude Stop sent to a daemon that only answers Codex would
+    /// be the same offered-and-silently-broken control this gate exists to prevent.
+    public var claudeInterrupt: Bool { advertises(["claude_interrupt"]) }
     /// This daemon **understands `compose` at all** (minor 18).
     ///
     /// **The load-bearing one.** A minor-17 daemon cannot decode the message and

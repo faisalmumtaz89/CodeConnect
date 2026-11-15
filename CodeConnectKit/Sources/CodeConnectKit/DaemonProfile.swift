@@ -88,6 +88,18 @@ public struct DaemonProfile: Sendable, Hashable {
     /// verification bar names by name.
     public var stopsCodexTurns: Bool { capabilities?.codexInterrupt == true }
 
+    /// **Whether this daemon honours a Stop for a run of `agent`** — `codex_interrupt`
+    /// for Codex, `claude_interrupt` for a hosted Claude run (minor 37). The same
+    /// hard gate as `stopsCodexTurns`, resolved per agent: an unflagged daemon
+    /// answers a well-formed refusal to every ask, so the button must not be offered.
+    public func honoursStop(for agent: AgentKind) -> Bool {
+        switch agent {
+        case .codex: return capabilities?.codexInterrupt == true
+        case .claude: return capabilities?.claudeInterrupt == true
+        case .unsupported: return false
+        }
+    }
+
     /// **This daemon understands `compose` at all** (minor 18).
     ///
     /// The strictest gate in the app. A minor-17 daemon answers

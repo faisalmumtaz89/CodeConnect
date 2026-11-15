@@ -669,4 +669,68 @@ final class CatchUpTests: XCTestCase {
         XCTAssertEqual(Array(publications(model, a).dropFirst(published)), [.release])
         XCTAssertEqual(model.shown(for: a)?.drawnThrough, 60)
     }
+
+    // MARK: "Not sent: stopped" — the hand-back fires on a live arrival, never a replay
+
+    /// A Stop cancels a send **live**: its text is offered back to the composer (the view takes it only
+    /// when empty). The daemon's real order (claude_host.rs: `a_stop_aborts_…`) is the send answering
+    /// `.sent` FIRST — which clears the send's identity — then the person's row, then, after the Stop,
+    /// the notice. So the hand-back rides on live arrival, not on a held identity. Driving the real
+    /// `.sent` answer is the point: an identity-gated hand-back would never fire here (must-fail).
+    func testALiveStoppedSendOffersItsTextToTheComposer() async throws {
+        let (model, _) = await caughtUp([Row(uid: a, lastSeq: 2)])
+        // The send answers `.sent`, exactly as the daemon's canonical stop sequence does, so its
+        // identity is already cleared before the notice arrives (not a hand-built `sentButUnanswered`).
+        model.connection.sendTextStub = { _, _ in .sent(matched: "cc-1") }
+        _ = await model.send(text: "and the docs", to: a)
+        let requestID = try XCTUnwrap(
+            model.connection.sendTextIdentities.last?.requestID, "the send carried a request id")
+        XCTAssertFalse(
+            model.holdsSendIdentity(text: "and the docs", to: a),
+            "a `.sent` send clears its identity, as the daemon's flow does")
+        inject(model, userMessageFrame(a, seq: 3, requestID: requestID, text: "and the docs"))
+        inject(model, sendNotSentFrame(a, seq: 4, requestID: requestID))
+        await settle(model)
+        XCTAssertEqual(
+            model.composerRestore[a], "and the docs",
+            "a live stopped send hands its text back — on liveness, not a held identity")
+    }
+
+    /// **The replay gate.** A reopened session replays its history — the person's send and the
+    /// Stop's notice among it — and must NOT refill the composer from that old stopped row.
+    /// Must-fail: without the gate, the replayed notice refills the composer.
+    func testAReplayedStoppedSendDoesNotRefillTheComposer() async {
+        let (model, wire) = model()
+        model.refreshFleet()
+        answer(model, [Row(uid: a, lastSeq: 4)])
+        await subscribed(wire, a)
+        inject(model, a, 1...2)
+        inject(model, userMessageFrame(a, seq: 3, requestID: "send-1", text: "and the docs"))
+        inject(model, sendNotSentFrame(a, seq: 4, requestID: "send-1"))
+        await settle(model)
+        XCTAssertNil(
+            model.composerRestore[a], "a replayed stopped send must not refill the composer")
+    }
+
+    private func userMessageFrame(_ uid: String, seq: Int, requestID: String, text: String)
+        -> ServerMessage
+    {
+        frame(
+            """
+            {"type":"event","event":{"seq":\(seq),"session_uid":"\(uid)","session_id":"cc-1",
+            "ts":"2026-10-16T10:00:00Z","kind":"user_message","source":"hook",
+            "payload":{"type":"user","request_id":"\(requestID)",
+            "message":{"role":"user","content":"\(text)"}}}}
+            """)
+    }
+
+    private func sendNotSentFrame(_ uid: String, seq: Int, requestID: String) -> ServerMessage {
+        frame(
+            """
+            {"type":"event","event":{"seq":\(seq),"session_uid":"\(uid)","session_id":"cc-1",
+            "ts":"2026-10-16T10:00:01Z","kind":"notification","source":"daemon",
+            "payload":{"notification_type":"send_not_sent","request_id":"\(requestID)",
+            "reason":"stopped","message":"Not sent: stopped"}}}
+            """)
+    }
 }

@@ -1125,6 +1125,15 @@ struct SessionDetailView: View {
                     // note has been read. A landed outcome's note retires itself.
                     if composeResult?.clearsOnEdit == true { composeResult = nil }
                 }
+                .onChange(of: model.composerRestore[key]) { _, restore in
+                    // A send a live Stop cancelled hands its text back here — but only into an EMPTY
+                    // composer, so a draft the person is typing now is never overwritten. Consumed
+                    // either way, so the words are offered once; the dropped identity (C2) makes the
+                    // resend fresh. The row keeps reading "Not sent: stopped" regardless.
+                    guard let restore else { return }
+                    if composeText.isEmpty { composeText = restore }
+                    model.consumeComposerRestore(for: key)
+                }
             }
         }
         // A new handshake is the link back: the unanswered send is asked again. Here,

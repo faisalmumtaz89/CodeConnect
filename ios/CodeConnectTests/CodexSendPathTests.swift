@@ -54,7 +54,8 @@ final class CodexSendPathTests: XCTestCase {
 
     private func model(
         link: String, agent: String = "codex", uid: String = "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        interrupt: Bool = true, compose: Bool = true, minor: UInt32 = 19
+        interrupt: Bool = true, compose: Bool = true, claudeInterrupt: Bool = false,
+        tmux: String = "cc-1", minor: UInt32 = 19
     ) -> (AppModel, Wire) {
         // Its own defaults suite: the spent-material ledger is durable by
         // design, so a shared one would let the first test's uncertainty refuse
@@ -69,10 +70,11 @@ final class CodexSendPathTests: XCTestCase {
                 canApproveReliably: true, sendText: true,
                 extra: [
                     "codex_interrupt": .bool(interrupt), "codex_compose": .bool(compose),
+                    "claude_interrupt": .bool(claudeInterrupt),
                 ]),
             minor: minor)
         model.connection.injectForTesting(
-            .sessions([Self.summary(uid: uid, agent: agent, link: link)]))
+            .sessions([Self.summary(uid: uid, agent: agent, link: link, tmux: tmux)]))
         // A running turn on the envelope, so Stop has something to name.
         model.connection.injectForTesting(
             .event(Self.turnEvent(uid: uid.isEmpty ? "cc-1" : uid)))
@@ -98,14 +100,14 @@ final class CodexSendPathTests: XCTestCase {
     }
 
     private static func summary(
-        uid: String, agent: String, link: String, runLink: String = "attached"
+        uid: String, agent: String, link: String, runLink: String = "attached", tmux: String = "cc-1"
     ) -> SessionSummary {
         let uidClause = uid.isEmpty ? "" : #""session_uid":"\#(uid)","#
         return try! JSONDecoder().decode(
             SessionSummary.self,
             from: Data(
                 """
-                {\(uidClause)"session_id":"cc-1","tmux_session":"cc-1",
+                {\(uidClause)"session_id":"cc-1","tmux_session":"\(tmux)",
                  "cwd":"/work","project_label":"work","lifecycle":"live","link":"\(runLink)",
                  "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
                  "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],
@@ -533,7 +535,7 @@ final class CodexSendPathTests: XCTestCase {
 
     /// And the sentence stays neutral rather than becoming "already sent".
     func testTheUnknownSentenceNeverClaimsActuation() {
-        let sentence = CodexProse.interrupt(.unknown(status: "quiesced")).message
+        let sentence = CodexProse.interrupt(.unknown(status: "quiesced"), agent: .codex).message
         XCTAssertTrue(sentence.contains("quiesced"), "the word is named verbatim")
         for claim in ["already sent", "will not be sent again", "was sent"] {
             XCTAssertFalse(
@@ -592,7 +594,7 @@ final class CodexSendPathTests: XCTestCase {
 
         wire.interruptResult = .rejected(reason: "the turn already ended.")
         _ = await model.stopCodexTurn(sessionKey: key())
-        let refused = CodexProse.interrupt(.rejected(reason: "the turn already ended."))
+        let refused = CodexProse.interrupt(.rejected(reason: "the turn already ended."), agent: .codex)
         let stop = model.outcomeNote(for: key(), lastSend: typed)
         XCTAssertEqual(stop?.text, refused.oneLine)
         XCTAssertEqual(stop?.icon, refused.icon)
@@ -659,6 +661,45 @@ final class CodexSendPathTests: XCTestCase {
             XCTAssertEqual(note?.tone, tone, "\(result)")
             XCTAssertEqual(note?.icon, icon, "\(result)")
         }
+    }
+
+    /// **A hosted Claude run's Stop outcome shows in the session**, the same slot a
+    /// Codex stop uses, and names Claude. It used to sit behind `isCodex`, so the
+    /// Stop executed and its answer vanished from the session (design-check F1).
+    /// Must-fail before the move: `outcomeNote` is nil for a Claude run.
+    func testAHostedClaudeStopOutcomeShowsInTheSession() async {
+        let (model, wire) = model(
+            link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+        wire.interruptResult = .aborted(turnID: "turn-9")
+        _ = await model.stopCodexTurn(sessionKey: key())
+        let note = model.outcomeNote(for: key(), lastSend: nil)
+        XCTAssertEqual(note?.text, "Stopped. Claude stopped the turn.")
+        XCTAssertEqual(note?.icon, "stop-circle-fill")
+    }
+
+    /// **A send retires the stale Stop note (round 1, F3).** After a Claude Stop the outcome sits
+    /// in the shared slot until a new turn registers; the resend the hand-back invites may not
+    /// answer, so no new turn rotates it away — the send itself must. Codex does this in
+    /// `beginCompose`; the Claude send path does it in `sendUnchecked`.
+    /// Must-fail without the reset: `outcomeNote` keeps returning the stop note over the send.
+    func testAHostedClaudeSendRetiresTheStaleStopNote() async {
+        let (model, wire) = model(
+            link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+        wire.interruptResult = .aborted(turnID: "turn-9")
+        _ = await model.stopCodexTurn(sessionKey: key())
+        XCTAssertEqual(
+            model.outcomeNote(for: key(), lastSend: nil)?.text, "Stopped. Claude stopped the turn.",
+            "precondition: the stop outcome shows right after Stop")
+
+        model.connection.sendStub = { message in
+            MainActor.assumeIsolated { wire.frames.append(message) }
+            throw ConnectionError.sentButUnanswered
+        }
+        let attempt = await model.send(text: "and the docs", to: key())
+        XCTAssertNotEqual(
+            model.outcomeNote(for: key(), lastSend: attempt)?.text,
+            "Stopped. Claude stopped the turn.",
+            "a send retires the stale stop note so it cannot shadow the send's own outcome")
     }
 
     /// Why a Codex run cannot be sent to: the draft's own ceiling first, then
@@ -769,5 +810,58 @@ final class CodexSendPathTests: XCTestCase {
         return ApprovalItem(
             card: card, requestedAt: Date(), sessionKey: sessionKey, outcome: nil,
             codexResolution: nil, paneSnapshot: nil, risk: nil)
+    }
+
+    // MARK: F2 — a Stop drops the cancelled send's retry identity, so the resend is fresh
+
+    /// **A send a Stop cancelled re-sends fresh.** An unanswered send keeps its identity so a
+    /// retry is the recognisable one the daemon replays. But a `send_not_sent {reason:"stopped"}`
+    /// says the daemon dropped it — the identity is cleared by its request id, so the text handed
+    /// back to the composer goes as a NEW send and not the "already applied" the retry would get.
+    func testASendAStopCancelledDropsItsRetryIdentity() async throws {
+        let (model, wire) = model(link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+        model.connection.sendStub = { message in
+            MainActor.assumeIsolated { wire.frames.append(message) }
+            throw ConnectionError.sentButUnanswered
+        }
+        _ = await model.send(text: "and the docs", to: key())
+        XCTAssertTrue(
+            model.holdsSendIdentity(text: "and the docs", to: key()),
+            "an unanswered send keeps its identity, so a resend is the recognisable retry")
+
+        let frame = try XCTUnwrap(wire.frames.last, "the send left a frame")
+        let object = try XCTUnwrap(
+            try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(frame)).objectValue)
+        let requestID = try XCTUnwrap(object["request_id"]?.stringValue, "the send carried a request id")
+
+        model.connection.injectForTesting(.event(try sendNotSentStopped(requestID: requestID)))
+        XCTAssertFalse(
+            model.holdsSendIdentity(text: "and the docs", to: key()),
+            "the stopped send's identity is dropped: the handed-back text re-sends fresh")
+    }
+
+    /// **B5 regression:** without a Stop, an unanswered send KEEPS its identity — only a
+    /// `send_not_sent` notice drops one. Dropping it otherwise would re-type the same words.
+    func testAnUnconfirmedSendKeepsItsIdentityWithoutAStop() async throws {
+        let (model, wire) = model(link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+        model.connection.sendStub = { message in
+            MainActor.assumeIsolated { wire.frames.append(message) }
+            throw ConnectionError.sentButUnanswered
+        }
+        _ = await model.send(text: "and the docs", to: key())
+        XCTAssertTrue(
+            model.holdsSendIdentity(text: "and the docs", to: key()),
+            "no stop notice: the identity is kept and the resend retries under it (B5)")
+    }
+
+    private func sendNotSentStopped(requestID: String) throws -> Event {
+        let idJSON = JSONValue.string(requestID).canonicalJSONString
+        let json = """
+            {"seq":9,"session_uid":"\(key())","session_id":"cc-1","ts":"2026-09-04T21:32:00.000Z",
+             "kind":"notification","source":"daemon",
+             "payload":{"notification_type":"send_not_sent","request_id":\(idJSON),"reason":"stopped",
+             "message":"Not sent: stopped"}}
+            """
+        return try JSONDecoder().decode(Event.self, from: Data(json.utf8))
     }
 }

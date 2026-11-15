@@ -79,7 +79,7 @@ final class ComposeProseTests: XCTestCase {
         let marks =
             outcomes.compactMap { ComposeProse.note($0)?.icon }
             + codexMessages.compactMap { CodexProse.compose($0).map(ComposeProse.note)?.icon }
-            + codexStops.compactMap { ComposeProse.note(CodexProse.interrupt($0)).icon }
+            + codexStops.compactMap { ComposeProse.note(CodexProse.interrupt($0, agent: .codex)).icon }
             + ["warning-circle-fill", "question-fill"]
         XCTAssertEqual(
             Set(marks),

@@ -1987,7 +1987,7 @@ struct FleetRowCell: View, Equatable {
         // **The daemon's sentence, verbatim.** Its refusals were written to be
         // shown, and each names which condition failed.
         case .settled(let result):
-            let banner = CodexProse.interrupt(result)
+            let banner = CodexProse.interrupt(result, agent: content.row.summary.agent)
             return StopOutcome(
                 word: Self.word(for: result), title: banner.title, message: banner.message, icon: banner.icon,
                 tone: banner.tone.ccTone)

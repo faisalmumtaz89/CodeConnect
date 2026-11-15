@@ -221,12 +221,12 @@ public enum CodexProse {
     /// The four `InterruptResult` arms. **Refusals verbatim** — a daemon
     /// sentence is the only thing on this screen that knows which of eleven
     /// conditions failed, and paraphrasing it would throw that away.
-    public static func interrupt(_ result: InterruptResult) -> Banner {
+    public static func interrupt(_ result: InterruptResult, agent: AgentKind) -> Banner {
         switch result {
         case .aborted:
             return Banner(
                 title: "Stopped",
-                message: "Codex stopped the turn.",
+                message: "\(agent.displayName) stopped the turn.",
                 icon: "stop-circle-fill", tone: .success)
         case .duplicate:
             return Banner(
@@ -317,16 +317,42 @@ public enum CodexProse {
     /// phone already knew were `bound`, `offline` or `none`. Measured at the
     /// send stub. One rule, one reader.
     static func stopUnavailable(
-        agent: AgentKind, daemonHonoursStop: Bool, link: CodexLinkState, runningTurn: String?
+        agent: AgentKind, daemonHonoursStop: Bool, hosted: Bool, isLive: Bool,
+        link: CodexLinkState, runningTurn: String?
     ) -> String? {
-        guard agent == .codex else { return "Only a Codex session can be stopped from here." }
-        guard daemonHonoursStop else {
-            return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Codex turn. Update it."
+        switch agent {
+        case .codex:
+            guard daemonHonoursStop else {
+                return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Codex turn. Update it."
+            }
+            // **The one honest hide** is the absent turn: with nothing to name
+            // there is nothing to send, so the control is absent rather than dead.
+            guard runningTurn != nil else { return "Nothing is running to stop." }
+            return link.blockedReason(for: .stop)
+        case .claude:
+            // A Claude run is stopped only when CodeConnect started it (hosted —
+            // a terminal run's Stop is its own keyboard at the Mac), the run is
+            // live, and a turn is actually running. No control-link check: a
+            // hosted run's interrupt does not travel the Codex control link.
+            //
+            // These reasons are plain, readable sentences rather than the daemon's
+            // own uid-prefixed operator rows because of where they surface: the
+            // views read `stopUnavailable` only as `== nil` for button visibility
+            // and the Stop button's accessibility label is static, so a person
+            // never hears these from the control. They reach a person only through
+            // the send path — `stopBlocked → stopNotSent` into the Stop outcome
+            // banner — in the race where the run's state changes between the button
+            // showing and the tap landing (the run ends under a shown button).
+            guard daemonHonoursStop else {
+                return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Claude turn. Update it."
+            }
+            guard hosted else { return "Only a Claude run started from the app can be stopped here." }
+            guard isLive else { return "This run has ended, so there is no turn to stop." }
+            guard runningTurn != nil else { return "Nothing is running to stop." }
+            return nil
+        case .unsupported:
+            return "Only a Claude or Codex run can be stopped from here."
         }
-        // **The one honest hide** is the absent turn: with nothing to name there
-        // is nothing to send, so the control is absent rather than dead.
-        guard runningTurn != nil else { return "Nothing is running to stop." }
-        return link.blockedReason(for: .stop)
     }
 
     /// Why the composer cannot send, or nil when it can. Same shape, same order.
