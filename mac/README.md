@@ -1003,7 +1003,10 @@ gate then refuses.
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
 `send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
-`codex_compose`, `question_card`, `hook_only_approvals`, `history_pages` and `supported_agents` so the app disables
+`codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
+`can_approve_reliably`, `fail_mode`, `answer_path`, `hold_secs`, `slash_composer_recovery`,
+`command_catalog`, `terminal_pty`, `start_session`, `start_worktree`, `browse_folders`,
+`machine_stats` and `stop_run` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1174,6 +1177,23 @@ connector's commands (the host leaves them out of both), the ones the latest ini
 claude's own screen, or those three refused screens, each with claude's description and
 argument hint (`entries`); it is `unavailable` until an init names the commands claude keeps
 to its own screen.
+An app changes such a run's model, its effort or its permission mode with `set_model` and
+`set_mode` (minor 39), each answered with a `setting_result`. Each value must be one the run's
+`menus` offer (its summary's while it is live: the models of its start's answer, each with
+the efforts claude lists for it, and three modes, "Ask before edits", "Accept edits" and
+"Plan"; never `bypassPermissions`), checked before anything is sent. Each part then goes to the host as a
+line of its own, the model before the effort, and the host makes the SDK's own call for it
+(`setModel`, `applyFlagSettings`, `setPermissionMode`), one line at a time. The answer is
+`applied`, from `now` between turns or from the `next_turn` while one runs; `refused` with
+claude's reason, saying so when the model was changed and the effort was not; or
+`indeterminate` when no answer came within 10 s or the run's link ended first. The model and
+the mode then show as claude reports them, its `Set model to …` receipt and its permission-mode
+status. claude echoes nothing for an app's effort, so that shows from a `model_set` notice ccd
+files when claude takes it, even from an answer that comes late; an effort typed as
+`/effort low` shows from claude's own `Set effort level to low …` receipt (a receipt in another
+wording is not read). A retry applies the change again. A change whose answer is lost
+across a ccd restart leaves the effort as it was last set. A Claude run in a terminal, and a
+Codex run, take no settings from an app.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

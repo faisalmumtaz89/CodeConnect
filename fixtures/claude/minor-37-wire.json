@@ -120,6 +120,48 @@
     "last_seq": 3,
     "lifecycle": "live",
     "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ]
+    },
     "project_label": "cc-rig",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

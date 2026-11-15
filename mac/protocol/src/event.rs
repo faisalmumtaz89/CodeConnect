@@ -99,7 +99,8 @@ pub mod notice {
     pub const CONVERSATION_CLEARED: &str = "conversation_cleared";
     /// The content-free line that wakes an idle agent to read its mail.
     pub const MAIL_NUDGE: &str = "mail_nudge";
-    /// The agent host confirmed a model change.
+    /// An app's effort change on a Claude run CodeConnect started, which claude took
+    /// (`{effort}`, minor 39): claude echoes nothing for that change, so this records it.
     pub const MODEL_SET: &str = "model_set";
     /// The agent host confirmed a permission-mode change.
     pub const MODE_SET: &str = "mode_set";
@@ -537,6 +538,17 @@ pub struct SessionSummary {
     /// said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<Fact>,
+    /// The effort this run last took, and the event that recorded it (minor 39): an app's
+    /// change ([`notice::MODEL_SET`]) or claude's own receipt for a typed `/effort`. Omitted
+    /// when neither has happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Fact>,
+    /// What an app may set this run to (minor 39): a live Claude run CodeConnect started,
+    /// once its start is answered. Omitted for any other run, before then, once it has
+    /// ended, and from an older daemon; a client offers the model, effort and mode controls
+    /// only where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menus: Option<RunMenus>,
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended, when the run registered, or when the daemon started. Absent
     /// outside a repository, on a detached head, before the first read, and from
@@ -591,6 +603,31 @@ pub struct ModelFact {
     pub source: ModelSource,
     /// The deciding event's `ts`.
     pub at: String,
+}
+
+/// The settings an app may choose for a run (minor 39), as its agent offers them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunMenus {
+    pub models: Vec<MenuModel>,
+    pub modes: Vec<MenuMode>,
+}
+
+/// One model of a run's menu: claude's own `value`, its name, what claude says of it, and
+/// the efforts it takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuModel {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub efforts: Vec<String>,
+}
+
+/// One permission mode of a run's menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuMode {
+    pub value: String,
+    pub label: String,
 }
 
 /// Which kind of event said what the model is.
@@ -719,6 +756,8 @@ mod tests {
             pending: Vec::new(),
             model: None,
             permission_mode: None,
+            effort: None,
+            menus: None,
             git_branch: None,
             diff_stat: None,
         };

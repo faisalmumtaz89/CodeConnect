@@ -11,7 +11,11 @@
 // person, given to the query in the order ccd sent it, with its outcome `done` once the SDK has taken it; one the run
 // cannot take (before the start, or once its input has ended) is `refused`. claude's permission requests are held for
 // ccd's `answer` (permissions.ts), each answer told back once the SDK has written it into claude's input; the state
-// message lists those still open. `stop` ends the run (H5): the query is interrupted, its input ended and the query
+// message lists those still open. `set_model` and `set_mode` change the run's model, effort or permission mode
+// through the SDK's own calls, one line at a time in the order ccd sent them: a model with `setModel`, an effort alone
+// with `applyFlagSettings` (never `setModel`, which with no model resets it), a mode with `setPermissionMode`; each
+// is `done` once claude has taken it, or `refused` with claude's reason. `stop` ends the run (H5): the query is
+// interrupted, its input ended and the query
 // closed, so claude exits; a second `stop` does nothing. `interrupt` is an app's Stop of one turn, taken only while that
 // turn (its `system/init` uuid, until its `result`) is the one claude is running, and refused otherwise: the query is
 // interrupted with its queued messages cancelled, and the outcome `done` follows once both the turn's result and the
@@ -71,6 +75,10 @@ const link = createLink({
     interrupt
       ? interrupt(command)
       : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'that turn is not running' }),
+  setting: (command) =>
+    setting
+      ? setting(command)
+      : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'the run has not started' }),
   stop: () => stop?.(),
   facts: () => facts,
   pending: () => permissions?.pending() ?? [],
@@ -97,6 +105,9 @@ let stop: (() => void) | undefined;
 
 // An app's Stop of one turn, once the run has a query.
 let interrupt: ((command: Extract<ToHost, { type: 'interrupt' }>) => void) | undefined;
+
+// A change of the run's settings, once the run has a query.
+let setting: ((command: Extract<ToHost, { type: 'set_model' | 'set_mode' }>) => void) | undefined;
 
 function begin(start: Start): void {
   if (begun) return;
@@ -170,6 +181,28 @@ function begin(start: Start): void {
     run.interrupt().catch(() => {});
     endInput();
     run.close();
+  };
+  // The run's settings, each line's calls once the line before has been answered, so two changes reach claude in the
+  // order ccd sent them.
+  let settings: Promise<void> = Promise.resolve();
+  setting = (command) => {
+    settings = settings.then(async () => {
+      try {
+        if (command.type === 'set_mode') {
+          await run.setPermissionMode(command.mode as Parameters<typeof run.setPermissionMode>[0]);
+        } else if (command.model === undefined && command.effort === undefined) {
+          throw new Error('nothing to change');
+        } else {
+          if (command.model !== undefined) await run.setModel(command.model);
+          if (command.effort !== undefined) {
+            await run.applyFlagSettings({ effortLevel: command.effort } as Parameters<typeof run.applyFlagSettings>[0]);
+          }
+        }
+        link.send({ type: 'outcome', uuid: command.uuid, status: 'done' });
+      } catch (error) {
+        link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: oneLine(error) });
+      }
+    });
   };
   // The turn claude is running: its `system/init` uuid, until that turn's `result`.
   let running: string | undefined;

@@ -1382,6 +1382,46 @@ where
             )
             .await?;
         }
+        ClientMessage::SetModel {
+            session_id,
+            request_id,
+            model,
+            effort,
+        } => {
+            let result = daemon
+                .set_setting(
+                    &session_id,
+                    crate::claude_host::Setting::Model { model, effort },
+                )
+                .await;
+            send(
+                sink,
+                &ServerMessage::SettingResult {
+                    session_id,
+                    request_id,
+                    result,
+                },
+            )
+            .await?;
+        }
+        ClientMessage::SetMode {
+            session_id,
+            request_id,
+            mode,
+        } => {
+            let result = daemon
+                .set_setting(&session_id, crate::claude_host::Setting::Mode(mode))
+                .await;
+            send(
+                sink,
+                &ServerMessage::SettingResult {
+                    session_id,
+                    request_id,
+                    result,
+                },
+            )
+            .await?;
+        }
         ClientMessage::DeleteSession { session_uid } => {
             // **By uid, never by name.** `resolve` accepts a tmux name and maps it
             // to the newest run under it, which is right for subscribing and wrong
@@ -9564,6 +9604,8 @@ mod tests {
             pending: Vec::new(),
             model: None,
             permission_mode: None,
+            effort: None,
+            menus: None,
             git_branch: None,
             diff_stat: None,
         };
@@ -9624,6 +9666,8 @@ mod tests {
                 pending: Vec::new(),
                 model: None,
                 permission_mode: None,
+                effort: None,
+                menus: None,
                 git_branch: tree.map(|(branch, _, _)| branch.to_string()),
                 diff_stat: tree
                     .map(|(_, added, removed)| protocol::event::DiffStat { added, removed }),

@@ -295,8 +295,8 @@ final class CodexProseTests: XCTestCase {
     /// wrote, a period before one the app wrote.
     func testAVerbatimDaemonSentenceIsNotIntroducedByAFullStop() throws {
         let daemonWritten: [CodexProse.Banner] = [
-            CodexProse.interrupt(.indeterminate(reason: "this interrupt was already sent")),
-            CodexProse.interrupt(.rejected(reason: "this Mac has lost its control link")),
+            CodexProse.interrupt(.indeterminate(reason: "this interrupt was already sent"), agent: .codex),
+            CodexProse.interrupt(.rejected(reason: "this Mac has lost its control link"), agent: .codex),
             try XCTUnwrap(CodexProse.compose(.indeterminate(reason: "that message was written"))),
             try XCTUnwrap(CodexProse.compose(.rejected(reason: "this Mac is connected but not watching"))),
         ]
@@ -311,9 +311,9 @@ final class CodexProseTests: XCTestCase {
 
         // The app's own sentences are whole sentences and keep the full stop.
         let appWritten: [CodexProse.Banner] = [
-            CodexProse.interrupt(.aborted(turnID: "t-1")),
-            CodexProse.interrupt(.duplicate(turnID: "t-1")),
-            CodexProse.interrupt(.unknown(status: "quiesced")),
+            CodexProse.interrupt(.aborted(turnID: "t-1"), agent: .codex),
+            CodexProse.interrupt(.duplicate(turnID: "t-1"), agent: .codex),
+            CodexProse.interrupt(.unknown(status: "quiesced"), agent: .codex),
             try XCTUnwrap(CodexProse.compose(.unknown(status: "quiesced"))),
         ]
         for banner in appWritten {
@@ -332,22 +332,20 @@ final class CodexProseTests: XCTestCase {
     func testWhyStopIsNotOffered() {
         XCTAssertNil(
             CodexProse.stopUnavailable(
-                agent: .codex, daemonHonoursStop: true, link: .subscribed, runningTurn: "t-1"))
-
-        XCTAssertEqual(
-            CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: true, link: .subscribed, runningTurn: "t-1"),
-            "Only a Codex session can be stopped from here.")
+                agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
+                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         XCTAssertTrue(
             CodexProse.stopUnavailable(
-                agent: .codex, daemonHonoursStop: false, link: .subscribed, runningTurn: "t-1")!
+                agent: .codex, daemonHonoursStop: false, hosted: true, isLive: true,
+                link: .subscribed, runLink: .attached, runningTurn: "t-1")!
                 .contains("too old"))
 
         // **The one honest hide**: no turn, nothing to name.
         XCTAssertEqual(
             CodexProse.stopUnavailable(
-                agent: .codex, daemonHonoursStop: true, link: .subscribed, runningTurn: nil),
+                agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
+                link: .subscribed, runLink: .attached, runningTurn: nil),
             "Nothing is running to stop.")
 
         for link in [
@@ -355,9 +353,68 @@ final class CodexProseTests: XCTestCase {
         ] {
             XCTAssertNotNil(
                 CodexProse.stopUnavailable(
-                    agent: .codex, daemonHonoursStop: true, link: link, runningTurn: "t-1"),
+                    agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
+                    link: link, runLink: .attached, runningTurn: "t-1"),
                 "\(link) cannot be stopped, and the control says why")
         }
+    }
+
+    /// A hosted Claude run is stopped when the daemon honours it, the run is live,
+    /// a turn is running, and its link to the host is attached — with no *Codex*
+    /// control-link check. The must-fail: before the Claude branch, a Claude run read
+    /// "Only a Codex session can be stopped from here" here instead of being offered.
+    func testWhyClaudeStopIsNotOffered() {
+        // Offered: hosted, live, a running turn, the capability. The link is never
+        // consulted, so a `.none` link (never relevant to a hosted run) still offers.
+        XCTAssertNil(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                link: .none, runLink: .attached, runningTurn: "t-1"))
+
+        XCTAssertTrue(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: false, hosted: true, isLive: true,
+                link: .subscribed, runLink: .attached, runningTurn: "t-1")!
+                .contains("too old"))
+
+        // Not hosted (a terminal run): not offered.
+        XCTAssertNotNil(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: true, hosted: false, isLive: true,
+                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
+
+        // Not live (ended): not offered.
+        XCTAssertNotNil(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: false,
+                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
+
+        // The honest hide: no running turn.
+        XCTAssertEqual(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                link: .subscribed, runLink: .attached, runningTurn: nil),
+            "Nothing is running to stop.")
+
+        // G-1: a detached hosted run — live, hosted, a turn running — is NOT offered;
+        // ccd's link to the host has dropped and the interrupt cannot reach it.
+        XCTAssertNotNil(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                link: .none, runLink: .detached, runningTurn: "t-1"),
+            "a detached hosted run cannot be stopped")
+    }
+
+    /// The Stop banner names the agent that stopped: "Codex stopped the turn." for
+    /// a Codex run (unchanged) and "Claude stopped the turn." for a hosted Claude
+    /// run. Must-fail before the agent param: both read "Codex stopped the turn."
+    func testTheStopBannerNamesTheStoppingAgent() {
+        XCTAssertEqual(
+            CodexProse.interrupt(.aborted(turnID: "t-1"), agent: .codex).message,
+            "Codex stopped the turn.")
+        XCTAssertEqual(
+            CodexProse.interrupt(.aborted(turnID: "t-1"), agent: .claude).message,
+            "Claude stopped the turn.")
     }
 
     func testWhyComposeIsNotOffered() {
@@ -429,9 +486,9 @@ final class CodexProseTests: XCTestCase {
         let arbitrary =
             "  Any sentence at all — 4 KiB of it, with «punctuation», a\nnewline, "
             + "and a trailing space "
-        XCTAssertEqual(CodexProse.interrupt(.rejected(reason: arbitrary)).message, arbitrary)
+        XCTAssertEqual(CodexProse.interrupt(.rejected(reason: arbitrary), agent: .codex).message, arbitrary)
         XCTAssertEqual(try XCTUnwrap(CodexProse.compose(.rejected(reason: arbitrary))).message, arbitrary)
-        XCTAssertEqual(CodexProse.interrupt(.indeterminate(reason: arbitrary)).message, arbitrary)
+        XCTAssertEqual(CodexProse.interrupt(.indeterminate(reason: arbitrary), agent: .codex).message, arbitrary)
         XCTAssertEqual(try XCTUnwrap(CodexProse.compose(.indeterminate(reason: arbitrary))).message, arbitrary)
     }
 
@@ -453,7 +510,7 @@ final class CodexProseTests: XCTestCase {
     /// `cancelled_before_send` would have read "Sent, outcome unknown".
     func testAnUnknownStatusClaimsNeitherActuationNorNonActuation() throws {
         for banner in [
-            CodexProse.interrupt(.unknown(status: "cancelled_before_send")),
+            CodexProse.interrupt(.unknown(status: "cancelled_before_send"), agent: .codex),
             try XCTUnwrap(CodexProse.compose(.unknown(status: "cancelled_before_send"))),
         ] {
             XCTAssertTrue(banner.message.contains("cancelled_before_send"), banner.message)

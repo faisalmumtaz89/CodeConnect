@@ -1376,10 +1376,10 @@ public final class AppModel {
     /// Ask the Mac to forget a run, and forget it here too.
     ///
     /// **Gated on `SessionSummary.isRemovable`, which mirrors the daemon's own
-    /// rule.** A hosted run needs `lifecycle == .exited` — the proof, never the
+    /// rule.** A run needs `lifecycle` `exited` or `failed` — the proof, never the
     /// derived Ended status, which can read Ended without the run being proven
-    /// exited. An unhosted run (adopted; empty `tmux_session`) is removable at
-    /// any lifecycle, because no proof of its end can ever exist — and removing
+    /// ended. An adopted run (`claude:`) is removable at any lifecycle, because
+    /// no proof of its end can ever exist — and removing
     /// one also stops observation of that conversation: the Mac drops its
     /// further hooks until a new session start announces itself and re-adopts
     /// it. The daemon enforces the same rule in SQL regardless; the gate here
@@ -1420,6 +1420,39 @@ public final class AppModel {
         enqueueCacheWork { await $0.saveFleet(remaining) }
         await cacheSettled()
         return result
+    }
+
+    /// Whether End run is offered on this run: a live Claude run CodeConnect
+    /// started, on a computer whose ccd ends runs (it ends no other here).
+    public func canEndRun(_ summary: SessionSummary) -> Bool {
+        daemonProfile.endsRuns && summary.lifecycle == .live && summary.startedByCodeConnect
+            && summary.agent == .claude
+    }
+
+    /// End a run CodeConnect started (`stop_run`): what to tell the person who
+    /// asked, or `nil` when the run is ending or has ended.
+    ///
+    /// No gate of its own: the connection refuses to send without `stop_run` in
+    /// its own words, and ccd answers every other case itself, a refusal written
+    /// to be shown, so a confirmation that outlived the row it was asked from
+    /// still gets an answer. ccd says nothing more when it accepts the stop, so
+    /// the fleet is asked again at once and the row reads Stopping.
+    public func endRun(_ summary: SessionSummary) async -> String? {
+        let result: StopRunResult
+        do {
+            result = try await connection.stopRun(session: summary.sessionUID, requestID: UUID().uuidString)
+        } catch {
+            return error.localizedDescription
+        }
+        switch result {
+        case .stopping, .alreadyEnded:
+            refreshFleet()
+            return nil
+        case .refused(let reason):
+            return reason
+        case .unknown(let status):
+            return "\(HostDevice.current.computer("The computer")) answered “\(status)”."
+        }
     }
 
     /// Removes each ended session in turn, and returns why each one still in
@@ -2203,11 +2236,16 @@ public final class AppModel {
         case .event(let event):
             let sessionState = state(for: event.sessionKey)
             let heldThrough = sessionState.lastSeq
+            // Whether this event arrives live, captured BEFORE `ingest`/`settleLaunchIfCaughtUp`:
+            // the event that completes a catch-up flips `launchSettled` true, so reading it afterward
+            // would read a replay's last event as live. Used by the "Not sent: stopped" hand-back.
+            let wasLiveArrival = launchSettled && catchUp == nil
             sessionState.ingest(event)
             scheduleCacheWrite(event.sessionKey)
             if !launchSettled { settleLaunchIfCaughtUp() }
-            // A resolution or a new card changes the fleet's top band.
-            if event.kind == .approvalRequest || event.kind == .approvalResolved {
+            // A resolution or a new card changes the fleet's top band; a run's end
+            // changes its lifecycle, which only the list carries.
+            if event.kind == .approvalRequest || event.kind == .approvalResolved || event.kind == .sessionEnd {
                 refreshFleet()
             }
             // A run's link attaching or dropping, or the run ending, changes what the fleet says of it, and the daemon
@@ -2218,6 +2256,22 @@ public final class AppModel {
                 event.seq > summary.lastSeq
             {
                 askFleetForFact()
+            }
+            // A send a Stop cancelled ("Not sent: stopped"): drop its retry identity so the
+            // text handed back to the composer re-sends fresh, not as the duplicate the
+            // daemon would replay as "already applied". Only this notice drops one.
+            if let stoppedRequestID = event.sendNotSentStoppedRequestID {
+                dropSendIdentity(requestID: stoppedRequestID)
+                // Offer the cancelled text to the composer on a LIVE arrival (`wasLiveArrival`, captured
+                // before the settle). The real stopped send answered `.sent` before the Stop, so its
+                // identity is already cleared by then — liveness, not a held identity, is what separates
+                // a live stop from a replay. The view takes the text only when its composer is empty.
+                if wasLiveArrival,
+                    let text = sessionState.events
+                        .first(where: { $0.sendRequestID == stoppedRequestID })?.userText
+                {
+                    composerRestore[event.sessionKey] = text
+                }
             }
             if catchUp != nil {
                 // Only a session still short of what it owes is progress: one
@@ -3059,8 +3113,11 @@ public final class AppModel {
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
-            daemonHonoursStop: daemonProfile.stopsCodexTurns,
+            daemonHonoursStop: daemonProfile.honoursStop(for: summary.agent),
+            hosted: summary.tmuxSession.isEmpty,
+            isLive: summary.lifecycle == .live,
             link: summary.codexLink,
+            runLink: summary.link,
             runningTurn: shown(for: key)?.runningTurn)
     }
 
@@ -3070,8 +3127,11 @@ public final class AppModel {
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
-            daemonHonoursStop: daemonProfile.stopsCodexTurns,
+            daemonHonoursStop: daemonProfile.honoursStop(for: summary.agent),
+            hosted: summary.tmuxSession.isEmpty,
+            isLive: summary.lifecycle == .live,
             link: summary.codexLink,
+            runLink: summary.link,
             runningTurn: runningTurn(for: key))
     }
 
@@ -3168,7 +3228,8 @@ public final class AppModel {
         controls.beginStop(turn: turn)
         do {
             let result = try await connection.interrupt(
-                session: reference, requestID: requestID, turnID: turn, payloadHash: hash)
+                session: reference, requestID: requestID, turnID: turn, payloadHash: hash,
+                requires: summary.agent)
             controls.settleStop(result, material: hash, turnID: turn, now: now)
             states[key]?.codexTurnsChanged()
             refreshFleet()
@@ -3539,6 +3600,10 @@ public final class AppModel {
         guard connection.capabilities?.sendText != false else {
             return .failed("\(HostDevice.current.computer("The computer"))'s CodeConnect can't take typed text.")
         }
+        // A committed send retires the last Stop's note, so the shared outcome slot shows what
+        // became of THIS send rather than a stale "stopped" from the turn just ended. Codex does the
+        // same inside `beginCompose`; this is the Claude send path's own retirement.
+        codexControls(for: key).retireStopForSend()
         // Every send carries an identity, so a retry is recognisable instead
         // of being typed twice. The id is fresh per mutation — except after
         // an indeterminate outcome, where re-sending the *same mutation*
@@ -3623,6 +3688,15 @@ public final class AppModel {
         pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] = nil
     }
 
+    /// Drops the retry identity of the send a Stop cancelled, found by its `request_id`
+    /// (the value the mint recorded), so the text handed back to the composer re-sends as
+    /// a new send and not the retry the daemon would answer "already applied". Only a
+    /// `send_not_sent` notice drops one; an ordinary unanswered send keeps its identity
+    /// (`retainIdentityIfListed`), so an unconfirmed send still retries under its first id.
+    func dropSendIdentity(requestID: String) {
+        pendingSendIdentities = pendingSendIdentities.filter { $0.value != requestID }
+    }
+
     /// Keeps an unsettled mutation's identity — unless its session departed
     /// while the send was in flight. The departure sweep already ran; writing
     /// after it would park a dead identity under a session *name* the next
@@ -3643,6 +3717,19 @@ public final class AppModel {
         let submit: Bool
     }
     private var pendingSendIdentities: [SendMutationKey: String] = [:]
+
+    /// The text of a send a **live** Stop cancelled, by session key, for the composer to take back. Set
+    /// only when a `send_not_sent {stopped}` arrives on a LIVE event (`wasLiveArrival`): the real stopped
+    /// send answered `.sent` before the Stop, so its identity is already gone by notice time — liveness,
+    /// not a held identity, is the signal. Consumed by the view, which fills its composer only when it is
+    /// empty, so a draft in progress is never overwritten.
+    public private(set) var composerRestore: [String: String] = [:]
+
+    /// The view took the handed-back text, or declined it because its composer was busy; either way
+    /// clear it, so a later notice is its own one-shot event and the same text is never re-offered.
+    public func consumeComposerRestore(for key: String) {
+        composerRestore[key] = nil
+    }
 
     func capturePane(key: String, lines: UInt32 = 80) async -> String? {
         guard connection.capabilities?.capture != false else { return nil }

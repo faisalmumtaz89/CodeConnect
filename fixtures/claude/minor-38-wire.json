@@ -99,15 +99,159 @@
     "codex_link": "none",
     "created_at": "2026-11-15T09:00:00.000Z",
     "cwd": "/tmp/cc-rig",
+    "effort": {
+      "seq": 5,
+      "value": "low"
+    },
     "last_seq": 7,
     "lifecycle": "live",
     "link": "detached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ]
+    },
     "project_label": "cc-rig",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "tmux_session": "",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
+  "session_hosted_detached_events": [
+    {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 1,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "daemon",
+      "ts": "2026-11-15T09:00:00.000Z"
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "fix the tests"
+      },
+      "seq": 2,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "daemon",
+      "source_event_id": "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b",
+      "ts": "2026-11-15T09:00:00.000Z"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000020",
+      "kind": "session_start",
+      "payload": {},
+      "seq": 3,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000020/session_start/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000031",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Compacted </local-command-stdout>"
+        }
+      },
+      "seq": 4,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000031/user_message/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000032",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"
+        }
+      },
+      "seq": 5,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000032/user_message/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000033",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Current session: 3% used</local-command-stdout>"
+        }
+      },
+      "seq": 6,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000033/user_message/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "kind": "link_state",
+      "payload": {
+        "link": "detached",
+        "reason": "agent host disconnected"
+      },
+      "seq": 7,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "daemon",
+      "ts": "2026-11-15T09:00:00.000Z"
+    }
+  ],
   "session_hosted_live": {
     "agent": "claude",
     "blocked_on": [],
@@ -118,6 +262,48 @@
     "last_seq": 3,
     "lifecycle": "live",
     "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ]
+    },
     "project_label": "cc-rig",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

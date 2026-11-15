@@ -463,6 +463,55 @@ test('a Stop of a turn the host is not running is refused and reaches claude not
   expect(interruptsRead(stub()).length).toBe(1);
 }, 10_000);
 
+/** The settings requests claude read, and when each was answered, in order. */
+const settingsSeen = (log: any[]) =>
+  log.filter((event) => event.setting || event.answered).map((event) => (event.setting ? event.setting : { answered: event.answered }));
+
+test('a model, an effort and a mode reach claude through the SDK, each answered done once claude has taken it', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [sessionInit] });
+  await ccd.line('the turn', (line) => line.type === 'sdk' && line.message.type === 'system');
+  ccd.send({ type: 'set_model', uuid: 'c-model', model: 'sonnet' });
+  expect((await ccd.line('the model answered', (line) => line.type === 'outcome' && line.uuid === 'c-model')).status).toBe('done');
+  ccd.send({ type: 'set_model', uuid: 'c-effort', effort: 'low' });
+  expect((await ccd.line('the effort answered', (line) => line.type === 'outcome' && line.uuid === 'c-effort')).status).toBe('done');
+  ccd.send({ type: 'set_mode', uuid: 'c-mode', mode: 'plan' });
+  expect((await ccd.line('the mode answered', (line) => line.type === 'outcome' && line.uuid === 'c-mode')).status).toBe('done');
+  expect(settingsSeen(stub()).filter((seen) => !('answered' in seen))).toStrictEqual([
+    { subtype: 'set_model', model: 'sonnet' },
+    { subtype: 'apply_flag_settings', settings: { effortLevel: 'low' } },
+    { subtype: 'set_permission_mode', mode: 'plan' },
+  ]);
+  noUnexpected(stub());
+}, 10_000);
+
+test("an effort alone never calls setModel, which with no model would reset it; claude's refusal is the outcome's reason", async () => {
+  const { ccd, stub } = await run(trustedStart, {
+    after_user: [sessionInit],
+    settings: { refuse: { set_permission_mode: 'Invalid permission mode: plann' } },
+  });
+  await ccd.line('the turn', (line) => line.type === 'sdk' && line.message.type === 'system');
+  ccd.send({ type: 'set_model', uuid: 'c-effort', effort: 'high' });
+  await ccd.line('the effort answered', (line) => line.type === 'outcome' && line.uuid === 'c-effort');
+  ccd.send({ type: 'set_mode', uuid: 'c-mode', mode: 'plann' });
+  const refused = await ccd.line('the mode answered', (line) => line.type === 'outcome' && line.uuid === 'c-mode');
+  expect(refused).toMatchObject({ status: 'refused', detail: 'Invalid permission mode: plann' });
+  expect(settingsSeen(stub()).filter((seen) => 'subtype' in seen && seen.subtype === 'set_model')).toStrictEqual([]);
+}, 10_000);
+
+test('two settings lines reach claude one at a time: the second waits for the first to be answered', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [sessionInit], settings: { delay_ms: 500 } });
+  await ccd.line('the turn', (line) => line.type === 'sdk' && line.message.type === 'system');
+  ccd.send({ type: 'set_model', uuid: 'c-model', model: 'sonnet' });
+  ccd.send({ type: 'set_model', uuid: 'c-effort', effort: 'low' });
+  await ccd.line('the effort answered', (line) => line.type === 'outcome' && line.uuid === 'c-effort');
+  expect(settingsSeen(stub())).toStrictEqual([
+    { subtype: 'set_model', model: 'sonnet' },
+    { answered: 'set_model' },
+    { subtype: 'apply_flag_settings', settings: { effortLevel: 'low' } },
+    { answered: 'apply_flag_settings' },
+  ]);
+}, 10_000);
+
 test("a Stop with a permission open: claude's cancel of it withdraws the request before the Stop's outcome", async () => {
   const { ccd } = await run(trustedStart, {
     after_user: [sessionInit, ask('toolu_s')],

@@ -760,7 +760,22 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         `agent_message`.
 ///       - `/usage` and `/cost` sent to such a run are messages; `/status` is
 ///         refused, as its claude does not offer it.
-pub const PROTOCOL_MINOR: u32 = 38;
+///   * `39` — **A Claude run's model, effort and permission mode, set from an app.**
+///
+///     Additive:
+///       - [`ws::ClientMessage::SetModel`] (a model, an effort, or both) and
+///         [`ws::ClientMessage::SetMode`], answered with [`ws::ServerMessage::SettingResult`]
+///         (`applied {applies: now | next_turn}`, `refused`, `indeterminate`), for a Claude
+///         run CodeConnect started. A daemon below 39 answers both `bad_request`.
+///       - [`event::SessionSummary`]'s `menus` ([`event::RunMenus`]: the run's models with
+///         their efforts, and its permission modes) on such a run while it is live, once its
+///         start is answered; and `effort`, the effort the run last took (an app's change, or
+///         claude's own receipt for a typed `/effort`). No capability: a client offers the
+///         controls where a summary carries `menus`, which a daemon below 39 never sends.
+///       - A `notification` event `model_set {effort}` when claude took an app's effort
+///         change. A model or mode change shows as claude itself reports it: its
+///         `Set model to …` output and its permission-mode status.
+pub const PROTOCOL_MINOR: u32 = 39;
 
 #[cfg(test)]
 mod ledger_tests {

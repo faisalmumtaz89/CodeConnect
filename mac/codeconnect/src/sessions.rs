@@ -253,6 +253,8 @@ mod tests {
             pending: Vec::new(),
             model: None,
             permission_mode: None,
+            effort: None,
+            menus: None,
             git_branch: None,
             diff_stat: None,
         }

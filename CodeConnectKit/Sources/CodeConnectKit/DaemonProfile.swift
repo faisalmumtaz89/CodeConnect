@@ -64,6 +64,10 @@ public struct DaemonProfile: Sendable, Hashable {
     /// no swipe, because the row would stay and the user would not know why.
     public var removesSessions: Bool { capabilities?.deletesSessions == true }
 
+    /// The daemon ends a run CodeConnect started (`stop_run`, minor 35). Unknown
+    /// is false, so End run is only offered where it can be sent.
+    public var endsRuns: Bool { capabilities?.endsRuns == true }
+
     /// The daemon answers `get_diff`: every connected daemon does.
     public var servesDiff: Bool { isConnected }
 
@@ -87,6 +91,18 @@ public struct DaemonProfile: Sendable, Hashable {
     /// only behaviour is refusing the tap, which is the one thing the
     /// verification bar names by name.
     public var stopsCodexTurns: Bool { capabilities?.codexInterrupt == true }
+
+    /// **Whether this daemon honours a Stop for a run of `agent`** — `codex_interrupt`
+    /// for Codex, `claude_interrupt` for a hosted Claude run (minor 37). The same
+    /// hard gate as `stopsCodexTurns`, resolved per agent: an unflagged daemon
+    /// answers a well-formed refusal to every ask, so the button must not be offered.
+    public func honoursStop(for agent: AgentKind) -> Bool {
+        switch agent {
+        case .codex: return capabilities?.codexInterrupt == true
+        case .claude: return capabilities?.claudeInterrupt == true
+        case .unsupported: return false
+        }
+    }
 
     /// **This daemon understands `compose` at all** (minor 18).
     ///

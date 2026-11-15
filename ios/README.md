@@ -621,6 +621,21 @@ follows from each — an `indeterminate` spends its material so the same words c
 be sent twice, and an unknown status deliberately spends nothing and keeps the request
 id open.
 
+**A hosted Claude run can be stopped too, by its own rule.** `CodexProse.stopUnavailable`
+switches on the agent: a Codex run keeps the gate above, while a hosted Claude run — `claude_interrupt`
+advertised, an empty `tmux_session`, `lifecycle == live`, and a running turn — is offered Stop with
+**no `codex_link` check**, because a hosted run has no Codex link. The stop outcome shows in the same
+slot and names Claude, and a committed send after a Stop retires that note so it cannot shadow the send's
+own outcome. When a Stop cancels a send, the daemon's `send_not_sent {reason: "stopped"}` marks the
+person's row **"Not sent: stopped"** and the cancelled text is handed back to the composer on a **live**
+arrival of the notice, into an empty composer. (The real send answers `.sent` before the Stop — clearing
+its identity — so liveness, not a held identity, is the signal.) Three accepted misses: a Stop tapped on a
+*fleet row* marks the row but does not refill the composer (the conversation's composer is not on screen
+to take the text); a replayed `send_not_sent` during a post-launch backfill of a session that is on screen
+may refill from an old stopped row; and a send the app refuses before it reaches the send path — a native
+slash-command refusal, or one declined early — does not retire the stop note, so the stale "Stopped" can
+briefly shadow that refusal until the next action.
+
 ### The fixtures it decodes
 
 Three Codex fixtures are **emitted by `ccd` and byte-pinned by a gate on the Mac side**,

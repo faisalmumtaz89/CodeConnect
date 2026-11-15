@@ -175,6 +175,8 @@ export interface StubScript {
   init_error?: boolean;
   /** Answer an interrupt with a receipt listing `cancelled`, then write `lines` (or the lines first). */
   interrupt?: { cancelled?: string[]; lines?: string[]; result_first?: boolean };
+  /** Settings requests: refused with the error given for their subtype; set_model answered after `delay_ms`. */
+  settings?: { refuse?: Record<string, string>; delay_ms?: number };
 }
 
 /** Writes the stand-in claude for run `dir` (a sh wrapper running stub-claude.ts on the built host as Bun). */

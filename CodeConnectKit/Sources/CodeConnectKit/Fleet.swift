@@ -7,8 +7,10 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
     case failed = 1
     case doneUnreviewed = 2
     case running = 3
-    case idle = 4
-    case ended = 5
+    /// Asked to end (End run): still Active until it has exited.
+    case stopping = 4
+    case idle = 5
+    case ended = 6
 
     public static func < (lhs: FleetStatus, rhs: FleetStatus) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -18,6 +20,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
         case .failed: return "Failed"
         case .doneUnreviewed: return "Done"
         case .running: return "Running"
+        case .stopping: return "Stopping"
         case .idle: return "Idle"
         case .ended: return "Ended"
         }
@@ -28,7 +31,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
         case .blocked: return "hand-palm-fill"
         case .failed: return "warning-octagon-fill"
         case .doneUnreviewed: return "seal-check-fill"
-        case .running: return "circle-dashed"
+        case .running, .stopping: return "circle-dashed"
         case .idle: return "moon"
         case .ended: return "power"
         }
@@ -332,6 +335,8 @@ public enum FleetStatusRule {
     public static func status(
         summary: SessionSummary, shown: SessionState.Shown?, reviewedSeq: UInt64
     ) -> FleetStatus {
+        // Ending, whatever it was doing: its cards close with it.
+        if summary.lifecycle == .stopping { return .stopping }
         let pending = shown?.pendingApprovals.count ?? 0
         if !summary.blockedOn.isEmpty || pending > 0 { return .blocked }
         if summary.lifecycle == .exited {
@@ -439,8 +444,9 @@ public enum FleetStatusRule {
                 reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn't said what it can do yet.")
         }
         // Before any link reason: an ended run has no supervisor because it has
-        // ended, and nothing can answer it anywhere, the Mac included.
-        if summary.lifecycle == .exited {
+        // ended, and nothing can answer it anywhere, the Mac included. A failed
+        // run never started, which ccd counts as ended too.
+        if summary.lifecycle == .exited || summary.lifecycle == .failed {
             return .observe(reason: "This session has ended.")
         }
         guard capabilities.canApproveReliably else {
@@ -453,6 +459,13 @@ public enum FleetStatusRule {
         case .degraded:
             return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
+            // A run with no tmux session is one ccd hosts: it has no supervisor and no
+            // pane to answer from, and its link is ccd's connection to its host.
+            if summary.tmuxSession.isEmpty {
+                return .observe(
+                    reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
+                )
+            }
             return .observe(
                 reason: "No supervisor is attached to this session. It can only be answered at \(HostDevice.current.computer("the computer"))."
             )

@@ -150,7 +150,7 @@ private struct ConversationRow: View {
     @ViewBuilder private var content: some View {
         switch item.content {
         case .userMessage(let text, let isCommand):
-            Prompt(text: text, isCommand: isCommand)
+            Prompt(text: text, isCommand: isCommand, notSent: item.notSent)
         case .agentMessage(let text, let isInterrupted):
             Prose(text: text, isInterrupted: isInterrupted)
         case .tool(let tool):
@@ -177,12 +177,27 @@ private struct WaitingLine: View {
     }
 }
 
-/// What you said: one raised block, a slash command in the code face.
+/// What you said: one raised block, a slash command in the code face; under it, when a Stop cancelled the send, the
+/// composer's own note shape saying so.
 private struct Prompt: View {
     let text: String
     let isCommand: Bool
+    let notSent: Bool
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            block
+            if notSent {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber).accessibilityHidden(true)
+                    Text("Not sent: stopped").foregroundStyle(Theme.text2)
+                }
+                .font(Theme.ui(12))
+            }
+        }
+    }
+
+    private var block: some View {
         Text(text)
             .font(isCommand ? Theme.mono(12.5) : Theme.ui(13))
             .foregroundStyle(Theme.text)
