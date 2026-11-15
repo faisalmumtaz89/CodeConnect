@@ -1006,7 +1006,7 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// phone that sent one would wait on a typed reply that is never coming.
     /// Hiding the button is not the same thing as not transmitting.
     public var codexCompose: Bool { advertises(["codex_compose"]) }
-    /// This daemon ends a Claude run it started (`stop_run`, minor 35). An older one
+    /// This daemon ends a run it started (`stop_run`, minor 35). An older one
     /// answers `stop_run` with `bad_request`, so the frame is sent only when this is set.
     public var endsRuns: Bool { advertises(["stop_run"]) }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
@@ -2041,7 +2041,7 @@ public enum ClientMessage: Sendable {
     /// own spelling), so alternating spellings under one request id is a
     /// self-inflicted `stale payload_hash`.
     case interrupt(session: String, requestID: String, turnID: String, payloadHash: String)
-    /// **End a Claude run CodeConnect started.** Minor 35, sent only when
+    /// **End a run CodeConnect started**, Claude's or Codex's. Minor 35, sent only when
     /// `Capabilities.endsRuns`. `session` is the run's `session_uid`.
     case stopRun(session: String, requestID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an

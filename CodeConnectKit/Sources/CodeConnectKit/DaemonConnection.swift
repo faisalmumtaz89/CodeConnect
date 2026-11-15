@@ -1195,7 +1195,7 @@ public final class DaemonConnection {
                 session: session, requestID: requestID, turnID: turnID, payloadHash: payloadHash))
     }
 
-    /// **End a Claude run CodeConnect started** (`stop_run`, minor 35). No frame leaves
+    /// **End a run CodeConnect started**, Claude's or Codex's (`stop_run`, minor 35). No frame leaves
     /// unless the daemon advertised `stop_run`: an older one cannot answer it.
     /// `session` is the run's `session_uid`.
     public func stopRun(session: String, requestID: String) async throws -> StopRunResult {

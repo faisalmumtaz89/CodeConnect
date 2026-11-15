@@ -1422,11 +1422,10 @@ public final class AppModel {
         return result
     }
 
-    /// Whether End run is offered on this run: a live Claude run CodeConnect
-    /// started, on a computer whose ccd ends runs (it ends no other here).
+    /// Whether End run is offered on this run: a live run CodeConnect started,
+    /// Claude's or Codex's, on a computer whose ccd ends runs (it ends no other).
     public func canEndRun(_ summary: SessionSummary) -> Bool {
         daemonProfile.endsRuns && summary.lifecycle == .live && summary.startedByCodeConnect
-            && summary.agent == .claude
     }
 
     /// End a run CodeConnect started (`stop_run`): what to tell the person who
