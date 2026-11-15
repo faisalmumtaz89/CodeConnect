@@ -1134,6 +1134,8 @@ the run's cursor in one transaction before it is acknowledged, and each init als
 the run's Claude session id and the folder claude runs in, a new worktree's included.
 A command's own output (`/usage`'s, `/effort low`'s, `/compact`'s "Compacted") is filed as a
 terminal run's is: a `user_message` whose content is claude's `<local-command-stdout>` string.
+It is stored with the run's history, account figures included when the command prints them, as
+`/usage` does.
 A live run ends when claude does: its `exited` is filed with the run's cursor in one
 transaction, the run `exited` and its `SessionEnd` carrying the exit code and any signal. It
 also ends when its host is gone, seen when the run's link ends or by the liveness tick. ccd
