@@ -44,6 +44,10 @@ struct DecisionCardView: View {
     let approval: ApprovalItem
     /// Called once the card reaches a terminal state, so the Deck can advance.
     var onSettled: (() -> Void)?
+    /// Called when the person answered but the computer has not confirmed it
+    /// (`.sentUnconfirmed`): the card stays on the Deck, so the Deck records it
+    /// as answered and counts it once the confirmation removes it.
+    var onSent: (() -> Void)?
     /// The Deck's own footer control, rendered inside the card's action bar so
     /// it reads as clearly subordinate to Deny.
     var comeBackToThis: (() -> Void)?
@@ -1645,8 +1649,14 @@ struct DecisionCardView: View {
             case .answered(let result):
                 authNotice = nil
                 // `.sentUnconfirmed` closes the controls but must NOT settle the
-                // card off the Deck — the agent may still be blocked waiting.
-                if result.settlesCard { onSettled?() }
+                // card off the Deck — the agent may still be blocked waiting. The
+                // person did answer it, so the Deck records it and counts it when
+                // the computer's confirmation removes it from the queue.
+                if result.settlesCard {
+                    onSettled?()
+                } else if case .sentUnconfirmed = result {
+                    onSent?()
+                }
             }
         }
     }

@@ -74,12 +74,39 @@ public struct DeckPass: Sendable, Equatable {
     /// Postponing is not deciding: they stay pending, and they stay in the
     /// queue.
     private(set) var deferred: [String] = []
+    /// Cards the person answered whose answer is still unconfirmed: the computer
+    /// has not yet said it landed (`.sentUnconfirmed`). They stay pending and in
+    /// the queue, and they are not counted yet — but the person did answer them,
+    /// so when the computer's confirmation removes one from the pending set it is
+    /// counted (`reconcile`), not dropped uncounted as "nothing was waiting".
+    private(set) var awaitingConfirmation: Set<String> = []
 
     public init() {}
 
     public mutating func settle(_ cardID: String) {
         settled.insert(cardID)
+        awaitingConfirmation.remove(cardID)
         deferred.removeAll { $0 == cardID }
+    }
+
+    /// The person answered this card, but the computer has not confirmed the
+    /// answer landed (`.sentUnconfirmed`). It stays in the queue; counting waits
+    /// for the confirmation, which `reconcile` reads from the pending set.
+    public mutating func recordSent(_ cardID: String) {
+        guard !settled.contains(cardID) else { return }
+        awaitingConfirmation.insert(cardID)
+    }
+
+    /// Reconcile this pass against the cards still pending in the log: an
+    /// answered-and-unconfirmed card the log no longer shows pending has had its
+    /// answer confirmed, so it counts. Without this, the confirmation removes the
+    /// card from the queue and the finish line reads "Nothing was waiting" though
+    /// the person had just answered it.
+    public mutating func reconcile(pending: Set<String>) {
+        for cardID in awaitingConfirmation where !pending.contains(cardID) {
+            settled.insert(cardID)
+        }
+        awaitingConfirmation.formIntersection(pending)
     }
 
     public mutating func postpone(_ cardID: String) {
@@ -90,6 +117,7 @@ public struct DeckPass: Sendable, Equatable {
     mutating func reset() {
         settled.removeAll()
         deferred.removeAll()
+        awaitingConfirmation.removeAll()
     }
 
     /// The queue as this pass sees it: still-pending cards, urgency-ranked, with
