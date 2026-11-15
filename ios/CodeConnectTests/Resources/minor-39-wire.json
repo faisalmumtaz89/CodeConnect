@@ -164,6 +164,79 @@
     "tmux_session": "",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
+  "session_hosted_live_init": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "effort": {
+      "seq": 5,
+      "value": "high"
+    },
+    "last_seq": 6,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ],
+      "selected_model": "sonnet"
+    },
+    "model": {
+      "at": "2026-11-15T09:00:00.000Z",
+      "seq": 6,
+      "source": "session_start",
+      "value": "claude-sonnet-5-5"
+    },
+    "permission_mode": {
+      "seq": 6,
+      "value": "plan"
+    },
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
   "session_hosted_live_minor_38": {
     "agent": "claude",
     "blocked_on": [],

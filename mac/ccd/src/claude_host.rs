@@ -6931,9 +6931,10 @@ mod tests {
     /// whose link ended before its answer; the effort's `model_set` notice; the capabilities
     /// a paired phone is offered; and the fleet's summaries an app decides from, pinned as
     /// minor 37's are: the run still starting (no menus yet), the run with its menus, the
-    /// effort set and claude's echoes of the model and the mode filed, that run as an older
-    /// daemon sends it (minor 38's summary has neither `effort` nor `menus`), and a tmux
-    /// Claude run (none).
+    /// effort set and claude's echoes of the model and the mode filed, then after claude's
+    /// next init (the model by its full id, the menu's choice found by its `resolvedModel`),
+    /// that run as an older daemon sends it (minor 38's summary has neither `effort` nor
+    /// `menus`), and a tmux Claude run (none).
     async fn derived_minor_39_wire() -> serde_json::Value {
         let rig = rig();
         let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
@@ -7006,6 +7007,18 @@ mod tests {
             }
         );
         let hosted = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        // claude's next init names the model by its full id, as each init does (the recorded
+        // session's line 109, after line 108's change to sonnet).
+        sdk(
+            &mut played.write,
+            11,
+            serde_json::json!({"type": "system", "subtype": "init", "uuid": "9d1f0000-0000-4000-8000-000000000052",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "model": "claude-sonnet-5-5", "permissionMode": "plan"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 11 }));
+        let hosted_init = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
         let mut older = hosted.clone();
         for field in ["effort", "menus"] {
             assert!(
@@ -7076,6 +7089,7 @@ mod tests {
             "effort_notice": notice,
             "session_hosted_starting": starting,
             "session_hosted_live": hosted,
+            "session_hosted_live_init": hosted_init,
             "session_hosted_live_minor_38": older,
             "session_tmux_live": tmux_live,
         })
