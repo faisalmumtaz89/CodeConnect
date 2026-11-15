@@ -4889,6 +4889,183 @@ mod tests {
         stop(&played.dir);
     }
 
+    // ------------------------------- a mail wake, as the apps are sent it
+
+    /// The run the mail-wake fixture is emitted for, written in place of the run's own uid.
+    const MAIL_WAKE_UID: &str = "01K1B3XQ8ZC0DE5FGH7CWAKE00";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const MAIL_WAKE_AT: &str = "2026-11-16T00:00:00.000Z";
+    /// The start's uuid and the wake line's, each written in place of the one ccd minted.
+    const MAIL_WAKE_START: &str = "6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b";
+    const MAIL_WAKE_LINE: &str = "7a1e0c2b-3d4f-4a5b-8c6d-9e0f1a2b3c4d";
+    const MAIL_WAKE: &str = include_str!("../../../fixtures/claude/mail-wake-wire.json");
+    const REGENERATE_MAIL_WAKE: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_hosted_mail_wake_fixture";
+
+    /// The events this build files for a hosted run woken for its mail, as the wire delivers
+    /// them to an app, in seq order: the run's first turn, mail from another run, the wake
+    /// line ccd hands its host and its `mail_nudge` notice, then the turn the wake starts as a
+    /// stand-in claude plays it: its echo of the line (a replayed user message), its init, its
+    /// reply, its read of the mail (as `read_messages` reads it) and its end. The run's uid is written [`MAIL_WAKE_UID`], each clock read
+    /// [`MAIL_WAKE_AT`], the start's and the wake's uuids [`MAIL_WAKE_START`] and
+    /// [`MAIL_WAKE_LINE`], and the line itself as the mail switch's `show` line, whichever the
+    /// switch picked.
+    async fn hosted_mail_wake() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let session = "5f0c1e2a-0000-4000-8000-000000000001";
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000391").await;
+        turn_ends(&mut played, 4).await;
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        let Some(ToHost::Wake { uuid, text }) = next(&mut played.lines).await else {
+            panic!("no mail wake reached the host");
+        };
+        assert_eq!(nudges(&rig, &uid, 1).await, 1);
+        for (seq, message) in [
+            (
+                5,
+                serde_json::json!({"type": "user", "isReplay": true, "uuid": uuid, "session_id": session,
+                    "message": {"role": "user", "content": text}}),
+            ),
+            (
+                6,
+                serde_json::json!({"type": "system", "subtype": "init", "session_id": session,
+                    "uuid": "9d1f0000-0000-4000-8000-000000000392"}),
+            ),
+            (
+                7,
+                serde_json::json!({"type": "assistant", "uuid": "9d1f0000-0000-4000-8000-000000000393",
+                    "session_id": session, "parent_tool_use_id": null,
+                    "message": {"role": "assistant", "model": "claude-opus-5-5",
+                        "content": [{"type": "text", "text": "I read my mail."}]}}),
+            ),
+        ] {
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        // The woken turn reads its mail, as claude's `read_messages` does, so its end wakes
+        // nothing more.
+        let (offer, _) = rig.daemon.offer_agent_messages(&uid).await.unwrap();
+        rig.daemon.read_offered_mail(&offer).await;
+        turn_ends(&mut played, 8).await;
+        let events = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap();
+        let live = pinned_summary(
+            &summary(&rig.daemon, &uid).await,
+            &uid,
+            MAIL_WAKE_UID,
+            &rig.root,
+        );
+        let start = played.start_uuid();
+        stop(&played.dir);
+        let rendered = serde_json::to_string(&events)
+            .unwrap()
+            .replace(&uid, MAIL_WAKE_UID)
+            .replace(&start, MAIL_WAKE_START)
+            .replace(&uuid, MAIL_WAKE_LINE)
+            .replace(&text, protocol::ipc::MAIL_NUDGE_SHOW);
+        let mut events: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        for event in events.as_array_mut().unwrap() {
+            let ts = &mut event["ts"];
+            assert!(
+                ts.as_str()
+                    .and_then(protocol::time::unix_ms_from_rfc3339)
+                    .is_some(),
+                "ts was expected to be a clock read, and is {ts}"
+            );
+            *ts = MAIL_WAKE_AT.into();
+        }
+        serde_json::json!({ "session_hosted_live": live, "session_hosted_live_events": events })
+    }
+
+    /// **B11: a hosted run's mail wake reaches the apps as ccd's own `mail_nudge` notice, and
+    /// the wake line itself as nothing; this file is what this build sends for it.**
+    ///
+    /// `fixtures/claude/mail-wake-wire.json` is the apps' pin for drawing a hosted Claude run's
+    /// wake: the notice carries the line ccd handed the host, claude's echo of the line files
+    /// no event (no row reads as the person's words), and the turn it starts follows. Gate one
+    /// reads the committed bytes; gate two re-derives the file from this build and requires the
+    /// same bytes.
+    #[tokio::test]
+    async fn the_hosted_mail_wake_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(MAIL_WAKE).expect("the fixture must be JSON");
+        let _: protocol::event::SessionSummary =
+            serde_json::from_value(committed["session_hosted_live"].clone())
+                .expect("a summary the apps decode");
+        let events: Vec<protocol::event::Event> =
+            serde_json::from_value(committed["session_hosted_live_events"].clone())
+                .expect("Events the apps decode");
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            (1..=events.len() as u64).collect::<Vec<_>>(),
+            "the daemon's own numbering, in order, with no holes"
+        );
+        let notices: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::Notification
+                    && event.payload["notification_type"] == protocol::event::notice::MAIL_NUDGE
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "the wake's one notice");
+        assert_eq!(
+            notices[0].payload["message"],
+            protocol::ipc::MAIL_NUDGE_SHOW,
+            "the notice carries the line"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == EventKind::UserMessage
+                    && serde_json::to_string(&event.payload)
+                        .unwrap()
+                        .contains(protocol::ipc::MAIL_NUDGE_SHOW)),
+            "no user_message carries the wake line"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == EventKind::TurnComplete && event.seq > notices[0].seq),
+            "the woken turn's end follows the notice"
+        );
+        let derived = hosted_mail_wake().await;
+        assert_eq!(
+            derived, committed,
+            "the committed hosted mail wake no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_MAIL_WAKE}"
+        );
+        assert_eq!(
+            MAIL_WAKE,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate it: {REGENERATE_MAIL_WAKE}"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/mail-wake-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_hosted_mail_wake_fixture() {
+        let wire = serde_json::to_string_pretty(&hosted_mail_wake().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/mail-wake-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
     /// **B5 G2: retries.** The same request asked again while its first send waits for
     /// the host is not sent twice; once the host has taken it, it is answered `duplicate`,
     /// with nothing sent and no second row; the same id with other words is refused;
