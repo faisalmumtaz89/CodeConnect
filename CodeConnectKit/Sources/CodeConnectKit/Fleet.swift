@@ -7,8 +7,10 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
     case failed = 1
     case doneUnreviewed = 2
     case running = 3
-    case idle = 4
-    case ended = 5
+    /// Asked to end (End run): still Active until it has exited.
+    case stopping = 4
+    case idle = 5
+    case ended = 6
 
     public static func < (lhs: FleetStatus, rhs: FleetStatus) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -18,6 +20,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
         case .failed: return "Failed"
         case .doneUnreviewed: return "Done"
         case .running: return "Running"
+        case .stopping: return "Stopping"
         case .idle: return "Idle"
         case .ended: return "Ended"
         }
@@ -28,7 +31,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
         case .blocked: return "hand-palm-fill"
         case .failed: return "warning-octagon-fill"
         case .doneUnreviewed: return "seal-check-fill"
-        case .running: return "circle-dashed"
+        case .running, .stopping: return "circle-dashed"
         case .idle: return "moon"
         case .ended: return "power"
         }
@@ -332,6 +335,8 @@ public enum FleetStatusRule {
     public static func status(
         summary: SessionSummary, shown: SessionState.Shown?, reviewedSeq: UInt64
     ) -> FleetStatus {
+        // Ending, whatever it was doing: its cards close with it.
+        if summary.lifecycle == .stopping { return .stopping }
         let pending = shown?.pendingApprovals.count ?? 0
         if !summary.blockedOn.isEmpty || pending > 0 { return .blocked }
         if summary.lifecycle == .exited {

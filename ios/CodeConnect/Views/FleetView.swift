@@ -2281,7 +2281,13 @@ struct FleetRowView: View {
             // with what it is doing.
             CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
                 if !titledByAgent { CCTag(agent: row.summary.agent) }
-                if let activity {
+                if row.status == .stopping {
+                    // Asked to end: said where what it is doing is said, until it has.
+                    Text(verbatim: "Stopping…")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .lineLimit(1)
+                } else if let activity {
                     activityLine(
                         activity,
                         truncation: blocked?.truncation ?? .head,

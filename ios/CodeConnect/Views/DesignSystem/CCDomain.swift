@@ -20,7 +20,7 @@ extension FleetStatus {
         case .blocked: return .warning
         case .failed: return .danger
         case .doneUnreviewed: return .success
-        case .running: return .neutral
+        case .running, .stopping: return .neutral
         case .idle: return .neutral
         case .ended: return .neutral
         }
@@ -36,6 +36,8 @@ extension FleetStatus {
         case .doneUnreviewed: return CC.color.success
         // White. Running is healthy; colour is for things that need you.
         case .running: return CC.text.primary
+        // On its way to ended: the row's line says Stopping…
+        case .stopping: return CC.text.tertiary
         case .idle: return CC.text.tertiary
         case .ended: return CC.text.disabled
         }

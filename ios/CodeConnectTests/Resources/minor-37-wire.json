@@ -1,0 +1,170 @@
+{
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "claude_interrupt": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "machine_stats": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "stop_run": true,
+    "terminal_pty": false,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "interrupt_aborted": {
+    "request_id": "stop-1",
+    "result": {
+      "status": "aborted",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000011"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "interrupt_result"
+  },
+  "interrupt_already_waiting": {
+    "request_id": "stop-2",
+    "result": {
+      "reason": "an interrupt for that turn is already waiting to take effect, so nothing was sent again",
+      "status": "rejected"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "interrupt_result"
+  },
+  "interrupt_ended_on_its_own": {
+    "request_id": "stop-3",
+    "result": {
+      "reason": "that turn ended on its own (completed) while the request to stop it was in flight, so it was not stopped from here; it will not be sent again",
+      "status": "rejected"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "interrupt_result"
+  },
+  "interrupt_no_connection": {
+    "request_id": "stop-5",
+    "result": {
+      "reason": "CodeConnect has no connection to this run right now, so nothing was sent.",
+      "status": "rejected"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "interrupt_result"
+  },
+  "interrupt_not_running": {
+    "request_id": "stop-4",
+    "result": {
+      "reason": "that turn is not the one Claude is running, so nothing was sent; it may have finished already",
+      "status": "rejected"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "interrupt_result"
+  },
+  "interrupt_request": {
+    "payload_hash": "fcecfa960321afc8b665668ae2113e02986eb42f59dbc4f631bef095f560e152",
+    "request_id": "stop-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "turn_id": "9d1f0000-0000-4000-8000-000000000011",
+    "type": "interrupt"
+  },
+  "person_row": {
+    "request_id": "send-1",
+    "text": "and the docs"
+  },
+  "send_not_sent": {
+    "message": "Not sent: stopped",
+    "notification_type": "send_not_sent",
+    "reason": "stopped",
+    "request_id": "send-1"
+  },
+  "session_hosted_ended": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 11,
+    "lifecycle": "exited",
+    "link": "detached",
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 2,
+    "lifecycle": "live",
+    "link": "attached",
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_live_events": [
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "fix the tests"
+      },
+      "seq": 1,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "daemon",
+      "source_event_id": "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b",
+      "ts": "2026-11-15T09:00:00.000Z"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000011",
+      "kind": "session_start",
+      "payload": {},
+      "seq": 2,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000011/session_start/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000011"
+    }
+  ],
+  "session_tmux_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp",
+    "last_seq": 1,
+    "lifecycle": "live",
+    "link": "attached",
+    "project_label": "tmp",
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
+    "tmux_session": "cc-1",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  }
+}
