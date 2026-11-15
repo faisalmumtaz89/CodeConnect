@@ -5,8 +5,10 @@
 //! name ([`protocol::tailnet`]). It sends with the `codeconnect` tool's
 //! `send_message` and reads its own with `read_messages`. A session's
 //! `cc-N@<computer>` is its label, for reading only: another run, later, can carry
-//! the same one. Only a run whose supervisor speaks [`MAIL_MINOR`] or later was
-//! launched able to read mail; any other is neither listed nor sent to. The receiving computer's daemon keeps each
+//! the same one. Only a run launched able to read mail is listed and sent to: one
+//! whose supervisor speaks [`MAIL_MINOR`] or later, or one CodeConnect started on its
+//! engine, from the moment it goes live ([`Daemon::mail_run_live`]); any other is
+//! neither listed nor sent to. The receiving computer's daemon keeps each
 //! message (`mail` in [`crate::store`]) until that session reads it, the session
 //! ends, or a day passes; the sending computer's daemon keeps what its agent sent
 //! (`mail_sent`), written before the message goes anywhere, and what that agent has
@@ -61,8 +63,8 @@ pub(crate) const LIMITS: MailLimits = MailLimits {
     settled_ms: 7 * 24 * 60 * 60 * 1000,
 };
 
-/// The protocol minor whose supervisors launch their agents with the
-/// `codeconnect` tool and its mail.
+/// The protocol minor from which a run is launched with the `codeconnect` tool and its
+/// mail: its supervisor's, or this build's for a run started on the engine.
 const MAIL_MINOR: u32 = 27;
 
 /// How often unread mail is expired, messages no other computer has taken yet are
@@ -800,7 +802,86 @@ pub(crate) async fn prompt_submitted(daemon: &Arc<Daemon>, run_uid: &str) -> Opt
     }
 }
 
+/// **What an event just filed for `run_uid` tells the wake rule**: called once for each
+/// event the log newly holds ([`Daemon::ingest`]'s `Some`), from every live frame, resume
+/// answer or app's message that filed it, never for one it already had.
+///
+/// **The end of a turn that carried the mail nudge** is counted once, when the log holds
+/// both of its facts: the turn's end and its nudge message. Whichever of the two is
+/// filed second counts it, however the run's link learned of them: live frames, or a
+/// resume answer describing a turn it did not watch, whose user message may be read back
+/// only after its end (the first turn of a new thread ends before its rollout can be
+/// resumed). The log keeps one copy of each fact, so each nudge turn reaches the
+/// mailbox's wake rule exactly once.
+///
+/// Only a turn one of whose user messages is a mail wake ([`protocol::ipc::is_mail_nudge`],
+/// either line, as the switch may change before the wake runs) counts, interrupted or
+/// not, and with a person's message merged into it or not. Codex runs a queued nudge
+/// after a busy turn ends, and after an Esc only once the person's next turn has ended;
+/// either of those turn ends, counted, would let the rule queue a second nudge behind the
+/// first (measured at 5d42ce3). A nudge Codex never runs leaves the wake outstanding.
+///
+/// Any other user message is the person's own turn, which the mailbox hears of as it
+/// hears of Claude's prompts.
+pub(crate) async fn note_filed_event(
+    daemon: &Arc<Daemon>,
+    run_uid: &str,
+    filed: &protocol::event::Event,
+) {
+    let ended_now = filed.kind == protocol::event::EventKind::TurnComplete;
+    let message_now = filed.kind == protocol::event::EventKind::UserMessage;
+    let nudge_now = message_now
+        && filed.payload["text"]
+            .as_str()
+            .is_some_and(protocol::ipc::is_mail_nudge);
+    // A message the person sent is their turn, as Claude's prompt is: wakes that had
+    // stopped start again, and the rule decides at once; Codex's own queue holds a
+    // wake until that turn ends.
+    if message_now && !nudge_now {
+        prompt_submitted(daemon, run_uid).await;
+        waiter_registered(daemon, run_uid);
+        return;
+    }
+    if !ended_now && !nudge_now {
+        return;
+    }
+    let Some(turn) = filed.turn_id.clone() else {
+        return;
+    };
+    match daemon
+        .db
+        .codex_turn_messages(run_uid.to_string(), turn)
+        .await
+    {
+        // The end, filed after its nudge; or the turn's one nudge, filed after its end.
+        Ok((true, nudges)) if (ended_now && nudges > 0) || (nudge_now && nudges == 1) => {
+            turn_ended(daemon, run_uid)
+        }
+        Ok(_) => {}
+        Err(err) => crate::log_error!(
+            "mail for {run_uid}: could not read whether a turn carried the mail nudge: {err:#}"
+        ),
+    }
+}
+
 impl Daemon {
+    /// **A run CodeConnect started on its engine went live**, of either agent: from now on
+    /// it is listed and takes mail, as a run of this build's supervisor is, with this
+    /// build's minor. Each host calls it once, at the step that makes its run `live`; a start
+    /// that fails never reaches it. The run stops taking mail at its end, as every hosted
+    /// run ends ([`Daemon::end_hosted_run`]).
+    pub(crate) async fn mail_run_live(&self, run_uid: &str) {
+        if let Err(err) = self
+            .db
+            .note_mail_minor(run_uid.to_string(), protocol::PROTOCOL_MINOR)
+            .await
+        {
+            crate::log_error!(
+                "mail for {run_uid}: could not record it as able to take mail: {err:#}"
+            );
+        }
+    }
+
     /// **The wake rule.** Wake `run_uid` when unread mail waits, no wake is
     /// outstanding, wakes have not stopped, and, for Claude, no turn of it runs:
     /// decided in one store transaction, then issued. A wake that cannot be issued

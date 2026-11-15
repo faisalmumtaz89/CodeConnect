@@ -24,9 +24,6 @@ final class MailWakeNudgeTests: XCTestCase {
         let frames: [ServerMessage]
     }
 
-    /// The fixture's own `session_uid`, so `ingest` keys its events to the state.
-    private static let uid = "01K1B3XQ8ZC0DE5FGH7MAWAKE0"
-
     private func fixture() throws -> Fixture {
         let url = try XCTUnwrap(
             Bundle(for: type(of: self)).url(forResource: "mail-wake-turn-wire", withExtension: "json"))
@@ -37,20 +34,22 @@ final class MailWakeNudgeTests: XCTestCase {
         run.frames.compactMap { if case .event(let event) = $0 { return event } else { return nil } }
     }
 
-    private func liveSummary() -> SessionSummary {
-        // swiftlint:disable:next force_try
-        try! JSONDecoder().decode(
+    /// The fleet's summary of the fixture's run, as ccd lists an engine Codex run: its identity and its latest seq
+    /// read from the fixture's own events, and no tmux name.
+    private func liveSummary(of events: [Event]) throws -> SessionSummary {
+        let last = try XCTUnwrap(events.last)
+        return try JSONDecoder().decode(
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"\(Self.uid)","session_id":"cc-1","tmux_session":"cc-1",
-                 "cwd":"/work/proj","lifecycle":"live","link":"attached","last_seq":5,
+                {"session_uid":"\(last.sessionKey)","session_id":"\(last.sessionID)","tmux_session":"",
+                 "agent":"codex","cwd":"/work/proj","lifecycle":"live","link":"attached","last_seq":\(last.seq),
                  "created_at":"2026-11-13T00:00:00Z","updated_at":"2026-11-13T00:00:00Z","blocked_on":[]}
                 """.utf8))
     }
 
     private func state(_ events: [Event]) async -> SessionState {
-        let state = SessionState(sessionKey: Self.uid)
+        let state = SessionState(sessionKey: events.first?.sessionKey ?? "")
         for event in events { state.ingest(event) }
         await state.settleForTesting()
         XCTAssertFalse(state.timeline.isEmpty, "the rebuild did not run; the test proves nothing")
@@ -74,12 +73,15 @@ final class MailWakeNudgeTests: XCTestCase {
             "\(label): no mail notice in the timeline")
         XCTAssertEqual(mail.kind, .taskReport, "\(label): the mail notice is activity, so a woken run stays Running")
 
-        // 2. Before any reply (session_start + the wake), the run reads Running:
-        // `.taskReport` is substantive, where `.other` would read Idle — a Codex
-        // wake is not a prompt.
-        let woken = await state(Array(all.prefix(2)))
+        // 2. Before any reply (every event through the wake), the run reads
+        // Running: `.taskReport` is substantive, where `.other` would read Idle —
+        // a Codex wake is not a prompt.
+        let wake = try XCTUnwrap(
+            all.firstIndex { $0.kind == .userMessage && $0.payload["text"]?.stringValue == wakeLine },
+            "\(label): the fixture carries no wake line")
+        let woken = await state(Array(all[...wake]))
         XCTAssertEqual(
-            FleetStatusRule.status(summary: liveSummary(), shown: woken.shown, reviewedSeq: 0),
+            FleetStatusRule.status(summary: try liveSummary(of: all), shown: woken.shown, reviewedSeq: 0),
             .running, "\(label): a mail-woken run reads Running")
 
         // 3. The fleet preview reads the last item; a notice, so its subtitle is

@@ -1172,7 +1172,7 @@ async fn claude_path(
 /// every `codex` on that `PATH`, then the well-known install locations; the first
 /// that is a program and not the launcher itself. Unlike the launcher it leaves out
 /// `CODECONNECT_CODEX_BIN`, as [`claude_path`] leaves out Claude's.
-async fn codex_path(
+pub(crate) async fn codex_path(
     environment: &HashMap<OsString, OsString>,
     codex_bin: Option<&str>,
 ) -> Option<PathBuf> {
@@ -1669,7 +1669,7 @@ const UTF8_CTYPE: &str = "C.UTF-8";
 /// definition gave it; so the session is read afresh ([`session_environment`]),
 /// and when it cannot be, the daemon's own is used (a written miss). Run any other
 /// way, the daemon's environment is the session's already.
-fn phone_environment() -> HashMap<OsString, OsString> {
+pub(crate) fn phone_environment() -> HashMap<OsString, OsString> {
     let own: HashMap<OsString, OsString> = std::env::vars_os().collect();
     let session = (crate::state::launchd_label().as_deref() == Some(protocol::launchd_label()))
         .then(|| session_environment(&own))

@@ -18,7 +18,10 @@
 //! codex 0.164.0).
 
 use crate::state::Daemon;
+use crate::store::SessionRow;
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -34,15 +37,19 @@ const STDERR_TAIL: usize = 400;
 
 /// **Wake the Codex run `run_uid`**: queue the mail switch's line on the thread its link
 /// adopted, through its app-server (`as.sock`, beside the run's control socket), with
-/// the `codex` it was launched with. `Ok` means Codex accepted the nudge into the
-/// thread's queue, not that a turn has run. An `Err` (no thread yet, no live
-/// supervisor, the CLI refusing) leaves the wake to the next try.
+/// the `codex` it was launched with; a run CodeConnect started on its engine is woken
+/// by [`wake_engine_run`]. `Ok` means Codex accepted the nudge into the thread's queue,
+/// not that a turn has run. An `Err` (no thread yet, no live supervisor, the CLI
+/// refusing) leaves the wake to the next try.
 pub(crate) async fn wake_codex(daemon: &Arc<Daemon>, run_uid: &str) -> Result<()> {
     let row = daemon
         .db
         .get_session(run_uid.to_string())
         .await?
         .context("no such run")?;
+    if daemon.db.hosted_link(run_uid.to_string()).await?.is_some() {
+        return wake_engine_run(daemon, run_uid, &row).await;
+    }
     let thread = crate::codex_link::real_thread_id(row.codex_thread_id.as_deref())
         .context("the run has no thread yet")?
         .to_string();
@@ -55,8 +62,65 @@ pub(crate) async fn wake_codex(daemon: &Arc<Daemon>, run_uid: &str) -> Result<()
     wake(Path::new(&codex), &as_sock, &thread, crate::mail::nudge()).await
 }
 
+/// **Wake a run CodeConnect started on its engine**: the run's own app-server
+/// (`<run-dir>/as.sock`), the thread on its row, and the `codex` a start's resolver finds
+/// now ([`crate::start_session::codex_path`]; a start also reads its version, a wake does
+/// not), run as a start runs it, through the login shell with the environment a start
+/// reads ([`crate::start_session::login_shell_command`]), so a `codex` whose
+/// `#!/usr/bin/env node` needs the shell's own `PATH` runs here too. The deadline covers
+/// running the queue, not finding the `codex`. A written limit: that `codex` can be another
+/// install than the one the run was started with, or one too old to queue; a queue it
+/// refuses leaves the wake to the next try.
+async fn wake_engine_run(daemon: &Arc<Daemon>, run_uid: &str, row: &SessionRow) -> Result<()> {
+    let thread = row
+        .codex_thread_id
+        .clone()
+        .context("the run has no thread yet")?;
+    let as_sock = crate::claude_host::run_dir(&protocol::root_dir(), run_uid).join("as.sock");
+    let environment = crate::start_session::phone_environment();
+    let codex = crate::start_session::codex_path(&environment, daemon.config.codex_bin.as_deref())
+        .await
+        .context("no codex to run the wake with")?;
+    let command = through_login_shell(
+        &environment,
+        &codex,
+        &as_sock,
+        &thread,
+        crate::mail::nudge(),
+    );
+    run(command, &codex, WAKE_DEADLINE).await
+}
+
+/// `codex queue …` for an engine run, run by the login shell with `environment`.
+fn through_login_shell(
+    environment: &HashMap<OsString, OsString>,
+    codex: &Path,
+    as_sock: &Path,
+    thread_id: &str,
+    nudge: &str,
+) -> tokio::process::Command {
+    let args = queue_args(as_sock, thread_id, nudge);
+    let mut argv: Vec<&OsStr> = vec![codex.as_os_str()];
+    argv.extend(args.iter().map(OsString::as_os_str));
+    crate::start_session::login_shell_command(environment, &argv)
+}
+
 async fn wake(codex: &Path, as_sock: &Path, thread_id: &str, nudge: &str) -> Result<()> {
     queue(codex, as_sock, thread_id, nudge, WAKE_DEADLINE).await
+}
+
+/// The arguments of `codex queue` that put `nudge` on `thread_id` through `as_sock`.
+fn queue_args(as_sock: &Path, thread_id: &str, nudge: &str) -> Vec<OsString> {
+    [
+        OsString::from("queue"),
+        OsString::from("--remote"),
+        OsString::from(format!("unix://{}", as_sock.display())),
+        OsString::from("--thread"),
+        OsString::from(thread_id),
+        OsString::from("--message"),
+        OsString::from(nudge),
+    ]
+    .into()
 }
 
 async fn queue(
@@ -66,14 +130,14 @@ async fn queue(
     nudge: &str,
     deadline: Duration,
 ) -> Result<()> {
-    let output = tokio::process::Command::new(codex)
-        .arg("queue")
-        .arg("--remote")
-        .arg(format!("unix://{}", as_sock.display()))
-        .arg("--thread")
-        .arg(thread_id)
-        .arg("--message")
-        .arg(nudge)
+    let mut command = tokio::process::Command::new(codex);
+    command.args(queue_args(as_sock, thread_id, nudge));
+    run(command, codex, deadline).await
+}
+
+/// Run a `codex queue` `command` within `deadline`; its stderr's tail is the error.
+async fn run(mut command: tokio::process::Command, codex: &Path, deadline: Duration) -> Result<()> {
+    let output = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -220,5 +284,53 @@ mod tests {
         }
         assert!(gone, "the hung codex outlived the deadline");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An engine run's wake runs `codex queue` through the person's login shell**, as a start
+    /// runs codex: the program is the environment's `SHELL`, zsh here and so `-lic`; its
+    /// arguments carry the codex and `queue --remote unix://… --thread … --message …`; and its
+    /// environment is the one given. Run directly, a `codex` whose `#!/usr/bin/env node` needs
+    /// the shell's own `PATH` would not start.
+    #[test]
+    fn an_engine_runs_wake_runs_codex_queue_through_the_login_shell() {
+        let environment = HashMap::from([
+            (OsString::from("SHELL"), OsString::from("/bin/zsh")),
+            (OsString::from("HOME"), OsString::from("/Users/person")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let command = through_login_shell(
+            &environment,
+            Path::new("/Users/person/.local/bin/codex"),
+            Path::new("/tmp/cch.x/runs/01K1B3XQ8ZC0DE5FGH7JKMNPQR/as.sock"),
+            "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
+            protocol::ipc::MAIL_NUDGE_ACT,
+        );
+        let command = command.as_std();
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(command.get_program(), "/bin/zsh");
+        assert_eq!(args.first(), Some(&OsStr::new("-lic")), "{args:?}");
+        assert!(
+            args.ends_with(&[
+                OsStr::new("/Users/person/.local/bin/codex"),
+                OsStr::new("queue"),
+                OsStr::new("--remote"),
+                OsStr::new("unix:///tmp/cch.x/runs/01K1B3XQ8ZC0DE5FGH7JKMNPQR/as.sock"),
+                OsStr::new("--thread"),
+                OsStr::new("01a197a7-7ac3-7ed1-ac9e-888bf77b95a4"),
+                OsStr::new("--message"),
+                OsStr::new(protocol::ipc::MAIL_NUDGE_ACT),
+            ]),
+            "{args:?}"
+        );
+        let given: HashMap<OsString, OsString> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_os_string(),
+                    value.expect("set, not removed").to_os_string(),
+                )
+            })
+            .collect();
+        assert_eq!(given, environment);
     }
 }

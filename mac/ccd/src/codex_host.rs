@@ -272,6 +272,7 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
             stop(&uid, send.leader, send.boot).await;
         }
         Ok(thread) if advanced => {
+            daemon.mail_run_live(&uid).await;
             let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
             link(daemon, uid, thread, client, adapter, None, HashMap::new()).await;
         }
@@ -1056,7 +1057,7 @@ async fn recorded_interrupt(
 /// ([`heard`]). Codex's own refusal gives the claim back, so the same ask is a first attempt
 /// again; a connection that ends first leaves it `applying`, for startup's settle.
 async fn compose(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     uid: &str,
     client: &Client,
     thread: &str,
@@ -1412,11 +1413,14 @@ async fn retire(
     }
 }
 
-/// File `events` in order ([`Daemon::ingest`]: once each, then out to every subscriber).
-async fn file(daemon: &Daemon, uid: &str, events: Vec<PendingEvent>) {
+/// File `events` in order ([`Daemon::ingest`]: once each, then out to every subscriber),
+/// telling the mail wake rule of each one newly filed ([`crate::mail::note_filed_event`]).
+async fn file(daemon: &Arc<Daemon>, uid: &str, events: Vec<PendingEvent>) {
     for pending in events {
-        if let Err(err) = daemon.ingest(pending).await {
-            crate::log_error!("{uid}: could not file a Codex event: {err:#}");
+        match daemon.ingest(pending).await {
+            Ok(Some(event)) => crate::mail::note_filed_event(daemon, uid, &event).await,
+            Ok(None) => {}
+            Err(err) => crate::log_error!("{uid}: could not file a Codex event: {err:#}"),
         }
     }
 }
@@ -1461,7 +1465,7 @@ async fn unfiled(
 /// A `thread/resume` answer's facts filed, then the adapter told what was filed; the turns
 /// the answer reports still running.
 async fn resumed(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     uid: &str,
     adapter: &mut CodexAdapter,
     answer: &Value,
@@ -1519,7 +1523,7 @@ pub(crate) async fn reconnect(
 }
 
 async fn resume(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     root: &Path,
     run: &LiveCodexRun,
     codeconnect: &Path,
@@ -1941,13 +1945,18 @@ mod tests {
         }
     }
 
-    /// A daemon on the store in `root`, as a restarted ccd opens it again.
+    /// A daemon on the store in `root`, as a restarted ccd opens it again. Its mail wakes find
+    /// `/usr/bin/false` for codex (config.json's `codex_bin`), so a test whose wake rule fires
+    /// never runs a real codex.
     fn daemon_on(root: &Path) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
         let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
         Box::leak(Box::new(transcript_rx));
         Daemon::new(
-            Config::default(),
+            Config {
+                codex_bin: Some("/usr/bin/false".into()),
+                ..Config::default()
+            },
             Arc::new(store),
             Arc::new(crate::apns::LoggingPushSender::new()),
             Endpoint {
@@ -4828,6 +4837,500 @@ mod tests {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../fixtures/codex/compose-stop-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    // ------------------------------- mail on a run started on the engine
+
+    /// One message turn as codex 0.147 sent it, from its thread's start to its end; its user
+    /// message the person's, with no client id of ccd's (fixtures/codex/lifecycle.jsonl).
+    const LIFECYCLE: &str = include_str!("../../../fixtures/codex/lifecycle.jsonl");
+    /// [`LIFECYCLE`]'s thread.
+    const LIFECYCLE_THREAD: &str = "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86";
+    /// [`LIFECYCLE`]'s turn.
+    const LIFECYCLE_TURN: &str = "01a0127a-d9cd-7461-84d7-6eea6d0b98a5";
+    /// The words of [`LIFECYCLE`]'s user message.
+    const LIFECYCLE_WORDS: &str = "reply with the word pong and nothing else";
+
+    /// [`LIFECYCLE`]'s frames, its user message `line`: with a wake line, the turn a mail wake
+    /// starts, as Codex runs a line `codex queue` put on the thread.
+    fn lifecycle_turn(line: &str) -> Vec<serde_json::Value> {
+        frames_of(&LIFECYCLE.replace(LIFECYCLE_WORDS, line))
+    }
+
+    /// The runs the mailbox reads as taking mail, each with the minor kept for it.
+    async fn mail_minors(daemon: &Daemon) -> Vec<(String, u32)> {
+        daemon
+            .db
+            .mail_runs()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(row, minor)| (row.session_uid, minor))
+            .collect()
+    }
+
+    /// What an agent's message to the run `uid`, from another run on this computer (`studio`,
+    /// as the recorded tailnet names it), is told.
+    async fn mail_from_another_run(daemon: &Arc<Daemon>, uid: &str) -> protocol::ipc::MailState {
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let sender = protocol::uid::new().unwrap();
+        let row = SessionRow {
+            session_uid: sender.clone(),
+            session_id: sender.clone(),
+            claude_session_id: None,
+            codex_thread_id: None,
+            ..daemon
+                .db
+                .get_session(uid.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        daemon.store.upsert_session(&row).unwrap().assert_present();
+        daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &sender,
+                &format!("{uid}@studio"),
+                "hi",
+                None,
+            )
+            .await
+            .state
+    }
+
+    /// **The mail item's D1 and D2 on Codex: a run started on the engine takes mail from the
+    /// moment its first send makes it `live`.** It is kept with this build's minor, as a run of
+    /// this build's supervisor is, so it is listed and mail from another run on this computer
+    /// waits for it. A start whose first send fails is never kept, and mail for it is refused.
+    #[tokio::test]
+    async fn an_engine_codex_run_takes_mail_once_live_and_a_failed_start_never_does() {
+        let (live, failing) = (rig(), rig());
+        let (uid, ws) = engine_run(&live, "req-mail", "thr-mail", "turn-1").await;
+        // The link attaches after the run is kept.
+        link_states_once(&live.daemon, &uid, 1).await;
+        assert_eq!(
+            mail_minors(&live.daemon).await,
+            [(uid.clone(), protocol::PROTOCOL_MINOR)]
+        );
+        assert_eq!(
+            mail_from_another_run(&live.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        drop(ws);
+        end_run(&live, &uid).await;
+
+        let codex = stand_in(&failing, "exec sleep 30");
+        let script = [
+            whole_start()[0].clone(),
+            ("skills/list", json!({"result": {"data": []}})),
+            (
+                "thread/start",
+                json!({"error": {"code": -32600, "message": "invalid config"}}),
+            ),
+        ];
+        let (result, (_, _ws)) = tokio::join!(
+            start(&failing.daemon, run(&failing, "req-mail-failed", &codex)),
+            play_app_server(&failing, script.to_vec())
+        );
+        let uid = started_uid(&result);
+        assert_eq!(
+            row_once(&failing, &uid, Lifecycle::Failed).await.lifecycle,
+            Lifecycle::Failed
+        );
+        assert!(mail_minors(&failing.daemon).await.is_empty());
+        assert_eq!(
+            mail_from_another_run(&failing.daemon, &uid).await,
+            protocol::ipc::MailState::Refused
+        );
+    }
+
+    /// Unread mail `message_id` for the run `uid`, as the mailbox keeps an agent's message.
+    fn mail_kept_for(rig: &Rig, uid: &str, message_id: &str) {
+        rig.daemon
+            .store
+            .take_mail(
+                &crate::store::MailIntake {
+                    message_id: message_id.into(),
+                    context_id: format!("ctx-{message_id}"),
+                    in_reply_to: None,
+                    session_uid: uid.into(),
+                    sender_computer: String::new(),
+                    sender_uid: "01JQXV9K7B0000000000000SND".into(),
+                    sender: "01JQXV9K7B0000000000000SND@studio".into(),
+                    sender_label: "cc-2@studio".into(),
+                    sender_agent: "Codex".into(),
+                    sender_project: "api".into(),
+                    text: "hi".into(),
+                },
+                protocol::time::now_unix_ms(),
+                crate::mail::LIMITS,
+            )
+            .unwrap();
+    }
+
+    /// [`engine_run`] with unread mail and a wake outstanding for it, as the mailbox leaves them
+    /// once it has queued a Codex nudge.
+    async fn engine_run_woken(
+        rig: &Rig,
+        request_id: &str,
+        thread: &str,
+        turn: &str,
+    ) -> (String, Socket) {
+        let (uid, ws) = engine_run(rig, request_id, thread, turn).await;
+        mail_kept_for(rig, &uid, "m1");
+        assert!(
+            rig.daemon
+                .store
+                .claim_mail_wake(&uid, protocol::time::now_unix_ms(), false)
+                .unwrap(),
+            "the premise: a wake is outstanding for unread mail"
+        );
+        (uid, ws)
+    }
+
+    /// The run's `(outstanding, misses)` in the mailbox's wake table.
+    fn wake_row(rig: &Rig, uid: &str) -> (i64, i64) {
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT outstanding, misses FROM mail_wake WHERE session_uid = ?1",
+                [uid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// Whether the wake table reaches `want` within 5 s: the rule runs on a task of its own.
+    async fn wake_row_reaches(rig: &Rig, uid: &str, want: (i64, i64)) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while wake_row(rig, uid) != want {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        true
+    }
+
+    /// Whether a wake for the run's unread mail is claimed within 5 s. The rule's own re-wake,
+    /// which cannot be issued here, may hold the claim for a moment before it gives it back.
+    async fn claimed_within(rig: &Rig, uid: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let claimed = rig
+                .daemon
+                .store
+                .claim_mail_wake(uid, protocol::time::now_unix_ms(), false)
+                .unwrap();
+            if claimed || Instant::now() >= deadline {
+                return claimed;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// **Through the engine link, a turn that did not carry the nudge leaves the wake
+    /// outstanding** (`codex_link.rs`'s M-07, and the design check's F1): Codex runs a nudge
+    /// queued during a busy turn only after that turn ends, and counting the busy turn's end
+    /// queued a second nudge, whose turn read "No new messages" (measured at 5d42ce3).
+    ///
+    /// **Mutation:** count every turn end in [`crate::mail::note_filed_event`]. The busy turn
+    /// then clears the wake.
+    #[tokio::test]
+    async fn a_turn_on_the_engine_that_did_not_carry_the_nudge_leaves_the_wake_outstanding() {
+        let rig = rig();
+        let (uid, mut ws) = engine_run_woken(&rig, "req-busy", LIFECYCLE_THREAD, "turn-1").await;
+        for frame in lifecycle_turn(LIFECYCLE_WORDS) {
+            tell(&mut ws, &frame).await;
+        }
+        let ended = format!(":turn:{LIFECYCLE_TURN}");
+        let ids = filed_until(&rig.daemon, &uid, &ended).await;
+        assert_eq!(count(&ids, &ended), 1, "{ids:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            wake_row(&rig, &uid),
+            (1, 0),
+            "the person's busy turn ended, and the nudge queued behind it has not run"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **Through the engine link, a nudge turn a resume answer describes ends the outstanding
+    /// wake, once** (`codex_link.rs`'s rule, measured on the rig at 19244c6: a woken Codex was
+    /// never woken again): a restarted ccd learns of the woken turn only from its reconnect's
+    /// answer, and the live frame for the same turn after it counts nothing more.
+    ///
+    /// **Mutation:** make [`file`] ignore what [`Daemon::ingest`] newly filed. The answer then
+    /// ends nothing, and `misses` stays 0.
+    #[tokio::test]
+    async fn an_engine_nudge_turn_described_by_a_resume_answer_ends_the_outstanding_wake_once() {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let thread = &capture["answerAfter"]["result"]["thread"];
+        let (uid, ws) = engine_run_woken(
+            &rig,
+            "req-resumed",
+            thread["id"].as_str().unwrap(),
+            thread["turns"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        let mut nudge = thread["turns"][1]["items"][0].clone();
+        nudge["clientId"] = serde_json::Value::Null;
+        nudge["content"][0]["text"] = json!(protocol::ipc::MAIL_NUDGE_ACT);
+        let (_restarted, mut ws, _) = resumed_with(&rig, ws, resumed_answer_with(&nudge)).await;
+        assert!(
+            wake_row_reaches(&rig, &uid, (0, 1)).await,
+            "the described nudge turn's end reached the wake rule: {:?}",
+            wake_row(&rig, &uid)
+        );
+
+        // A wake outstanding again, so that a second turn end would show as a miss.
+        assert!(
+            claimed_within(&rig, &uid).await,
+            "a wake outstanding again: {:?}",
+            wake_row(&rig, &uid)
+        );
+        let live_end = capture["live"]["afterTheMidTurnAnswer"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|frame| frame["method"] == "turn/completed")
+            .expect("the capture completes the turn")
+            .clone();
+        tell(&mut ws, &live_end).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            wake_row(&rig, &uid),
+            (1, 1),
+            "the live frame for a turn the log already holds is no second turn end"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **Through the engine link, a person's message resumes wakes that had stopped**
+    /// (`codex_link.rs`'s M-08): after three woken turns left the mail unread, a message from an
+    /// app is the person's turn (its words are no wake line), and wakes start again, as a
+    /// prompt does for Claude.
+    ///
+    /// **Mutation:** make [`file`] ignore what [`Daemon::ingest`] newly filed. The misses stay at
+    /// three and the mail is never woken for again.
+    #[tokio::test]
+    async fn a_persons_message_to_an_engine_run_resumes_wakes_that_had_stopped() {
+        let rig = rig();
+        let (uid, mut ws) = engine_run_woken(&rig, "req-person", "thr-person", "turn-1").await;
+        for miss in 1..=3 {
+            if miss > 1 {
+                assert!(rig
+                    .daemon
+                    .store
+                    .claim_mail_wake(&uid, protocol::time::now_unix_ms(), false)
+                    .unwrap());
+            }
+            rig.daemon
+                .store
+                .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
+                .unwrap();
+        }
+        assert_eq!(
+            wake_row(&rig, &uid),
+            (0, 3),
+            "the premise: wakes have stopped"
+        );
+        let sent = saying(&rig.daemon, &uid, "say-1", "and the docs");
+        let start = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &start, json!({"turn": {"id": "turn-2"}})).await;
+        sent.await.unwrap();
+        assert!(
+            wake_row_reaches(&rig, &uid, (0, 0)).await,
+            "the person's message resumed wakes: {:?}",
+            wake_row(&rig, &uid)
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **The mail item's D4: an engine run woken once is woken again for new mail.** Mail waits
+    /// and a wake is claimed; the nudge's turn runs and ends on the run's link, which ends the
+    /// wake; new mail then gets a second claim. While the engine link told the wake rule
+    /// nothing of what it filed, the first wake stayed outstanding for ever.
+    #[tokio::test]
+    async fn an_engine_run_woken_once_is_woken_again_for_new_mail() {
+        let rig = rig();
+        let (uid, mut ws) = engine_run_woken(&rig, "req-twice", LIFECYCLE_THREAD, "turn-1").await;
+        for frame in lifecycle_turn(protocol::ipc::MAIL_NUDGE_ACT) {
+            tell(&mut ws, &frame).await;
+        }
+        let ended = format!(":turn:{LIFECYCLE_TURN}");
+        let ids = filed_until(&rig.daemon, &uid, &ended).await;
+        assert_eq!(count(&ids, &ended), 1, "{ids:?}");
+        mail_kept_for(&rig, &uid, "m2");
+        assert!(
+            claimed_within(&rig, &uid).await,
+            "no second wake for new mail: {:?}",
+            wake_row(&rig, &uid)
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    // ------------------------------- a mail wake's turn, as the apps are sent it
+
+    /// The run the mail-wake fixture is emitted for, written in place of the run's own uid.
+    const MAIL_WAKE_UID: &str = "01K1B3XQ8ZC0DE5FGH7MAWAKE0";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const MAIL_WAKE_AT: &str = "2026-11-13T00:00:00.000Z";
+    const MAIL_WAKE_TURN: &str = include_str!("../../../fixtures/codex/mail-wake-turn-wire.json");
+    const REGENERATE_MAIL_WAKE_TURN: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_mail_wake_turn_fixture";
+    /// The fixture's runs: each wake line the mail switch can pick, under its name.
+    const MAIL_WAKE_RUNS: [(&str, &str); 2] = [
+        ("act", protocol::ipc::MAIL_NUDGE_ACT),
+        ("show", protocol::ipc::MAIL_NUDGE_SHOW),
+    ];
+
+    /// The events this build files for a run started on the engine whose link then carries a
+    /// mail wake's turn with `line`, as the `event` frames a subscribed app is sent, in seq order:
+    /// a stand-in app-server plays [`lifecycle_turn`] on the run's link once it has attached, and
+    /// every event the run filed is kept, the link's `attached` first, the run's uid written
+    /// [`MAIL_WAKE_UID`] and each clock read [`MAIL_WAKE_AT`].
+    async fn mail_wake_turn(line: &str) -> serde_json::Value {
+        let rig = rig();
+        let (uid, mut ws) = engine_run(&rig, "req-wake", LIFECYCLE_THREAD, "turn-1").await;
+        link_states_once(&rig.daemon, &uid, 1).await;
+        for frame in lifecycle_turn(line) {
+            tell(&mut ws, &frame).await;
+        }
+        filed_until(&rig.daemon, &uid, &format!(":turn:{LIFECYCLE_TURN}")).await;
+        let frames: Vec<serde_json::Value> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|event| {
+                serde_json::to_value(protocol::ws::ServerMessage::Event { event }).unwrap()
+            })
+            .collect();
+        drop(ws);
+        end_run(&rig, &uid).await;
+        let mut out: serde_json::Value = serde_json::from_str(
+            &json!({ "frames": frames })
+                .to_string()
+                .replace(&uid, MAIL_WAKE_UID),
+        )
+        .unwrap();
+        for frame in out["frames"].as_array_mut().unwrap() {
+            let ts = &mut frame["event"]["ts"];
+            assert!(
+                ts.as_str()
+                    .is_some_and(|read| read.len() == 24 && read.ends_with('Z')),
+                "ts was expected to be an RFC3339 clock read, and is {ts}"
+            );
+            *ts = json!(MAIL_WAKE_AT);
+        }
+        out
+    }
+
+    /// Both runs of the mail-wake fixture.
+    async fn mail_wake_turns() -> serde_json::Value {
+        let mut runs = serde_json::Map::new();
+        for (run, line) in MAIL_WAKE_RUNS {
+            runs.insert(run.to_string(), mail_wake_turn(line).await);
+        }
+        serde_json::Value::Object(runs)
+    }
+
+    /// **A mail wake's turn on a run started on the engine reaches the apps as a `user_message`
+    /// whose text is the wake line, and this file is what this build sends for it.**
+    ///
+    /// `fixtures/codex/mail-wake-turn-wire.json` is the apps' pin for telling the wake line from
+    /// the person's own words: the run's link files the line as the turn's user message, which
+    /// the mailbox's wake rule counts ([`protocol::ipc::is_mail_nudge`]). Gate one reads the
+    /// committed bytes: in each run, the daemon's own numbering from 1 with no holes, one
+    /// `user_message` carrying exactly that run's wake line, then the turn's end. Gate two
+    /// re-derives the file from this build and requires the same bytes.
+    ///
+    /// **Mutation:** edit the wake line in the checked-in file and gate one fails; change either
+    /// line in `protocol::ipc` and gate two fails, naming the command that rewrites the file.
+    #[tokio::test]
+    async fn the_mail_wake_turn_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(MAIL_WAKE_TURN).expect("the fixture must be JSON");
+        let runs = committed
+            .as_object()
+            .expect("the file is its runs, by name");
+        assert_eq!(
+            runs.keys().map(String::as_str).collect::<Vec<_>>(),
+            MAIL_WAKE_RUNS.map(|(run, _)| run).to_vec(),
+        );
+        for (run, line) in MAIL_WAKE_RUNS {
+            let events: Vec<protocol::event::Event> = committed[run]["frames"]
+                .as_array()
+                .expect("a run is a list of frames")
+                .iter()
+                .map(|frame| {
+                    serde_json::from_value(frame["event"].clone())
+                        .expect("an Event the apps decode")
+                })
+                .collect();
+            assert_eq!(
+                events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+                (1..=events.len() as u64).collect::<Vec<_>>(),
+                "{run}: the daemon's own numbering, in order, with no holes"
+            );
+            let messages: Vec<_> = events
+                .iter()
+                .filter(|event| event.kind == EventKind::UserMessage)
+                .collect();
+            assert_eq!(messages.len(), 1, "{run}: the turn's one user message");
+            assert_eq!(
+                messages[0].payload,
+                json!({ "interrupted": false, "text": line }),
+                "{run}: the wake line, as a Codex user message carries text"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.kind == EventKind::TurnComplete
+                        && event.seq > messages[0].seq),
+                "{run}: the turn's end follows its wake line"
+            );
+        }
+
+        let derived = mail_wake_turns().await;
+        assert_eq!(
+            derived, committed,
+            "the committed mail-wake turn no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_MAIL_WAKE_TURN}"
+        );
+        assert_eq!(
+            MAIL_WAKE_TURN,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate it: {REGENERATE_MAIL_WAKE_TURN}"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/mail-wake-turn-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_mail_wake_turn_fixture() {
+        let wire = serde_json::to_string_pretty(&mail_wake_turns().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/mail-wake-turn-wire.json"
             ),
             wire + "\n",
         )
