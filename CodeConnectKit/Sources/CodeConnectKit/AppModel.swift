@@ -2326,10 +2326,10 @@ public final class AppModel {
             }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()
-        case .interruptResult, .stopRunResult, .composeResult:
+        case .interruptResult, .stopRunResult, .composeResult, .settingResult:
             // Awaited by the control that asked, correlated on the request id it
-            // minted. Nothing here may act on one: a stop or a message is a
-            // mutation somebody pressed, and its outcome belongs to that press.
+            // minted. Nothing here may act on one: a stop, a message or a setting
+            // is a mutation somebody pressed, and its outcome belongs to that press.
             break
         case .error(let code, _) where code == "sessions_unavailable":
             // The Mac's answer to a `sessions` request it could not serve: it
