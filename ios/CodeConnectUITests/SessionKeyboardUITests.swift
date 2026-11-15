@@ -3,9 +3,9 @@ import XCTest
 /// The keyboard's claim on the session screen, proven on the running app.
 ///
 /// The rule: the session's header is its bar, so focusing the composer moves
-/// nothing above the conversation, and the terminal stays one tap away; drag or
-/// a background tap gives the keyboard back. None of that is provable from
-/// source: focus, keyboard animation and gesture arbitration are runtime facts.
+/// nothing above the conversation; drag or a background tap gives the keyboard
+/// back. None of that is provable from source: focus, keyboard animation and
+/// gesture arbitration are runtime facts.
 final class SessionKeyboardUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -35,7 +35,7 @@ final class SessionKeyboardUITests: XCTestCase {
 
         // Focused: the keyboard is up and the bar has not moved.
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(more.isHittable, "the menu, and the terminal in it, stay in reach while typing")
+        XCTAssertTrue(more.isHittable, "the menu stays in reach while typing")
         XCTAssertEqual(more.frame, before, "the bar does not move for the keyboard")
 
         // A tap on the timeline's background resigns focus. Coordinates, not

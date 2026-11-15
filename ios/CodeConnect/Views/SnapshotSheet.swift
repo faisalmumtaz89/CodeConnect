@@ -20,9 +20,6 @@ struct SnapshotSheet: View {
     /// The keystrokes landed on the Mac — the composer draft that opened
     /// this sheet has been consumed and may be cleared.
     var onLanded: () -> Void = {}
-    /// "Open Terminal" — the recovery path when Esc did not bring the
-    /// composer back. Dismisses this sheet and lands on the Terminal tab.
-    var onOpenTerminal: () -> Void = {}
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -110,11 +107,8 @@ struct SnapshotSheet: View {
                 message:
                     "The computer's view was closed and the composer is ready, "
                     + "but the captured pane contained no readable text.")
-            HStack(spacing: CC.space.xs) {
-                CCButton("Try again", variant: .secondary, size: .sm) {
-                    Task { await capture() }
-                }
-                CCButton("Open Terminal", variant: .ghost, size: .sm) { onOpenTerminal() }
+            CCButton("Try again", variant: .secondary, size: .sm) {
+                Task { await capture() }
             }
 
         case .noView:
@@ -132,8 +126,7 @@ struct SnapshotSheet: View {
                 title: "Couldn’t restore the composer",
                 message:
                     "The command was typed and Escape was sent, but the composer "
-                    + "did not return. Open Terminal before sending anything else.")
-            CCButton("Open Terminal", variant: .secondary, size: .sm) { onOpenTerminal() }
+                    + "did not return.")
 
         case .duplicate:
             notice(

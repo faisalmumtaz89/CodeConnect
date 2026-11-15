@@ -61,55 +61,6 @@ final class HalfOpenSendUITests: XCTestCase {
                 + "\((field.value as? String) ?? "nil")")
     }
 
-    /// **The same, with the person on the terminal while the link comes back.** The
-    /// reconnect is noticed wherever the session screen is, so returning to the
-    /// timeline finds the box already empty.
-    func testALostAnswerClearsTheComposerAfterAReconnectSeenFromTheTerminal() throws {
-        try XCTSkipIf(host.isEmpty || token.isEmpty, "CC_HOST/CC_TOKEN not provided")
-        let app = XCUIApplication()
-        app.launchArguments = ["-CC_HOST", host, "-CC_TOKEN", token, "-CC_RESET_CACHE", "YES"]
-        app.launch()
-
-        let session = app.buttons.matching(
-            NSPredicate(format: "identifier BEGINSWITH 'session-'")
-        ).firstMatch
-        XCTAssertTrue(session.waitForExistence(timeout: 40), "the scratch session is listed")
-        session.tap()
-        let field = app.textViews.firstMatch.exists
-            ? app.textViews.firstMatch : app.textFields.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 20))
-        field.tap()
-        field.typeText("B18 probe: sent, then the terminal while the link is down")
-        app.buttons["Send"].tap()
-        let sentAt = Date()
-        // A tap on the timeline's upper background gives focus up (the timeline
-        // by name: with the keyboard up, a bare coordinate can land on the
-        // keyboard's own bar).
-        app.collectionViews["session-timeline"].coordinate(
-            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)
-        ).tap()
-        app.buttons["session-more"].tap()
-        let terminal = app.buttons["Terminal"]
-        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
-        terminal.tap()
-        print("B18 TERMINAL shown at t=\(Date().timeIntervalSince(sentAt))s")
-        // Past the 30 s silence deadline and the redial, on the terminal.
-        Thread.sleep(forTimeInterval: max(0, 45 - Date().timeIntervalSince(sentAt)))
-        app.buttons["session-more"].tap()
-        app.buttons["Timeline"].tap()
-        let cleared = (0..<20).contains { _ in
-            let shown = (field.value as? String) ?? ""
-            if shown.isEmpty || shown == "Ask anything" { return true }
-            Thread.sleep(forTimeInterval: 0.5)
-            return false
-        }
-        attach(app, "b18-terminal-end")
-        XCTAssertTrue(
-            cleared,
-            "back on the timeline the composer still shows what the computer already typed: "
-                + "\((field.value as? String) ?? "nil")")
-    }
-
     /// **A slow answer is not a dead link.** The daemon answers a link's requests one
     /// at a time, so a diff it takes 18 s to read holds every pong back for that
     /// long. The rig's `git` sleeps 18 s; the link must stay up and the diff arrive.
