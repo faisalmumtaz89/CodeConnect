@@ -102,6 +102,8 @@ extension Event {
         case "completed": return (.succeeded, output)
         case "failed": return (.failed, output)
         case "interrupted": return (.interrupted, output)
+        // Its approval was refused, so it never ran.
+        case "declined": return (.denied, output)
         default: return nil
         }
     }
