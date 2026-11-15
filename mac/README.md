@@ -1177,7 +1177,12 @@ line of its own, the model before the effort, and the host makes the SDK's own c
 claude's reason, saying so when the model was changed and the effort was not; or
 `indeterminate` when no answer came within 10 s or the run's link ended first. The model and
 the mode then show as claude reports them, its `Set model to …` receipt and its permission-mode
-status. claude echoes nothing for an app's effort, so that shows from a `model_set` notice ccd
+status. The summary's `menus.selected_model` names the value in `models` that model is, for an
+app to show as chosen (display only): the model itself when it is a value, else the alias of
+claude's receipt (`sonnet` of `sonnet (claude-sonnet-5-5)`), else the one model claude's start's
+answer resolves to the model's id; when two do (`default` and `opus` both resolve to
+`claude-opus-5-5`), the alias of the run's newest receipt if it is one of them, else `default`.
+It is left out when none matches (a typed `/model`'s `Sonnet 5.5`). claude echoes nothing for an app's effort, so that shows from a `model_set` notice ccd
 files when claude takes it, even from an answer that comes late; an effort typed as
 `/effort low` shows from claude's own `Set effort level to low …` receipt (a receipt in another
 wording is not read). A retry applies the change again. A change whose answer is lost
