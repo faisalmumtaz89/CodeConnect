@@ -17,15 +17,16 @@
 //! The run's first message is sent by the run's own task, after the answer, on the same
 //! connection ([`first_send`]): `thread/start` with the run's preset, model and thread
 //! config, the thread recorded on the row, then `turn/start` with the first message under
-//! the start's uuid, and the run is `live`. The thread config keeps the project out (P3
-//! L4): each folder from the repository's top down to the run's own (or the run's folder
-//! alone outside git) is untrusted, the repository's own skills are disabled, and the
-//! only MCP server added is CodeConnect's mail server. A start that fails once the
-//! app-server is launched, before or after the answer, marks the run `failed` and stops
-//! its process group with the ladder ([`crate::claude_host::stop_group`]): an app-server
-//! never ends by itself. A start that a restarted ccd finds still `starting` is failed the
-//! same way, whatever became of it ([`crate::state::Daemon::recover_hosted_runs`]): a
-//! start is never sent again.
+//! the start's uuid, and the run is `live`. The thread config and the launch take the
+//! person's folder answer (P3 L4): each folder from the repository's top down to the run's
+//! own (or the run's folder alone outside git) is trusted or untrusted as they answered, a
+//! not-trusted run's repository skills are disabled too, and the only MCP server added is
+//! CodeConnect's mail server. The run keeps that answer for its reconnect. A start that
+//! fails once the app-server is launched, before or after the answer, marks the run
+//! `failed` and stops its process group with the ladder
+//! ([`crate::claude_host::stop_group`]): an app-server never ends by itself. A start that
+//! a restarted ccd finds still `starting` is failed the same way, whatever became of it
+//! ([`crate::state::Daemon::recover_hosted_runs`]): a start is never sent again.
 //!
 //! The start's connection is then kept as the run's link ([`link`], P3 R1): every
 //! notification it brings is mapped by the Codex adapter and filed, for both apps. When a
@@ -43,6 +44,7 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::event::{Lifecycle, PendingEvent, SessionKey};
+use protocol::host::Trust;
 use protocol::proc_identity::{
     group_has_members, group_warrant, liveness, read_birth_identity, BootIdentity, GroupWarrant,
     Liveness, ProcessIdentity,
@@ -89,6 +91,8 @@ pub(crate) struct Run<'a> {
     /// The start's environment, the one its codex check read: codex gets it as it is,
     /// with only `CODECONNECT_SESSION_UID` added.
     pub environment: &'a HashMap<OsString, OsString>,
+    /// The person's folder answer, as the start resolved it: the trust list's level.
+    pub trust: Trust,
 }
 
 /// What the run's task needs for the first message, owned: it outlives the start.
@@ -102,6 +106,8 @@ struct FirstSend {
     codeconnect: String,
     /// The trust list's folders, top down.
     folders: Vec<PathBuf>,
+    /// The folder answer the run started with.
+    trust: Trust,
     /// The recorded leader and boot, for the ladder if the first send fails.
     leader: ProcessIdentity,
     boot: Option<BootIdentity>,
@@ -145,9 +151,10 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         codex_socket: None,
     };
     let model = run.model.filter(|model| *model != "default");
+    let trust = serde_json::to_string(&run.trust).expect("a folder answer is always JSON");
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), None)
+        .begin_run(row, run.request_id.to_string(), Some(trust))
         .await
     {
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
@@ -167,6 +174,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
                 model: model.map(str::to_string),
                 codeconnect: run.codeconnect.to_string_lossy().into_owned(),
                 folders,
+                trust: run.trust,
                 leader,
                 boot,
                 deadline,
@@ -1205,7 +1213,13 @@ async fn resume(
         .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
     let mut params = thread_params(&run.cwd, None);
     params["threadId"] = json!(run.thread);
-    params["config"] = thread_config(uid, &codeconnect.to_string_lossy(), &folders, &skills);
+    params["config"] = thread_config(
+        uid,
+        &codeconnect.to_string_lossy(),
+        &folders,
+        run.trust,
+        &skills,
+    );
     let answer = client
         .call("thread/resume", params.clone())
         .await
@@ -1302,7 +1316,13 @@ async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Resul
         .await
         .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
     let mut params = thread_params(&send.cwd, send.model.as_deref());
-    params["config"] = thread_config(&send.uid, &send.codeconnect, &send.folders, &skills);
+    params["config"] = thread_config(
+        &send.uid,
+        &send.codeconnect,
+        &send.folders,
+        send.trust,
+        &skills,
+    );
     let started = client
         .call("thread/start", params)
         .await
@@ -1335,7 +1355,8 @@ async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Resul
 
 /// `thread/start`'s params but its `config`: the run's folder, its model (none for Codex's own
 /// `default`) and the preset Default, `on-request` with a `workspace-write` sandbox (T4,
-/// decision 176), so an untrusted folder never falls to Codex's own UnlessTrusted.
+/// decision 176), so an untrusted folder never falls to Codex's own UnlessTrusted, and a
+/// trusted project's own approval policy and sandbox mode never replace them.
 fn thread_params(cwd: &str, model: Option<&str>) -> Value {
     json!({
         "cwd": cwd,
@@ -1345,16 +1366,23 @@ fn thread_params(cwd: &str, model: Option<&str>) -> Value {
     })
 }
 
-/// The run `uid`'s thread config (P3 L4): its `folders` untrusted, the repository's own
-/// skills that `skills/list` reported disabled, and CodeConnect's mail server, run by
-/// `codeconnect` with the run's uid, which Codex hands an MCP server only through its `env`.
-fn thread_config(uid: &str, codeconnect: &str, folders: &[PathBuf], skills: &Value) -> Value {
+/// The run `uid`'s thread config (P3 L4): its `folders` at the level of the person's answer
+/// `trust`, and CodeConnect's mail server, run by `codeconnect` with the run's uid, which
+/// Codex hands an MCP server only through its `env`. Not trusted, the repository's own skills
+/// that `skills/list` reported are disabled too, since Codex loads them for any folder.
+fn thread_config(
+    uid: &str,
+    codeconnect: &str,
+    folders: &[PathBuf],
+    trust: Trust,
+    skills: &Value,
+) -> Value {
     let projects: serde_json::Map<String, Value> = folders
         .iter()
         .map(|folder| {
             (
                 folder.to_string_lossy().into_owned(),
-                json!({"trust_level": "untrusted"}),
+                json!({"trust_level": trust_level(trust)}),
             )
         })
         .collect();
@@ -1366,6 +1394,9 @@ fn thread_config(uid: &str, codeconnect: &str, folders: &[PathBuf], skills: &Val
             "env": {protocol::ENV_SESSION_UID: uid},
         },
     });
+    if trust == Trust::Trusted {
+        return config;
+    }
     let disabled: Vec<Value> = skills["data"]
         .as_array()
         .into_iter()
@@ -1378,6 +1409,14 @@ fn thread_config(uid: &str, codeconnect: &str, folders: &[PathBuf], skills: &Val
         config["skills.config"] = Value::Array(disabled);
     }
     config
+}
+
+/// The trust level Codex's `projects` entries take for the person's answer.
+fn trust_level(trust: Trust) -> &'static str {
+    match trust {
+        Trust::Trusted => "trusted",
+        Trust::NotTrusted => "untrusted",
+    }
 }
 
 /// The run's folder, its app-server launched and recorded in `launched`, connected and
@@ -1396,7 +1435,7 @@ async fn bring_up(
     let socket = dir.join("as.sock");
     let mut listen = OsString::from("unix://");
     listen.push(&socket);
-    let projects = format!("projects={}", launch_projects(folders));
+    let projects = format!("projects={}", launch_projects(folders, run.trust));
     let mut child = crate::start_session::spawn_detached(
         run.environment,
         &[
@@ -1507,15 +1546,18 @@ async fn folders(cwd: &str, git_bin: Option<&str>) -> Result<Vec<PathBuf>, Strin
     Ok(folders)
 }
 
-/// `folders`, each untrusted, as the TOML inline table the launch's `-c projects=` takes.
-/// Each path is a TOML basic string, written as JSON writes a string.
-fn launch_projects(folders: &[PathBuf]) -> String {
+/// `folders`, each at the level of the person's answer `trust`, as the TOML inline table the
+/// launch's `-c projects=` takes: the same level as the thread config's, since a reload
+/// rebuilds the project's config from this list. Each path is a TOML basic string, written as
+/// JSON writes a string.
+fn launch_projects(folders: &[PathBuf], trust: Trust) -> String {
+    let level = trust_level(trust);
     let entries: Vec<String> = folders
         .iter()
         .map(|folder| {
             let key =
                 serde_json::to_string(&folder.to_string_lossy()).expect("a string is always JSON");
-            format!(r#"{key} = {{ trust_level = "untrusted" }}"#)
+            format!(r#"{key} = {{ trust_level = "{level}" }}"#)
         })
         .collect();
     format!("{{ {} }}", entries.join(", "))
@@ -1617,6 +1659,7 @@ mod tests {
             codeconnect: Path::new(CODECONNECT),
             git_bin: None,
             environment: &rig.environment,
+            trust: Trust::NotTrusted,
         }
     }
 
@@ -1934,6 +1977,54 @@ mod tests {
         );
         let uuid = turn["clientUserMessageId"].as_str().unwrap();
         assert_eq!((uuid.len(), uuid.matches('-').count()), (36, 4), "{uuid}");
+    }
+
+    /// **XT G1: a run started trusted launches and threads its folders trusted**, the
+    /// repository's skills left on as Codex loads them, CodeConnect's mail server as for any
+    /// run, and the answer kept in its `start` record for its reconnect.
+    #[tokio::test]
+    async fn a_run_started_trusted_launches_and_threads_its_folders_trusted() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let run = Run {
+            trust: Trust::Trusted,
+            ..run(&rig, "req-trusted", &codex)
+        };
+        let (result, (seen, _ws)) = tokio::join!(
+            start(&rig.daemon, run),
+            play_app_server(&rig, whole_start())
+        );
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        let kept = rig
+            .daemon
+            .db
+            .hosted_link(uid.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        end_run(&rig, &uid).await;
+
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let argv = String::from_utf8(std::fs::read(dir.join("argv")).unwrap()).unwrap();
+        let launched = format!(r#"projects={{ "{real}" = {{ trust_level = "trusted" }} }}"#);
+        assert!(argv.contains(&launched), "{argv:?}");
+        let config = seen
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .unwrap()["params"]["config"]
+            .clone();
+        assert_eq!(
+            config["projects"],
+            json!({real: {"trust_level": "trusted"}})
+        );
+        assert!(config.get("skills.config").is_none(), "{config}");
+        assert_eq!(config["mcp_servers.codeconnect"]["command"], CODECONNECT);
+        assert_eq!(kept.start.as_deref(), Some(r#""trusted""#));
     }
 
     /// **The start answers before the thread is made, and a `skills/list` that fails ends
@@ -2583,11 +2674,35 @@ mod tests {
         turn: &str,
         stand_in_script: &str,
     ) -> (String, Socket) {
+        engine_run_as(
+            rig,
+            request_id,
+            thread,
+            turn,
+            stand_in_script,
+            Trust::NotTrusted,
+        )
+        .await
+    }
+
+    /// [`engine_run_on`], started with the folder answer `trust`.
+    async fn engine_run_as(
+        rig: &Rig,
+        request_id: &str,
+        thread: &str,
+        turn: &str,
+        stand_in_script: &str,
+        trust: Trust,
+    ) -> (String, Socket) {
         let codex = stand_in(rig, stand_in_script);
         let mut script = whole_start();
         script.truncate(3);
         script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
-        let (result, ws) = tokio::join!(start(&rig.daemon, run(rig, request_id, &codex)), async {
+        let run = Run {
+            trust,
+            ..run(rig, request_id, &codex)
+        };
+        let (result, ws) = tokio::join!(start(&rig.daemon, run), async {
             let (_, mut ws) = play_app_server(rig, script).await;
             let first_turn = asked(&mut ws, "turn/start").await;
             answer(&mut ws, &first_turn, json!({"turn": {"id": turn}})).await;
@@ -2890,15 +3005,26 @@ mod tests {
     /// listening anew, a fresh daemon on the same store recovering, its reconnect answered
     /// with [`RUNNING_TURN`]. The restarted daemon and the stand-in's new end of the link.
     async fn restarted_under(rig: &Rig, first: Socket) -> (Arc<Daemon>, Socket) {
-        drop(first);
         let resume: serde_json::Value = serde_json::from_str(RUNNING_TURN).unwrap();
+        let (restarted, ws, _) = resumed_with(rig, first, resume["result"].clone()).await;
+        (restarted, ws)
+    }
+
+    /// [`restarted_under`], its reconnect answered with `resume_answer`, with the params of the
+    /// `thread/resume` the reconnect sent.
+    async fn resumed_with(
+        rig: &Rig,
+        first: Socket,
+        resume_answer: serde_json::Value,
+    ) -> (Arc<Daemon>, Socket, serde_json::Value) {
+        drop(first);
         let dir = run_folder(rig).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         std::fs::remove_file(dir.join("as.sock")).unwrap();
         let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
         let restarted = daemon_on(&rig.root);
         restarted.recover().await;
-        let ((), ws) = tokio::join!(
+        let ((), (ws, params)) = tokio::join!(
             restarted.recover_codex_runs(&rig.root, Ok(PathBuf::from(CODECONNECT))),
             async {
                 let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
@@ -2911,11 +3037,69 @@ mod tests {
                 let skills = asked(&mut ws, "skills/list").await;
                 answer(&mut ws, &skills, json!({"data": []})).await;
                 let resumed = asked(&mut ws, "thread/resume").await;
-                answer(&mut ws, &resumed, resume["result"].clone()).await;
-                ws
+                answer(&mut ws, &resumed, resume_answer).await;
+                (ws, resumed["params"].clone())
             }
         );
-        (restarted, ws)
+        (restarted, ws, params)
+    }
+
+    /// **XT G3: a reconnect resumes the thread with the run's own folder answer**, not the
+    /// folder's answer now, and so does the follow-up resume once the turn it found running
+    /// ends: a run started trusted resumes trusted after the folder became `not_trusted`, and
+    /// one started not trusted stays so after it became `trusted`.
+    #[tokio::test]
+    async fn a_reconnect_resumes_with_the_runs_own_folder_answer() {
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mid_turn = &capture["answerMidTurn"]["result"];
+        let thread = mid_turn["thread"]["id"].as_str().unwrap();
+        let first_turn = capture["answerAfter"]["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap();
+        for (started, changed) in [
+            (Trust::Trusted, Trust::NotTrusted),
+            (Trust::NotTrusted, Trust::Trusted),
+        ] {
+            let rig = rig();
+            let (uid, ws) = engine_run_as(
+                &rig,
+                "req-kept",
+                thread,
+                first_turn,
+                "exec sleep 30",
+                started,
+            )
+            .await;
+            let real = std::fs::canonicalize(&rig.project)
+                .unwrap()
+                .display()
+                .to_string();
+            rig.daemon
+                .db
+                .set_folder_trust(real.clone(), changed)
+                .await
+                .unwrap();
+            let (_restarted, mut ws, resumed) = resumed_with(&rig, ws, mid_turn.clone()).await;
+            for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+                tell(&mut ws, frame).await;
+            }
+            let follow_up = asked(&mut ws, "thread/resume").await;
+            answer(
+                &mut ws,
+                &follow_up,
+                capture["answerAfter"]["result"].clone(),
+            )
+            .await;
+            let want = json!({real: {"trust_level": trust_level(started)}});
+            for (which, params) in [("reconnect", &resumed), ("follow-up", &follow_up["params"])] {
+                assert_eq!(
+                    params["config"]["projects"], want,
+                    "the {which}: started {started:?}, the folder's answer then {changed:?}"
+                );
+            }
+            drop(ws);
+            end_run(&rig, &uid).await;
+        }
     }
 
     /// **R6 (X7a): an answer in flight across a restart is sent once more to Codex's
@@ -3087,7 +3271,7 @@ mod tests {
         let projects = |cwd: PathBuf| async move {
             folders(cwd.to_str().unwrap(), None)
                 .await
-                .map(|folders| launch_projects(&folders))
+                .map(|folders| launch_projects(&folders, Trust::NotTrusted))
         };
         assert_eq!(
             projects(deep.clone()).await.unwrap(),

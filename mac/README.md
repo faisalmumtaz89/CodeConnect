@@ -1115,6 +1115,12 @@ answer never lifts its start folder's `not_trusted`. A run keeps the
 answer it started with, a restarted daemon included; changing the answer applies to the
 next start.
 
+A Codex run takes the same answer, by the same rules. Answered `trusted`, it loads the
+project as Codex does when you run it there yourself: its AGENTS.md, its
+`.codex/config.toml` and the MCP servers it names, its rules and its skills. Answered `not_trusted`,
+it keeps the project out: every folder is untrusted and the repository's own skills are
+off. CodeConnect keeps the answer itself and never writes it to Codex's own configuration.
+
 A Claude Code start
 that goes on is then checked, before anything runs: the daemon finds the claude the launcher would run,
 from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
@@ -1207,16 +1213,17 @@ above, and runs, through the user's login shell in a session of its own, a
 `as.pid`, never over one already there) and becomes `<codex> -c projects=<list>
 app-server --listen unix://<run folder>/as.sock`. The list is every folder from the
 repository's top down to the start's, by its real path, or that folder alone outside
-git, each `trust_level = "untrusted"`. The run's process is that one pid throughout,
+git, each at the folder answer's level, `trust_level = "trusted"` or `"untrusted"`. The
+run's process is that one pid throughout,
 recorded with the birth time the kernel gives it. The daemon connects over `as.sock`,
 sends `initialize` and `initialized`, and answers started with the folder. The run's
 own task then sends the first message on that connection:
 - `skills/list` for the folder;
 - `thread/start` with the folder, the start's model (none for Codex's own `default`),
-  `approvalPolicy: "on-request"`, `sandbox: "workspace-write"` and a thread config that
-  keeps the project out:
-  - the same folder list, each untrusted;
-  - every repository-scope skill `skills/list` reported, disabled;
+  `approvalPolicy: "on-request"`, `sandbox: "workspace-write"` and a thread config:
+  - the same folder list, at the same level;
+  - for a folder answered `not_trusted`, every repository-scope skill `skills/list`
+    reported, disabled;
   - CodeConnect's mail server (`codeconnect mcp`) with the run's uid in its `env`;
 - the thread recorded on the run's row;
 - `turn/start` with the first message under the start's own uuid as its
@@ -1825,6 +1832,13 @@ fails the suite instead of failing silently in production.
   above). It misses one started since its last check that the app-server's death cuts off,
   one that leaves its process group itself, and every command of an app-server that dies
   while ccd has no link to the run: while ccd restarts, or after a reconnect that failed.
+* **On a Codex run started from an app, a trusted folder's own approval policy and sandbox
+  mode do not apply.** The run starts in CodeConnect's Default, `on-request` with a
+  `workspace-write` sandbox, whatever the folder's `.codex/config.toml` says. That folder's
+  own workspace-write settings, network access and writable roots do apply, as when Codex
+  runs there directly.
+* **On a Codex run started from an app, a trusted folder's hooks run only once you have
+  approved them in Codex itself.** CodeConnect does not approve them.
 * **On a Codex run started from an app, End run can show "stopping" for up to a minute
   after Codex has gone, when ccd has no connection to the run.** That happens when ccd
   restarts while the run is stopping, or when End run follows a reconnect that failed.
