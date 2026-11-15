@@ -3117,6 +3117,7 @@ public final class AppModel {
             hosted: summary.tmuxSession.isEmpty,
             isLive: summary.lifecycle == .live,
             link: summary.codexLink,
+            runLink: summary.link,
             runningTurn: shown(for: key)?.runningTurn)
     }
 
@@ -3130,6 +3131,7 @@ public final class AppModel {
             hosted: summary.tmuxSession.isEmpty,
             isLive: summary.lifecycle == .live,
             link: summary.codexLink,
+            runLink: summary.link,
             runningTurn: runningTurn(for: key))
     }
 

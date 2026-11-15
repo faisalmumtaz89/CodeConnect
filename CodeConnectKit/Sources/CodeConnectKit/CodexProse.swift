@@ -318,7 +318,7 @@ public enum CodexProse {
     /// send stub. One rule, one reader.
     static func stopUnavailable(
         agent: AgentKind, daemonHonoursStop: Bool, hosted: Bool, isLive: Bool,
-        link: CodexLinkState, runningTurn: String?
+        link: CodexLinkState, runLink: Link, runningTurn: String?
     ) -> String? {
         switch agent {
         case .codex:
@@ -332,8 +332,9 @@ public enum CodexProse {
         case .claude:
             // A Claude run is stopped only when CodeConnect started it (hosted —
             // a terminal run's Stop is its own keyboard at the Mac), the run is
-            // live, and a turn is actually running. No control-link check: a
-            // hosted run's interrupt does not travel the Codex control link.
+            // live, a turn is actually running, and its own link to the host is
+            // attached. No Codex control-link check — a hosted run's interrupt does
+            // not travel the Codex link — but it does ride ccd's link to the host.
             //
             // These reasons are plain, readable sentences rather than the daemon's
             // own uid-prefixed operator rows because of where they surface: the
@@ -349,6 +350,13 @@ public enum CodexProse {
             guard hosted else { return "Only a Claude run started from the app can be stopped here." }
             guard isLive else { return "This run has ended, so there is no turn to stop." }
             guard runningTurn != nil else { return "Nothing is running to stop." }
+            // The interrupt rides ccd's own link to the host; when that link has dropped the daemon
+            // buffers for re-attach and cannot deliver the Stop, so it is not offered. A detached run
+            // stays live with its turn still running, so "hosted + live + a turn" do not catch it — the
+            // link does (G-1).
+            guard runLink == .attached else {
+                return "This run has lost its link to \(HostDevice.current.computer("the computer")), so the Stop cannot reach it."
+            }
             return nil
         case .unsupported:
             return "Only a Claude or Codex run can be stopped from here."

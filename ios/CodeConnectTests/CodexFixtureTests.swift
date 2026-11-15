@@ -470,7 +470,7 @@ final class CodexFixtureTests: XCTestCase {
             let link = CodexLinkState(wire: state.link ?? "none")
             let stopBlocked = CodexProse.stopUnavailable(
                 agent: .codex, daemonHonoursStop: caps.interrupt, hosted: true, isLive: true,
-                link: link, runningTurn: CodexFixtures.turnID)
+                link: link, runLink: .attached, runningTurn: CodexFixtures.turnID)
             let composeBlocked = CodexProse.composeUnavailable(
                 agent: .codex, daemonUnderstandsCompose: caps.compose, link: link)
 

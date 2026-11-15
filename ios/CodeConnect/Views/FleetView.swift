@@ -1060,10 +1060,12 @@ struct FleetView: View {
             removalOffered: removable && !selecting,
             selection: choosable ? selected.contains(key) : nil,
             // **Offered only when the phone genuinely holds a turn to name.**
-            // `stopUnavailable` returns nil exactly when this run is Codex, the
-            // daemon honours a stop, its control link is subscribed and an
-            // unterminated turn is in the log — and `runningTurn` is the one
-            // honest hide: with no turn there is nothing to stop, so the
+            // `stopUnavailable` returns nil for two runs: a Codex session whose
+            // daemon honours a stop, whose control link is subscribed, with an
+            // unterminated turn in the log; and a hosted Claude run (one this app
+            // started) whose daemon honours a Claude stop, that is live, with a
+            // running turn and its link to the computer still attached. `runningTurn`
+            // is the one honest hide: with no turn there is nothing to stop, so the
             // control is absent rather than dead.
             //
             // **`stopUnavailable(for:)` is the only reader of the rule.** This
