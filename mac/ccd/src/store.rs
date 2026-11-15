@@ -4788,8 +4788,6 @@ impl Store {
         Ok(changed)
     }
 
-    /// The run `session_uid`'s messages to its agent host still claimed, each by its
-    /// request id with its text.
     /// The request id of every message sent to the hosted run `session_uid`, whatever became
     /// of it: what a Stop's receipt names a cancelled message by.
     pub fn send_request_ids(&self, session_uid: &str) -> Result<Vec<String>> {
@@ -4802,6 +4800,8 @@ impl Store {
         Ok(rows)
     }
 
+    /// The run `session_uid`'s messages to its agent host still claimed, each by its
+    /// request id with its text.
     pub fn host_sends(&self, session_uid: &str) -> Result<Vec<(String, String)>> {
         let conn = self.read();
         let mut stmt = conn.prepare(

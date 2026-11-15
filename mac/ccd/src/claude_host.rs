@@ -5210,9 +5210,10 @@ mod tests {
     /// `interrupt` naming the turn. A second Stop of the turn while the first waits is
     /// refused at once, and nothing more reaches the host. The host files the turn's end
     /// and then its outcome: the Stop is `aborted`, after the turn's `turn_complete`, and
-    /// recorded so; a retry is a `duplicate` and sends nothing. The person's message the
-    /// receipt lists, sent and filed before the Stop, gets one `send_not_sent` with its
-    /// request id, as its own row carries; a uuid that names no message files nothing.
+    /// recorded so; a retry is a `duplicate` and sends nothing. Of the person's two
+    /// messages, both sent and filed before the Stop, the one the receipt lists gets one
+    /// `send_not_sent` with its request id, as its own row carries, and the other none; a
+    /// uuid that names no message files nothing.
     #[tokio::test]
     async fn a_stop_aborts_the_running_turn_and_marks_the_message_it_cancelled() {
         let rig = rig();
@@ -5224,13 +5225,18 @@ mod tests {
             host_takes(&mut played, 4, "done")
         );
         assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let (ran, _) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-2", "and the tests"),
+            host_takes(&mut played, 5, "done")
+        );
+        assert!(matches!(ran, SendTextResult::Sent { .. }), "{ran:?}");
         let cancelled = [send_uuid(&uid, "r-1"), "a-uuid-of-no-send".to_string()];
         let (first, second) =
             tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
                 let (uuid, turn) = host_reads_stop(&mut played).await;
                 assert_eq!(turn, "turn-1");
                 let second = stop_as_app(&rig.daemon, &uid, "stop-2", "turn-1").await;
-                host_ends_turn(&mut played, 5, &uuid, "aborted_tools", &cancelled).await;
+                host_ends_turn(&mut played, 6, &uuid, "aborted_tools", &cancelled).await;
                 second
             });
         assert_eq!(
