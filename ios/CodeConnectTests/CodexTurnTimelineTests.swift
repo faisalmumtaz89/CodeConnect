@@ -506,6 +506,63 @@ final class CodexTurnTimelineTests: XCTestCase {
         XCTAssertEqual(try WireRecording.status(state), .doneUnreviewed)
     }
 
+    /// **A command read back shows what it was given, not how it ended.** `attachedMidTurn` read the command back (9)
+    /// only as its terminal event, whose payload holds the outcome (status, exit code, output) and where it was read
+    /// back (`belongs_before`) beside the command line. The row's input is exactly the tool and the command line; the
+    /// outcome is the row's status and output.
+    func testACommandReadBackShowsWhatItWasGivenNotHowItEnded() throws {
+        let events = try recoveredTurn("attachedMidTurn")
+        let result = try XCTUnwrap(events.first { $0.kind == .toolResult })
+        XCTAssertEqual(
+            events.filter { $0.kind == .toolCall || $0.kind == .toolResult }.map(\.seq), [result.seq],
+            "the premise: the command came back as its result alone")
+        XCTAssertNotNil(result.payload["belongs_before"], "the premise: it carries where it was read back")
+
+        let tool = try XCTUnwrap(tools(TimelineBuilder.build(events)).first)
+        let given: JSONValue = .object([
+            "tool": try XCTUnwrap(result.payload["tool"]), "command": try XCTUnwrap(result.payload["command"]),
+        ])
+        XCTAssertEqual(tool.input, given, "the row's input shows more than what the command was given")
+    }
+
+    /// **A file change read back keeps its changes**, which are what its call carried and the only place its diff is
+    /// drawn. The daemon's own capture's file change result (17), its call dropped as if it were on an older page.
+    func testAFileChangeReadBackKeepsItsChanges() throws {
+        let result = try XCTUnwrap(try capture().events.first { $0.seq == 17 })
+        let changes = try XCTUnwrap(result.payload["changes"], "the premise: the file change's result carries them")
+
+        let tool = try XCTUnwrap(tools(TimelineBuilder.build([result])).first)
+        XCTAssertEqual(tool.input?["changes"], changes, "the file change's diff was dropped from its row")
+    }
+
+    /// **A result without its own fields is what its call carried**, read from the daemon's own capture for a command
+    /// (call 4, result 7) and a file change (call 14, result 17). Every field `callInput` keeps is the call's, with the
+    /// call's value, so a field ccd ever adds to a result and not to its call fails here, until it joins
+    /// `Event.codexResultFields`.
+    func testAResultWithoutItsOwnFieldsIsWhatItsCallCarried() throws {
+        let events = try capture().events
+        for (call, result) in [(4, 7), (14, 17)] {
+            let carried = try XCTUnwrap(events.first { $0.seq == call }?.payload.objectValue)
+            let kept = try XCTUnwrap(events.first { $0.seq == result }?.callInput?.objectValue)
+            for (field, value) in kept {
+                XCTAssertEqual(carried[field], value, "result \(result)'s \(field) is not its call's")
+            }
+        }
+    }
+
+    /// **A hook's result whose call was missed keeps its arguments.** Claude's PostToolUse names the call's arguments
+    /// under `tool_input`, so with its PreToolUse missed (seq 108 of the daemon-emitted
+    /// `mcp-result-transcript-wire.json`, alone) the row still shows what the tool was given.
+    func testAHookResultWhoseCallWasMissedKeepsItsArguments() throws {
+        let objects = try XCTUnwrap(WireRecording.json("mcp-result-transcript-wire") as? [[String: Any]])
+        let post = try WireRecording.decode(objects).filter { $0.seq == 108 }
+        let arguments = try XCTUnwrap(post.first?.payload["tool_input"], "the premise: the hook named its arguments")
+        XCTAssertEqual(post.map(\.kind), [.toolResult], "the premise: the hook's PostToolUse, alone")
+
+        let tool = try XCTUnwrap(tools(TimelineBuilder.build(post)).first)
+        XCTAssertEqual(tool.input, arguments, "the hook's arguments were dropped from its row")
+    }
+
     /// An item whose fact is not loaded — an older page, as in a long turn the phone
     /// holds only the end of — belongs above everything drawn, so it waits for that page
     /// rather than sitting under the turn's end.
