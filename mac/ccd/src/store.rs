@@ -622,6 +622,9 @@ pub struct LiveCodexRun {
     pub cwd: String,
     /// The thread its first message started.
     pub thread: String,
+    /// The folder answer it started with, kept in its `start` record; a record that is
+    /// missing or unreadable reads not trusted.
+    pub trust: protocol::host::Trust,
 }
 
 /// What a link to a recorded host starts from ([`Store::hosted_link`]).
@@ -2533,7 +2536,8 @@ impl Store {
     /// Write a new hosted run's row, in its agent's table, and its `run_hosts` row with
     /// its `start` line, when it has one, in one transaction, before anything for it is
     /// spawned (H1). A Claude run's host is sent its start again after a restart; a Codex
-    /// start is never sent again, so it has none. If `request_id` already has a run, of
+    /// start is never sent again, and its record is the folder answer it started with, which
+    /// its reconnect resumes with. If `request_id` already has a run, of
     /// either agent, nothing is written and that run is returned, so a repeated start never
     /// makes a second one.
     pub fn begin_run(
@@ -3113,17 +3117,21 @@ impl Store {
         let conn = self.read();
         let mut stmt = conn.prepare(&format!(
             "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
-                    h.boot_sec, h.boot_usec, s.cwd, s.codex_thread_id
+                    h.boot_sec, h.boot_usec, s.cwd, s.codex_thread_id, h.start
                FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
               WHERE s.lifecycle = ?1 AND h.host_pid IS NOT NULL
                 AND s.codex_thread_id IS NOT NULL"
         ))?;
         let rows = stmt
             .query_map(params![lifecycle_str(Lifecycle::Live)], |row| {
+                let start: Option<String> = row.get(9)?;
                 Ok(LiveCodexRun {
                     host: watched_host_from(row)?,
                     cwd: row.get(7)?,
                     thread: row.get(8)?,
+                    trust: start
+                        .and_then(|start| serde_json::from_str(&start).ok())
+                        .unwrap_or(protocol::host::Trust::NotTrusted),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

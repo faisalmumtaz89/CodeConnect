@@ -345,9 +345,11 @@ async fn codex_start(
     if let Some(refusal) = refusal(path, prompt) {
         return refusal;
     }
-    if let Err(asked) = folder_question(&daemon.db, path, trust).await {
-        return asked;
-    }
+    // The start path's answer; the folder the run runs in can only lower it (below).
+    let trust = match folder_question(&daemon.db, path, trust).await {
+        Ok(trust) => trust,
+        Err(asked) => return asked,
+    };
     let ready = match codex_probe(environment, daemon.config.codex_bin.as_deref()).await {
         Ok(ready) => ready,
         Err((reason, detail)) => return failed(reason, detail),
@@ -364,6 +366,13 @@ async fn codex_start(
             Err(why) => return failed(StartFailure::LaunchFailed, why),
         },
     };
+    // As for a Claude run: the folder the run runs in, with its own kept `not_trusted`
+    // answer, lowers the start's, and nothing lifts it.
+    let trust = if trust == Trust::Trusted && declined(&daemon.db, Path::new(&cwd)).await {
+        Trust::NotTrusted
+    } else {
+        trust
+    };
     crate::codex_host::start(
         daemon,
         crate::codex_host::Run {
@@ -376,6 +385,7 @@ async fn codex_start(
             codeconnect: &codeconnect,
             git_bin,
             environment,
+            trust,
         },
     )
     .await
@@ -3451,6 +3461,78 @@ mod tests {
         assert_eq!(lines.len(), 2, "the check and the launch: {seen}");
         assert_eq!(lines[0], lines[1]);
         assert!(lines[0].ends_with("X2_MARKER=x2-env-marker"), "{seen}");
+    }
+
+    /// The `-c projects=` list the stand-in codex was last launched with.
+    fn launched_projects(rig: &Rig) -> String {
+        rig.codex_argv()
+            .into_iter()
+            .find(|arg| arg.starts_with("projects="))
+            .expect("the launch names its trust list")
+    }
+
+    /// **XT G1: a Codex start launches its folders at the person's answer**, given or
+    /// kept: `trusted` given, then kept, then `not_trusted` given.
+    #[tokio::test]
+    async fn a_codex_start_launches_its_folders_at_the_folder_answer() {
+        let rig = counting("codex-trust");
+        let mut launched = Vec::new();
+        for trust in [Some(Trust::Trusted), None, Some(Trust::NotTrusted)] {
+            let result = rig
+                .start_as(AgentKind::Codex, &rig.project(), "fix it", None, trust)
+                .await;
+            assert!(reached(&result), "{trust:?}: {result:?}");
+            launched.push(launched_projects(&rig));
+        }
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let list =
+            |level: &str| format!(r#"projects={{ "{real}" = {{ trust_level = "{level}" }} }}"#);
+        assert_eq!(
+            launched,
+            [list("trusted"), list("trusted"), list("untrusted")]
+        );
+    }
+
+    /// **XT G2: a Codex run in a worktree with its own `not_trusted` answer runs untrusted**
+    /// though its start folder is trusted; with no answer of its own it runs trusted.
+    #[tokio::test]
+    async fn a_codex_worktree_with_its_own_not_trusted_answer_runs_untrusted() {
+        let rig = recording("codex-worktree-trust");
+        let existing = rig.worktree_on("wt/existing").await.path;
+        let worktree = StartWorktree::Existing {
+            path: existing.clone(),
+        };
+        let project = rig.project();
+        let start = || {
+            rig.start_as(
+                AgentKind::Codex,
+                &project,
+                "fix it",
+                Some(&worktree),
+                Some(Trust::Trusted),
+            )
+        };
+        assert!(reached(&start().await));
+        let own_none = launched_projects(&rig);
+        let real = std::fs::canonicalize(&existing).unwrap();
+        rig.db
+            .set_folder_trust(real.to_string_lossy().into_owned(), Trust::NotTrusted)
+            .await
+            .unwrap();
+        assert!(reached(&start().await));
+        let own_declined = launched_projects(&rig);
+        assert!(
+            own_none.contains(r#"trust_level = "trusted""#) && !own_none.contains("untrusted"),
+            "{own_none}"
+        );
+        assert!(
+            own_declined.contains(r#"trust_level = "untrusted""#)
+                && !own_declined.contains(r#"trust_level = "trusted""#),
+            "{own_declined}"
+        );
     }
 
     /// **A new Claude worktree is Claude's own to make**: the run starts in the folder
