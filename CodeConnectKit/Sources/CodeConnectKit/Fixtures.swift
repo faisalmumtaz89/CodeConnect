@@ -683,7 +683,7 @@ enum Fixtures {
         "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[],\
         "model":{"value":"sonnet (claude-sonnet-5-5)","seq":2,"source":"command","at":"\(stamp)"},\
         "permission_mode":{"value":"plan","seq":4},"effort":{"value":"high","seq":5},\
-        "menus":{"models":[\
+        "menus":{"selected_model":"sonnet","models":[\
         {"value":"default","label":"Default (recommended)",\
         "detail":"Use the default model (currently Opus 5.5) · $4/$20 per Mtok",\
         "efforts":["low","medium","high","xhigh","max"]},\

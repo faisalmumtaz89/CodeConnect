@@ -27,19 +27,23 @@ public enum RunSettings: Sendable, Hashable {
         guard summary.agent == .claude, summary.tmuxSession.isEmpty else { return .deferToOtherPath }
         guard let menus = summary.menus else { return .hostedReadOnly(model: summary.model?.value) }
 
-        let selectedModel = summary.model.map { alias($0.value) }
-            .flatMap { a in menus.models.first { $0.value == a } }
-        let selectedMode = summary.permissionMode.map { alias($0.value) }
-            .flatMap { a in menus.modes.first { $0.value == a } }
+        // The model the daemon states as chosen — never re-derived from the fact's text here, because
+        // the fact at a turn's init is claude's full id and only the daemon knows the alias it resolves
+        // to. Absent (an older daemon, or an unlisted value) selects nothing.
+        let selectedModel = menus.selectedModel
+            .flatMap { value in menus.models.first { $0.value == value } }
+        // Effort and mode facts carry the menu's own words, so a plain equality selects them.
+        let selectedMode = summary.permissionMode
+            .flatMap { fact in menus.modes.first { $0.value == fact.value } }
         // The effort menu is the selected model's efforts; with nothing selected there is no effort
         // menu to draw. Each effort carries its display name from the one place those names live.
         let efforts = (selectedModel?.efforts ?? []).map {
             EffortChoice(value: $0, label: EffortConfirmation.label(for: $0))
         }
-        let selectedEffort = summary.effort.map { alias($0.value) }
-            .flatMap { a in efforts.first { $0.value == a } }
-        // The one string drawn for the model — the button, the header: the selected entry's label when
-        // the alias matched, and the raw fact only when nothing matched (the written miss).
+        let selectedEffort = summary.effort
+            .flatMap { fact in efforts.first { $0.value == fact.value } }
+        // The one string drawn for the model — the button, the header: the selected entry's label, and
+        // the raw fact only when the daemon named no selection.
         let modelDisplay = selectedModel?.label ?? summary.model?.value ?? ""
 
         return .hostedLive(
@@ -48,12 +52,6 @@ public enum RunSettings: Sendable, Hashable {
                 selectedModel: selectedModel, selectedMode: selectedMode,
                 efforts: efforts, selectedEffort: selectedEffort,
                 modelDisplay: modelDisplay, inFlight: inFlight, lastOutcome: lastOutcome))
-    }
-
-    /// The value before the first space — the one selection rule, uniform across model, effort and
-    /// mode. `"sonnet (claude-sonnet-5-5)"` → `"sonnet"`, `"plan"` → `"plan"`, `"high"` → `"high"`.
-    static func alias(_ raw: String) -> String {
-        String(raw.prefix { $0 != " " })
     }
 }
 
@@ -64,8 +62,8 @@ public struct HostedSettings: Sendable, Hashable {
     public let models: [MenuModel]
     /// The permission-mode rows, with the agent's own labels.
     public let modes: [MenuMode]
-    /// The model selected now — the row whose `value` matches the fact's alias — or `nil` when nothing
-    /// matches (the written miss; `modelDisplay` then shows the raw fact).
+    /// The model selected now — the row the daemon named in `menus.selected_model` — or `nil` when it
+    /// named none (an older daemon, or a value off the menus; `modelDisplay` then shows the raw fact).
     public let selectedModel: MenuModel?
     public let selectedMode: MenuMode?
     /// The selected model's efforts, each with its display name. Empty when no model is selected.
