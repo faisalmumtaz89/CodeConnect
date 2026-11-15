@@ -689,6 +689,9 @@ async fn link(
                     Ok(true) => {
                         live = lifecycle == Lifecycle::Live;
                         refused = lifecycle == Lifecycle::Failed;
+                        if live {
+                            daemon.mail_run_live(&uid).await;
+                        }
                     }
                     Ok(false) => {
                         break format!("message {seq} is not past the run's cursor for this host")
@@ -4002,6 +4005,101 @@ mod tests {
             });
         assert!(words(&rig, &played.uid).is_empty());
         stop(&played.dir);
+    }
+
+    /// What an agent's message to the run `uid`, from another run on this computer (`studio`,
+    /// as the recorded tailnet names it), is told.
+    async fn mail_from_another_run(daemon: &Arc<Daemon>, uid: &str) -> protocol::ipc::MailState {
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let sender = protocol::uid::new().unwrap();
+        let row = crate::store::SessionRow {
+            session_uid: sender.clone(),
+            session_id: sender.clone(),
+            claude_session_id: None,
+            codex_thread_id: None,
+            ..daemon
+                .db
+                .get_session(uid.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        daemon.store.upsert_session(&row).unwrap().assert_present();
+        daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &sender,
+                &format!("{uid}@studio"),
+                "hi",
+                None,
+            )
+            .await
+            .state
+    }
+
+    /// **The mail item's D1 and D2 on Claude: a hosted run takes mail from the moment its start
+    /// is answered `done`.** It is kept with this build's minor, as a run of this build's
+    /// supervisor is, so it is listed and mail from another run on this computer waits for it.
+    /// A start the host refuses is never kept, and mail for it is refused.
+    #[tokio::test]
+    async fn a_hosted_claude_run_takes_mail_once_live_and_a_refused_start_never_does() {
+        for (status, kept, told) in [
+            (
+                "done",
+                Some(protocol::PROTOCOL_MINOR),
+                protocol::ipc::MailState::Waiting,
+            ),
+            ("refused", None, protocol::ipc::MailState::Refused),
+        ] {
+            let rig = rig();
+            let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+            let cwd = rig.root.to_str().unwrap().to_string();
+            let (_, played) = tokio::join!(
+                start(&rig.daemon, run(&rig, "req-mail", &cwd, &host)),
+                async {
+                    let mut played = play_to_start(&rig).await;
+                    let uuid = played.start_uuid();
+                    say(
+                        &mut played.write,
+                        serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                           "status": status,
+                                           "initialize": (status == "done").then(initialize_answer)}),
+                    )
+                    .await;
+                    assert_eq!(
+                        next(&mut played.lines).await,
+                        Some(ToHost::Ack { seq: 2 }),
+                        "{status}"
+                    );
+                    played
+                }
+            );
+            let minors: Vec<(String, u32)> = rig
+                .daemon
+                .db
+                .mail_runs()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(row, minor)| (row.session_uid, minor))
+                .collect();
+            assert_eq!(
+                minors,
+                kept.map(|minor| (played.uid.clone(), minor))
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                "{status}"
+            );
+            assert_eq!(
+                mail_from_another_run(&rig.daemon, &played.uid).await,
+                told,
+                "{status}"
+            );
+            stop(&played.dir);
+        }
     }
 
     /// **B5 G2: retries.** The same request asked again while its first send waits for

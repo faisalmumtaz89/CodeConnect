@@ -1873,9 +1873,18 @@ fails the suite instead of failing silently in production.
   restarts while the run is stopping, or when End run follows a reconnect that failed.
   Codex is still ended by force, and the run reads ended at ccd's next check of its runs,
   every 60 s by default.
+* **On a Codex run started from an app, a ccd restart that lands just as Codex closes the
+  run's thread leaves the run without a link.** Codex closes a thread a minute after
+  nothing is watching it. A reconnect made while it is closing is refused, and ccd does not
+  try again, so the run stays live with no connection: an answer, a Stop and a message are
+  refused, and a mail wake already on its way stays outstanding, so new mail does not wake
+  the run. It has been seen only with Codex's closing delay set to two seconds.
 * **On a Codex run started from an app, every one of CodeConnect's mail tools asks
   first.** `list_agents` and `read_messages` show a card like `send_message` until they
   are marked as only reading.
+* **A Claude run started from an app takes mail, but nothing wakes it for its mail yet.**
+  Its agent reads its mail when it calls `read_messages` itself; the mail waits a day at
+  most. A Codex run started from an app is woken for its mail through its own queue.
 * **On a Codex run started from an app, a message whose turn's end ccd never sees keeps
   its last state.** If the connection to Codex ends, or ccd restarts, while a message added
   to a running turn waits for Codex to read it, ccd records that what became of it is not

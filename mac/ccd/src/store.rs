@@ -5209,9 +5209,9 @@ impl Store {
         Ok(())
     }
 
-    /// Keep the protocol minor the run's supervisor speaks: what the build that
-    /// launched it can do with mail, kept so a restarted daemon knows it before that
-    /// supervisor registers again.
+    /// Keep the protocol minor of the build that launched the run (its supervisor's, or
+    /// this build's for a run started on the engine): what that build can do with mail,
+    /// kept so a restarted daemon knows it before a supervisor registers again.
     pub fn note_mail_minor(&self, session_uid: &str, minor: u32) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -5222,9 +5222,9 @@ impl Store {
         Ok(())
     }
 
-    /// **Every run that has not ended**, with the protocol minor its supervisor last
-    /// registered with: the runs mail can be for, whether or not their supervisor is
-    /// attached at this moment.
+    /// **Every run that has not ended**, with the protocol minor kept for it
+    /// ([`Store::note_mail_minor`]): the runs mail can be for, whether or not their
+    /// supervisor or link is attached at this moment.
     pub fn mail_runs(&self) -> Result<Vec<(SessionRow, u32)>> {
         let minors: std::collections::HashMap<String, u32> = {
             let conn = self.read();
@@ -6710,7 +6710,8 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         );
         CREATE INDEX IF NOT EXISTS mail_by_session ON mail(session_uid, state, seq);
 
-        -- The protocol minor each run's supervisor registered with, kept so a
+        -- The protocol minor each run that takes mail was launched with (its
+        -- supervisor's, or this build's for a run started on the engine), kept so a
         -- restarted daemon knows which runs take mail before they register again.
         CREATE TABLE IF NOT EXISTS mail_runs(
             session_uid TEXT PRIMARY KEY,
