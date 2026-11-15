@@ -1902,9 +1902,10 @@ fails the suite instead of failing silently in production.
 * **On a Codex run started from an app, every one of CodeConnect's mail tools asks
   first.** `list_agents` and `read_messages` show a card like `send_message` until they
   are marked as only reading.
-* **A Claude run started from an app takes mail, but nothing wakes it for its mail yet.**
-  Its agent reads its mail when it calls `read_messages` itself; the mail waits a day at
-  most. A Codex run started from an app is woken for its mail through its own queue.
+* **A Claude run started from an app before CodeConnect was updated is not woken for its
+  mail.** Its agent host is the older one, which does not take the wake. Its agent reads its
+  mail when it calls `read_messages` itself; the mail waits a day at most. A run started
+  after the update is woken.
 * **On a Codex run started from an app, a message whose turn's end ccd never sees keeps
   its last state.** If the connection to Codex ends, or ccd restarts, while a message added
   to a running turn waits for Codex to read it, ccd records that what became of it is not

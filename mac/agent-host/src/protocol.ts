@@ -46,6 +46,7 @@ export type ToHost =
   | { type: 'ack'; seq: number }
   | { type: 'start'; uuid: string; options: StartOptions; prompt: string }
   | { type: 'say'; uuid: string; text: string }
+  | { type: 'wake'; uuid: string; text: string }
   | { type: 'answer'; uuid: string; tool_use_id: string; decision: Decision }
   | { type: 'set_model'; uuid: string; model?: string; effort?: string }
   | { type: 'set_mode'; uuid: string; mode: string }

@@ -260,6 +260,23 @@ test("each say reaches claude's input after the first message, in order, marked 
   expect(outcomes.map((line) => [line.uuid, line.status])).toStrictEqual([['c-say-1', 'done'], ['c-say-2', 'done']]);
 }, 10_000);
 
+test("a wake reaches claude's input in its place among the says, stamped with its uuid and marked as a background notification, not the person's words, and is answered done", async () => {
+  const { ccd, start, stub } = await run(trustedStart);
+  const wake = goldenLine('to_host', 'wake');
+  ccd.send({ type: 'say', uuid: 'c-say-1', text: 'the second message' });
+  ccd.send(wake);
+  await ccd.line('the wake taken', (line) => line.type === 'outcome' && line.uuid === wake.uuid);
+  await waitFor('claude to read it', () => stdinOf(stub()).filter((m) => m.type === 'user').length === 3);
+  const users = stdinOf(stub()).filter((message) => message.type === 'user');
+  expect(users.map((m) => [m.uuid, m.message.content, m.origin])).toStrictEqual([
+    [start.uuid, start.prompt, { kind: 'human' }],
+    ['c-say-1', 'the second message', { kind: 'human' }],
+    [wake.uuid, wake.text, { kind: 'task-notification' }],
+  ]);
+  const outcome = ccd.lines.find((line) => line.type === 'outcome' && line.uuid === wake.uuid);
+  expect(outcome.status).toBe('done');
+}, 10_000);
+
 test('a say whose multibyte character is split across two writes on the socket arrives whole', async () => {
   const { ccd, stub } = await run(trustedStart);
   const text = 'déjà vu — 日本語 ✓';

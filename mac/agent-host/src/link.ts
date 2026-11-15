@@ -2,7 +2,7 @@
 // acknowledges them, the one attached connection, and whole lines in. It names no Node API, so the pinned Bun's type
 // checker checks it against the protocol's types (test/protocol.test.ts); main.ts wires the run's socket to it.
 import type { FromHost, PermissionRequest, ToHost } from './protocol.ts';
-import type { Facts, Say, Start } from './start.ts';
+import type { Facts, Say, Start, Wake } from './start.ts';
 
 /** A connection from ccd: lines out, and closing it. */
 export interface Connection {
@@ -15,6 +15,8 @@ export interface Run {
   start(command: Start): void;
   /** One more message from the person. */
   say(command: Say): void;
+  /** ccd's line waking the agent for its mail. */
+  wake(command: Wake): void;
   /** ccd's answer to one of the run's permission requests. */
   answer(command: Extract<ToHost, { type: 'answer' }>): void;
   /** An app's Stop of the turn the command names. */
@@ -95,6 +97,7 @@ export function createLink(run: Run) {
       settle();
     } else if (message.type === 'start') run.start(message);
     else if (message.type === 'say') run.say(message);
+    else if (message.type === 'wake') run.wake(message);
     else if (message.type === 'answer') run.answer(message);
     else if (message.type === 'interrupt') run.interrupt(message);
     else if (message.type === 'set_model' || message.type === 'set_mode') run.setting(message);

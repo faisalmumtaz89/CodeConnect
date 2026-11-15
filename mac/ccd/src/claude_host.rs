@@ -530,9 +530,12 @@ async fn commit_and_ack(
 
 /// Map one SDK message of a live run and file it with its cursor, then acknowledge it.
 /// `turn` is the uuid of the run's latest `system/init`: an init sets it before it is
-/// mapped, so the init's own events carry their turn.
+/// mapped, so the init's own events carry their turn. The run's turns are marked for the
+/// mail wake rule as a terminal run's transcript marks them: a start at the main thread's
+/// init, an end at its `result`, which is also the end the rule hears of
+/// ([`crate::mail::turn_ended`]); ccd's clock, as a prompt's mark.
 async fn apply_sdk(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     uid: &str,
     host: ProcessIdentity,
     seq: u64,
@@ -560,16 +563,41 @@ async fn apply_sdk(
             Signal::Delivered { .. } | Signal::Lifecycle { .. } | Signal::Reset { .. } => {}
         }
     }
+    let filed = |kind: EventKind| mapped.events.iter().any(|event| event.kind == kind);
+    let (started, ended) = (
+        filed(EventKind::SessionStart),
+        filed(EventKind::TurnComplete),
+    );
     match daemon
         .ingest_host_message(uid, host, seq, mapped.events, notes)
         .await
     {
-        Ok(true) => send(write, &ToHost::Ack { seq }).await,
-        Ok(false) => Err(format!(
-            "message {seq} is not past the run's cursor for this host"
-        )),
-        Err(err) => Err(format!("{err:#}")),
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "message {seq} is not past the run's cursor for this host"
+            ))
+        }
+        Err(err) => return Err(format!("{err:#}")),
     }
+    if started || ended {
+        let now = protocol::time::now_unix_ms();
+        if let Err(err) = daemon
+            .db
+            .mail_turn_marks(
+                uid.to_string(),
+                started.then_some(now),
+                ended.then_some(now),
+            )
+            .await
+        {
+            crate::log_error!("mail for {uid}: could not mark its turn: {err:#}");
+        }
+        if ended {
+            crate::mail::turn_ended(daemon, uid);
+        }
+    }
+    send(write, &ToHost::Ack { seq }).await
 }
 
 /// What a link knows of its run when it begins: from the start that spawned the host, or,
@@ -650,8 +678,12 @@ async fn link(
                     break why;
                 }
                 // The end of a replay: the run's cards are put right against the
-                // requests the host still holds.
+                // requests the host still holds, and a live run can be woken for its
+                // mail again, its replayed turns marked.
                 daemon.host_cards_reconcile(&uid, &pending).await;
+                if live {
+                    crate::mail::waiter_registered(&daemon, &uid);
+                }
                 if let Some(command) = resend.take() {
                     // A start goes again only while no outcome has come.
                     let due = !matches!(command, ToHost::Start { .. }) || (!live && !refused);
@@ -1731,6 +1763,41 @@ pub(crate) async fn answer(
     }
 }
 
+/// **Wake the hosted run `uid` for its mail** with `text`, the fixed nudge: the line goes to
+/// its host through its attached link, and ccd files a `mail_nudge` notice for it, since a
+/// replayed user line files nothing ([`protocol::sdk_map`]). Whether a link took it; a run
+/// with no link attached (a terminal run, or a host not reached) is not woken here.
+pub(crate) async fn wake(daemon: &Daemon, uid: &str, text: &str) -> bool {
+    let uuid = match protocol::uid::uuid_v4() {
+        Ok(uuid) => uuid,
+        Err(err) => {
+            crate::log_error!("{uid}: could not name a mail wake: {err}");
+            return false;
+        }
+    };
+    let line = ToHost::Wake {
+        uuid: uuid.clone(),
+        text: text.to_string(),
+    };
+    if !daemon.send_to_host(uid, line).await {
+        return false;
+    }
+    let notice = PendingEvent::new(
+        &SessionKey::new(uid, uid),
+        EventKind::Notification,
+        serde_json::json!({
+            "notification_type": protocol::event::notice::MAIL_NUDGE,
+            "message": text,
+        }),
+        Source::Daemon,
+    )
+    .with_source_event_id(format!("wake:{uuid}"));
+    if let Err(err) = daemon.ingest(notice).await {
+        crate::log_error!("{uid}: could not record its mail wake: {err:#}");
+    }
+    true
+}
+
 /// The person's words `text`, sent as the message `uuid` (the start's or a later
 /// send's), as the run's event. A Codex run's later sends file the same row.
 pub(crate) fn person_row(
@@ -1755,10 +1822,13 @@ pub(crate) fn person_row(
 /// The host's outcome for a message ccd sent it (`say`): the send it names, found by its
 /// uuid among the run's claimed sends, is settled with the person's words filed when the
 /// host took the message, or released when it refused it, in one transaction with the
-/// cursor; then acknowledged, and whoever waits for it is told. An outcome naming no
-/// claimed send is an answer's ([`apply_answer_outcome`]).
+/// cursor; then acknowledged, and whoever waits for it is told. A message taken is the
+/// person's prompt to the mail wake rule, as a terminal run's prompt hook tells it: with no
+/// turn running and unread mail waiting, the nudge follows it as a wake line ([`wake`]). An
+/// outcome naming no claimed send is an answer's ([`apply_answer_outcome`]); a wake's own
+/// outcome is one of those.
 async fn apply_send_outcome(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     uid: &str,
     host: ProcessIdentity,
     seq: u64,
@@ -1789,6 +1859,11 @@ async fn apply_send_outcome(
                     ))
                 }
                 Err(err) => return Err(format!("{err:#}")),
+            }
+            if taken {
+                if let Some(nudge) = crate::mail::prompt_submitted(daemon, uid).await {
+                    wake(daemon, uid, nudge).await;
+                }
             }
         }
         None => apply_answer_outcome(daemon, uid, host, seq, uuid, taken, write).await?,
@@ -4393,6 +4468,204 @@ mod tests {
             );
             stop(&played.dir);
         }
+    }
+
+    /// The stand-in host ends the running turn with claude's `result`, as message `seq`.
+    async fn turn_ends(played: &mut Played, seq: u64) {
+        sdk(
+            &mut played.write,
+            seq,
+            serde_json::json!({"type": "result", "subtype": "success", "is_error": false,
+                "num_turns": 1, "uuid": format!("9d1f0000-0000-4000-8000-0000000003{seq:02}"),
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// The text of the mail wake ccd sends the host next.
+    async fn woken(lines: &mut Lines<BufReader<OwnedReadHalf>>) -> String {
+        match next(lines).await {
+            Some(ToHost::Wake { text, .. }) => text,
+            other => panic!("no mail wake reached the host: {other:?}"),
+        }
+    }
+
+    /// The line ccd sends the host within a second, if any.
+    async fn sent_soon(played: &mut Played) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(1), played.lines.next_line())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+    }
+
+    /// How many `mail_nudge` notices the run has filed.
+    fn nudges(rig: &Rig, uid: &str) -> usize {
+        stored(rig, uid)
+            .iter()
+            .filter(|event| {
+                event["kind"] == "notification"
+                    && event["payload"]["notification_type"] == protocol::event::notice::MAIL_NUDGE
+            })
+            .count()
+    }
+
+    /// **B11 T1: mail that reaches a hosted run while its turn runs wakes it once that turn
+    /// has ended, never during it.** The turn starts at claude's init and ends at its
+    /// `result`, as a terminal run's transcript marks them.
+    #[tokio::test]
+    async fn mail_to_a_hosted_run_mid_turn_wakes_it_once_the_turn_ends() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000311").await;
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(
+            sent_soon(&mut played).await,
+            None,
+            "a wake while the turn runs"
+        );
+        turn_ends(&mut played, 4).await;
+        assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        stop(&played.dir);
+    }
+
+    /// **B11 T2: after a person's turn, mail wakes the idle hosted run once, until the woken
+    /// turn ends.** The wake is the fixed nudge, with ccd's own `mail_nudge` notice beside
+    /// it; a second message while the woken turn runs sends nothing more; that turn's end,
+    /// its mail still unread, lets the rule wake it again.
+    #[tokio::test]
+    async fn mail_wakes_an_idle_hosted_run_once_until_its_woken_turn_ends() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000321").await;
+        turn_ends(&mut played, 4).await;
+        tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
+            host_takes(&mut played, 5, "done")
+        );
+        turn_begins(&mut played, 6, "9d1f0000-0000-4000-8000-000000000322").await;
+        turn_ends(&mut played, 7).await;
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        assert_eq!(nudges(&rig, &uid), 1);
+        turn_begins(&mut played, 8, "9d1f0000-0000-4000-8000-000000000323").await;
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(
+            sent_soon(&mut played).await,
+            None,
+            "a second wake before the woken turn ended"
+        );
+        turn_ends(&mut played, 9).await;
+        assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        assert_eq!(nudges(&rig, &uid), 2);
+        stop(&played.dir);
+    }
+
+    /// **B11 T3: a person's message to an idle hosted run while unread mail waits is followed
+    /// by the nudge**, which claude reads in that turn, as a terminal run's prompt is told of
+    /// its mail. With no mail waiting, nothing follows. Mail waits unwoken once three woken
+    /// turns have left it unread.
+    #[tokio::test]
+    async fn a_message_to_an_idle_hosted_run_with_mail_waiting_is_followed_by_the_nudge() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000331").await;
+        turn_ends(&mut played, 4).await;
+        tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
+            host_takes(&mut played, 5, "done")
+        );
+        assert_eq!(sent_soon(&mut played).await, None, "a nudge with no mail");
+        turn_begins(&mut played, 6, "9d1f0000-0000-4000-8000-000000000332").await;
+        turn_ends(&mut played, 7).await;
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        for (n, seq) in [8, 10, 12].into_iter().enumerate() {
+            assert_eq!(
+                woken(&mut played.lines).await,
+                crate::mail::nudge(),
+                "wake {n}"
+            );
+            turn_begins(
+                &mut played,
+                seq,
+                &format!("9d1f0000-0000-4000-8000-0000000003{seq:02}"),
+            )
+            .await;
+            turn_ends(&mut played, seq + 1).await;
+        }
+        assert_eq!(sent_soon(&mut played).await, None, "a fourth wake");
+        tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-2", "and the tests"),
+            host_takes(&mut played, 14, "done")
+        );
+        assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        stop(&played.dir);
+    }
+
+    /// **B11 T4: a hosted run whose link is gone is not woken, and is woken once its host is
+    /// attached again.** The wake that found no link is released; the restarted daemon's
+    /// attach decides again at the end of the host's replay.
+    #[tokio::test]
+    async fn a_hosted_run_is_woken_for_mail_that_came_while_its_link_was_gone_once_attached_again()
+    {
+        let rig = rig();
+        let played = live_run(&rig).await;
+        let (uid, dir) = (played.uid.clone(), played.dir.clone());
+        drop(played);
+        for _ in 0..100 {
+            if link_facts(&rig, &uid).len() == 2 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        let outstanding = || {
+            rusqlite::Connection::open(rig.root.join("events.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT outstanding FROM mail_wake WHERE session_uid = ?1",
+                    [&uid],
+                    |row| row.get::<_, bool>(0),
+                )
+                .ok()
+        };
+        // The claim makes the row; its release, once no link took the wake, clears it.
+        for _ in 0..100 {
+            if outstanding() == Some(false) {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        assert_eq!(outstanding(), Some(false), "the wake that found no link");
+        let (mut lines, mut write) = restart(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 3, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(woken(&mut lines).await, crate::mail::nudge());
+        stop(&dir);
     }
 
     /// **B5 G2: retries.** The same request asked again while its first send waits for

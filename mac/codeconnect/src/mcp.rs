@@ -152,6 +152,7 @@ fn tools() -> Value {
                 label (cc-N@computer, for reading only), which agent it is, and its project. \
                 Give your own address when you ask an agent to answer you through another.",
             "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true},
         },
         {
             "name": "send_message",
@@ -176,6 +177,7 @@ fn tools() -> Value {
             "description": "Read the messages other Claude Code and Codex sessions sent you, \
                 and what became of the messages you sent. Takes no arguments.",
             "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true},
         },
     ])
 }
@@ -450,6 +452,15 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["list_agents", "send_message", "read_messages"]);
+        // Decisions 178 and 180: the two tools that only read are marked so, and the one
+        // that sends is not.
+        let read_only: Vec<bool> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["annotations"]["readOnlyHint"] == true)
+            .collect();
+        assert_eq!(read_only, [true, false, true]);
         let unknown = reply(
             r#"{"jsonrpc":"2.0","id":2,"method":"resources/list"}"#,
             no_daemon,

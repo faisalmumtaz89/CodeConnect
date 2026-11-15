@@ -762,8 +762,9 @@ pub(crate) fn nudge() -> &'static str {
 /// until a person's turn or new mail.
 const WAKE_MISSES: u32 = 3;
 
-/// **A turn of `run_uid` ended**: Claude's `Stop`, Codex's `turn/completed`. The
-/// wake it answered is no longer outstanding, and the rule decides again.
+/// **A turn of `run_uid` ended**: Claude's `Stop`, a hosted Claude run's `result`,
+/// Codex's `turn/completed`. The wake it answered is no longer outstanding, and the rule
+/// decides again.
 pub(crate) fn turn_ended(daemon: &Arc<Daemon>, run_uid: &str) {
     let (daemon, run_uid) = (Arc::clone(daemon), run_uid.to_string());
     tokio::spawn(async move {
@@ -779,7 +780,8 @@ pub(crate) fn turn_ended(daemon: &Arc<Daemon>, run_uid: &str) {
 }
 
 /// **Decide again whether to wake `run_uid`**: its Claude waiter registered, its
-/// Codex link adopted a thread, or mail was taken for it.
+/// agent host's link replayed what it kept, its Codex link adopted a thread, or mail was
+/// taken for it.
 pub(crate) fn waiter_registered(daemon: &Arc<Daemon>, run_uid: &str) {
     let (daemon, run_uid) = (Arc::clone(daemon), run_uid.to_string());
     tokio::spawn(async move { daemon.wake_if_due(&run_uid).await });
@@ -912,8 +914,11 @@ impl Daemon {
                 return;
             }
         }
+        // A Claude run CodeConnect started is woken through its agent host's link; one in a
+        // terminal, through its waiter.
         let issued = if claude {
-            crate::claude_waiter::wake_claude(self, run_uid)
+            crate::claude_host::wake(self, run_uid, nudge()).await
+                || crate::claude_waiter::wake_claude(self, run_uid)
         } else {
             match crate::codex_wake::wake_codex(self, run_uid).await {
                 Ok(()) => true,
