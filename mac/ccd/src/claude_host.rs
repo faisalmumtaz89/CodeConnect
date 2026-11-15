@@ -13,7 +13,8 @@
 //! link, makes the run `live` or `failed`, and the app's answer waits for it. A restarted
 //! ccd attaches each host still running again from its run's cursor ([`attach_run`]). An
 //! app's message to a live run goes to its host as `say` ([`send_text`]), and the
-//! person's words are filed once the host has taken them. An
+//! person's words are filed once the host has taken them; its command menu is what its
+//! claude last reported ([`catalog`]). An
 //! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop` if its link
 //! is attached, and a host that has not exited 10 s later is stopped by its group
 //! ([`escalate_stop`]).
@@ -41,8 +42,8 @@ use protocol::proc_identity::{
 };
 use protocol::sdk_map::Signal;
 use protocol::ws::{
-    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, ResolvedBy,
-    SendTextResult, StartFailure, StartSessionResult, StopRunResult,
+    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, CommandCatalogResult,
+    CommandEntry, ResolvedBy, SendTextResult, StartFailure, StartSessionResult, StopRunResult,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -52,7 +53,9 @@ use tokio::time::Instant;
 
 use crate::codex_link::InterruptReport;
 use crate::state::Daemon;
-use crate::store::{AnswerClaim, HostedRun, MutationClaimRow, SessionRow, TextClaim};
+use crate::store::{
+    AnswerClaim, HostedCommands, HostedRun, MutationClaimRow, RunNotes, SessionRow, TextClaim,
+};
 
 /// The agent host's file name, beside ccd's own executable.
 const HOST_BIN: &str = "cc-agent-host";
@@ -573,11 +576,13 @@ async fn apply_sdk(
         }
     }
     let mapped = protocol::sdk_map::map(&SessionKey::new(uid, uid), turn.as_deref(), message);
-    let (mut session_id, mut cwd) = (None, None);
+    let mut notes = RunNotes::default();
     for signal in mapped.signals {
         match signal {
-            Signal::SessionId { id } => session_id = Some(id),
-            Signal::Cwd { path } => cwd = Some(path),
+            Signal::SessionId { id } => notes.session_id = Some(id),
+            Signal::Cwd { path } => notes.cwd = Some(path),
+            Signal::ScreenOnly { names } => notes.screen_only = Some(names),
+            Signal::Commands { commands } => notes.commands = Some(commands),
             // A send is settled by its host's outcome ([`apply_send_outcome`]), not by
             // claude's deliveries or command lifecycles; `/clear` keeps the session id,
             // which the next init names.
@@ -585,7 +590,7 @@ async fn apply_sdk(
         }
     }
     match daemon
-        .ingest_host_message(uid, host, seq, mapped.events, session_id, cwd)
+        .ingest_host_message(uid, host, seq, mapped.events, notes)
         .await
     {
         Ok(true) => send(write, &ToHost::Ack { seq }).await,
@@ -1001,6 +1006,71 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
 /// How long a send waits for the run's host to take the message into claude's input.
 const SEND_WAIT: Duration = Duration::from_secs(10);
 
+/// The commands an app opens a screen of its own for that this ccd refuses on a hosted
+/// run, each with the reason the app shows. One list, read twice: [`send_text`] refuses
+/// each from its screen, and the run's command menu ([`catalog`]) leaves out exactly
+/// these, because the daemon is the one that knows what it refuses, so an app offers
+/// nothing it would be refused and keeps no list of its own in step with this one.
+const REFUSED_SCREENS: [(&str, &str); 3] = [
+    ("clear", "This isn't available for this session yet."),
+    (
+        "model",
+        "Changing the model isn't available for this session yet.",
+    ),
+    (
+        "effort",
+        "Changing the effort isn't available for this session yet.",
+    ),
+];
+
+/// Why ccd refuses `text`, sent from an app, as the screen of a command in
+/// [`REFUSED_SCREENS`]: the Model and Effort sheets send theirs with the native
+/// confirmation (`confirmed`), and the Clear dialog sends `/clear` alone. Typed with an
+/// argument (`/effort low`), such a command is a message, as at claude's keyboard.
+fn refused_screen(text: &str, confirmed: bool) -> Option<&'static str> {
+    let mut words = text.split_whitespace();
+    let command = words.next()?.strip_prefix('/')?;
+    let (_, reason) = REFUSED_SCREENS.iter().find(|(name, _)| *name == command)?;
+    (confirmed || words.next().is_none()).then_some(*reason)
+}
+
+/// A hosted run's command menu, from what the store keeps of it: `unavailable` until
+/// the run's first init has named the commands claude keeps to its own screen, then
+/// claude's list as it last reported it, without those and without
+/// [`REFUSED_SCREENS`], each with what claude says of it.
+pub(crate) fn catalog(kept: HostedCommands) -> CommandCatalogResult {
+    let (Some(commands), Some(screen_only)) = (kept.commands, kept.screen_only) else {
+        return CommandCatalogResult::Unavailable {
+            reason: "Claude hasn't listed its commands for this session yet.".into(),
+        };
+    };
+    let text = |command: &serde_json::Value, key: &str| {
+        command
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let entries: Vec<CommandEntry> = commands
+        .iter()
+        .filter_map(|command| {
+            let name = text(command, "name")?;
+            let offered = !screen_only.contains(&name)
+                && !REFUSED_SCREENS.iter().any(|(refused, _)| *refused == name);
+            offered.then(|| CommandEntry {
+                description: text(command, "description").unwrap_or_default(),
+                argument_hint: text(command, "argumentHint").filter(|hint| !hint.is_empty()),
+                name,
+            })
+        })
+        .collect();
+    CommandCatalogResult::Available {
+        commands: entries.iter().map(|entry| entry.name.clone()).collect(),
+        entries,
+        claude_version: kept.claude_version,
+        probed_at: kept.commands_at.unwrap_or_default(),
+    }
+}
+
 /// One `send_text` for a run started in an agent host, as the app sent it and ccd
 /// checked it.
 pub(crate) struct Message {
@@ -1016,9 +1086,10 @@ pub(crate) struct Message {
 /// and the person's words are filed once the host has taken it ([`apply_send_outcome`]).
 /// The send's claim keeps its text, so a restarted ccd still files them from the host's
 /// replay. A retry is answered from that claim first, as a typed send's is; only a new
-/// message meets the run's state. What only a terminal shows (the model and effort
-/// confirmations, `/status`, `/usage`, `/cost`, `/clear`) is refused, as is a message
-/// staged without being sent.
+/// message meets the run's state. The screens of [`REFUSED_SCREENS`] (the model and effort
+/// confirmations, `/clear`) are refused, as are `/status`, which claude does not offer
+/// such a run, and a message staged without being sent. `/usage` and `/cost` are
+/// messages, whose output the run's events carry.
 pub(crate) async fn send_text(
     daemon: &Daemon,
     uid: &str,
@@ -1034,18 +1105,11 @@ pub(crate) async fn send_text(
         submit,
         complete_native_confirmation,
     } = message;
-    if complete_native_confirmation {
-        return refuse(if text.starts_with("/effort") {
-            "Changing the effort isn't available for this session yet."
-        } else {
-            "Changing the model isn't available for this session yet."
-        });
+    if let Some(reason) = refused_screen(&text, complete_native_confirmation) {
+        return refuse(reason);
     }
-    if matches!(
-        text.split_whitespace().next(),
-        Some("/status" | "/usage" | "/cost" | "/clear")
-    ) {
-        return refuse("This isn't available for this session yet.");
+    if text.split_whitespace().next() == Some("/status") {
+        return refuse("Claude doesn't offer /status in this session.");
     }
     if !submit {
         return refuse("A message to this session is sent whole; nothing was sent.");
@@ -1500,7 +1564,7 @@ async fn apply_interrupt_outcome(
     };
     let notices = not_sent(daemon, uid, told.cancelled.unwrap_or_default()).await?;
     match daemon
-        .ingest_host_message(uid, host, told.seq, notices, None, None)
+        .ingest_host_message(uid, host, told.seq, notices, RunNotes::default())
         .await
     {
         Ok(true) => {}
@@ -1956,7 +2020,8 @@ mod tests {
         serde_json::json!({
             "commands": [{"name": "compact"}],
             "models": [{"value": "opus"}],
-            "account": {"api_provider": "firstParty"}
+            "account": {"api_provider": "firstParty"},
+            "claude_code_version": "2.1.322"
         })
     }
 
@@ -2680,12 +2745,12 @@ mod tests {
                 seqs.push(event.seq);
             }
         }
-        assert_eq!(seqs, (1..=110).collect::<Vec<u64>>(), "each once, in order");
+        assert_eq!(seqs, (1..=112).collect::<Vec<u64>>(), "each once, in order");
 
         let last = messages.len() as u64 + 2;
         sdk(&mut played.write, last, messages.last().unwrap().clone()).await;
         assert_eq!(next(&mut played.lines).await, None);
-        assert_eq!(after_words(&rig, &played.uid).len(), 109);
+        assert_eq!(after_words(&rig, &played.uid).len(), 111);
         assert_eq!(cursor(&rig, &played.uid), last as i64);
         stop(&played.dir);
     }
@@ -3900,8 +3965,10 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **B5 G3: what a run started in a host does not take.** Each is refused, and nothing
-    /// is sent, claimed or filed; a message that only mentions a command is a message.
+    /// **B5 G3, B8 G4: what a run started in a host does not take.** The Model and Effort
+    /// sheets' confirmations, the Clear dialog's `/clear` and `/status` are refused, and
+    /// nothing is sent, claimed or filed; a message that only mentions a command, `/usage`
+    /// and `/cost` are messages.
     #[tokio::test]
     async fn what_a_hosted_run_does_not_take_is_refused_and_nothing_is_sent() {
         let rig = rig();
@@ -3943,12 +4010,14 @@ mod tests {
             ),
             "Changing the effort isn't available for this session yet."
         );
-        for text in ["/clear", "/status", "/usage now", "/cost"] {
-            assert_eq!(
-                refused(send_as_app(&rig.daemon, &uid, text, text).await),
-                "This isn't available for this session yet."
-            );
-        }
+        assert_eq!(
+            refused(send_as_app(&rig.daemon, &uid, "c", "/clear").await),
+            "This isn't available for this session yet."
+        );
+        assert_eq!(
+            refused(send_as_app(&rig.daemon, &uid, "st", "/status").await),
+            "Claude doesn't offer /status in this session."
+        );
         let staged = protocol::hash::send_text_hash(&uid, "half", false);
         refused(
             rig.daemon
@@ -3968,6 +4037,14 @@ mod tests {
         );
         assert!(matches!(result, SendTextResult::Sent { .. }));
         assert_eq!(text, "why did /clear not run?");
+        for (seq, command) in [(4, "/usage"), (5, "/cost")] {
+            let (result, (_, text)) = tokio::join!(
+                send_as_app(&rig.daemon, &uid, command, command),
+                host_takes(&mut played, seq, "done")
+            );
+            assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
+            assert_eq!(text, command);
+        }
         for (lifecycle, request_id) in [("stopping", "r-2"), ("exited", "r-3")] {
             force_lifecycle(&rig, &uid, lifecycle);
             assert_eq!(
@@ -3985,7 +4062,12 @@ mod tests {
         assert_eq!(next(&mut played.lines).await, None, "nothing sent");
         assert_eq!(
             words(&rig, &uid),
-            ["fix the tests", "why did /clear not run?"]
+            [
+                "fix the tests",
+                "why did /clear not run?",
+                "/usage",
+                "/cost"
+            ]
         );
         assert!(
             rig.daemon
@@ -5754,6 +5836,238 @@ mod tests {
         })
     }
 
+    /// The commands of a `commands_changed` as claude gives them: a refused screen's
+    /// (`clear`, `model`, `effort`), a screen-only one (`doctor`), and two it offers
+    /// (`usage` with no argument hint, `compact` with one).
+    fn commands_changed() -> serde_json::Value {
+        serde_json::json!({"type": "system", "subtype": "commands_changed",
+        "uuid": "9d1f0000-0000-4000-8000-000000000021", "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+        "commands": [
+            {"name": "clear", "description": "Clear conversation history and free up context", "argumentHint": "", "builtin": true, "aliases": ["reset", "new"]},
+            {"name": "model", "description": "Set the AI model for Claude Code", "argumentHint": "[model]", "builtin": true},
+            {"name": "effort", "description": "Set effort level for model usage", "argumentHint": "<low|medium|high|xhigh|max>", "builtin": true},
+            {"name": "doctor", "description": "Diagnose and verify your Claude Code installation and settings", "argumentHint": "", "builtin": true},
+            {"name": "usage", "description": "Show plan usage limits", "argumentHint": "", "builtin": true, "aliases": ["cost", "stats"]},
+            {"name": "compact", "description": "Clear conversation history but keep a summary in context", "argumentHint": "<optional custom summarization instructions>", "builtin": true}
+        ]})
+    }
+
+    /// A turn's init, as claude's carries the commands it keeps to its own screen.
+    async fn init_with_screen_only(played: &mut Played, seq: u64, turn: &str) {
+        sdk(
+            &mut played.write,
+            seq,
+            serde_json::json!({"type": "system", "subtype": "init", "uuid": turn,
+                               "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                               "terminal_slash_commands": ["doctor", "send-to-project"]}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// The catalog's names, with each entry, when it is available.
+    fn offered(result: &CommandCatalogResult) -> Vec<CommandEntry> {
+        match result {
+            CommandCatalogResult::Available {
+                commands, entries, ..
+            } => {
+                assert_eq!(
+                    commands,
+                    &entries
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect::<Vec<_>>()
+                );
+                entries.clone()
+            }
+            other => panic!("not available: {other:?}"),
+        }
+    }
+
+    /// **B8 G2: a hosted run's menu is what its claude last reported.** `unavailable`
+    /// until the first init; then the answer's list, then each `commands_changed`'s,
+    /// without the init's screen-only commands and without [`REFUSED_SCREENS`], each
+    /// with claude's description and argument hint, the answer's claude version and when
+    /// the list was taken; a restarted ccd answers the same. And the other way: every
+    /// command claude lists is either offered or one ccd refuses from its app screen (or
+    /// claude's screen-only), never both, from the one list.
+    #[tokio::test]
+    async fn a_hosted_runs_menu_is_what_its_claude_last_reported() {
+        let rig = rig();
+        let before = protocol::time::now_rfc3339();
+        let mut played = live_run(&rig).await;
+        let after = protocol::time::now_rfc3339();
+        let uid = played.uid.clone();
+        assert_eq!(
+            rig.daemon.command_catalog(&uid).await,
+            CommandCatalogResult::Unavailable {
+                reason: "Claude hasn't listed its commands for this session yet.".into()
+            }
+        );
+        init_with_screen_only(&mut played, 3, "9d1f0000-0000-4000-8000-000000000020").await;
+        let first = rig.daemon.command_catalog(&uid).await;
+        assert_eq!(
+            offered(&first),
+            [CommandEntry {
+                name: "compact".into(),
+                description: String::new(),
+                argument_hint: None
+            }]
+        );
+        let CommandCatalogResult::Available {
+            claude_version,
+            probed_at,
+            ..
+        } = &first
+        else {
+            unreachable!()
+        };
+        assert_eq!(claude_version.as_deref(), Some("2.1.322"));
+        assert!(
+            before <= *probed_at && *probed_at <= after,
+            "{before} {probed_at} {after}"
+        );
+        sdk(&mut played.write, 4, commands_changed()).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let changed = rig.daemon.command_catalog(&uid).await;
+        let expected = [
+            CommandEntry {
+                name: "usage".into(),
+                description: "Show plan usage limits".into(),
+                argument_hint: None,
+            },
+            CommandEntry {
+                name: "compact".into(),
+                description: "Clear conversation history but keep a summary in context".into(),
+                argument_hint: Some("<optional custom summarization instructions>".into()),
+            },
+        ];
+        assert_eq!(offered(&changed), expected);
+        let names: Vec<String> = offered(&changed)
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        for command in commands_changed()["commands"].as_array().unwrap() {
+            let name = command["name"].as_str().unwrap();
+            let refused = refused_screen(&format!("/{name}"), true).is_some();
+            let screen_only = name == "doctor";
+            assert_eq!(
+                names.iter().any(|offered| offered == name),
+                !refused && !screen_only,
+                "{name}"
+            );
+        }
+        for (name, reason) in REFUSED_SCREENS {
+            assert_eq!(refused_screen(&format!("/{name} x"), true), Some(reason));
+            assert_eq!(refused_screen(&format!("/{name}"), false), Some(reason));
+            assert_eq!(refused_screen(&format!("/{name} x"), false), None, "typed");
+        }
+        stop(&played.dir);
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        assert_eq!(restarted.command_catalog(&uid).await, changed);
+    }
+
+    #[tokio::test]
+    async fn the_minor_38_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-38-wire.json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(FIXTURE).unwrap(),
+            derived_minor_38_wire().await,
+            "the committed minor 38 wire fixture no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_38_wire_fixture, then copy it over any copy under ios/ \
+             or the Kit"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-38-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_38_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_38_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-38-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The catalog request an app sends for a hosted run; the answers before the run's first
+    /// init and after a `commands_changed`, from a run on a stand-in host (`probed_at` is
+    /// when the list was taken, so it is fixed here); a command's output from each of the
+    /// SDK's three ways, as the run's events file it; and the `/status` refusal.
+    async fn derived_minor_38_wire() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let answer = |result: CommandCatalogResult| {
+            let mut frame = serde_json::to_value(protocol::ws::ServerMessage::CommandCatalog {
+                session_id: fixed.into(),
+                result,
+            })
+            .unwrap();
+            if frame["result"]["status"] == "available" {
+                frame["result"]["probed_at"] = "2026-11-15T09:00:00Z".into();
+            }
+            frame
+        };
+        let before_init = rig.daemon.command_catalog(&uid).await;
+        init_with_screen_only(&mut played, 3, "9d1f0000-0000-4000-8000-000000000020").await;
+        sdk(&mut played.write, 4, commands_changed()).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let available = rig.daemon.command_catalog(&uid).await;
+        let outputs = [
+            serde_json::json!({"type": "user", "uuid": "9d1f0000-0000-4000-8000-000000000031", "isReplay": true,
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "message": {"role": "user", "content": "<local-command-stdout>Compacted </local-command-stdout>"}}),
+            serde_json::json!({"type": "assistant", "uuid": "9d1f0000-0000-4000-8000-000000000032",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": "Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead"}]},
+                "local_command_run": {"command": "effort", "args": "low"},
+                "local_command_source": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"}),
+            serde_json::json!({"type": "system", "subtype": "local_command_output", "uuid": "9d1f0000-0000-4000-8000-000000000033",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "content": "Current session: 3% used"}),
+        ];
+        for (seq, message) in (5..).zip(outputs) {
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let status = send_as_app(&rig.daemon, &uid, "status-1", "/status").await;
+        let events = stored(&rig, &uid);
+        stop(&played.dir);
+        let row = |item: &str| {
+            events
+                .iter()
+                .find(|event| event["item_id"] == item)
+                .map(
+                    |event| serde_json::json!({"kind": event["kind"], "payload": event["payload"]}),
+                )
+                .expect("the event")
+        };
+        serde_json::json!({
+            "catalog_request": serde_json::to_value(protocol::ws::ClientMessage::GetCommandCatalog {
+                session_id: fixed.into(),
+            })
+            .unwrap(),
+            "catalog_before_first_init": answer(before_init),
+            "catalog": answer(available),
+            "output_replayed": row("9d1f0000-0000-4000-8000-000000000031"),
+            "output_effort": row("9d1f0000-0000-4000-8000-000000000032"),
+            "output_local_command": row("9d1f0000-0000-4000-8000-000000000033"),
+            "status_refused": serde_json::to_value(protocol::ws::ServerMessage::SendTextResult {
+                session_id: fixed.into(),
+                result: status,
+            })
+            .unwrap(),
+        })
+    }
+
     /// **B6 G11: a request too large to show** is refused at once: the host is answered
     /// deny with the reason claude reads, no card is raised, and the run goes on.
     #[tokio::test]
@@ -7419,6 +7733,81 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         false
+    }
+
+    /// **B8 G6: a real claude's command menu and a command's output reach the app**
+    /// (app-qa's rig). After a first turn, the run's catalog is what claude reported: none
+    /// of a claude.ai connector's commands, of its screen-only ones or of
+    /// [`REFUSED_SCREENS`], and `usage` among them. Then `/effort low` and `/usage`, each
+    /// sent as a message, file their output as a terminal run does: a `user_message` with
+    /// claude's `<local-command-stdout>` string, printed, which records what a headless
+    /// `/usage` prints. Then End run, as G2. Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_lists_its_commands_and_files_their_output() {
+        let (rig, uid, host_pid) = real_claude_run("g6b8", "Reply with the single word ok.").await;
+        let first = settled_after_words(&rig, &uid).await;
+        let catalog = rig.daemon.command_catalog(&uid).await;
+        let screen_only = rig
+            .daemon
+            .db
+            .hosted_commands(uid.clone())
+            .await
+            .unwrap()
+            .and_then(|kept| kept.screen_only)
+            .unwrap_or_default();
+        let outputs = |rig: &Rig| -> Vec<String> {
+            stored(rig, &uid)
+                .iter()
+                .filter(|event| event["kind"] == "user_message")
+                .filter_map(|event| event["payload"]["message"]["content"].as_str())
+                .filter(|content| content.starts_with("<local-command-std"))
+                .map(str::to_string)
+                .collect()
+        };
+        let mut said = Vec::new();
+        for command in ["/effort low", "/usage"] {
+            let before = outputs(&rig).len();
+            let sent = send_as_app(&rig.daemon, &uid, command, command).await;
+            let settled = settled_after_words(&rig, &uid).await;
+            said.push((command, sent, settled, outputs(&rig)[before..].to_vec()));
+        }
+        println!(
+            "B8 G6: first turn settled {first}; screen-only {screen_only:?}; catalog {catalog:?}"
+        );
+        for (command, sent, settled, output) in &said {
+            println!("B8 G6: {command}: {sent:?}; settled {settled}; output {output:?}");
+        }
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("B8 G6: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert!(first, "the first turn did not settle");
+        let CommandCatalogResult::Available { commands, .. } = &catalog else {
+            panic!("no menu: {catalog:?}");
+        };
+        for name in commands {
+            assert!(
+                !name.starts_with("claude.ai "),
+                "a connector's command: {name}"
+            );
+            assert!(!screen_only.contains(name), "a screen-only command: {name}");
+            assert!(
+                REFUSED_SCREENS.iter().all(|(refused, _)| refused != name),
+                "a refused screen's command: {name}"
+            );
+        }
+        assert!(commands.iter().any(|name| name == "usage"), "no usage");
+        for (command, sent, settled, output) in &said {
+            assert!(
+                matches!(sent, SendTextResult::Sent { .. }),
+                "{command}: {sent:?}"
+            );
+            assert!(*settled, "{command} did not settle");
+            assert!(!output.is_empty(), "{command} filed no output");
+        }
+        assert!(said[0].3[0].contains("effort"), "{:?}", said[0].3);
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(ended && host_gone, "the run did not end");
+        assert_eq!(left, Vec::<String>::new());
     }
 
     /// **B7 part 2 S11: a real claude's turn stopped from the app** (app-qa's rig). Turn 1:

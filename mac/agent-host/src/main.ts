@@ -6,7 +6,8 @@
 //
 // The first `start` runs the run's one query() (start.ts); a later one is ignored. claude stays in the host's process
 // group (H2). The start's outcome carries the initialize answer, or the reason the start failed. After an answer,
-// every message the query yields follows as `sdk`; after a refusal, none does. A `say` is one more message from the
+// every message the query yields follows as `sdk`, a `commands_changed` without the claude.ai connectors' commands as
+// the answer is (start.ts); after a refusal, none does. A `say` is one more message from the
 // person, given to the query in the order ccd sent it, with its outcome `done` once the SDK has taken it; one the run
 // cannot take (before the start, or once its input has ended) is `refused`. claude's permission requests are held for
 // ccd's `answer` (permissions.ts), each answer told back once the SDK has written it into claude's input; the state
@@ -27,6 +28,7 @@ import { HOST_PROTOCOL_VERSION, type HostFile, type ToHost } from './protocol.ts
 import {
   type Facts,
   firstMessage,
+  forwarded,
   initializeAnswer,
   noteMessage,
   oneLine,
@@ -234,7 +236,7 @@ function begin(start: Start): void {
       for await (const message of run) {
         if (!answered) continue;
         facts = noteMessage(facts, message);
-        link.send({ type: 'sdk', message });
+        link.send({ type: 'sdk', message: forwarded(message) });
         noteTurn(message);
       }
     } catch (error) {

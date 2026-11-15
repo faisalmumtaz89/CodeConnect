@@ -91,7 +91,7 @@ test("claude is the host's own child, in the host's process group, and host.json
   expect(statSync(join(dir, 'host.json')).mode & 0o777).toBe(0o600);
 }, 10_000);
 
-test("the start's outcome carries the commands, the models and only the account's provider: the email and organization never leave the host", async () => {
+test("the start's outcome carries the commands, the models, claude's version and only the account's provider: the email and organization never leave the host", async () => {
   const { dir, start, outcome, ccd } = await run(trustedStart, { after_user: [sessionInit] });
   expect(outcome).toStrictEqual({
     type: 'outcome',
@@ -102,6 +102,7 @@ test("the start's outcome carries the commands, the models and only the account'
       commands: recorded.response.response.commands,
       models: recorded.response.response.models,
       account: { api_provider: recorded.response.response.account.apiProvider },
+      claude_code_version: recorded.response.response.claude_code_version,
     },
   });
   await ccd.line("the stand-in's init", (line) => line.type === 'sdk');
@@ -128,7 +129,23 @@ test("the start's outcome leaves out the claude.ai connectors' commands, which n
   }
 }, 10_000);
 
-test("every message the query yields reaches ccd untouched, and the state then names the init's session, model and mode", async () => {
+test("a commands_changed reaches ccd without the claude.ai connectors' commands, and with every other command as claude wrote it", async () => {
+  // The recorded session's own commands_changed, with the made-up rows of the outcome's test added.
+  const own = { name: 'review-diff', description: 'Review the diff (user)', argumentHint: '' };
+  const connector = { name: 'claude.ai Marker Connector 7f3a:search (MCP)', description: 'A connector command', argumentHint: '' };
+  const prompt = { name: 'notes:summarize (MCP)', description: 'Summarize the notes', argumentHint: '' };
+  const changed = JSON.parse(fixture('claude/sdk-session-0.3.322.jsonl').split('\n')[4]!);
+  expect(changed.subtype).toBe('commands_changed');
+  const marked = { ...changed, commands: [...changed.commands, own, connector, prompt] };
+  const { dir, ccd } = await run(trustedStart, { after_user: [sessionInit, JSON.stringify(marked)] });
+  const sdk = await ccd.line('the commands_changed', (line) => line.type === 'sdk' && line.message.subtype === 'commands_changed');
+  expect(sdk.message).toStrictEqual({ ...changed, commands: [...changed.commands, own, prompt] });
+  for (const text of [JSON.stringify(ccd.lines), readFileSync(join(dir, 'host.log'), 'utf8')]) {
+    expect(text).not.toContain(connector.name);
+  }
+}, 10_000);
+
+test("every other message the query yields reaches ccd untouched, and the state then names the init's session, model and mode", async () => {
   const { ccd } = await run(trustedStart, { after_user: [sessionInit] });
   const sdk = await ccd.line("the stand-in's init", (line) => line.type === 'sdk');
   const init = JSON.parse(sessionInit);

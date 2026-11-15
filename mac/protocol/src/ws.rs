@@ -301,7 +301,9 @@ pub enum ClientMessage {
     /// honestly and to refuse, client-side, the picker-shaped ones that would
     /// open a dialog on the Mac's screen and lock the composer. Session-scoped
     /// because the binary is: each run registered the executable it was
-    /// launched with, and two sessions may straddle an upgrade.
+    /// launched with, and two sessions may straddle an upgrade. A run
+    /// CodeConnect started is answered from the list its own claude last
+    /// reported (minor 38).
     GetCommandCatalog {
         session_id: String,
     },
@@ -1683,11 +1685,16 @@ pub struct CodexResolutionPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CommandCatalogResult {
-    /// The binary's own inventory, read from its init message. Names come
+    /// The binary's own inventory, read from its init message, or, for a run
+    /// CodeConnect started, the list its claude last reported. Names come
     /// without the leading slash, exactly as emitted — the daemon adds and
     /// invents nothing.
     Available {
         commands: Vec<String>,
+        /// What claude says of each command, for a run CodeConnect started
+        /// (minor 38); empty, and left out, for one probed from its binary.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entries: Vec<CommandEntry>,
         /// The version the init message reported, when it did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claude_version: Option<String>,
@@ -1699,6 +1706,17 @@ pub enum CommandCatalogResult {
     /// No list. A complete answer, not an error: the phone must fall back to
     /// treating built-ins conservatively, never to guessing.
     Unavailable { reason: String },
+}
+
+/// One command of a catalog, as claude describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandEntry {
+    /// Without the leading slash, as in `commands`.
+    pub name: String,
+    pub description: String,
+    /// What the command takes after its name, when claude names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2292,9 +2310,14 @@ mod tests {
             crate::PROTOCOL_MINOR >= 37,
             "Stop on a Claude run CodeConnect started (`claude_interrupt`) is minor 37"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 38,
+            "the command menu and a command's output on a Claude run CodeConnect started \
+             (`entries`) are minor 38"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 37);
+        assert_eq!(crate::PROTOCOL_MINOR, 38);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3088,12 +3111,14 @@ mod tests {
             session_id: "u-1".into(),
             result: CommandCatalogResult::Available {
                 commands: vec!["model".into(), "clear".into()],
+                entries: Vec::new(),
                 claude_version: Some("2.1.221".into()),
                 probed_at: "2026-08-04T20:00:00Z".into(),
             },
         };
         let encoded = serde_json::to_string(&available).unwrap();
         assert!(encoded.contains(r#""status":"available""#), "{encoded}");
+        assert!(!encoded.contains("entries"), "{encoded}");
         match serde_json::from_str::<ServerMessage>(&encoded).unwrap() {
             ServerMessage::CommandCatalog {
                 result: CommandCatalogResult::Available { commands, .. },

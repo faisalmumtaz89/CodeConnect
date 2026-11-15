@@ -77,9 +77,25 @@ export function initializeAnswer(answer: {
   commands: Json[];
   models: Json[];
   account: { apiProvider?: string };
+  claude_code_version?: unknown;
 }): InitializeAnswer {
   const provider = answer.account.apiProvider;
-  return { commands: answer.commands.filter((command) => !isConnectorCommand(command)), models: answer.models, account: provider === undefined ? {} : { api_provider: provider } };
+  const version = answer.claude_code_version;
+  return {
+    commands: answer.commands.filter((command) => !isConnectorCommand(command)),
+    models: answer.models,
+    account: provider === undefined ? {} : { api_provider: provider },
+    ...(typeof version === 'string' ? { claude_code_version: version } : {}),
+  };
+}
+
+/**
+ * An SDK message as it goes to ccd: as the query yielded it, but a `system/commands_changed` without the claude.ai
+ * connectors' commands, as the initialize answer is.
+ */
+export function forwarded<M extends { type?: unknown; subtype?: unknown; commands?: unknown }>(message: M): M {
+  if (message.type !== 'system' || message.subtype !== 'commands_changed' || !Array.isArray(message.commands)) return message;
+  return { ...message, commands: (message.commands as Json[]).filter((command) => !isConnectorCommand(command)) } as M;
 }
 
 /** The run's facts as the start names them, until an init says otherwise (H4). */
