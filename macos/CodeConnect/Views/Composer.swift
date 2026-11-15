@@ -297,7 +297,7 @@ private struct Composer: View {
     }
 
     private func takesComposer(_ command: String) -> String {
-        "\(command) opens a view on \(computer) and would take over this composer. Use the Terminal tab to run it."
+        "\(command) opens a view on \(computer) and would take over this composer."
     }
 
     private func compact(prefill: String) {

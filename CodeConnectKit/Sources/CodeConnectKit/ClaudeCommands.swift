@@ -140,6 +140,9 @@ public enum ClaudeCommandPolicy {
     /// stronger than a test forbidding its use: the mistake cannot be
     /// written here again.
     public static func action(for text: String, recoversComposer: Bool) -> CommandAction {
+        // The iPhone's Terminal tab is where a refused command can still be run. The Mac app has none, so there a
+        // refusal ends at why.
+        func terminalTab(_ advice: String) -> String { HostDevice.current == .mac ? "" : " " + advice }
         guard let command = firstToken(text) else { return .passThrough }
         let args = arguments(of: text, command: command)
         if command == "model" {
@@ -188,22 +191,23 @@ public enum ClaudeCommandPolicy {
                 command: command,
                 reason:
                     "/\(command) opens a view on \(HostDevice.current.computer("the computer")) that Esc does not close, so "
-                    + "CodeConnect cannot recover the composer for you. "
-                    + "Use the Terminal tab to run it.")
+                    + "CodeConnect cannot recover the composer for you."
+                    + terminalTab("Use the Terminal tab to run it."))
         }
         if dialogCommands.contains(command) {
             return .blocked(
                 command: command,
                 reason:
                     "/\(command) opens a view on \(HostDevice.current.computer("the computer")) and would take over this "
-                    + "composer. Use the Terminal tab to run it.")
+                    + "composer." + terminalTab("Use the Terminal tab to run it."))
         }
         if unobservableCommands.contains(command) {
             return .blocked(
                 command: command,
                 reason:
-                    "/\(command) changes something CodeConnect cannot yet observe. "
-                    + "Use the Terminal tab until \(HostDevice.current.computer("the computer")) reports it back to the app.")
+                    "/\(command) changes something CodeConnect cannot yet observe."
+                    + terminalTab(
+                        "Use the Terminal tab until \(HostDevice.current.computer("the computer")) reports it back to the app."))
         }
         // Everything else — a measured-inline built-in, a custom skill, a
         // project command, a typo — is typed. The supervisor's recovery

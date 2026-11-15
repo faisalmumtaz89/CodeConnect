@@ -52,10 +52,8 @@ struct MainWindow: View {
                     .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
-                    SessionPane(row: open, model: model, tab: tab(of: open.id)) {
-                        if let address = model.endpoint?.typedAddress { pairAgain(address) }
-                    }
-                    .id(open.id)
+                    SessionPane(row: open, model: model, tab: tab(of: open.id))
+                        .id(open.id)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -69,13 +67,10 @@ struct MainWindow: View {
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
         .onChange(of: opened) { chosen = nil }
-        // Esc closes the open run; a sheet's own Esc is its Cancel. Not while its terminal is shown: there Esc is the
-        // agent's (it interrupts a turn), and a window shortcut would take it before the terminal saw it. Nor while the
-        // composer is using it: Esc closes its list, or leaves its field, first.
+        // Esc closes the open run; a sheet's own Esc is its Cancel. Not while the composer is using it: Esc closes its
+        // list, or leaves its field, first.
         .background {
-            if opened != nil, adding == nil, !(chosen?.run == opened && chosen?.tab == .terminal),
-                composerHoldsEscape != true
-            {
+            if opened != nil, adding == nil, composerHoldsEscape != true {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -108,7 +103,7 @@ struct MainWindow: View {
     }
 
     /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run
-    /// opened from another run's terminal shows its conversation from its first frame.
+    /// opened from another run's changes shows its conversation from its first frame.
     private func tab(of run: String) -> Binding<SessionTab> {
         Binding(
             get: { chosen.flatMap { $0.run == run ? $0.tab : nil } ?? .conversation },

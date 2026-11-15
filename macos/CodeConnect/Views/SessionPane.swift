@@ -1,20 +1,13 @@
 import CodeConnectKit
 import SwiftUI
 
-/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation, its
-/// changes or its terminal. Opening and closing it mark the run reviewed, as the iPhone does; opening it opens no
-/// terminal.
+/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation or its
+/// changes. Opening and closing it mark the run reviewed, as the iPhone does.
 struct SessionPane: View {
     let row: FleetRow
     let model: AppModel
-    /// Which tab is shown: the window's, because Esc closes the run everywhere but in the terminal.
+    /// Which tab is shown: the window's, which keeps it for the run it was chosen on.
     @Binding var tab: SessionTab
-    /// The run's computer paired again, for a terminal its connection may not open.
-    let pairAgain: () -> Void
-    /// Whether this run's terminal was shown. It is built the first time its tab is, and kept after that, hidden
-    /// behind the conversation: the emulator holds the run's screen and scrollback, and Kit keeps only the stream's
-    /// tail, so a terminal rebuilt from it draws a wrong screen once the run has printed more than that.
-    @State private var terminalShown = false
     @State private var height: CGFloat = 0
     /// A request holds the reply box's place.
     @State private var boxTaken = false
@@ -30,8 +23,7 @@ struct SessionPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Place(summary: row.summary, computer: row.machineName) {
-                // Only on the conversation, where the composer's note says what became of the stop. On the terminal,
-                // Codex's own Esc stops the turn.
+                // Only on the conversation, where the composer's note says what became of the stop.
                 if tab == .conversation, row.summary.isCodex, model.stopUnavailable(for: row.id) == nil {
                     StopTurn(model: model, key: row.id)
                 }
@@ -65,12 +57,6 @@ struct SessionPane: View {
                     .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
                 }
                 if tab == .changes { ChangesTab(model: model, key: row.id) }
-                if tab == .terminal || terminalShown {
-                    TerminalTab(row: row, model: model, onScreen: tab == .terminal, pairAgain: pairAgain)
-                        .opacity(tab == .terminal ? 1 : 0)
-                        .allowsHitTesting(tab == .terminal)
-                        .accessibilityHidden(tab != .terminal)
-                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -80,7 +66,6 @@ struct SessionPane: View {
         .accessibilityIdentifier("session.pane")
         .onAppear { model.markReviewed(row.id) }
         .onDisappear { model.markReviewed(row.id) }
-        .onChange(of: tab) { if tab == .terminal { terminalShown = true } }
     }
 }
 
@@ -116,7 +101,7 @@ private struct Place<Actions: View>: View {
 }
 
 /// What the run is called, how it stands, which agent and model it is, the lines it has changed, how long ago it
-/// last said anything, and its three tabs.
+/// last said anything, and its two tabs.
 private struct Heading: View {
     let row: FleetRow
     let model: AppModel
@@ -180,13 +165,11 @@ private struct Heading: View {
 enum SessionTab: CaseIterable {
     case conversation
     case changes
-    case terminal
 
     var title: String {
         switch self {
         case .conversation: return "Conversation"
         case .changes: return "Changes"
-        case .terminal: return "Terminal"
         }
     }
 
@@ -195,7 +178,6 @@ enum SessionTab: CaseIterable {
         switch self {
         case .conversation: return "session.tab.conversation"
         case .changes: return "session.tab.changes"
-        case .terminal: return "session.tab.terminal"
         }
     }
 }
