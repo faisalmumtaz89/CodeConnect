@@ -154,6 +154,80 @@
     "tmux_session": "",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
+  "session_hosted_detached_events": [
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "fix the tests"
+      },
+      "seq": 1,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "daemon",
+      "source_event_id": "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b",
+      "ts": "2026-11-15T09:00:00.000Z"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000020",
+      "kind": "session_start",
+      "payload": {},
+      "seq": 2,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000020/session_start/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000031",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Compacted </local-command-stdout>"
+        }
+      },
+      "seq": 3,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000031/user_message/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000032",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"
+        }
+      },
+      "seq": 4,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000032/user_message/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-000000000033",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Current session: 3% used</local-command-stdout>"
+        }
+      },
+      "seq": 5,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-000000000033/user_message/0",
+      "ts": "2026-11-15T09:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-000000000020"
+    }
+  ],
   "session_hosted_live": {
     "agent": "claude",
     "blocked_on": [],

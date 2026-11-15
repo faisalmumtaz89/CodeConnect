@@ -5936,6 +5936,37 @@ mod tests {
         .unwrap();
     }
 
+    /// The run `uid`'s `events`, as the wire delivers them, with what differs between runs
+    /// pinned, each checked first: the run's uid, which is also its name (to `pinned`), each
+    /// event's clock read (to `ts`), and the start's uuid, which names the person's first
+    /// words in the daemon's own source id (`say:<start_uuid>`).
+    fn pinned_events(
+        events: &[protocol::event::Event],
+        uid: &str,
+        pinned: &str,
+        ts: &str,
+        start_uuid: &str,
+    ) -> serde_json::Value {
+        let first_words = format!("say:{start_uuid}");
+        let mut wire = serde_json::to_value(events).unwrap();
+        for event in wire.as_array_mut().unwrap() {
+            assert_eq!(event["session_uid"], uid);
+            assert_eq!(event["session_id"], uid);
+            assert!(
+                protocol::time::unix_ms_from_rfc3339(event["ts"].as_str().unwrap()).is_some(),
+                "ts is a clock read: {event}"
+            );
+            event["session_uid"] = pinned.into();
+            event["session_id"] = pinned.into();
+            event["ts"] = ts.into();
+            if event["source"] == "daemon" {
+                assert_eq!(event["source_event_id"], first_words.as_str(), "{event}");
+                event["source_event_id"] = "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b".into();
+            }
+        }
+        wire
+    }
+
     /// `summary` as an app reads it in the fleet, with what differs between runs pinned,
     /// each checked first: the run's uid (`uid` to `pinned`), and its name when that is the
     /// uid; the rig's folder (`root`) in `cwd`, and the label made from it; and the clock reads
@@ -6007,30 +6038,17 @@ mod tests {
         ];
         turn_begins(&mut played, 3, turns[0]).await;
         let hosted_live = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
-        let first_words = format!("say:{}", played.start_uuid());
-        let mut hosted_live_events = serde_json::to_value(
-            rig.daemon
+        let hosted_live_events = pinned_events(
+            &rig.daemon
                 .db
                 .events_after(uid.clone(), 0, 100)
                 .await
                 .unwrap(),
-        )
-        .unwrap();
-        for event in hosted_live_events.as_array_mut().unwrap() {
-            assert_eq!(event["session_uid"], uid.as_str());
-            assert_eq!(event["session_id"], uid.as_str());
-            assert!(
-                protocol::time::unix_ms_from_rfc3339(event["ts"].as_str().unwrap()).is_some(),
-                "ts is a clock read: {event}"
-            );
-            event["session_uid"] = fixed.into();
-            event["session_id"] = fixed.into();
-            event["ts"] = "2026-11-15T09:00:00.000Z".into();
-            if event["source"] == "daemon" {
-                assert_eq!(event["source_event_id"], first_words.as_str(), "{event}");
-                event["source_event_id"] = "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b".into();
-            }
-        }
+            &uid,
+            fixed,
+            "2026-11-15T09:00:00.000Z",
+            &played.start_uuid(),
+        );
         let (_, _) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "send-1", "and the docs"),
             host_takes(&mut played, 4, "done")
@@ -6274,7 +6292,9 @@ mod tests {
     /// hosted run; the answers before the run's first init and after a `commands_changed`,
     /// from a run on a stand-in host (`probed_at` is when the list was taken, so it is fixed
     /// here); the run's session summary as the fleet gives it once its menu is there, and
-    /// again with ccd's connection to its host down, the host still running; a command's
+    /// again with ccd's connection to its host down, the host still running, with the run's
+    /// events as the wire delivers them, its turn still running (claude's init, no result);
+    /// a command's
     /// output from each of the SDK's three ways, as the run's events file it; and the
     /// `/status` refusal.
     async fn derived_minor_38_wire() -> serde_json::Value {
@@ -6319,10 +6339,23 @@ mod tests {
         let status = send_as_app(&rig.daemon, &uid, "status-1", "/status").await;
         let events = stored(&rig, &uid);
         let dir = played.dir.clone();
+        let start_uuid = played.start_uuid();
         drop(played);
         until_detached(&rig.daemon, &uid).await;
         let hosted_detached =
             pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        assert!(rig.daemon.db.turn_running(uid.clone()).await.unwrap());
+        let hosted_detached_events = pinned_events(
+            &rig.daemon
+                .db
+                .events_after(uid.clone(), 0, 100)
+                .await
+                .unwrap(),
+            &uid,
+            fixed,
+            "2026-11-15T09:00:00.000Z",
+            &start_uuid,
+        );
         stop(&dir);
         let row = |item: &str| {
             events
@@ -6337,6 +6370,7 @@ mod tests {
             "hello_ack_capabilities": crate::ws_server::capabilities(&rig.daemon, false, false, true),
             "session_hosted_live": hosted_live,
             "session_hosted_detached": hosted_detached,
+            "session_hosted_detached_events": hosted_detached_events,
             "catalog_request": serde_json::to_value(protocol::ws::ClientMessage::GetCommandCatalog {
                 session_id: fixed.into(),
             })
@@ -7213,7 +7247,6 @@ mod tests {
     async fn the_capture_as_the_wire_delivers_it() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
-        let first_words = format!("say:{}", played.start_uuid());
         for (index, message) in capture().into_iter().enumerate() {
             let seq = index as u64 + 3;
             sdk(&mut played.write, seq, message).await;
@@ -7226,24 +7259,13 @@ mod tests {
             .await
             .unwrap();
         stop(&played.dir);
-        let mut wire = serde_json::to_value(&events).unwrap();
-        for event in wire.as_array_mut().unwrap() {
-            assert_eq!(event["session_uid"], played.uid.as_str());
-            assert_eq!(event["session_id"], played.uid.as_str());
-            assert!(
-                protocol::time::unix_ms_from_rfc3339(event["ts"].as_str().unwrap()).is_some(),
-                "ts is a clock read: {event}"
-            );
-            event["session_uid"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
-            event["session_id"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
-            event["ts"] = serde_json::json!("2026-11-13T12:00:00.000Z");
-            if event["source"] == "daemon" {
-                assert_eq!(event["source_event_id"], first_words.as_str(), "{event}");
-                event["source_event_id"] =
-                    serde_json::json!("say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b");
-            }
-        }
-        wire
+        pinned_events(
+            &events,
+            &played.uid,
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "2026-11-13T12:00:00.000Z",
+            &played.start_uuid(),
+        )
     }
 
     /// **G6: the events of the recorded session as this build files and sends them**,
