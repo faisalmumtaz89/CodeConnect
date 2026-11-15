@@ -6249,6 +6249,47 @@ impl Daemon {
         // id, which the ledger would call a conflict.
         let claimed_hash = protocol::hash::compose_hash(&row.session_uid, &text);
 
+        // **A run started on the engine is spoken to through its own link**, which claims the
+        // message, sends it and settles it on Codex's evidence ([`crate::codex_host`]). With
+        // its link not attached, nothing is sent and the person is told so; a message already
+        // sent is answered from the ledger, since startup records it unknown and never sends
+        // it again.
+        let engine = match self.inner.lock().await.host_links.get(&session.uid) {
+            Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
+            _ => None,
+        };
+        if let Some(commands) = engine {
+            return Daemon::compose_result(
+                self.compose_on_engine(&commands, &session.uid, request_id, text, claimed_hash)
+                    .await,
+            );
+        }
+        if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) {
+            if let Some(recorded) = self
+                .settled_compose(&row.session_uid, request_id, &claimed_hash)
+                .await
+            {
+                return recorded;
+            }
+            let in_flight = matches!(
+                self.db
+                    .mutation_status(
+                        crate::store::OPERATION_COMPOSE,
+                        session.uid.clone(),
+                        request_id.to_string(),
+                    )
+                    .await,
+                Ok(Some(state)) if state.status == crate::store::AnswerStatus::Applying
+                    && state.claimed.claimed_hash == claimed_hash
+            );
+            if in_flight {
+                return ComposeResult::Indeterminate {
+                    reason: crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+                };
+            }
+            return refuse(crate::codex_refusals::ENGINE_NO_CONNECTION.into());
+        }
+
         // **There is no pre-claim ledger read here, and that is the point.**
         //
         // There used to be: this step asked `mutation_status` and reproduced the whole
@@ -6395,6 +6436,51 @@ impl Daemon {
             ),
         };
         Daemon::compose_result(report)
+    }
+
+    /// An engine run's message, handed to its link
+    /// ([`crate::codex_host::LinkCommand::Compose`]). A link that ended before answering is
+    /// reported by what the ledger then holds: no claim means nothing was sent, and a claim
+    /// means the message may have reached Codex.
+    async fn compose_on_engine(
+        &self,
+        commands: &tokio::sync::mpsc::UnboundedSender<crate::codex_host::LinkCommand>,
+        uid: &str,
+        request_id: &str,
+        text: String,
+        claimed_hash: String,
+    ) -> crate::codex_link::ComposeReport {
+        use crate::codex_link::ComposeReport;
+        let (reply, told) = tokio::sync::oneshot::channel();
+        let asked = commands.send(crate::codex_host::LinkCommand::Compose(
+            crate::codex_host::ComposeAsk {
+                request_id: request_id.to_string(),
+                text,
+                claimed_hash,
+                reply,
+            },
+        ));
+        if asked.is_ok() {
+            if let Ok(report) = told.await {
+                return report;
+            }
+        }
+        match self
+            .db
+            .mutation_status(
+                crate::store::OPERATION_COMPOSE,
+                uid.to_string(),
+                request_id.to_string(),
+            )
+            .await
+        {
+            Ok(None) => {
+                ComposeReport::NotApplied(crate::codex_refusals::ENGINE_NO_CONNECTION.into())
+            }
+            _ => ComposeReport::Unknown(crate::codex_refusals::compose_settled_unknown(
+                crate::codex_refusals::COMPOSE_CONNECTION_ENDED,
+            )),
+        }
     }
 
     /// **The one place a link's compose report becomes the phone's answer.**
@@ -10386,6 +10472,41 @@ impl Daemon {
         Ok(true)
     }
 
+    /// Settle the run's claim `request_id` of `operation_kind` as `outcome`, with `event`
+    /// filed by that settle alone, then fan out what was filed
+    /// ([`crate::store::Store::settle_mutation_with_event`]). A claim already terminal is
+    /// left as it is, and nothing is filed.
+    pub(crate) async fn settle_with_event(
+        &self,
+        session_uid: &str,
+        operation_kind: &'static str,
+        request_id: &str,
+        outcome: &'static str,
+        event: PendingEvent,
+    ) -> Result<()> {
+        let gate = self.publish_gate(session_uid).await;
+        let events = {
+            let _ordered = gate.lock().await;
+            let events = self
+                .db
+                .settle_mutation_with_event(
+                    operation_kind,
+                    session_uid.to_string(),
+                    request_id.to_string(),
+                    outcome,
+                    protocol::time::now_rfc3339(),
+                    event,
+                )
+                .await?;
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+        self.published(session_uid, &events).await;
+        Ok(())
+    }
+
     /// Commit the run's start outcome with its cursor and, when it makes the run live,
     /// `events`, the person's first words, then fan them out
     /// ([`crate::store::Store::commit_outcome`]). `false` when the cursor did not move:
@@ -10901,6 +11022,13 @@ impl Daemon {
             // `none` that says there is no link to have named it is a row nothing
             // can act on. So it is resolved here and both fields are read off it.
             let addressee = Self::codex_addressee_locked(inner, &row.session_uid);
+            // A run started on the engine has no tmux-era addressee: its own link started or
+            // resumed its thread and carries every ask to it, so while that link is attached
+            // and the run is live, an ask aimed at it can land.
+            let engine_link = matches!(
+                inner.host_links.get(&row.session_uid),
+                Some(HostLink::Codex(..))
+            ) && row.lifecycle == Lifecycle::Live;
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
@@ -10953,7 +11081,15 @@ impl Daemon {
                 // Deliberately NOT the row's `agent`: a Claude run resolves to
                 // `NoLink` and reports `none` on its own, so the two fields are
                 // independently true rather than one derived from the other.
-                codex_link: addressee.wire_link(),
+                //
+                // A run started on the engine reads `subscribed` while its link is attached and
+                // it is live, and `none` otherwise: before its reconnect, after one that failed,
+                // and while it is stopping. Both apps offer Stop and the composer on this field.
+                codex_link: if engine_link {
+                    protocol::event::CodexLink::Subscribed
+                } else {
+                    addressee.wire_link()
+                },
                 pending,
                 model: facts.and_then(|facts| facts.model.clone()),
                 permission_mode: facts.and_then(|facts| facts.permission_mode.clone()),

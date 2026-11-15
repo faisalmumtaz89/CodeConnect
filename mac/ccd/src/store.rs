@@ -1052,6 +1052,10 @@ pub const COMPOSE_ROUTE_STEER: &str = "turn_steer";
 /// This build gives back a refusal that proves nothing reached Codex
 /// ([`Store::release_mutation`]) and records any other answer as `indeterminate`.
 pub const COMPOSE_REFUSED: &str = "refused";
+/// A compose of an engine run that joined a running turn and was dropped when that turn
+/// was stopped: Codex recorded no message carrying its id before the turn's interrupted
+/// end. Settled with its `send_not_sent` notice, and replayed as a refusal.
+pub const COMPOSE_STOPPED: &str = "stopped";
 
 /// **The recorded outcome of a compose that reached the model**, which is the route it
 /// took and the turn that heard it.
@@ -1093,6 +1097,7 @@ pub fn parse_compose_outcome(outcome: &str) -> Option<(&str, &str)> {
 pub fn replayed_compose_sentence(outcome: &str) -> String {
     match outcome {
         COMPOSE_REFUSED => crate::codex_refusals::REPLAY_COMPOSE_REFUSED.to_string(),
+        COMPOSE_STOPPED => crate::codex_refusals::REPLAY_COMPOSE_STOPPED.to_string(),
         // **The outcome is not interpolated.** A row this build cannot read carries a
         // turn id the phone never sent — `parse_compose_outcome` refuses an unknown route
         // and lands here — and there is nothing in the stored word a caller can act on
@@ -5640,6 +5645,40 @@ impl Store {
             ],
         )?;
         Ok(updated == 1)
+    }
+
+    /// [`Store::settle_mutation`] with `event` filed in the same transaction, only by the
+    /// settle that wins, so the outcome and the fact it is told by cannot land apart. The
+    /// events newly stored: none when the claim was already terminal.
+    pub fn settle_mutation_with_event(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+        client_request_id: &str,
+        outcome: &str,
+        settled_at: &str,
+        event: &PendingEvent,
+    ) -> Result<Vec<Event>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE mutation_ledger SET status = 'done', outcome = ?4, settled_at = ?5
+              WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3
+                AND status = 'applying'",
+            params![
+                operation_kind,
+                session_uid,
+                client_request_id,
+                outcome,
+                settled_at
+            ],
+        )?;
+        let mut filed = Vec::new();
+        if updated == 1 {
+            filed.extend(append_in_tx(&tx, event)?);
+        }
+        tx.commit()?;
+        Ok(filed)
     }
 
     /// **Give back a claim whose write was refused before it did anything**, so the same

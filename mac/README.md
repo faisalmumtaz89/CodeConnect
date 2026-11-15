@@ -1264,12 +1264,27 @@ An app's Stop (`interrupt`) stops the turn it names through the same link,
 and is answered when that turn ends: `aborted` with the turn when Codex ended it
 interrupted, or, if the turn finished on its own first, a sentence saying so. A card the
 turn was waiting on closes. A retry with the same request id is answered from the first,
-and a Stop for a turn whose stop is already on its way is refused at once. While a run's
-link is not attached, before its reconnect or after one that failed, an answer and a Stop
-are refused with "CodeConnect has no connection to this run right now, so nothing was
-sent." A retry of one already sent and not yet settled is answered from what was recorded
-instead: a Stop is told it was sent and what became of it is not known, and an answer that
-it is already waiting to be confirmed. A run that a
+and a Stop for a turn whose stop is already on its way is refused at once.
+Both apps offer Stop and the composer on the run's `codex_link` in the fleet. For a run
+started on the engine it reads `subscribed` while the run's link is attached and the run is
+`live`, and `none` otherwise: before its reconnect, after one that failed, and while it is
+stopping.
+An app's message (`compose`) goes through the same link as `turn/start`, under a uuid named
+from the run and the request id, as a Claude run's message is. Codex runs it as a new turn
+when the run is idle, and adds it to the running turn otherwise. The answer names that turn
+(`started` or `steered`), and the person's row of the message, with its `request_id`, is
+filed then; Codex's own record of the same words is not filed again. Codex reads a message
+added to a running turn at the turn's next step. If the turn is stopped first, Codex drops
+the message without saying so, and ccd files a `send_not_sent` notice for it ("Not sent:
+stopped", with its `request_id`). The evidence is that Codex recorded no message under its
+uuid before the turn ended interrupted, which is the evidence Codex's own client hands a
+message back on. A retry with the same request id is answered from the first, and a retry of
+a stopped message is told it was not sent and is not sent again. While a run's
+link is not attached, before its reconnect or after one that failed, an answer, a Stop and
+a message are refused with "CodeConnect has no connection to this run right now, so nothing
+was sent." A retry of one already sent and not yet settled is answered from what was
+recorded instead: a Stop or a message is told it was sent and what became of it is not
+known, and an answer that it is already waiting to be confirmed. A run that a
 restarted daemon finds still `starting` is `failed`, whatever became of its start, before
 the daemon listens, and its recorded process group gets the same ladder under the same
 warrant. Nothing is sent again, so a first message Codex had already taken is lost with
@@ -1847,6 +1862,17 @@ fails the suite instead of failing silently in production.
 * **On a Codex run started from an app, every one of CodeConnect's mail tools asks
   first.** `list_agents` and `read_messages` show a card like `send_message` until they
   are marked as only reading.
+* **On a Codex run started from an app, a message whose turn's end ccd never sees keeps
+  its last state.** If the connection to Codex ends, or ccd restarts, while a message added
+  to a running turn waits for Codex to read it, ccd records that what became of it is not
+  known. It is not sent again, and no notice says it was not sent, even if a Stop dropped it.
+* **On a Codex run started from an app, a message taken just as a turn finishes waits for
+  the next work.** Codex records it as the turn ends, with no model step after it, so it is
+  answered only when the run next works, for example on the next message.
+* **On a Codex run started from an app, the composer and Stop can take up to about 15 s to
+  appear after the run starts, and again after ccd restarts.** The apps learn that the run is
+  ready from the fleet, which ccd sends only when asked and the apps ask for every 15 s. Until
+  then they say there is no live link to the session.
 * **A message ccd took but could not hand to Claude before it stopped is not
   confirmed.** If ccd stops in the instant between recording a message to a session
   started from an app and passing it to that session's agent host, the app says the

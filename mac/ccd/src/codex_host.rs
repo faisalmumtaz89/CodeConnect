@@ -32,8 +32,10 @@
 //! notification it brings is mapped by the Codex adapter and filed, for both apps. When a
 //! ccd restarts, each `live` run whose app-server is alive is connected again
 //! ([`reconnect`]): its thread resumed with the preset and its thread config, the turns it
-//! ran meanwhile filed from the answer, and its link kept from there. An app's Stop and End
-//! run reach the run through its link too ([`LinkCommand`]).
+//! ran meanwhile filed from the answer, and its link kept from there. An app's Stop, its
+//! later messages and End run reach the run through its link too ([`LinkCommand`]). A message
+//! is a `turn/start` under its own uuid, which Codex runs as a new turn or adds to the running
+//! one; it is settled by what Codex then records of it ([`compose`], [`heard`]).
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -43,7 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::agent::AgentKind;
-use protocol::event::{Lifecycle, PendingEvent, SessionKey};
+use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::host::Trust;
 use protocol::proc_identity::{
     group_has_members, group_warrant, liveness, read_birth_identity, BootIdentity, GroupWarrant,
@@ -56,7 +58,7 @@ use tokio::time::Instant;
 use crate::codex_adapter::CodexAdapter;
 use crate::codex_approval::{Approval, Family};
 use crate::codex_client::{CallError, Client};
-use crate::codex_link::{AnswerReport, AnswerRequest, InterruptReport};
+use crate::codex_link::{AnswerReport, AnswerRequest, ComposeReport, InterruptReport};
 use crate::state::{Daemon, HostLink, Retirement};
 use crate::store::{AnswerStatus, AnswerTerminal, LiveCodexRun, SessionRow};
 use protocol::composite_id::{CompositeId, ServerRequestId};
@@ -243,7 +245,7 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
             ))
         });
     let to = match &sent {
-        Ok(()) => Lifecycle::Live,
+        Ok(_) => Lifecycle::Live,
         Err(why) => {
             crate::log_info!("{uid}: did not start: {why}");
             Lifecycle::Failed
@@ -264,12 +266,16 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
             false
         }
     };
-    if sent.is_err() {
-        drop(client);
-        stop(&uid, send.leader, send.boot).await;
-    } else if advanced {
-        let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
-        link(daemon, uid, client, adapter, None, HashMap::new()).await;
+    match sent {
+        Err(_) => {
+            drop(client);
+            stop(&uid, send.leader, send.boot).await;
+        }
+        Ok(thread) if advanced => {
+            let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
+            link(daemon, uid, thread, client, adapter, None, HashMap::new()).await;
+        }
+        Ok(_) => {}
     }
 }
 
@@ -291,8 +297,43 @@ pub(crate) enum LinkCommand {
         turn_id: String,
         reply: tokio::sync::oneshot::Sender<InterruptReport>,
     },
+    /// A phone's message for the run ([`compose`]).
+    Compose(ComposeAsk),
     /// End run's graceful step ([`stop_gracefully`]).
     Stop,
+}
+
+/// A phone's message `text` under its request id and the hash [`Daemon::compose`] binds it
+/// to, its outcome told on `reply`.
+pub(crate) struct ComposeAsk {
+    pub(crate) request_id: String,
+    pub(crate) text: String,
+    pub(crate) claimed_hash: String,
+    pub(crate) reply: tokio::sync::oneshot::Sender<ComposeReport>,
+}
+
+/// A phone's message Codex has taken into the turn `turn`, waiting for Codex to record it
+/// under its `uuid`, or for that turn's end ([`heard`]).
+struct WaitingSend {
+    request_id: String,
+    claimed_hash: String,
+    uuid: String,
+    turn: String,
+    /// Whether it started `turn` or joined it: [`crate::store::COMPOSE_ROUTE_START`] or
+    /// [`crate::store::COMPOSE_ROUTE_STEER`].
+    route: &'static str,
+}
+
+impl WaitingSend {
+    /// What the phone was told when Codex took it.
+    fn report(&self) -> ComposeReport {
+        let turn_id = self.turn.clone();
+        if self.route == crate::store::COMPOSE_ROUTE_STEER {
+            ComposeReport::Steered { turn_id }
+        } else {
+            ComposeReport::Started { turn_id }
+        }
+    }
 }
 
 /// A phone's Stop that Codex has taken, waiting for its turn's end to say what became of it
@@ -323,10 +364,13 @@ const TOOL_SCAN: Duration = Duration::from_secs(1);
 /// `cards` holds the run's cards a restart found still standing.
 ///
 /// The daemon's other asks come on the link's command channel ([`LinkCommand`]): a phone's
-/// Interrupt for the turn the link is running, and End run's graceful step. The running turn
-/// is the one Codex's last `turn/started` named, or the one a resume found still running,
-/// until its `turn/completed`, or until Codex answers an interrupt of it: Codex answers just
-/// before the turn's end. A phone's Stop that Codex has taken waits for that end.
+/// Interrupt for the turn the link is running, a phone's message for the run's `thread`, and
+/// End run's graceful step. The running turn is the one Codex's last `turn/started` named, or
+/// the one a resume found still running, until its `turn/completed`, or until Codex answers an
+/// interrupt of it: Codex answers just before the turn's end. A phone's Stop that Codex has
+/// taken waits for that end; a phone's message that Codex has taken waits for Codex to record
+/// it, or for its turn's end ([`heard`]). The person's words a message filed are not filed
+/// again from Codex's own record of them ([`unfiled`]).
 ///
 /// When the connection ends, the run is ended once its app-server's leader is gone, within
 /// [`EXIT_WAIT`]: Codex closes its connections a moment before it exits.
@@ -339,6 +383,7 @@ const TOOL_SCAN: Duration = Duration::from_secs(1);
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
+    thread: String,
     mut client: Client,
     mut adapter: CodexAdapter,
     mut owed: Option<Owed>,
@@ -354,6 +399,7 @@ async fn link(
         .as_ref()
         .map(|owed| (owed.thread.clone(), owed.turn.clone()));
     let mut stops: Vec<WaitingStop> = Vec::new();
+    let mut sends: Vec<WaitingSend> = Vec::new();
     let host = daemon
         .db
         .watched_host(uid.clone())
@@ -401,7 +447,9 @@ async fn link(
                 let ended = (frame["method"] == "turn/completed")
                     .then(|| frame["params"]["turn"]["id"].as_str().map(str::to_string))
                     .flatten();
-                file(&daemon, &uid, adapter.ingest(&frame)).await;
+                let events = adapter.ingest(&frame);
+                file(&daemon, &uid, unfiled(&daemon, &uid, &[&frame["params"]["item"]], events).await).await;
+                heard(&daemon, &uid, &mut sends, &frame).await;
                 let Some(due) =
                     owed.take_if(|owed| ended.as_deref() == Some(owed.turn.as_str()))
                 else {
@@ -441,6 +489,17 @@ async fn link(
                         None => stops.push(WaitingStop { request_id, turn: turn_id, reply }),
                     }
                 }
+                LinkCommand::Compose(ask) => {
+                    // The turns a message can join: the running one, and one whose Stop Codex
+                    // has taken, which runs until its end.
+                    let live: Vec<&str> = running
+                        .iter()
+                        .map(|(_, turn)| turn.as_str())
+                        .chain(stops.iter().map(|stop| stop.turn.as_str()))
+                        .collect();
+                    let told = compose(&daemon, &uid, &client, &thread, &live, &mut sends, &ask).await;
+                    let _ = ask.reply.send(told);
+                }
                 LinkCommand::Stop => {
                     record_tools(host.as_ref(), &mut tools);
                     stop_gracefully(&daemon, &uid, &client, &mut running).await;
@@ -449,7 +508,8 @@ async fn link(
         }
     }
     // A Stop Codex took and whose turn's end never came: its claim stays `applying`, for
-    // startup's settle.
+    // startup's settle. So does a message Codex took that it never recorded before the
+    // connection ended.
     for stop in stops {
         let _ = stop.reply.send(InterruptReport::Unknown(
             crate::codex_refusals::interrupt_settled_unknown(
@@ -986,6 +1046,227 @@ async fn recorded_interrupt(
     })
 }
 
+/// A phone's message for the run's `thread` (X5). A retry of a message still waiting is told
+/// what the first was; otherwise what the record already says of this exact ask is the
+/// answer, or the ask is claimed and sent as `turn/start` under its own uuid
+/// ([`crate::claude_host::send_uuid`]). Codex runs it as a new turn when the thread is idle
+/// and adds it to the turn it is running otherwise, and answers with that turn: one of the
+/// `live` turns, which it joined, or a new one, which it started. Once Codex takes it, the
+/// person's words are filed with its request id, and it waits for what Codex records of it
+/// ([`heard`]). Codex's own refusal gives the claim back, so the same ask is a first attempt
+/// again; a connection that ends first leaves it `applying`, for startup's settle.
+async fn compose(
+    daemon: &Daemon,
+    uid: &str,
+    client: &Client,
+    thread: &str,
+    live: &[&str],
+    sends: &mut Vec<WaitingSend>,
+    ask: &ComposeAsk,
+) -> ComposeReport {
+    use crate::codex_refusals as says;
+    use crate::store::{MutationClaim, OPERATION_COMPOSE};
+    if let Some(send) = sends.iter().find(|send| send.request_id == ask.request_id) {
+        return if send.claimed_hash == ask.claimed_hash {
+            send.report()
+        } else {
+            ComposeReport::NotApplied(says::COMPOSE_ID_REUSED.into())
+        };
+    }
+    // What is written is a `turn/start` whichever way Codex then runs it, so a retry builds the
+    // same material.
+    let claimed = crate::store::ClaimedMaterial {
+        thread_id: thread.to_string(),
+        generation: 0,
+        route: crate::store::COMPOSE_ROUTE_START.to_string(),
+        target_turn_id: None,
+        claimed_hash: ask.claimed_hash.clone(),
+    };
+    let claim = daemon
+        .db
+        .claim_mutation(
+            OPERATION_COMPOSE,
+            uid.to_string(),
+            ask.request_id.clone(),
+            claimed,
+            protocol::time::now_rfc3339(),
+        )
+        .await;
+    match claim {
+        Ok(MutationClaim::Claimed) => {}
+        Ok(MutationClaim::Applied { outcome, .. }) => {
+            return crate::codex_link::replayed_compose_report(&outcome)
+        }
+        Ok(MutationClaim::Indeterminate { .. }) => {
+            return ComposeReport::Unknown(says::COMPOSE_ALREADY_SENT_UNKNOWN.into())
+        }
+        Ok(MutationClaim::Conflict) => {
+            return ComposeReport::NotApplied(says::COMPOSE_ID_REUSED.into())
+        }
+        Ok(MutationClaim::NoSession) => {
+            return ComposeReport::NotApplied(says::COMPOSE_RUN_IS_GONE.into())
+        }
+        Err(err) => {
+            crate::log_error!(
+                "{uid}: could not claim the message {}: {err:#}",
+                crate::state::logged_request_id(&ask.request_id)
+            );
+            return ComposeReport::NotApplied(says::COMPOSE_CLAIM_UNRECORDED.into());
+        }
+    }
+    let uuid = crate::claude_host::send_uuid(uid, &ask.request_id);
+    let params = json!({
+        "threadId": thread,
+        "input": [{"type": "text", "text": ask.text}],
+        "clientUserMessageId": uuid,
+    });
+    let asked = tokio::time::timeout(
+        crate::start_session::START_TIMEOUT,
+        client.call("turn/start", params),
+    )
+    .await;
+    let answer = match asked {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(CallError::Rpc { code, message })) => {
+            crate::log_info!("{uid}: Codex refused a message: {message} ({code})");
+            if let Err(err) = daemon
+                .db
+                .release_mutation(OPERATION_COMPOSE, uid.to_string(), ask.request_id.clone())
+                .await
+            {
+                crate::log_error!("{uid}: could not give back the refused message: {err:#}");
+            }
+            return ComposeReport::NotApplied(says::wire_refused(
+                &code.to_string(),
+                says::COMPOSE_WIRE_SUBJECT,
+                says::COMPOSE_WIRE_REMEDY,
+            ));
+        }
+        Ok(Err(CallError::Closed)) | Err(_) => {
+            return ComposeReport::Unknown(says::compose_settled_unknown(
+                says::COMPOSE_CONNECTION_ENDED,
+            ))
+        }
+    };
+    let Some(turn) = answer["turn"]["id"]
+        .as_str()
+        .filter(|turn| !turn.is_empty())
+    else {
+        crate::log_error!("{uid}: Codex took a message and named no turn; it is recorded unknown");
+        if let Err(err) = daemon
+            .db
+            .settle_mutation_indeterminate(
+                OPERATION_COMPOSE,
+                uid.to_string(),
+                ask.request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            crate::log_error!("{uid}: could not record the message as unknown: {err:#}");
+        }
+        return ComposeReport::Unknown(says::COMPOSE_ANSWER_UNREADABLE.into());
+    };
+    let route = if live.contains(&turn) {
+        crate::store::COMPOSE_ROUTE_STEER
+    } else {
+        crate::store::COMPOSE_ROUTE_START
+    };
+    let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id));
+    file(daemon, uid, vec![words]).await;
+    let send = WaitingSend {
+        request_id: ask.request_id.clone(),
+        claimed_hash: ask.claimed_hash.clone(),
+        uuid,
+        turn: turn.to_string(),
+        route,
+    };
+    let report = send.report();
+    sends.push(send);
+    report
+}
+
+/// What a frame says of the phone's messages Codex took (X5), by the evidence Codex's own
+/// client reads. A message Codex records under its uuid was delivered. One still waiting when
+/// its turn ends was dropped by a Stop if that turn ended `interrupted`: Codex drops the input
+/// a stopped turn had not yet read, and says nothing of it, so it is settled with its
+/// `send_not_sent` notice. After any other end, Codex records what input was left (all but
+/// what a hook blocked), so a message it did not record is settled unknown.
+async fn heard(daemon: &Daemon, uid: &str, sends: &mut Vec<WaitingSend>, frame: &Value) {
+    use crate::store::OPERATION_COMPOSE;
+    let params = &frame["params"];
+    let settled = match frame["method"].as_str() {
+        Some("item/started" | "item/completed") if params["item"]["type"] == "userMessage" => {
+            let echoed = params["item"]["clientId"].as_str();
+            let Some(at) = sends
+                .iter()
+                .position(|send| echoed == Some(send.uuid.as_str()))
+            else {
+                return;
+            };
+            let send = sends.remove(at);
+            let delivered = daemon
+                .db
+                .settle_mutation(
+                    OPERATION_COMPOSE,
+                    uid.to_string(),
+                    send.request_id.clone(),
+                    crate::store::compose_outcome(send.route, &send.turn),
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+                .map(|_| ());
+            vec![(send, delivered)]
+        }
+        Some("turn/completed") => {
+            let turn = params["turn"]["id"].as_str();
+            let interrupted = params["turn"]["status"] == "interrupted";
+            let (ended, waiting): (Vec<_>, Vec<_>) = std::mem::take(sends)
+                .into_iter()
+                .partition(|send| Some(send.turn.as_str()) == turn);
+            *sends = waiting;
+            let mut settled = Vec::new();
+            for send in ended {
+                let outcome = if interrupted {
+                    let notice =
+                        crate::claude_host::not_sent_notice(uid, &send.uuid, &send.request_id);
+                    daemon
+                        .settle_with_event(
+                            uid,
+                            OPERATION_COMPOSE,
+                            &send.request_id,
+                            crate::store::COMPOSE_STOPPED,
+                            notice,
+                        )
+                        .await
+                } else {
+                    daemon
+                        .db
+                        .settle_mutation_indeterminate(
+                            OPERATION_COMPOSE,
+                            uid.to_string(),
+                            send.request_id.clone(),
+                            protocol::time::now_rfc3339(),
+                        )
+                        .await
+                        .map(|_| ())
+                };
+                settled.push((send, outcome));
+            }
+            settled
+        }
+        _ => return,
+    };
+    for (send, outcome) in settled {
+        if let Err(err) = outcome {
+            crate::log_error!(
+                "{uid}: could not record what became of the message {}: {err:#}",
+                crate::state::logged_request_id(&send.request_id)
+            );
+        }
+    }
+}
+
 /// End run's graceful step for the run (P3 S5, ruling D1): the turn it is running
 /// interrupted, then its app-server's process group sent SIGTERM under the warrant, so
 /// Codex drains and exits. The escalation that follows the stop takes it from there
@@ -1140,6 +1421,43 @@ async fn file(daemon: &Daemon, uid: &str, events: Vec<PendingEvent>) {
     }
 }
 
+/// `events` but the person's messages among `items` that a phone's message already filed
+/// (its `say:` row, named by the item's `clientId`): Codex's own record of those words is not
+/// filed a second time. A message whose row was never filed keeps Codex's.
+async fn unfiled(
+    daemon: &Daemon,
+    uid: &str,
+    items: &[&Value],
+    events: Vec<PendingEvent>,
+) -> Vec<PendingEvent> {
+    let mut said = Vec::new();
+    for item in items {
+        let (Some(id), Some(client_id)) = (item["id"].as_str(), item["clientId"].as_str()) else {
+            continue;
+        };
+        if item["type"] != "userMessage" {
+            continue;
+        }
+        let row = daemon
+            .db
+            .filed_event(uid.to_string(), Source::Daemon, format!("say:{client_id}"))
+            .await;
+        if matches!(row, Ok(Some(_))) {
+            said.push(id);
+        }
+    }
+    events
+        .into_iter()
+        .filter(|event| {
+            event.kind != EventKind::UserMessage
+                || !event
+                    .item_id
+                    .as_deref()
+                    .is_some_and(|id| said.contains(&id))
+        })
+        .collect()
+}
+
 /// A `thread/resume` answer's facts filed, then the adapter told what was filed; the turns
 /// the answer reports still running.
 async fn resumed(
@@ -1153,7 +1471,19 @@ async fn resumed(
         crate::log_info!("{uid}: Codex's resume answer for thread {thread} was not read");
         return Vec::new();
     };
-    file(daemon, uid, seed.take_events()).await;
+    let items: Vec<&Value> = answer["thread"]["turns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|turn| turn["items"].as_array())
+        .flatten()
+        .collect();
+    file(
+        daemon,
+        uid,
+        unfiled(daemon, uid, &items, seed.take_events()).await,
+    )
+    .await;
     adapter.apply_resume_seed(&seed);
     seed.running_turn_ids().to_vec()
 }
@@ -1178,7 +1508,7 @@ pub(crate) async fn reconnect(
     .await;
     match resumed {
         Ok(Ok((client, adapter, owed, cards))) => {
-            link(daemon, uid, client, adapter, owed, cards).await
+            link(daemon, uid, run.thread, client, adapter, owed, cards).await
         }
         Ok(Err(why)) => crate::log_info!("{uid}: not reconnected: {why}"),
         Err(_) => crate::log_info!(
@@ -1306,8 +1636,8 @@ async fn standing_cards(
 }
 
 /// `skills/list`, `thread/start`, the thread recorded, then `turn/start` with the first
-/// message: each call's error, or a run ended meanwhile, stops it.
-async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Result<(), String> {
+/// message: each call's error, or a run ended meanwhile, stops it. The run's thread.
+async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Result<String, String> {
     let skills = client
         .call(
             "skills/list",
@@ -1350,7 +1680,7 @@ async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Resul
         )
         .await
         .map_err(|err| format!("Codex did not take the first message: {err}"))?;
-    Ok(())
+    Ok(thread.to_string())
 }
 
 /// `thread/start`'s params but its `config`: the run's folder, its model (none for Codex's own
@@ -3748,10 +4078,10 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
-    /// **X8-1 G9: with its link not attached, an engine run refuses an answer and a Stop with
-    /// the fact alone**, before its reconnect and after a reconnect that failed.
+    /// **X8-1 G9: with its link not attached, an engine run refuses an answer, a Stop and (X5)
+    /// a message with the fact alone**, before its reconnect and after a reconnect that failed.
     #[tokio::test]
-    async fn an_engine_run_with_no_link_refuses_an_answer_and_a_stop_with_the_fact() {
+    async fn an_engine_run_with_no_link_refuses_an_answer_a_stop_and_a_message_with_the_fact() {
         let rig = rig();
         let frames = frames_of(LIVE_FRAMES);
         let thread = frames[2]["params"]["threadId"].as_str().unwrap();
@@ -3771,7 +4101,15 @@ mod tests {
             let stopped = restarted
                 .interrupt(&uid, "req-nolink-stop", turn, &hash)
                 .await;
-            (answered, stopped)
+            let said = restarted
+                .compose(
+                    &uid,
+                    "req-nolink-say",
+                    "hello".into(),
+                    &protocol::hash::compose_hash(&uid, "hello"),
+                )
+                .await;
+            (answered, stopped, said)
         };
         let fact = crate::codex_refusals::ENGINE_NO_CONNECTION.to_string();
         let expected = (
@@ -3779,6 +4117,9 @@ mod tests {
                 reason: fact.clone(),
             },
             protocol::ws::InterruptResult::Rejected {
+                reason: fact.clone(),
+            },
+            protocol::ws::ComposeResult::Rejected {
                 reason: fact.clone(),
             },
         );
@@ -3796,6 +4137,619 @@ mod tests {
         .await;
         assert_eq!(refused().await, expected, "after a failed reconnect");
         end_run(&rig, &uid).await;
+    }
+
+    /// A phone's message `text` for the run under `request_id`, in a task of its own, since it
+    /// is answered only once Codex answers its `turn/start`.
+    fn saying(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        text: &str,
+    ) -> tokio::task::JoinHandle<protocol::ws::ComposeResult> {
+        let (daemon, uid, request_id, text) = (
+            Arc::clone(daemon),
+            uid.to_string(),
+            request_id.to_string(),
+            text.to_string(),
+        );
+        tokio::spawn(async move {
+            let hash = protocol::hash::compose_hash(&uid, &text);
+            daemon.compose(&uid, &request_id, text, &hash).await
+        })
+    }
+
+    /// The captured run's `turn` begun on the link: Codex's notice that it started, then its
+    /// record of the turn's first message, waited for until filed. The link reads its frames in
+    /// order, so it is then running the turn: a message sent after this joins it.
+    async fn turn_begun(daemon: &Daemon, uid: &str, ws: &mut Socket, thread: &str, turn: &str) {
+        let frames = frames_of(LIVE_FRAMES);
+        tell(ws, &turn_started(thread, turn)).await;
+        tell(ws, &frames[4]).await;
+        tell(ws, &frames[5]).await;
+        let item = frames[5]["params"]["item"]["id"].as_str().unwrap();
+        let ids = filed_until(daemon, uid, &format!(":item:{item}")).await;
+        assert_eq!(count(&ids, &format!(":item:{item}")), 1, "{ids:?}");
+    }
+
+    /// Codex's record of a person's message `text` under the client id `uuid`: the item `id`.
+    fn message_item(id: &str, uuid: &str, text: &str) -> serde_json::Value {
+        json!({"type": "userMessage", "id": id, "clientId": uuid,
+               "content": [{"type": "text", "text": text, "text_elements": []}]})
+    }
+
+    /// Codex recording `item` in `turn` on `thread`: the item's start and its end.
+    fn recorded(thread: &str, turn: &str, item: &serde_json::Value) -> [serde_json::Value; 2] {
+        let params = json!({"threadId": thread, "turnId": turn, "item": item});
+        [
+            json!({"method": "item/started", "params": params}),
+            json!({"method": "item/completed", "params": params}),
+        ]
+    }
+
+    /// The payloads of the run's filed person's messages that read `text`, from ccd and from
+    /// Codex's own record alike.
+    async fn words(daemon: &Daemon, uid: &str, text: &str) -> Vec<serde_json::Value> {
+        daemon
+            .db
+            .events_after(uid.to_string(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::UserMessage && event.payload["text"] == text)
+            .map(|event| event.payload)
+            .collect()
+    }
+
+    /// The compose ledger's state for the run's message `request_id`.
+    async fn said(daemon: &Daemon, uid: &str, request_id: &str) -> Option<AnswerStatus> {
+        daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_COMPOSE,
+                uid.into(),
+                request_id.into(),
+            )
+            .await
+            .unwrap()
+            .map(|state| state.status)
+    }
+
+    /// Once the run's message `request_id` is settled `outcome`, within 10 s.
+    async fn settled_as(daemon: &Daemon, uid: &str, request_id: &str, outcome: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let want = Some(AnswerStatus::Settled(outcome.to_string()));
+        while said(daemon, uid, request_id).await != want {
+            assert!(
+                Instant::now() < deadline,
+                "{request_id} is {:?}, not {want:?}",
+                said(daemon, uid, request_id).await
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// The run's `send_not_sent` notices, by source event id.
+    async fn notices(daemon: &Daemon, uid: &str) -> Vec<(String, serde_json::Value)> {
+        daemon
+            .db
+            .events_after(uid.to_string(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.payload["notification_type"] == "send_not_sent")
+            .map(|event| (event.source_event_id.unwrap_or_default(), event.payload))
+            .collect()
+    }
+
+    /// The captured follow-up's answer once its turns ended, with its second turn's message
+    /// replaced by `item`: a resume answer for the run on its thread.
+    fn resumed_answer_with(item: &serde_json::Value) -> serde_json::Value {
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mut after = capture["answerAfter"]["result"].clone();
+        assert_eq!(
+            after["thread"]["turns"][1]["items"][0]["type"],
+            "userMessage"
+        );
+        after["thread"]["turns"][1]["items"][0] = item.clone();
+        after
+    }
+
+    /// **X5-1 G1: a phone's message to an idle engine run starts a turn, and its words are
+    /// filed once.** The link claims it and sends `turn/start` on the run's thread under the
+    /// message's uuid. Codex's answer names a new turn: the phone is told `Started`, and the
+    /// person's row is filed with its request id while the claim waits. Codex then records
+    /// the message under that uuid, which settles it delivered and files nothing more, and
+    /// neither does a restart's resume whose answer carries the same record. The same ask
+    /// again is answered from the first and sends nothing.
+    #[tokio::test]
+    async fn a_message_to_an_idle_engine_run_starts_a_turn_and_its_words_are_filed_once() {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let turns = &capture["answerAfter"]["result"]["thread"]["turns"];
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .unwrap();
+        let (first, turn) = (
+            turns[0]["id"].as_str().unwrap(),
+            turns[1]["id"].as_str().unwrap(),
+        );
+        let (uid, mut ws) = engine_run(&rig, "req-say", thread, first).await;
+        let text = "and the docs";
+        let uuid = crate::claude_host::send_uuid(&uid, "say-1");
+        let sent = saying(&rig.daemon, &uid, "say-1", text);
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"],
+            json!({"threadId": thread, "input": [{"type": "text", "text": text}],
+                   "clientUserMessageId": uuid})
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        assert_eq!(
+            sent.await.unwrap(),
+            protocol::ws::ComposeResult::Started {
+                turn_id: turn.into()
+            }
+        );
+        assert_eq!(
+            words(&rig.daemon, &uid, text).await,
+            [json!({"text": text, "request_id": "say-1"})]
+        );
+        assert_eq!(
+            said(&rig.daemon, &uid, "say-1").await,
+            Some(AnswerStatus::Applying)
+        );
+        let item = message_item(turns[1]["items"][0]["id"].as_str().unwrap(), &uuid, text);
+        tell(&mut ws, &turn_started(thread, turn)).await;
+        for frame in recorded(thread, turn, &item) {
+            tell(&mut ws, &frame).await;
+        }
+        let delivered = crate::store::compose_outcome(crate::store::COMPOSE_ROUTE_START, turn);
+        settled_as(&rig.daemon, &uid, "say-1", &delivered).await;
+        assert_eq!(
+            words(&rig.daemon, &uid, text).await.len(),
+            1,
+            "after the echo"
+        );
+        assert_eq!(
+            saying(&rig.daemon, &uid, "say-1", text).await.unwrap(),
+            protocol::ws::ComposeResult::Duplicate {
+                turn_id: turn.into(),
+                started: true
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next_frame(&mut ws))
+                .await
+                .is_err(),
+            "the same ask was sent again"
+        );
+        let (restarted, ws, _) = resumed_with(&rig, ws, resumed_answer_with(&item)).await;
+        let ids = filed_until(&restarted, &uid, &format!(":turn:{turn}")).await;
+        assert_eq!(
+            words(&restarted, &uid, text).await.len(),
+            1,
+            "after the resume: {ids:?}"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X5-1 G2: a message added to a running turn that a Stop ends before Codex reads it is
+    /// handed back; one Codex recorded first is not.** Two messages with the same words under
+    /// two request ids join the running turn: the phone is told `Steered` for each. Codex
+    /// records the second, which settles it delivered. A Stop then ends the turn
+    /// `interrupted`: the first, which Codex never recorded, settles `stopped` with its
+    /// `send_not_sent` notice, and the second gets none. Asked again, the first is told it was
+    /// not sent, and nothing is sent.
+    #[tokio::test]
+    async fn a_message_a_stop_cuts_off_is_handed_back_and_one_codex_recorded_is_not() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-cut", thread, turn).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
+        let text = "and the docs";
+        let steered = protocol::ws::ComposeResult::Steered {
+            turn_id: turn.into(),
+        };
+        for request_id in ["say-a", "say-b"] {
+            let sent = saying(&rig.daemon, &uid, request_id, text);
+            let start = asked(&mut ws, "turn/start").await;
+            answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+            assert_eq!(sent.await.unwrap(), steered, "{request_id}");
+        }
+        let (a, b) = (
+            crate::claude_host::send_uuid(&uid, "say-a"),
+            crate::claude_host::send_uuid(&uid, "say-b"),
+        );
+        for frame in recorded(thread, turn, &message_item("item-said-b", &b, text)) {
+            tell(&mut ws, &frame).await;
+        }
+        let delivered = crate::store::compose_outcome(crate::store::COMPOSE_ROUTE_STEER, turn);
+        settled_as(&rig.daemon, &uid, "say-b", &delivered).await;
+        let stop = stopping(&rig.daemon, &uid, "stop-cut", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        tell(&mut ws, &its_turn_ended("interrupted")).await;
+        assert_eq!(
+            stop.await.unwrap(),
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: turn.into()
+            }
+        );
+        settled_as(&rig.daemon, &uid, "say-a", crate::store::COMPOSE_STOPPED).await;
+        assert_eq!(
+            notices(&rig.daemon, &uid).await,
+            [(
+                format!("not_sent:{a}"),
+                json!({"notification_type": "send_not_sent", "message": "Not sent: stopped",
+                       "request_id": "say-a", "reason": "stopped"})
+            )]
+        );
+        assert_eq!(
+            said(&rig.daemon, &uid, "say-b").await,
+            Some(AnswerStatus::Settled(delivered))
+        );
+        assert_eq!(
+            words(&rig.daemon, &uid, text).await,
+            [
+                json!({"text": text, "request_id": "say-a"}),
+                json!({"text": text, "request_id": "say-b"})
+            ]
+        );
+        assert_eq!(
+            saying(&rig.daemon, &uid, "say-a", text).await.unwrap(),
+            protocol::ws::ComposeResult::Rejected {
+                reason: crate::codex_refusals::REPLAY_COMPOSE_STOPPED.into()
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next_frame(&mut ws))
+                .await
+                .is_err(),
+            "the stopped message was sent again"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X5-1, the crash seam: a message whose row ccd never filed is shown once, from Codex's
+    /// own record.** ccd stopped between Codex taking the message and filing the person's row:
+    /// its claim is `applying` and there is no row. The restarted ccd's resume answer carries
+    /// Codex's record of the message, which is filed once.
+    #[tokio::test]
+    async fn a_message_whose_row_was_never_filed_is_shown_once_from_codexs_record() {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let turns = &capture["answerAfter"]["result"]["thread"]["turns"];
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .unwrap();
+        let (first, turn) = (
+            turns[0]["id"].as_str().unwrap(),
+            turns[1]["id"].as_str().unwrap(),
+        );
+        let (uid, ws) = engine_run(&rig, "req-seam", thread, first).await;
+        let text = "and the docs";
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id: thread.into(),
+            generation: 0,
+            route: crate::store::COMPOSE_ROUTE_START.into(),
+            target_turn_id: None,
+            claimed_hash: protocol::hash::compose_hash(&uid, text),
+        };
+        assert_eq!(
+            rig.daemon
+                .db
+                .claim_mutation(
+                    crate::store::OPERATION_COMPOSE,
+                    uid.clone(),
+                    "say-seam".into(),
+                    claimed,
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+                .unwrap(),
+            crate::store::MutationClaim::Claimed
+        );
+        let uuid = crate::claude_host::send_uuid(&uid, "say-seam");
+        let item = message_item(turns[1]["items"][0]["id"].as_str().unwrap(), &uuid, text);
+        let (restarted, ws, _) = resumed_with(&rig, ws, resumed_answer_with(&item)).await;
+        let ids = filed_until(&restarted, &uid, &format!(":turn:{turn}")).await;
+        assert_eq!(
+            words(&restarted, &uid, text).await,
+            [json!({"text": text, "interrupted": false})],
+            "{ids:?}"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X5-1: a message retried after its run's link has gone is answered from the record.**
+    /// Codex took the first into the running turn and the connection ended before it recorded
+    /// it, so its claim is still `applying`: the retry is told it was sent and what became of
+    /// it is not known, never that nothing was.
+    #[tokio::test]
+    async fn a_message_retried_after_its_link_has_gone_is_answered_from_the_record() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-resay", thread, turn).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
+        let sent = saying(&rig.daemon, &uid, "say-gone", "and the docs");
+        let start = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        assert!(matches!(
+            sent.await.unwrap(),
+            protocol::ws::ComposeResult::Steered { .. }
+        ));
+        drop(ws);
+        link_gone(&rig.daemon, &uid).await;
+        assert_eq!(
+            said(&rig.daemon, &uid, "say-gone").await,
+            Some(AnswerStatus::Applying)
+        );
+        assert_eq!(
+            saying(&rig.daemon, &uid, "say-gone", "and the docs")
+                .await
+                .unwrap(),
+            protocol::ws::ComposeResult::Indeterminate {
+                reason: crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into()
+            }
+        );
+        end_run(&rig, &uid).await;
+    }
+
+    /// The run `uid`'s summary as the fleet reports it.
+    async fn summary_of(daemon: &Daemon, uid: &str) -> protocol::event::SessionSummary {
+        daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.session_uid == uid)
+            .expect("the run is in the fleet")
+    }
+
+    /// **X5-1, round 1's F1: the fleet offers an engine run's link while it is attached and
+    /// live.** Both apps offer Stop and the composer on the summary's `codex_link`. It reads
+    /// `subscribed` for a live run whose link is attached, and `none` when a restarted ccd has not
+    /// connected the run again, and while the run is stopping.
+    #[tokio::test]
+    async fn the_fleet_offers_an_engine_runs_link_only_while_it_is_attached_and_live() {
+        use protocol::event::CodexLink;
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-fleet", "thr-fleet", "turn-1").await;
+        assert_eq!(
+            summary_of(&rig.daemon, &uid).await.codex_link,
+            CodexLink::Subscribed
+        );
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        assert_eq!(
+            summary_of(&restarted, &uid).await.codex_link,
+            CodexLink::None,
+            "before its reconnect"
+        );
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        assert_eq!(
+            summary_of(&rig.daemon, &uid).await.codex_link,
+            CodexLink::None,
+            "while it is stopping"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// The run `uid`'s summary as the fleet sends it, its identity, folder, times and count of
+    /// events fixed so the fixture is the same on every run.
+    async fn summary_as_sent(daemon: &Daemon, uid: &str) -> serde_json::Value {
+        let mut sent = serde_json::to_value(summary_of(daemon, uid).await).unwrap();
+        let fixed = [
+            ("session_uid", json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR")),
+            ("session_id", json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR")),
+            ("cwd", json!("/Users/person/project")),
+            ("project_label", json!("project")),
+            ("created_at", json!("2026-11-15T00:00:00Z")),
+            ("updated_at", json!("2026-11-15T00:00:00Z")),
+            ("last_seq", json!(0)),
+        ];
+        for (key, value) in fixed {
+            assert!(sent.get(key).is_some(), "the summary carries no {key}");
+            sent[key] = value;
+        }
+        sent
+    }
+
+    /// The run `uid`'s events filed after the seq `after`, each as a phone reads its kind, source event id and turn,
+    /// the run's uid written `{uid}`; and the last seq among them.
+    async fn events_after_as_sent(
+        daemon: &Daemon,
+        uid: &str,
+        after: u64,
+    ) -> (Vec<serde_json::Value>, u64) {
+        let events = daemon
+            .db
+            .events_after(uid.to_string(), after, 10_000)
+            .await
+            .unwrap();
+        let last = events.last().map_or(after, |event| event.seq);
+        let sent = events
+            .into_iter()
+            .map(|event| {
+                json!({
+                    "kind": event.kind.as_str(),
+                    "source_event_id": event.source_event_id.map(|id| id.replace(uid, "{uid}")),
+                    "turn_id": event.turn_id,
+                })
+            })
+            .collect();
+        (sent, last)
+    }
+
+    /// One step of [`derived_fleet_over_a_run`]: the events filed since the step before (`seen`, moved on), and the
+    /// run's summary as the fleet sends it now.
+    async fn fleet_step(
+        daemon: &Daemon,
+        uid: &str,
+        step: &str,
+        seen: &mut u64,
+    ) -> serde_json::Value {
+        let (events, last) = events_after_as_sent(daemon, uid, *seen).await;
+        *seen = last;
+        json!({"step": step, "events": events, "summary": summary_as_sent(daemon, uid).await})
+    }
+
+    /// Once `daemon` has the run `uid`'s link attached, within 10 s.
+    async fn link_attached(daemon: &Daemon, uid: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while daemon.engine_commands_for_tests(uid).await.is_none() {
+            assert!(Instant::now() < deadline, "the run's link did not attach");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// **The fleet over a run started on the engine, as a phone reads it**, step by step, each with the events
+    /// filed since the step before:
+    /// - started, still `starting`;
+    /// - its first message taken and recorded by Codex, live;
+    /// - a ccd restart before its reconnect;
+    /// - after its reconnect, whose resume answer's events are filed before the link attaches;
+    /// - End run, `stopping`;
+    /// - its end.
+    async fn derived_fleet_over_a_run() -> serde_json::Value {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let after = capture["answerAfter"]["result"].clone();
+        let thread = after["thread"]["id"].as_str().unwrap().to_string();
+        let first = after["thread"]["turns"][0].clone();
+        let first_turn = first["id"].as_str().unwrap().to_string();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let mut script = whole_start();
+        script.truncate(3);
+        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
+        let (result, (_, mut ws)) = tokio::join!(
+            start(&rig.daemon, run(&rig, "req-life", &codex)),
+            play_app_server(&rig, script)
+        );
+        let uid = started_uid(&result);
+        let mut seen = 0;
+        let mut steps = vec![fleet_step(&rig.daemon, &uid, "started", &mut seen).await];
+        let asked_first = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &asked_first, json!({"turn": {"id": first_turn}})).await;
+        tell(&mut ws, &turn_started(&thread, &first_turn)).await;
+        for frame in recorded(&thread, &first_turn, &first["items"][0]) {
+            tell(&mut ws, &frame).await;
+        }
+        let item = first["items"][0]["id"].as_str().unwrap();
+        filed_until(&rig.daemon, &uid, &format!(":item:{item}")).await;
+        link_attached(&rig.daemon, &uid).await;
+        steps.push(fleet_step(&rig.daemon, &uid, "first message taken", &mut seen).await);
+        let before = daemon_on(&rig.root);
+        before.recover().await;
+        steps.push(
+            fleet_step(
+                &before,
+                &uid,
+                "ccd restarted, before its reconnect",
+                &mut seen,
+            )
+            .await,
+        );
+        let (restarted, ws, _) = resumed_with(&rig, ws, after).await;
+        link_attached(&restarted, &uid).await;
+        steps.push(fleet_step(&restarted, &uid, "reconnected", &mut seen).await);
+        assert_eq!(
+            restarted.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        steps.push(fleet_step(&restarted, &uid, "End run", &mut seen).await);
+        drop(ws);
+        row_once(&rig, &uid, Lifecycle::Exited).await;
+        steps.push(fleet_step(&restarted, &uid, "ended", &mut seen).await);
+        end_run(&rig, &uid).await;
+        json!(steps)
+    }
+
+    /// **A message to a run started on the engine, then Stop, as this build files them**: the
+    /// person's row with its request id, and the `send_not_sent` notice for it, under
+    /// `fixtures/claude/minor-37-wire.json`'s keys and in its shape. Beside them, what the apps
+    /// decide on whether to offer the composer and Stop: the capabilities a paired phone is
+    /// offered, the run's summary as the fleet sends it while it is live and while it is
+    /// stopping, and the fleet over a run's whole life ([`derived_fleet_over_a_run`]).
+    async fn derived_compose_stop_wire() -> serde_json::Value {
+        let fleet_over_a_run = derived_fleet_over_a_run().await;
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-wire", thread, turn).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
+        let live = summary_as_sent(&rig.daemon, &uid).await;
+        let sent = saying(&rig.daemon, &uid, "send-1", "and the docs");
+        let start = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        sent.await.unwrap();
+        let stop = stopping(&rig.daemon, &uid, "stop-1", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        tell(&mut ws, &its_turn_ended("interrupted")).await;
+        stop.await.unwrap();
+        settled_as(&rig.daemon, &uid, "send-1", crate::store::COMPOSE_STOPPED).await;
+        let person_row = words(&rig.daemon, &uid, "and the docs").await;
+        let send_not_sent = notices(&rig.daemon, &uid).await;
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        let ending = summary_as_sent(&rig.daemon, &uid).await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+        assert_eq!((person_row.len(), send_not_sent.len()), (1, 1));
+        json!({
+            "hello_ack_capabilities": crate::ws_server::capabilities(&rig.daemon, false, false, true),
+            "session_summary": live,
+            "session_summary_stopping": ending,
+            "fleet_over_a_run": fleet_over_a_run,
+            "person_row": person_row[0],
+            "send_not_sent": send_not_sent[0].1,
+        })
+    }
+
+    /// **A Codex run's message and its Stop, as this build files them**, against
+    /// `fixtures/codex/compose-stop-wire.json`.
+    #[tokio::test]
+    async fn the_codex_compose_stop_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/compose-stop-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_compose_stop_wire().await,
+            committed,
+            "the committed Codex compose-and-Stop records no longer match what this build files. \
+             Regenerate them with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_codex_compose_stop_wire_fixture"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/compose-stop-wire.json` with what this build files.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_codex_compose_stop_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_compose_stop_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/compose-stop-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
     }
 
     /// **X8-2, G1's clause: End run ends the groups the run's app-server started.** The
