@@ -729,7 +729,17 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         The daemon refuses it on a card that does not offer it, nothing sent, and
 ///         on one that does it returns Claude's allow rules for this session only,
 ///         never written to Claude's settings.
-pub const PROTOCOL_MINOR: u32 = 36;
+///   * `37` — **Stop on a Claude run CodeConnect started.**
+///
+///     Additive:
+///       - [`ws::Capabilities::claude_interrupt`]: this daemon stops the running turn
+///         of such a run. [`ws::ClientMessage::Interrupt`] and
+///         [`ws::InterruptResult`] are Codex's, unchanged; the turn is the
+///         `turn_id` of the run's events. A daemon below 37 refuses every Claude Stop.
+///       - A `notification` event `send_not_sent` (`{request_id, reason: "stopped"}`):
+///         a Stop cancelled the person's message before claude ran it. The person's
+///         own row of a message sent to such a run carries its `request_id`.
+pub const PROTOCOL_MINOR: u32 = 37;
 
 #[cfg(test)]
 mod ledger_tests {

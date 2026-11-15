@@ -17,6 +17,8 @@ export interface Run {
   say(command: Say): void;
   /** ccd's answer to one of the run's permission requests. */
   answer(command: Extract<ToHost, { type: 'answer' }>): void;
+  /** An app's Stop of the turn the command names. */
+  interrupt(command: Extract<ToHost, { type: 'interrupt' }>): void;
   /** ccd ends the run (H5). */
   stop(): void;
   facts(): Facts;
@@ -92,6 +94,7 @@ export function createLink(run: Run) {
     } else if (message.type === 'start') run.start(message);
     else if (message.type === 'say') run.say(message);
     else if (message.type === 'answer') run.answer(message);
+    else if (message.type === 'interrupt') run.interrupt(message);
     else if (message.type === 'stop') run.stop();
   }
 

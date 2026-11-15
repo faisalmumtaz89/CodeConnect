@@ -77,9 +77,11 @@ pub enum ToHost {
         uuid: String,
         mode: String,
     },
-    /// The app's Stop: the turn is interrupted and nothing queued runs after it.
+    /// The app's Stop of the turn `turn_id`, its `system/init` uuid: the host interrupts it, and nothing queued runs
+    /// after it, only while that turn is the one claude is running; any other is refused.
     Interrupt {
         uuid: String,
+        turn_id: String,
     },
     /// Ends the run: the host interrupts, ends Claude's input and closes the query.
     Stop {
@@ -171,6 +173,10 @@ pub enum FromHost {
         /// On `interrupt`'s outcome: the uuids its receipt lists as cancelled.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cancelled: Option<Vec<String>>,
+        /// On `interrupt`'s outcome: the stopped turn's `result.terminal_reason` (`aborted_tools`,
+        /// `aborted_streaming`, `completed`, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_reason: Option<String>,
     },
     /// Sent once after every replay, so it is never older than anything replayed.
     State {
@@ -385,6 +391,7 @@ mod tests {
             }),
             to(ToHost::Interrupt {
                 uuid: "c-interrupt".into(),
+                turn_id: "9d1f0000-0000-4000-8000-000000000002".into(),
             }),
             to(ToHost::Stop {
                 uuid: "c-stop".into(),
@@ -418,6 +425,7 @@ mod tests {
                     },
                 }),
                 cancelled: None,
+                terminal_reason: None,
             }),
             from(FromHost::Outcome {
                 seq: 5,
@@ -426,6 +434,7 @@ mod tests {
                 detail: None,
                 initialize: None,
                 cancelled: Some(vec!["c-say".into()]),
+                terminal_reason: Some("aborted_tools".into()),
             }),
             from(FromHost::Outcome {
                 seq: 6,
@@ -434,6 +443,7 @@ mod tests {
                 detail: Some("no such permission mode: plann".into()),
                 initialize: None,
                 cancelled: None,
+                terminal_reason: None,
             }),
             from(FromHost::State {
                 seq: 7,

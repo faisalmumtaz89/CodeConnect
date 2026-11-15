@@ -566,6 +566,7 @@ fn capabilities() -> Capabilities {
         browse_folders: false,
         machine_stats: false,
         stop_run: false,
+        claude_interrupt: false,
     }
 }
 

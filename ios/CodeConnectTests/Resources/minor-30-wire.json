@@ -75,6 +75,7 @@
     "browse_folders": true,
     "can_approve_reliably": true,
     "capture": true,
+    "claude_interrupt": true,
     "codex_compose": true,
     "codex_interrupt": true,
     "command_catalog": true,
