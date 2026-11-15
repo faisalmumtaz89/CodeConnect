@@ -132,8 +132,9 @@ struct SheetBar<Leading: View>: View {
     }
 }
 
-/// The Agent side: the start form once a computer can start an agent; before that, why none can (none paired,
-/// none connected, or a computer's CodeConnect too old to start one from here).
+/// The Agent side: the start form once a computer can start an agent, or while a start this Mac sent has no answer
+/// yet, which the form opens on; before that, why none can (none paired, none connected, or a computer's CodeConnect
+/// too old to start one from here).
 private struct AgentSide: View {
     @Environment(Machines.self) private var machines
     @Environment(\.dismiss) private var dismiss
@@ -141,8 +142,8 @@ private struct AgentSide: View {
     let started: () -> Void
 
     var body: some View {
-        if !machines.startContexts.isEmpty {
-            StartForm(started: started)
+        if !machines.startContexts.isEmpty || machines.outstandingStart != nil {
+            StartForm(resuming: machines.outstandingStart?.requestID, started: started)
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 10) {
