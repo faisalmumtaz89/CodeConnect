@@ -173,6 +173,16 @@ struct DecisionBlock: View {
                     .onScrollVisibilityChange(threshold: 1) { if $0 { gate.hasSeenProvenance = true } }
             }
             if let banner { banner.accessibilityIdentifier("\(id).banner") }
+            // The banner says how a Codex question ended; this says what was chosen, as far as the record proves it.
+            if let codexEnding {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("What was chosen").font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text)
+                    Text(CodexProse.whatWasChosen(codexEnding)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("\(id).chosen")
+            }
             if case .noneAnswerable = surface, actionable || banner == nil { readOnly }
             if let sentAt, inFlight, model.now.timeIntervalSince(sentAt) >= 3 {
                 Text(
