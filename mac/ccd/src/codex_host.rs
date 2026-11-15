@@ -2648,6 +2648,16 @@ mod tests {
         !group_alive(pgid)
     }
 
+    /// Whether `pgid`'s group has a member within 15 s: a child that makes its own group
+    /// may not have made it yet when its pid is read.
+    async fn group_forms(pgid: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !group_alive(pgid) && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        group_alive(pgid)
+    }
+
     /// The ladder on the run's recorded group, so a test leaves no process behind.
     async fn end_run(rig: &Rig, uid: &str) {
         if let Some(watch) = rig.daemon.db.watched_host(uid.to_string()).await.unwrap() {
@@ -3019,12 +3029,6 @@ mod tests {
             matches!(&result, StartSessionResult::Failed { detail, .. } if detail.contains("did not listen")),
             "{result:?}"
         );
-        let dir = run_folder(&rig).await;
-        let leader: i32 = std::fs::read_to_string(dir.join("as.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
         let run = rig
             .daemon
             .db
@@ -3033,8 +3037,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.lifecycle, Lifecycle::Failed);
+        // The leader ccd recorded and stopped: a start ended at its deadline may not have
+        // run the claim that writes `as.pid`.
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(run.session_uid)
+            .await
+            .unwrap()
+            .expect("a start that did not listen recorded its leader")
+            .host
+            .pid;
         assert!(
-            !group_alive(leader),
+            group_ends(leader).await,
             "the run's group outlived its failed start"
         );
     }
@@ -3352,6 +3367,7 @@ mod tests {
         );
         let uid = started_uid(&result);
         row_once(&rig, &uid, Lifecycle::Live).await;
+        link_attached(&rig.daemon, &uid).await;
         assert_eq!(
             link_of(&rig.daemon, &uid).await,
             Some(protocol::event::Link::Attached)
@@ -3563,6 +3579,8 @@ mod tests {
         });
         let uid = started_uid(&result);
         row_once(rig, &uid, Lifecycle::Live).await;
+        // The run is `live` before its link attaches; until then a message or a Stop is refused.
+        link_attached(&rig.daemon, &uid).await;
         (uid, ws)
     }
 
@@ -4886,7 +4904,7 @@ mod tests {
         let thread = frames[2]["params"]["threadId"].as_str().unwrap();
         let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
         let (uid, mut ws) = engine_run(&rig, "req-finish", thread, turn).await;
-        tell(&mut ws, &turn_started(thread, turn)).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
         let stop = stopping(&rig.daemon, &uid, "req-finish-1", turn);
         let interrupt = asked(&mut ws, "turn/interrupt").await;
         answer(&mut ws, &interrupt, json!({})).await;
@@ -4910,7 +4928,7 @@ mod tests {
         let thread = frames[2]["params"]["threadId"].as_str().unwrap();
         let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
         let (uid, mut ws) = engine_run(&rig, "req-two", thread, turn).await;
-        tell(&mut ws, &turn_started(thread, turn)).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
         let first = stopping(&rig.daemon, &uid, "req-two-1", turn);
         let interrupt = asked(&mut ws, "turn/interrupt").await;
         answer(&mut ws, &interrupt, json!({})).await;
@@ -5040,7 +5058,7 @@ mod tests {
         }
         assert_eq!(lifecycle, Lifecycle::Exited, "the run stayed stopping");
         assert!(
-            !group_alive(leader),
+            group_ends(leader).await,
             "the app-server outlived the escalation"
         );
         assert_eq!(
@@ -5066,7 +5084,7 @@ mod tests {
             .pid;
         let (stopped, left) = rig.daemon.stop_hosted_runs(Duration::from_secs(20)).await;
         assert_eq!((stopped, left), (1, Vec::<u32>::new()));
-        assert!(!group_alive(leader), "the app-server outlived the stop");
+        assert!(group_ends(leader).await, "the app-server outlived the stop");
         drop(ws);
     }
 
@@ -5089,7 +5107,7 @@ mod tests {
         let thread = frames[2]["params"]["threadId"].as_str().unwrap();
         let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
         let (uid, mut ws) = engine_run(&rig, "req-restop", thread, turn).await;
-        tell(&mut ws, &turn_started(thread, turn)).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
         let first = stopping(&rig.daemon, &uid, "req-restop-1", turn);
         let interrupt = asked(&mut ws, "turn/interrupt").await;
         answer(&mut ws, &interrupt, json!({})).await;
@@ -5778,10 +5796,13 @@ mod tests {
         json!({"step": step, "events": events, "summary": summary_as_sent(daemon, uid).await})
     }
 
-    /// Once `daemon` has the run `uid`'s link attached, within 10 s.
+    /// Once `daemon` has the run `uid`'s link attached, within 10 s: in place to take commands,
+    /// and its `link_state` "attached", filed just after, the run's last.
     async fn link_attached(daemon: &Daemon, uid: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while daemon.engine_commands_for_tests(uid).await.is_none() {
+        while daemon.engine_commands_for_tests(uid).await.is_none()
+            || link_states(daemon, uid).await.last().map(String::as_str) != Some("attached")
+        {
             assert!(Instant::now() < deadline, "the run's link did not attach");
             tokio::time::sleep(POLL).await;
         }
@@ -5811,6 +5832,24 @@ mod tests {
             play_app_server(&rig, script)
         );
         let uid = started_uid(&result);
+        // The start answers before its first message's task records the thread Codex started.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig
+            .daemon
+            .db
+            .get_session(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .codex_thread_id
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the run's thread was not recorded"
+            );
+            tokio::time::sleep(POLL).await;
+        }
         let mut seen = 0;
         let mut steps = vec![fleet_step(&rig.daemon, &uid, "started", &mut seen).await];
         let asked_first = asked(&mut ws, "turn/start").await;
@@ -5844,6 +5883,8 @@ mod tests {
         steps.push(fleet_step(&restarted, &uid, "End run", &mut seen).await);
         drop(ws);
         row_once(&rig, &uid, Lifecycle::Exited).await;
+        // The escalation can end the run before its link has seen the connection close.
+        link_gone(&restarted, &uid).await;
         steps.push(fleet_step(&restarted, &uid, "ended", &mut seen).await);
         end_run(&rig, &uid).await;
         json!(steps)
@@ -5894,6 +5935,7 @@ mod tests {
         let ending = summary_as_sent(&rig.daemon, &uid).await;
         drop(ws);
         row_once(&rig, &uid, Lifecycle::Exited).await;
+        link_gone(&rig.daemon, &uid).await;
         let ended = summary_as_sent(&rig.daemon, &uid).await;
         end_run(&rig, &uid).await;
         assert_eq!((person_row.len(), send_not_sent.len()), (1, 1));
@@ -6448,13 +6490,20 @@ mod tests {
             "perl -e 'setpgrp(0, 0); sleep 60' &\necho $! > tool.pid\nexec sleep 30",
         )
         .await;
-        let tool: i32 = std::fs::read_to_string(run_folder(&rig).await.join("tool.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // The stand-in writes the pid once it has forked, which the start does not wait for.
+        let pid_file = run_folder(&rig).await.join("tool.pid");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let tool: i32 = loop {
+            match std::fs::read_to_string(&pid_file).map(|pid| pid.trim().parse()) {
+                Ok(Ok(pid)) => break pid,
+                _ => {
+                    assert!(Instant::now() < deadline, "the stand-in wrote no tool.pid");
+                    tokio::time::sleep(POLL).await;
+                }
+            }
+        };
         assert!(
-            group_alive(tool),
+            group_forms(tool).await,
             "the stand-in's command leads its own group"
         );
         let leader = rig
