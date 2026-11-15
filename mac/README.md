@@ -1159,7 +1159,8 @@ messages. The run's command menu (`get_command_catalog`, minor 38) is what its c
 reported: the start's initialize answer, then each `commands_changed`, without a claude.ai
 connector's commands (the host leaves them out of both), the ones the latest init keeps to
 claude's own screen, or those three refused screens, each with claude's description and
-argument hint (`entries`); it is `unavailable` until the run's first init.
+argument hint (`entries`); it is `unavailable` until an init names the commands claude keeps
+to its own screen.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

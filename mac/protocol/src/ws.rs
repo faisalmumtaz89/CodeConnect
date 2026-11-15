@@ -1695,7 +1695,8 @@ pub enum CommandCatalogResult {
         /// (minor 38); empty, and left out, for one probed from its binary.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         entries: Vec<CommandEntry>,
-        /// The version the init message reported, when it did.
+        /// The version claude reported, when it did: its init message's, or,
+        /// for a run CodeConnect started, its initialize answer's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claude_version: Option<String>,
         /// When this list was actually read from the binary. A cache hit

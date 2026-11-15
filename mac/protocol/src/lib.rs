@@ -744,9 +744,10 @@ pub const PROTOCOL_MISMATCH: &str =
 ///
 ///     Additive:
 ///       - [`ws::ClientMessage::GetCommandCatalog`] for such a run answers `available`
-///         once its first turn has begun: the commands its claude last reported, but
-///         for claude's screen-only ones and those whose app screen the daemon refuses
-///         on such a run (`clear`, `model`, `effort`), with
+///         once an init has named the commands claude keeps to its own screen: the
+///         commands its claude last reported, but for those screen-only ones and
+///         those whose app screen the daemon refuses on such a run (`clear`,
+///         `model`, `effort`), with
 ///         [`ws::CommandCatalogResult::Available`]'s `entries` (each command's
 ///         description and argument hint). Left out when empty, so a probed catalog
 ///         reads as before. A daemon below 38 answers `unavailable` for such a run.
