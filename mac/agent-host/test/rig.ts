@@ -173,6 +173,8 @@ export interface StubScript {
   die_on_init?: boolean;
   /** Answer the initialize request with an error, and stay. */
   init_error?: boolean;
+  /** Answer an interrupt with a receipt listing `cancelled`, then write `lines` (or the lines first). */
+  interrupt?: { cancelled?: string[]; lines?: string[]; result_first?: boolean };
 }
 
 /** Writes the stand-in claude for run `dir` (a sh wrapper running stub-claude.ts on the built host as Bun). */

@@ -50,8 +50,9 @@ use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use crate::codex_link::InterruptReport;
 use crate::state::Daemon;
-use crate::store::{AnswerClaim, HostedRun, SessionRow, TextClaim};
+use crate::store::{AnswerClaim, HostedRun, MutationClaimRow, SessionRow, TextClaim};
 
 /// The agent host's file name, beside ccd's own executable.
 const HOST_BIN: &str = "cc-agent-host";
@@ -705,7 +706,7 @@ async fn link(
                     }
                 };
                 // The person's first words, filed as the run goes live.
-                let words = vec![person_row(&uid, &start_uuid, &start_prompt)];
+                let words = vec![person_row(&uid, &start_uuid, &start_prompt, None)];
                 match daemon
                     .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words)
                     .await
@@ -731,11 +732,30 @@ async fn link(
                 }
             }
             Ok(FromHost::Outcome {
-                seq, uuid, status, ..
+                seq,
+                uuid,
+                status,
+                cancelled,
+                terminal_reason,
+                ..
             }) if live => {
-                if let Err(why) =
-                    apply_send_outcome(&daemon, &uid, host, seq, &uuid, status, &mut write).await
-                {
+                let told = StopOutcome {
+                    seq,
+                    uuid: &uuid,
+                    status,
+                    cancelled: cancelled.as_deref(),
+                    terminal_reason: terminal_reason.as_deref(),
+                };
+                let applied =
+                    match apply_interrupt_outcome(&daemon, &uid, host, &told, &mut write).await {
+                        Ok(true) => Ok(()),
+                        Ok(false) => {
+                            apply_send_outcome(&daemon, &uid, host, seq, &uuid, status, &mut write)
+                                .await
+                        }
+                        Err(why) => Err(why),
+                    };
+                if let Err(why) = applied {
                     break why;
                 }
             }
@@ -1137,6 +1157,135 @@ pub(crate) fn answer_uuid(uid: &str, request_id: &str) -> String {
     protocol::uid::uuid_named(&format!("{uid}\0answer\0{request_id}"))
 }
 
+/// The uuid of the interrupt ccd sends a run's host for the app's Stop `request_id`: the
+/// same for a retry, and found again among the run's claims when its outcome comes.
+fn interrupt_uuid(uid: &str, request_id: &str) -> String {
+    protocol::uid::uuid_named(&format!("{uid}\0interrupt\0{request_id}"))
+}
+
+/// How long an app's Stop waits for its host's outcome, the stopped turn's end, as a Codex
+/// Stop waits for its own.
+const STOP_WAIT: Duration = Duration::from_secs(15);
+
+/// An app's Stop of the turn `turn_id` of the hosted run `uid`, whose lifecycle is
+/// `lifecycle`, once the ledger holds no settled record of it ([`Daemon::interrupt`]). Only
+/// a live run's turn is stopped. A Stop of that turn already waiting (its claim `applying`)
+/// answers so at once, and a run whose link is not attached is refused, nothing sent, or
+/// unknown if this very ask was sent before its link went. Otherwise the ask is claimed and
+/// sent as `interrupt`, and the host's outcome answers it ([`apply_interrupt_outcome`]):
+/// aborted, ended on its own, or not the turn the host runs. With no outcome within
+/// [`STOP_WAIT`] it is unknown, and the outcome settles it when it comes.
+pub(crate) async fn interrupt(
+    daemon: &Daemon,
+    uid: &str,
+    request_id: &str,
+    turn_id: &str,
+    lifecycle: Lifecycle,
+) -> InterruptReport {
+    use crate::codex_refusals as says;
+    use crate::store::{ClaimedMaterial, MutationClaim, INTERRUPT_ROUTE, OPERATION_INTERRUPT};
+    match lifecycle {
+        Lifecycle::Live => {}
+        Lifecycle::Stopping => {
+            return InterruptReport::NotApplied(says::INTERRUPT_ALREADY_WAITING.into())
+        }
+        Lifecycle::Starting => {
+            return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into())
+        }
+        _ => return InterruptReport::NotApplied(says::INTERRUPT_RUN_IS_GONE.into()),
+    }
+    let waiting: Vec<MutationClaimRow> = match daemon
+        .db
+        .unsettled_claims_for(OPERATION_INTERRUPT, uid.to_string())
+        .await
+    {
+        Ok(claims) => claims
+            .into_iter()
+            .filter(|claim| claim.claimed.target_turn_id.as_deref() == Some(turn_id))
+            .collect(),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its Stops: {err:#}");
+            return InterruptReport::NotApplied(says::INTERRUPT_LEDGER_UNREADABLE.into());
+        }
+    };
+    if !daemon.host_attached(uid).await {
+        return if waiting
+            .iter()
+            .any(|claim| claim.client_request_id == request_id)
+        {
+            InterruptReport::Unknown(says::INTERRUPT_ALREADY_SENT_UNKNOWN.into())
+        } else {
+            InterruptReport::NotApplied(says::ENGINE_NO_CONNECTION.into())
+        };
+    }
+    if !waiting.is_empty() {
+        return InterruptReport::NotApplied(says::INTERRUPT_ALREADY_WAITING.into());
+    }
+    let claimed = ClaimedMaterial {
+        thread_id: uid.to_string(),
+        generation: 0,
+        route: INTERRUPT_ROUTE.to_string(),
+        target_turn_id: Some(turn_id.to_string()),
+        claimed_hash: protocol::hash::interrupt_hash(uid, turn_id),
+    };
+    let claim = daemon
+        .db
+        .claim_mutation(
+            OPERATION_INTERRUPT,
+            uid.to_string(),
+            request_id.to_string(),
+            claimed,
+            protocol::time::now_rfc3339(),
+        )
+        .await;
+    match claim {
+        Ok(MutationClaim::Claimed) => {}
+        Ok(MutationClaim::Applied { outcome, .. }) => {
+            return crate::codex_link::replayed_interrupt_report(&outcome, turn_id)
+        }
+        Ok(MutationClaim::Indeterminate { .. }) => {
+            return InterruptReport::Unknown(says::INTERRUPT_ALREADY_SENT_UNKNOWN.into())
+        }
+        Ok(MutationClaim::Conflict) => {
+            return InterruptReport::NotApplied(says::INTERRUPT_ID_REUSED_ON_LINK.into())
+        }
+        Ok(MutationClaim::NoSession) => {
+            return InterruptReport::NotApplied(says::INTERRUPT_RUN_IS_GONE.into())
+        }
+        Err(err) => {
+            crate::log_error!("{uid}: could not claim the stop of turn {turn_id}: {err:#}");
+            return InterruptReport::NotApplied(says::INTERRUPT_CLAIM_UNRECORDED.into());
+        }
+    }
+    let uuid = interrupt_uuid(uid, request_id);
+    let told = daemon.await_host_stop(uid, &uuid).await;
+    let command = ToHost::Interrupt {
+        uuid: uuid.clone(),
+        turn_id: turn_id.to_string(),
+    };
+    if !daemon.send_to_host(uid, command).await {
+        daemon.host_stop_told(&uuid, None).await;
+        if let Err(err) = daemon
+            .db
+            .release_mutation(OPERATION_INTERRUPT, uid.to_string(), request_id.to_string())
+            .await
+        {
+            crate::log_error!("{uid}: could not give back the stop that was not sent: {err:#}");
+        }
+        return InterruptReport::NotApplied(says::ENGINE_NO_CONNECTION.into());
+    }
+    match tokio::time::timeout(STOP_WAIT, told).await {
+        Ok(Ok(report)) => report,
+        Ok(Err(_)) => InterruptReport::Unknown(says::interrupt_settled_unknown(
+            says::CLAUDE_CONNECTION_ENDED,
+        )),
+        Err(_) => {
+            daemon.host_stop_told(&uuid, None).await;
+            InterruptReport::Unknown(says::INTERRUPT_ALREADY_SENT_UNKNOWN.into())
+        }
+    }
+}
+
 /// An app's answer to the hosted run `uid`'s card `request_id`, after the ledger found
 /// none recorded: it goes to the run's host (`answer`), and is `Applied` once the host
 /// says it reached claude ([`apply_answer_outcome`] records it). Its claim is settled
@@ -1251,11 +1400,15 @@ pub(crate) async fn answer(
 
 /// The person's words `text`, sent as the message `uuid` (the start's or a later
 /// send's), as the run's event.
-fn person_row(uid: &str, uuid: &str, text: &str) -> PendingEvent {
+fn person_row(uid: &str, uuid: &str, text: &str, request_id: Option<&str>) -> PendingEvent {
+    let mut payload = serde_json::json!({ "text": text });
+    if let Some(request_id) = request_id {
+        payload["request_id"] = request_id.into();
+    }
     PendingEvent::new(
         &SessionKey::new(uid, uid),
         EventKind::UserMessage,
-        serde_json::json!({ "text": text }),
+        payload,
         Source::Daemon,
     )
     .with_source_event_id(format!("say:{uuid}"))
@@ -1286,7 +1439,7 @@ async fn apply_send_outcome(
         .find(|(request_id, _)| send_uuid(uid, request_id) == uuid)
     {
         Some((request_id, text)) => {
-            let row = taken.then(|| person_row(uid, uuid, &text));
+            let row = taken.then(|| person_row(uid, uuid, &text, Some(&request_id)));
             match daemon
                 .commit_host_send(uid, host, seq, &request_id, row)
                 .await
@@ -1304,6 +1457,159 @@ async fn apply_send_outcome(
     }
     daemon.host_send_taken(uuid, taken).await;
     Ok(())
+}
+
+/// The host's outcome for a command, as an app's Stop reads it.
+struct StopOutcome<'a> {
+    seq: u64,
+    uuid: &'a str,
+    status: OutcomeStatus,
+    /// The interrupt's receipt: the uuids of the person's messages claude cancelled.
+    cancelled: Option<&'a [String]>,
+    /// The stopped turn's `result.terminal_reason`.
+    terminal_reason: Option<&'a str>,
+}
+
+/// The host's outcome for an app's Stop ccd sent it (`interrupt`), found by its uuid among
+/// the run's `applying` interrupt claims: settled from the stopped turn's end ([`settle_stop`]),
+/// and whoever waits for it is told. Each of the person's messages the receipt lists as
+/// cancelled is marked not sent ([`not_sent`]), with the cursor, then the outcome is
+/// acknowledged. A restart's replay finds its claim settled already by the startup sweep,
+/// and marks the messages alone. `false` when the outcome is not a Stop's.
+async fn apply_interrupt_outcome(
+    daemon: &Daemon,
+    uid: &str,
+    host: ProcessIdentity,
+    told: &StopOutcome<'_>,
+    write: &mut OwnedWriteHalf,
+) -> Result<bool, String> {
+    let claims = daemon
+        .db
+        .unsettled_claims_for(crate::store::OPERATION_INTERRUPT, uid.to_string())
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    let claim = claims
+        .into_iter()
+        .find(|claim| interrupt_uuid(uid, &claim.client_request_id) == told.uuid);
+    if claim.is_none() && told.cancelled.is_none() && told.terminal_reason.is_none() {
+        return Ok(false);
+    }
+    let report = match &claim {
+        Some(claim) => Some(settle_stop(daemon, uid, claim, told).await),
+        None => None,
+    };
+    let notices = not_sent(daemon, uid, told.cancelled.unwrap_or_default()).await?;
+    match daemon
+        .ingest_host_message(uid, host, told.seq, notices, None, None)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "message {} is not past the run's cursor for this host",
+                told.seq
+            ))
+        }
+        Err(err) => return Err(format!("{err:#}")),
+    }
+    send(write, &ToHost::Ack { seq: told.seq }).await?;
+    daemon.host_stop_told(told.uuid, report).await;
+    Ok(true)
+}
+
+/// What the host's outcome `told` makes of the app's Stop `claim`, as Codex's settle reads
+/// its turn's end: a turn that ended aborted was stopped by it, any other end was the turn's
+/// own; both are settled in the ledger. A refusal (the host was not running that turn) gives
+/// the claim back, so the same ask is a first attempt again.
+async fn settle_stop(
+    daemon: &Daemon,
+    uid: &str,
+    claim: &MutationClaimRow,
+    told: &StopOutcome<'_>,
+) -> InterruptReport {
+    use crate::codex_refusals as says;
+    use crate::store::OPERATION_INTERRUPT;
+    let request_id = claim.client_request_id.clone();
+    if told.status == OutcomeStatus::Refused {
+        if let Err(err) = daemon
+            .db
+            .release_mutation(OPERATION_INTERRUPT, uid.to_string(), request_id)
+            .await
+        {
+            crate::log_error!("{uid}: could not give back the refused stop: {err:#}");
+        }
+        return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into());
+    }
+    let reason = told.terminal_reason.unwrap_or("completed");
+    let (outcome, report) = if reason.starts_with("aborted") {
+        (
+            crate::store::INTERRUPT_ABORTED,
+            InterruptReport::Aborted {
+                turn_id: claim.claimed.target_turn_id.clone().unwrap_or_default(),
+            },
+        )
+    } else {
+        (
+            crate::store::INTERRUPT_TURN_ENDED,
+            InterruptReport::NotApplied(says::interrupt_turn_ended_itself(reason)),
+        )
+    };
+    let settled = daemon
+        .db
+        .settle_mutation(
+            OPERATION_INTERRUPT,
+            uid.to_string(),
+            request_id,
+            outcome.to_string(),
+            protocol::time::now_rfc3339(),
+        )
+        .await;
+    match settled {
+        Ok(true) => report,
+        Ok(false) => InterruptReport::Unknown(says::INTERRUPT_SETTLED_ELSEWHERE.into()),
+        Err(err) => {
+            crate::log_error!("{uid}: could not record what became of a stop: {err:#}");
+            InterruptReport::Unknown(says::INTERRUPT_OUTCOME_UNRECORDED.into())
+        }
+    }
+}
+
+/// A `send_not_sent` notice for each of the run's messages whose uuid the interrupt's receipt
+/// lists as `cancelled`: claude never ran them. A uuid that names none is ignored. Each
+/// notice's source event id is its message's, so a replay files it once.
+async fn not_sent(
+    daemon: &Daemon,
+    uid: &str,
+    cancelled: &[String],
+) -> Result<Vec<PendingEvent>, String> {
+    if cancelled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sends = daemon
+        .db
+        .send_request_ids(uid.to_string())
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    Ok(sends
+        .into_iter()
+        .filter_map(|request_id| {
+            let uuid = send_uuid(uid, &request_id);
+            cancelled.contains(&uuid).then(|| {
+                PendingEvent::new(
+                    &SessionKey::new(uid, uid),
+                    EventKind::Notification,
+                    serde_json::json!({
+                        "notification_type": protocol::event::notice::SEND_NOT_SENT,
+                        "message": "Not sent: stopped",
+                        "request_id": request_id,
+                        "reason": "stopped",
+                    }),
+                    Source::Daemon,
+                )
+                .with_source_event_id(format!("not_sent:{uuid}"))
+            })
+        })
+        .collect())
 }
 
 /// The host's outcome for an answer ccd sent it: the answer it names, found by its uuid
@@ -4780,6 +5086,553 @@ mod tests {
         });
         stop(&played.dir);
         wire
+    }
+
+    /// The app's Stop of the turn `turn` of the run `uid`, as request `request_id`, as the Kit
+    /// sends it: its hash is over the run's uid.
+    async fn stop_as_app(
+        daemon: &Daemon,
+        uid: &str,
+        request_id: &str,
+        turn: &str,
+    ) -> protocol::ws::InterruptResult {
+        let hash = protocol::hash::interrupt_hash(uid, turn);
+        daemon.interrupt(uid, request_id, turn, &hash).await
+    }
+
+    /// The stand-in host begins the turn `turn` with claude's `system/init`, as message `seq`.
+    async fn turn_begins(played: &mut Played, seq: u64, turn: &str) {
+        sdk(
+            &mut played.write,
+            seq,
+            serde_json::json!({"type": "system", "subtype": "init", "uuid": turn,
+                               "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// The interrupt the stand-in host reads next: its uuid, and the turn it names.
+    async fn host_reads_stop(played: &mut Played) -> (String, String) {
+        let Some(ToHost::Interrupt { uuid, turn_id }) = next(&mut played.lines).await else {
+            panic!("no interrupt reached the host");
+        };
+        (uuid, turn_id)
+    }
+
+    /// The stand-in host ends the stopped turn: claude's `result` ending `reason` as message
+    /// `seq`, then the interrupt `uuid`'s outcome `done` as `seq + 1`, with the receipt's
+    /// `cancelled`.
+    async fn host_ends_turn(
+        played: &mut Played,
+        seq: u64,
+        uuid: &str,
+        reason: &str,
+        cancelled: &[String],
+    ) {
+        let aborted = reason.starts_with("aborted");
+        sdk(
+            &mut played.write,
+            seq,
+            serde_json::json!({"type": "result",
+                "subtype": if aborted { "error_during_execution" } else { "success" },
+                "is_error": aborted, "terminal_reason": reason, "num_turns": 1,
+                "uuid": format!("9d1f0000-0000-4000-8000-0000000001{seq:02}"),
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": seq + 1, "uuid": uuid, "status": "done",
+                               "terminal_reason": reason, "cancelled": cancelled}),
+        )
+        .await;
+        assert_eq!(
+            next(&mut played.lines).await,
+            Some(ToHost::Ack { seq: seq + 1 })
+        );
+    }
+
+    /// The stand-in host refuses the interrupt `uuid` as message `seq`: it is not running
+    /// that turn.
+    async fn host_refuses_stop(played: &mut Played, seq: u64, uuid: &str) {
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": "refused",
+                               "detail": "that turn is not running"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// Where the run `uid`'s Stop `request_id` stands in the interrupt ledger: its status
+    /// word, or `None` when there is no claim.
+    async fn stop_record(daemon: &Daemon, uid: &str, request_id: &str) -> Option<String> {
+        let state = daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                uid.to_string(),
+                request_id.to_string(),
+            )
+            .await
+            .unwrap()?;
+        Some(match state.status {
+            crate::store::AnswerStatus::Settled(outcome) => outcome,
+            crate::store::AnswerStatus::Applying => "applying".into(),
+            crate::store::AnswerStatus::Indeterminate => "indeterminate".into(),
+        })
+    }
+
+    /// The `send_not_sent` notices the run has filed, by request id.
+    fn not_sent_notices(rig: &Rig, uid: &str) -> Vec<serde_json::Value> {
+        stored(rig, uid)
+            .into_iter()
+            .filter(|event| event["payload"]["notification_type"] == "send_not_sent")
+            .map(|event| event["payload"].clone())
+            .collect()
+    }
+
+    /// Until the run `uid`'s link has ended, 5 s at most.
+    async fn until_detached(daemon: &Daemon, uid: &str) {
+        for _ in 0..100 {
+            if !daemon.host_attached(uid).await {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("the link to {uid}'s host did not end");
+    }
+
+    /// **B7 part 2 S1, S4 and S7: a Stop aborts the running turn, a second one waits, and
+    /// the message it cancelled is marked.** The app's Stop reaches the host as
+    /// `interrupt` naming the turn. A second Stop of the turn while the first waits is
+    /// refused at once, and nothing more reaches the host. The host files the turn's end
+    /// and then its outcome: the Stop is `aborted`, after the turn's `turn_complete`, and
+    /// recorded so; a retry is a `duplicate` and sends nothing. The person's message the
+    /// receipt lists, sent and filed before the Stop, gets one `send_not_sent` with its
+    /// request id, as its own row carries; a uuid that names no message files nothing.
+    #[tokio::test]
+    async fn a_stop_aborts_the_running_turn_and_marks_the_message_it_cancelled() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        let (sent, _) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
+            host_takes(&mut played, 4, "done")
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let cancelled = [send_uuid(&uid, "r-1"), "a-uuid-of-no-send".to_string()];
+        let (first, second) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
+                let (uuid, turn) = host_reads_stop(&mut played).await;
+                assert_eq!(turn, "turn-1");
+                let second = stop_as_app(&rig.daemon, &uid, "stop-2", "turn-1").await;
+                host_ends_turn(&mut played, 5, &uuid, "aborted_tools", &cancelled).await;
+                second
+            });
+        assert_eq!(
+            first,
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: "turn-1".into()
+            }
+        );
+        assert_eq!(
+            second,
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::INTERRUPT_ALREADY_WAITING.into()
+            }
+        );
+        assert!(stored(&rig, &uid)
+            .iter()
+            .any(|event| event["kind"] == "turn_complete" && event["turn_id"] == "turn-1"));
+        assert_eq!(
+            stop_record(&rig.daemon, &uid, "stop-1").await.as_deref(),
+            Some("aborted")
+        );
+        assert_eq!(stop_record(&rig.daemon, &uid, "stop-2").await, None);
+        assert_eq!(
+            not_sent_notices(&rig, &uid),
+            [serde_json::json!({"notification_type": "send_not_sent",
+                "message": "Not sent: stopped", "request_id": "r-1", "reason": "stopped"})]
+        );
+        let row = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| {
+                event["kind"] == "user_message" && event["payload"]["text"] == "and the docs"
+            })
+            .expect("the person's row");
+        assert_eq!(row["payload"]["request_id"], "r-1");
+        assert_eq!(
+            stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1").await,
+            protocol::ws::InterruptResult::Duplicate {
+                turn_id: "turn-1".into()
+            }
+        );
+        assert_eq!(next(&mut played.lines).await, None, "nothing sent again");
+        stop(&played.dir);
+    }
+
+    /// **B7 part 2 S2 and S3: a turn that ended on its own, and one the host is not
+    /// running.** A Stop whose turn ended `completed` before the interrupt took is refused
+    /// with that fact and recorded so. One the host refuses (not the turn it runs) is
+    /// refused as such and its claim given back: the same request id is a first attempt
+    /// again, and reaches the host.
+    #[tokio::test]
+    async fn a_stop_of_a_turn_that_ended_or_is_not_running_says_so() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-2").await;
+        let (ended, _) = tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-3", "turn-2"), async {
+            let (uuid, _) = host_reads_stop(&mut played).await;
+            host_ends_turn(&mut played, 4, &uuid, "completed", &[]).await;
+        });
+        assert_eq!(
+            ended,
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::interrupt_turn_ended_itself("completed")
+            }
+        );
+        assert_eq!(
+            stop_record(&rig.daemon, &uid, "stop-3").await.as_deref(),
+            Some("turn_ended")
+        );
+        turn_begins(&mut played, 6, "turn-3").await;
+        let (refused, _) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-4", "turn-3"), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                host_refuses_stop(&mut played, 7, &uuid).await;
+            });
+        assert_eq!(
+            refused,
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::CLAUDE_TURN_NOT_RUNNING.into()
+            }
+        );
+        assert_eq!(stop_record(&rig.daemon, &uid, "stop-4").await, None);
+        let (again, _) = tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-4", "turn-3"), async {
+            let (uuid, _) = host_reads_stop(&mut played).await;
+            host_ends_turn(&mut played, 8, &uuid, "aborted_streaming", &[]).await;
+        });
+        assert_eq!(
+            again,
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: "turn-3".into()
+            }
+        );
+        stop(&played.dir);
+    }
+
+    /// **B7 part 2 S5: a Stop that cannot reach a running turn is refused, with no
+    /// claim.** A stale hash and an empty turn; a run ending (`stopping`); a run whose
+    /// link is not attached; one that has ended; one still starting. None claims anything
+    /// or reaches a host.
+    #[tokio::test]
+    async fn a_stop_that_cannot_reach_a_running_turn_is_refused_with_no_claim() {
+        let says = |reason: &str| protocol::ws::InterruptResult::Rejected {
+            reason: reason.to_string(),
+        };
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        assert_eq!(
+            rig.daemon
+                .interrupt(&uid, "stop-1", "turn-1", "not-the-hash")
+                .await,
+            says(crate::codex_refusals::INTERRUPT_STALE_HASH)
+        );
+        assert_eq!(
+            stop_as_app(&rig.daemon, &uid, "stop-1", "").await,
+            says(crate::codex_refusals::INTERRUPT_NAMES_NO_TURN)
+        );
+        assert_eq!(rig.daemon.stop_run(&uid).await, StopRunResult::Stopping);
+        assert!(matches!(
+            next(&mut played.lines).await,
+            Some(ToHost::Stop { .. })
+        ));
+        assert_eq!(
+            stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1").await,
+            says(crate::codex_refusals::INTERRUPT_ALREADY_WAITING)
+        );
+        assert_eq!(
+            next(&mut played.lines).await,
+            None,
+            "nothing reached the host"
+        );
+        assert_eq!(stop_record(&rig.daemon, &uid, "stop-1").await, None);
+        stop(&played.dir);
+
+        let rig = self::rig();
+        let played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let dir = played.dir.clone();
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        assert_eq!(
+            stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1").await,
+            says(crate::codex_refusals::ENGINE_NO_CONNECTION)
+        );
+        assert_eq!(stop_record(&rig.daemon, &uid, "stop-1").await, None);
+        stop(&dir);
+
+        let rig = self::rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1").await,
+            says(crate::codex_refusals::INTERRUPT_RUN_IS_GONE)
+        );
+        assert_eq!(stop_record(&rig.daemon, &uid, "stop-1").await, None);
+        stop(&played.dir);
+
+        let rig = self::rig();
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let (starting, _) = begun(&rig, &cwd, &host, Trust::Trusted).await;
+        assert_eq!(
+            stop_as_app(&rig.daemon, &starting, "stop-1", "turn-1").await,
+            says(crate::codex_refusals::CLAUDE_TURN_NOT_RUNNING)
+        );
+        assert_eq!(stop_record(&rig.daemon, &starting, "stop-1").await, None);
+    }
+
+    /// **B7 part 2 S6: a Stop whose link ends before its outcome.** It is unknown, never
+    /// "nothing was sent", and its claim stays: a retry before any restart is unknown too.
+    /// A restarted ccd's sweep settles it unknown; the host's replayed outcome then marks
+    /// the message it cancelled, once across a second replay, and a retry stays unknown.
+    #[tokio::test]
+    async fn a_stop_whose_link_ends_before_its_outcome_stays_unknown() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let dir = played.dir.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        let (sent, _) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
+            host_takes(&mut played, 4, "done")
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let (lost, uuid) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                drop(played);
+                uuid
+            });
+        assert_eq!(
+            lost,
+            protocol::ws::InterruptResult::Indeterminate {
+                reason: crate::codex_refusals::interrupt_settled_unknown(
+                    crate::codex_refusals::CLAUDE_CONNECTION_ENDED
+                )
+            }
+        );
+        assert_eq!(
+            stop_record(&rig.daemon, &uid, "stop-1").await.as_deref(),
+            Some("applying")
+        );
+        until_detached(&rig.daemon, &uid).await;
+        let unknown = protocol::ws::InterruptResult::Indeterminate {
+            reason: crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
+        };
+        assert_eq!(
+            stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1").await,
+            unknown
+        );
+        let (restarted, mut lines, mut write) = restarted(&rig, &dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        let outcome = |seq: u64| {
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": "done",
+                "terminal_reason": "aborted_tools", "cancelled": [send_uuid(&uid, "r-1")]})
+        };
+        say(&mut write, outcome(5)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        say(&mut write, outcome(6)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 6 }));
+        assert_eq!(
+            not_sent_notices(&rig, &uid)
+                .iter()
+                .map(|notice| notice["request_id"].clone())
+                .collect::<Vec<_>>(),
+            [serde_json::json!("r-1")]
+        );
+        assert_eq!(
+            stop_record(&restarted, &uid, "stop-1").await.as_deref(),
+            Some("indeterminate")
+        );
+        assert_eq!(
+            stop_as_app(&restarted, &uid, "stop-1", "turn-1").await,
+            unknown
+        );
+        stop(&dir);
+    }
+
+    /// **B7 part 2 S8: a card open at a Stop reads stopped.** The host withdraws the open
+    /// request while the Stop waits, and its card closes saying the turn was stopped; a
+    /// card withdrawn with no Stop waiting keeps saying the session ended.
+    #[tokio::test]
+    async fn a_card_open_at_a_stop_reads_stopped() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        host_asks(&mut played, 4, "toolu_1", serde_json::json!({})).await;
+        let withdrawn = |seq: u64, tool_use_id: &str| serde_json::json!({"type": "withdrawn", "seq": seq, "tool_use_id": tool_use_id});
+        let (stopped, _) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                say(&mut played.write, withdrawn(5, "toolu_1")).await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+                host_ends_turn(&mut played, 6, &uuid, "aborted_tools", &[]).await;
+            });
+        assert!(
+            matches!(stopped, protocol::ws::InterruptResult::Aborted { .. }),
+            "{stopped:?}"
+        );
+        turn_begins(&mut played, 8, "turn-2").await;
+        host_asks(&mut played, 9, "toolu_2", serde_json::json!({})).await;
+        say(&mut played.write, withdrawn(10, "toolu_2")).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 10 }));
+        let detail = |request_id: &str| {
+            stored(&rig, &uid)
+                .into_iter()
+                .find(|event| event["source_event_id"] == format!("resolved:{request_id}"))
+                .map(|event| event["payload"]["detail"].clone())
+        };
+        assert_eq!(
+            detail("toolu_1"),
+            Some(serde_json::json!(
+                "The turn was stopped before anyone answered."
+            ))
+        );
+        assert_eq!(
+            detail("toolu_2"),
+            Some(serde_json::json!(
+                "the session ended before anyone answered"
+            ))
+        );
+        assert_eq!(cards(&rig.daemon, &uid).await, (vec![], vec![]));
+        stop(&played.dir);
+    }
+
+    /// **Stop on a Claude run, as a minor-37 daemon sends it, emitted by this build.** A copy
+    /// of it under `ios/` is kept byte-identical by `fixtures/check-duplicated-fixtures.sh`.
+    #[tokio::test]
+    async fn the_minor_37_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-37-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_37_wire().await,
+            committed,
+            "the committed minor-37 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_37_wire_fixture, then copy it over any copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names them)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-37-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_37_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_37_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-37-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The capabilities a paired phone is offered, with `claude_interrupt`; the Interrupt an
+    /// app sends for a Claude run's turn; each answer ccd gives a hosted run's Stop, from a
+    /// run on a stand-in host (aborted, a second Stop while one waits, ended on its own, not
+    /// the turn the host runs, no connection); the person's row of a message, with its
+    /// request id; and the notice for that message, which the Stop cancelled.
+    async fn derived_minor_37_wire() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let answer = |request_id: &str, result: protocol::ws::InterruptResult| {
+            serde_json::to_value(protocol::ws::ServerMessage::InterruptResult {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let turns = [
+            "9d1f0000-0000-4000-8000-000000000011",
+            "9d1f0000-0000-4000-8000-000000000012",
+            "9d1f0000-0000-4000-8000-000000000013",
+        ];
+        turn_begins(&mut played, 3, turns[0]).await;
+        let (_, _) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "send-1", "and the docs"),
+            host_takes(&mut played, 4, "done")
+        );
+        let cancelled = [send_uuid(&uid, "send-1")];
+        let (aborted, waiting) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", turns[0]), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                let waiting = stop_as_app(&rig.daemon, &uid, "stop-2", turns[0]).await;
+                host_ends_turn(&mut played, 5, &uuid, "aborted_tools", &cancelled).await;
+                waiting
+            });
+        turn_begins(&mut played, 7, turns[1]).await;
+        let (ended, _) = tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-3", turns[1]), async {
+            let (uuid, _) = host_reads_stop(&mut played).await;
+            host_ends_turn(&mut played, 8, &uuid, "completed", &[]).await;
+        });
+        turn_begins(&mut played, 10, turns[2]).await;
+        let (not_running, _) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-4", turns[2]), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                host_refuses_stop(&mut played, 11, &uuid).await;
+            });
+        let dir = played.dir.clone();
+        let events = stored(&rig, &uid);
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        let no_connection = stop_as_app(&rig.daemon, &uid, "stop-5", turns[2]).await;
+        stop(&dir);
+        let payload = |find: &dyn Fn(&serde_json::Value) -> bool| {
+            events
+                .iter()
+                .find(|event| find(event))
+                .map(|event| event["payload"].clone())
+                .expect("the event")
+        };
+        serde_json::json!({
+            "hello_ack_capabilities": crate::ws_server::capabilities(&rig.daemon, false, false, true),
+            "interrupt_request": serde_json::to_value(protocol::ws::ClientMessage::Interrupt {
+                session_id: fixed.into(),
+                request_id: "stop-1".into(),
+                turn_id: turns[0].into(),
+                payload_hash: protocol::hash::interrupt_hash(fixed, turns[0]),
+            })
+            .unwrap(),
+            "interrupt_aborted": answer("stop-1", aborted),
+            "interrupt_already_waiting": answer("stop-2", waiting),
+            "interrupt_ended_on_its_own": answer("stop-3", ended),
+            "interrupt_not_running": answer("stop-4", not_running),
+            "interrupt_no_connection": answer("stop-5", no_connection),
+            "person_row": payload(&|event| event["kind"] == "user_message"
+                && event["payload"]["text"] == "and the docs"),
+            "send_not_sent": payload(&|event| event["payload"]["notification_type"] == "send_not_sent"),
+        })
     }
 
     /// **B6 G11: a request too large to show** is refused at once: the host is answered

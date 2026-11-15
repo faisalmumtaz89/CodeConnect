@@ -4790,6 +4790,18 @@ impl Store {
 
     /// The run `session_uid`'s messages to its agent host still claimed, each by its
     /// request id with its text.
+    /// The request id of every message sent to the hosted run `session_uid`, whatever became
+    /// of it: what a Stop's receipt names a cancelled message by.
+    pub fn send_request_ids(&self, session_uid: &str) -> Result<Vec<String>> {
+        let conn = self.read();
+        let mut stmt =
+            conn.prepare("SELECT request_id FROM text_mutations WHERE session_uid = ?1")?;
+        let rows = stmt
+            .query_map(params![session_uid], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn host_sends(&self, session_uid: &str) -> Result<Vec<(String, String)>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
@@ -6530,9 +6542,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         -- material is a conflict, never a second actuation. The claimed material
         -- is a single hash over the full authorization surface (route, target
         -- turn, the exact displayed option set, cwd) and is immutable once
-        -- written. Additive and agent-scoped by construction: only a Codex writer
-        -- ever inserts here, so a rolled-back daemon that does not know the table
-        -- neither reads nor mutates it.
+        -- written. Additive: a Codex run's asks and the Stops of a Claude run
+        -- CodeConnect started are written here, so a rolled-back daemon that does not
+        -- know the table neither reads nor mutates it.
         CREATE TABLE IF NOT EXISTS mutation_ledger(
             operation_kind    TEXT NOT NULL,
             session_uid       TEXT NOT NULL,

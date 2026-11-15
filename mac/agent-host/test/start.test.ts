@@ -6,7 +6,7 @@ import { afterAll, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cleanup, exitWithin, goldenLine, goldenLines, open, recordedInit, runDir, sessionInit, sessionQueued, startHost, type StubScript, stubLog, waitFor, writeStub } from './rig.ts';
+import { cleanup, exitWithin, fixture, goldenLine, goldenLines, open, recordedInit, runDir, sessionInit, sessionQueued, startHost, type StubScript, stubLog, waitFor, writeStub } from './rig.ts';
 
 afterAll(cleanup);
 
@@ -401,6 +401,62 @@ test("a question claude asks reaches ccd as a permission, and its answers reach 
   expect((await ccd.line('the answers answered', (line) => line.type === 'outcome' && line.uuid === 'c-question')).status).toBe('done');
   await waitFor('claude to read the answers', () => answersRead(stub(), 'req-toolu_q1').length === 1);
   expect(answersRead(stub(), 'req-toolu_q1')[0].response.response).toMatchObject({ behavior: 'allow', updatedInput: answered });
+}, 10_000);
+
+/** The turn the recorded session's first `system/init` opens. */
+const runningTurn = JSON.parse(sessionInit).uuid as string;
+/** claude's own `result` lines, recorded: a turn an app stopped (`aborted_tools`), and one that completed. */
+const recordedLines = fixture('claude/sdk-session-0.3.322.jsonl').split('\n');
+const turnResult = (reason = 'aborted_tools') => recordedLines[reason === 'completed' ? 10 : 95]!;
+/** The interrupts claude read. */
+const interruptsRead = (log: any[]) => stdinOf(log).filter((m) => m.type === 'control_request' && m.request?.subtype === 'interrupt');
+
+test("an app's Stop of the running turn interrupts with cancel_queued, and its outcome follows the turn's result with its reason and the cancelled sends", async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [sessionInit], interrupt: { cancelled: ['c-say'], lines: [turnResult()] } });
+  await ccd.line('the turn', (line) => line.type === 'sdk' && line.message.type === 'system');
+  ccd.send({ type: 'interrupt', uuid: 'c-stop', turn_id: runningTurn });
+  const result = await ccd.line('the turn ended', (line) => line.type === 'sdk' && line.message.type === 'result');
+  const outcome = await ccd.line('the stop answered', (line) => line.type === 'outcome' && line.uuid === 'c-stop');
+  expect(outcome).toMatchObject({ status: 'done', terminal_reason: 'aborted_tools', cancelled: ['c-say'] });
+  expect(outcome.seq).toBeGreaterThan(result.seq);
+  expect(interruptsRead(stub()).map((m) => m.request.cancel_queued)).toStrictEqual([true]);
+}, 10_000);
+
+test('a turn that ends as the Stop arrives writes its result first: the outcome still waits for the receipt and carries its cancelled sends', async () => {
+  const { ccd } = await run(trustedStart, {
+    after_user: [sessionInit],
+    interrupt: { cancelled: ['c-say'], lines: [turnResult('completed')], result_first: true },
+  });
+  await ccd.line('the turn', (line) => line.type === 'sdk' && line.message.type === 'system');
+  ccd.send({ type: 'interrupt', uuid: 'c-stop', turn_id: runningTurn });
+  const outcome = await ccd.line('the stop answered', (line) => line.type === 'outcome' && line.uuid === 'c-stop');
+  expect(outcome).toMatchObject({ status: 'done', terminal_reason: 'completed', cancelled: ['c-say'] });
+}, 10_000);
+
+test('a Stop of a turn the host is not running is refused and reaches claude nothing: another turn, or one whose result has come', async () => {
+  const { ccd, stub } = await run(trustedStart, { after_user: [sessionInit], interrupt: { lines: [turnResult()] } });
+  await ccd.line('the turn', (line) => line.type === 'sdk' && line.message.type === 'system');
+  ccd.send({ type: 'interrupt', uuid: 'c-other', turn_id: 'another-turn' });
+  expect((await ccd.line('another turn refused', (line) => line.type === 'outcome' && line.uuid === 'c-other')).status).toBe('refused');
+  expect(interruptsRead(stub())).toStrictEqual([]);
+  ccd.send({ type: 'interrupt', uuid: 'c-stop', turn_id: runningTurn });
+  expect((await ccd.line('the stop answered', (line) => line.type === 'outcome' && line.uuid === 'c-stop')).status).toBe('done');
+  ccd.send({ type: 'interrupt', uuid: 'c-late', turn_id: runningTurn });
+  expect((await ccd.line('a stop after the result refused', (line) => line.type === 'outcome' && line.uuid === 'c-late')).status).toBe('refused');
+  expect(interruptsRead(stub()).length).toBe(1);
+}, 10_000);
+
+test("a Stop with a permission open: claude's cancel of it withdraws the request before the Stop's outcome", async () => {
+  const { ccd } = await run(trustedStart, {
+    after_user: [sessionInit, ask('toolu_s')],
+    interrupt: { lines: [JSON.stringify({ type: 'control_cancel_request', request_id: 'req-toolu_s' }), turnResult()] },
+  });
+  await ccd.line('the permission', (line) => line.type === 'permission');
+  ccd.send({ type: 'interrupt', uuid: 'c-stop', turn_id: runningTurn });
+  const withdrawn = await ccd.line('the request withdrawn', (line) => line.type === 'withdrawn');
+  const outcome = await ccd.line('the stop answered', (line) => line.type === 'outcome' && line.uuid === 'c-stop');
+  expect(withdrawn.tool_use_id).toBe('toolu_s');
+  expect(outcome.seq).toBeGreaterThan(withdrawn.seq);
 }, 10_000);
 
 test('stop ends the run: claude is asked to interrupt and ends, its end is the last line, and the host exits once ccd has it; a second stop does nothing', async () => {

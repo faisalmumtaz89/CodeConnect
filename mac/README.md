@@ -1001,7 +1001,7 @@ gate then refuses.
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
-`send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`,
+`send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages` and `supported_agents` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
@@ -1179,6 +1179,17 @@ claude's end then ends the run `exited`, "Stopped", with no exit code, since the
 for it. A host that has not exited 10 s after the stop, told or not, has its group stopped by
 the same ladder, and the run ends "Stopped" too. A run still starting is refused, and one that has ended answers
 `already_ended`. A ccd restart sends a stopping run `stop` again and starts its 10 s again.
+An app stops the turn such a run is running with `interrupt`, Codex's Stop with the same frames
+and answers (`claude_interrupt`, minor 37), naming the turn by its events' `turn_id`. ccd sends
+the host `interrupt` with that turn, and the host interrupts claude, its queued messages cancelled
+(`cancel_queued`), only while that turn is the one claude is running; otherwise it refuses and
+nothing is sent. The Stop reads `aborted` when the turn ends interrupted, and "that turn ended on
+its own" when it finished first. A second Stop of the turn while one waits, and a Stop of a run
+that is ending, has ended or is still starting, are refused at once. A message the Stop cancelled
+before claude ran it gets a `send_not_sent` notice ("Not sent: stopped", with its `request_id`,
+which the person's own row of it carries too). A card open when the Stop ends the turn closes
+"The turn was stopped before anyone answered." A Stop in flight when ccd restarts reads unknown,
+and is never sent again.
 A Codex start that goes on runs `codeconnect codex --no-attach -- <prompt>` there through
 the user's login shell. Both use `$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise, every value an argument of its own, and the check and the run read the
@@ -1725,6 +1736,11 @@ fails the suite instead of failing silently in production.
   the retry: the same words typed again later are a new message. One case is not
   guarded: a reply typed character for character the same as a diff comment just left
   unconfirmed on the same session, where the comment's retry could type it twice.
+* **A Stop at the instant a turn ends can stop the next one.** If a turn has just ended inside
+  Claude and a message sent at that moment starts the next one, a Stop of the first reaches the
+  second: that turn is interrupted, or its message is cancelled before it runs, and the Stop reads
+  that the turn ended on its own. Claude's interrupt names no turn, so this cannot be told apart;
+  nothing the person asked to stop goes on running.
 * **A permission request too large to show is refused.** In a session started from an
   app, a request whose details are too large for the app to show (a very large file
   write, for example) is refused at once rather than approved unseen. Claude is told

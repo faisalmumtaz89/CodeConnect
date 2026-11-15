@@ -1599,9 +1599,10 @@ where
         | ClientMessage::TerminalDetach { .. } => {
             unreachable!("terminal messages are routed by handle_terminal, not handle_message")
         }
-        // Stop the turn a Codex session is running. Every refusal is a typed
-        // `Rejected` naming the reason, so a mutation result is never a silence,
-        // and a Claude session is refused by the agent branch inside rather than
+        // Stop the turn a Codex session, or a Claude run CodeConnect started, is
+        // running. Every refusal is a typed `Rejected` naming the reason, so a
+        // mutation result is never a silence, and any other Claude session is
+        // refused by the agent branch inside rather than
         // by this arm — the daemon is the one place that knows which agent a run
         // is hosting.
         ClientMessage::Interrupt {
@@ -3172,7 +3173,7 @@ fn validated_registration(
     }
 }
 
-fn capabilities(
+pub(crate) fn capabilities(
     daemon: &Arc<Daemon>,
     tls_active: bool,
     terminal_allowed: bool,
@@ -3270,6 +3271,9 @@ fn capabilities(
         browse_folders: paired,
         machine_stats: true,
         stop_run: true,
+        // Stop reaches a Claude run CodeConnect started through its agent host; any other
+        // Claude session is refused by the agent branch inside.
+        claude_interrupt: true,
     }
 }
 

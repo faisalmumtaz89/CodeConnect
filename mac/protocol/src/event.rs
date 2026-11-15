@@ -105,6 +105,9 @@ pub mod notice {
     pub const MODE_SET: &str = "mode_set";
     /// Claude compacted the conversation (`/compact`, or on its own).
     pub const COMPACTED: &str = "compacted";
+    /// A Stop cancelled the person's message `request_id` before claude ran it
+    /// (`reason: "stopped"`): it was never sent to the model.
+    pub const SEND_NOT_SENT: &str = "send_not_sent";
 }
 
 /// Item kinds, following the thread -> turn -> item model.

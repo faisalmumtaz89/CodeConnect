@@ -797,6 +797,11 @@ impl Db {
         .await
     }
 
+    pub async fn send_request_ids(&self, session_uid: String) -> Result<Vec<String>> {
+        self.run(move |store| store.send_request_ids(&session_uid))
+            .await
+    }
+
     pub async fn host_sends(&self, session_uid: String) -> Result<Vec<(String, String)>> {
         self.run(move |store| store.host_sends(&session_uid)).await
     }

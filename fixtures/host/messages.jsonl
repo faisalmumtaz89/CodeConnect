@@ -8,13 +8,13 @@
 {"dir":"to_host","message":{"decision":{"behavior":"deny","interrupt":true,"message":"Not now"},"tool_use_id":"toolu_02","type":"answer","uuid":"c-deny"}}
 {"dir":"to_host","message":{"effort":"high","model":"sonnet","type":"set_model","uuid":"c-model"}}
 {"dir":"to_host","message":{"mode":"plan","type":"set_mode","uuid":"c-mode"}}
-{"dir":"to_host","message":{"type":"interrupt","uuid":"c-interrupt"}}
+{"dir":"to_host","message":{"turn_id":"9d1f0000-0000-4000-8000-000000000002","type":"interrupt","uuid":"c-interrupt"}}
 {"dir":"to_host","message":{"type":"stop","uuid":"c-stop"}}
 {"dir":"from_host","message":{"message":{"session_id":"5f0c1e2a-0000-4000-8000-000000000001","subtype":"init","type":"system","uuid":"9d1f0000-0000-4000-8000-000000000002"},"seq":1,"type":"sdk"}}
 {"dir":"from_host","message":{"request":{"input":{"command":"cargo test","description":"Run the tests"},"options":{"displayName":"Run command","title":"Claude wants to run cargo test"},"tool_name":"Bash","tool_use_id":"toolu_01"},"seq":2,"type":"permission"}}
 {"dir":"from_host","message":{"seq":3,"tool_use_id":"toolu_01","type":"withdrawn"}}
 {"dir":"from_host","message":{"initialize":{"account":{"api_provider":"firstParty"},"commands":[{"argumentHint":"<optional custom summarization instructions>","description":"Clear conversation history but keep a summary in context","name":"compact"}],"models":[{"description":"Opus for complex tasks","displayName":"Default (recommended)","supportedEffortLevels":["low","medium","high"],"supportsEffort":true,"value":"default"}]},"seq":4,"status":"done","type":"outcome","uuid":"c-start"}}
-{"dir":"from_host","message":{"cancelled":["c-say"],"seq":5,"status":"done","type":"outcome","uuid":"c-interrupt"}}
+{"dir":"from_host","message":{"cancelled":["c-say"],"seq":5,"status":"done","terminal_reason":"aborted_tools","type":"outcome","uuid":"c-interrupt"}}
 {"dir":"from_host","message":{"detail":"no such permission mode: plann","seq":6,"status":"refused","type":"outcome","uuid":"c-mode"}}
 {"dir":"from_host","message":{"effort":"high","model":"sonnet","pending":[{"input":{"command":"cargo test","description":"Run the tests"},"options":{"displayName":"Run command","title":"Claude wants to run cargo test"},"tool_name":"Bash","tool_use_id":"toolu_01"}],"permission_mode":"default","seq":7,"session_id":"5f0c1e2a-0000-4000-8000-000000000001","type":"state"}}
 {"dir":"from_host","message":{"code":0,"seq":8,"type":"exited"}}

@@ -49,7 +49,7 @@ export type ToHost =
   | { type: 'answer'; uuid: string; tool_use_id: string; decision: Decision }
   | { type: 'set_model'; uuid: string; model: string; effort?: string }
   | { type: 'set_mode'; uuid: string; mode: string }
-  | { type: 'interrupt'; uuid: string }
+  | { type: 'interrupt'; uuid: string; turn_id: string }
   | { type: 'stop'; uuid: string };
 
 /** A `canUseTool` call: `options` is the SDK's, without its signal, tool-use id and control request id. */
@@ -85,6 +85,7 @@ export type FromHost =
       detail?: string;
       initialize?: InitializeAnswer;
       cancelled?: string[];
+      terminal_reason?: string;
     }
   | {
       type: 'state';

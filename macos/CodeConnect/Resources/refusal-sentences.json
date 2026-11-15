@@ -6,9 +6,9 @@
     "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
   },
   "counts": {
-    "link_state": 21,
-    "permanent": 43,
-    "total": 71,
+    "link_state": 22,
+    "permanent": 45,
+    "total": 74,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -148,6 +148,13 @@
     },
     {
       "category": "link_state",
+      "id": "engine_no_connection",
+      "outcome": "rejected",
+      "text": "CodeConnect has no connection to this run right now, so nothing was sent.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
       "id": "compose_link_bound",
       "outcome": "rejected",
       "text": "the computer is connected to the Codex session but is not yet watching its thread, so a message cannot be confirmed; nothing was sent",
@@ -218,6 +225,13 @@
     },
     {
       "category": "permanent",
+      "id": "claude_stop_settled_unknown",
+      "outcome": "indeterminate",
+      "text": "the computer's connection to Claude ended while this request to stop the turn was in flight, so whether that turn was stopped is not known; it will not be sent again. Check the computer.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
       "id": "interrupt_settled_unrecorded",
       "outcome": "indeterminate",
       "text": "the link's connection to Codex ended while this request to stop the turn was in flight, and the computer could not record that either, so it cannot say what became of it. Check the computer.",
@@ -284,6 +298,13 @@
       "id": "interrupt_turn_not_running",
       "outcome": "rejected",
       "text": "that turn is not the one this Codex session is running, so nothing was sent; it may have finished already",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "claude_turn_not_running",
+      "outcome": "rejected",
+      "text": "that turn is not the one Claude is running, so nothing was sent; it may have finished already",
       "verb": "interrupt"
     },
     {

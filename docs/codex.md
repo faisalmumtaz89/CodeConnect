@@ -409,15 +409,15 @@ below. `codeconnect ls` shows what is running in tmux even when the daemon is do
 
 ### The refusal sentence on the phone
 
-When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 71
+When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 74
 of them and they fall into four kinds. Which kind it is tells you whether trying again is
 worth anything:
 
 | Kind | How many | What it means | Try again? |
 |---|---|---|---|
-| Link state | 21 | A fact about the computer's control link right now — reconnecting, not yet watching the thread, no link at all — or Codex paused at the computer with Ctrl+Z. | Yes, shortly (after `fg` for a pause). |
+| Link state | 22 | A fact about the computer's control link right now — reconnecting, not yet watching the thread, no link at all — or Codex paused at the computer with Ctrl+Z. | Yes, shortly (after `fg` for a pause). |
 | The computer's own store | 5 | A local lookup or record failed **before** anything was sent. Nothing reached Codex. | Yes. Then check the computer. |
-| Settled | 43 | The ask was wrong, the id is spent, or the outcome is already recorded. | No. |
+| Settled | 45 | The ask was wrong, the id is spent, or the outcome is already recorded. | No. |
 | Wire code | 2 | Codex, or CodeConnect's own broker rules, refused the write in a way that proves nothing reached Codex, and the sentence carries the numeric code — never the refuser's message. | Yes, from the phone. A refusal by a rule refuses again. |
 
 Every sentence is written in one place in the daemon and emitted as

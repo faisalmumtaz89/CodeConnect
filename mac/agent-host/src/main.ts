@@ -11,8 +11,11 @@
 // cannot take (before the start, or once its input has ended) is `refused`. claude's permission requests are held for
 // ccd's `answer` (permissions.ts), each answer told back once the SDK has written it into claude's input; the state
 // message lists those still open. `stop` ends the run (H5): the query is interrupted, its input ended and the query
-// closed, so claude exits; a second `stop` does nothing. claude's end is the last message, `exited`. Once the run is
-// over and ccd has acknowledged everything, the host exits 0.
+// closed, so claude exits; a second `stop` does nothing. `interrupt` is an app's Stop of one turn, taken only while that
+// turn (its `system/init` uuid, until its `result`) is the one claude is running, and refused otherwise: the query is
+// interrupted with its queued messages cancelled, and the outcome `done` follows once both the turn's result and the
+// interrupt's receipt are in, with the result's `terminal_reason` and the receipt's `cancelled`. claude's end is the last
+// message, `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,7 +23,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createLink } from './link.ts';
 import { createPermissions } from './permissions.ts';
-import { HOST_PROTOCOL_VERSION, type HostFile } from './protocol.ts';
+import { HOST_PROTOCOL_VERSION, type HostFile, type ToHost } from './protocol.ts';
 import {
   type Facts,
   firstMessage,
@@ -62,6 +65,10 @@ const link = createLink({
     permissions
       ? permissions.answer(command)
       : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'the request is no longer open' }),
+  interrupt: (command) =>
+    interrupt
+      ? interrupt(command)
+      : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'that turn is not running' }),
   stop: () => stop?.(),
   facts: () => facts,
   pending: () => permissions?.pending() ?? [],
@@ -85,6 +92,9 @@ let begun = false;
 
 // The run's stop, once it has a query to stop.
 let stop: (() => void) | undefined;
+
+// An app's Stop of one turn, once the run has a query.
+let interrupt: ((command: Extract<ToHost, { type: 'interrupt' }>) => void) | undefined;
 
 function begin(start: Start): void {
   if (begun) return;
@@ -159,6 +169,51 @@ function begin(start: Start): void {
     endInput();
     run.close();
   };
+  // The turn claude is running: its `system/init` uuid, until that turn's `result`.
+  let running: string | undefined;
+  // An app's Stop of the running turn, until both its turn's result and the interrupt's receipt are in, in either
+  // order: claude writes the receipt first, but a turn that ends as the Stop arrives writes its result first.
+  let stopping: { uuid: string; ended: boolean; reason?: string; answered: boolean; cancelled: string[] } | undefined;
+  const stopped = () => {
+    if (!stopping?.ended || !stopping.answered) return;
+    const { uuid, reason, cancelled } = stopping;
+    stopping = undefined;
+    link.send({ type: 'outcome', uuid, status: 'done', ...(reason === undefined ? {} : { terminal_reason: reason }), cancelled });
+  };
+  // The SDK's interrupt takes `{ cancelQueued }` and returns the receipt (sdk.mjs), though its type shows no argument.
+  const interruptAll = run.interrupt.bind(run) as unknown as (options: {
+    cancelQueued: true;
+  }) => Promise<{ cancelled?: string[] } | undefined>;
+  interrupt = (command) => {
+    if (running === undefined || running !== command.turn_id) {
+      link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'that turn is not running' });
+      return;
+    }
+    const ask = { uuid: command.uuid, ended: false, answered: false, cancelled: [] as string[] };
+    stopping = ask;
+    // A rejection means claude went: the run's end follows, and no outcome.
+    interruptAll({ cancelQueued: true }).then(
+      (receipt) => {
+        ask.cancelled = receipt?.cancelled ?? [];
+        ask.answered = true;
+        stopped();
+      },
+      () => {},
+    );
+  };
+  // The running turn, from each message after it is sent: a stopped turn's result is sent before its outcome.
+  const noteTurn = (message: { type?: unknown; subtype?: unknown; uuid?: unknown; terminal_reason?: unknown }) => {
+    if (message.type === 'system' && message.subtype === 'init' && typeof message.uuid === 'string') {
+      running = message.uuid;
+    } else if (message.type === 'result') {
+      running = undefined;
+      if (stopping) {
+        stopping.ended = true;
+        if (typeof message.terminal_reason === 'string') stopping.reason = message.terminal_reason;
+        stopped();
+      }
+    }
+  };
   // Whether claude answered initialize.
   const outcome = run.initializationResult().then(
     (answer) => {
@@ -180,6 +235,7 @@ function begin(start: Start): void {
         if (!answered) continue;
         facts = noteMessage(facts, message);
         link.send({ type: 'sdk', message });
+        noteTurn(message);
       }
     } catch (error) {
       console.error(`the query ended: ${oneLine(error)}`);

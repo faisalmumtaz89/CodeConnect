@@ -484,6 +484,17 @@ struct Inner {
     /// answer reached claude. A restarted daemon holds none, and records the
     /// outcome from the answer's claim instead.
     host_answers: HashMap<String, AnswerOutcome>,
+    /// App Stops sent to a run's agent host and waiting for its outcome, by the
+    /// interrupt's uuid, each with its run's `session_uid`: told what became of the Stop
+    /// once the host's outcome is applied ([`crate::claude_host::interrupt`]). Dropped when
+    /// the run's link ends, so a waiter then hears nothing more.
+    host_stops: HashMap<
+        String,
+        (
+            String,
+            tokio::sync::oneshot::Sender<crate::codex_link::InterruptReport>,
+        ),
+    >,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -5745,7 +5756,8 @@ impl Daemon {
         }
     }
 
-    /// **Stop the turn a Codex session is running, from a phone.**
+    /// **Stop the turn a Codex session is running, from a phone**, or a Claude run
+    /// CodeConnect started, through its agent host ([`crate::claude_host::interrupt`]).
     ///
     /// Idempotent by `(session, request_id)` in the generalized mutation ledger, and
     /// bound to one turn by `payload_hash` — so a retry can never abort a *different*
@@ -5803,12 +5815,20 @@ impl Daemon {
                 return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
+        // A Claude run CodeConnect started: its lifecycle, for its own branch below.
+        let mut hosted = None;
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
-            // Claude has no interrupt on this wire. Its stop control is the keyboard
-            // at the Mac, and saying so is more useful than a bare refusal.
+            // A Claude run CodeConnect started is stopped through its agent host. Any
+            // other has no interrupt on this wire: its stop control is the keyboard at
+            // the Mac, and saying so is more useful than a bare refusal.
             protocol::agent::AgentKind::Claude => {
-                return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
+                match self.db.hosted_link(row.session_uid.clone()).await {
+                    Ok(Some(linked)) => hosted = Some(linked.lifecycle),
+                    _ => {
+                        return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
+                    }
+                }
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::interrupt_on_unsupported(
@@ -5901,6 +5921,15 @@ impl Daemon {
                 );
                 return refuse(crate::codex_refusals::INTERRUPT_LEDGER_UNREADABLE.to_string());
             }
+        }
+
+        // **A Claude run CodeConnect started is stopped through its agent host**, which
+        // runs the turn and refuses one it is not running ([`crate::claude_host::interrupt`]).
+        if let Some(lifecycle) = hosted {
+            return Daemon::interrupt_result(
+                crate::claude_host::interrupt(self, &session.uid, request_id, turn_id, lifecycle)
+                    .await,
+            );
         }
 
         // 4. **The link must be an addressee for this turn's thread.** `Subscribed`
@@ -10013,6 +10042,41 @@ impl Daemon {
         let mut inner = self.inner.lock().await;
         inner.host_links.remove(session_uid);
         inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
+        inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
+    }
+
+    /// Whether this daemon is attached to the hosted run `session_uid`'s agent host now.
+    pub(crate) async fn host_attached(&self, session_uid: &str) -> bool {
+        self.inner.lock().await.host_links.contains_key(session_uid)
+    }
+
+    /// Wait for the outcome of the app's Stop `uuid` this daemon is sending the run
+    /// `session_uid`'s agent host ([`Self::host_stop_told`]).
+    pub(crate) async fn await_host_stop(
+        &self,
+        session_uid: &str,
+        uuid: &str,
+    ) -> tokio::sync::oneshot::Receiver<crate::codex_link::InterruptReport> {
+        let (tell, told) = tokio::sync::oneshot::channel();
+        self.inner
+            .lock()
+            .await
+            .host_stops
+            .insert(uuid.to_string(), (session_uid.to_string(), tell));
+        told
+    }
+
+    /// What became of the app's Stop `uuid`, or nobody waits any more (`None`): whoever
+    /// waits for it hears so.
+    pub(crate) async fn host_stop_told(
+        &self,
+        uuid: &str,
+        report: Option<crate::codex_link::InterruptReport>,
+    ) {
+        let waiter = self.inner.lock().await.host_stops.remove(uuid);
+        if let (Some((_, tell)), Some(report)) = (waiter, report) {
+            let _ = tell.send(report);
+        }
     }
 
     /// Wait for the outcome of the message `uuid` this daemon is sending the run
@@ -10290,9 +10354,11 @@ impl Daemon {
     }
 
     /// The agent host of the hosted run `uid` withdrew the request `request_id`, as
-    /// message `seq` from the host `host`: claude no longer waits on it (an interrupt,
+    /// message `seq` from the host `host`: claude no longer waits on it (an app's Stop,
     /// End run, or claude's end), so its card closes, nobody having answered, with no
-    /// answer recorded. `false` when the cursor did not move.
+    /// answer recorded. While an app's Stop of the run waits (its claim `applying`), the
+    /// card says the turn was stopped; otherwise that the session ended. `false` when the
+    /// cursor did not move.
     pub(crate) async fn host_card_withdrawn(
         &self,
         uid: &str,
@@ -10300,7 +10366,18 @@ impl Daemon {
         seq: u64,
         request_id: &str,
     ) -> Result<bool> {
-        let closure = host_card_closure(&SessionKey::new(uid, uid), request_id);
+        let stopped = matches!(
+            self.db
+                .unsettled_claims_for(crate::store::OPERATION_INTERRUPT, uid.to_string())
+                .await,
+            Ok(claims) if !claims.is_empty()
+        );
+        let detail = if stopped {
+            STOPPED_BEFORE_ANSWER
+        } else {
+            RUN_ENDED
+        };
+        let closure = host_card_closure(&SessionKey::new(uid, uid), request_id, detail);
         if self
             .commit_host_card(uid, host, seq, request_id, None, vec![closure])
             .await?
@@ -10397,7 +10474,11 @@ impl Daemon {
             .delete_pending_approval(uid.to_string(), request_id.to_string())
             .await;
         if let Err(err) = self
-            .ingest(host_card_closure(&SessionKey::new(uid, uid), request_id))
+            .ingest(host_card_closure(
+                &SessionKey::new(uid, uid),
+                request_id,
+                RUN_ENDED,
+            ))
             .await
         {
             crate::log_error!("{uid}: could not close the card {request_id}: {err:#}");
@@ -11945,13 +12026,16 @@ const SENT_TO_CLAUDE: &str = "Sent to Claude from a phone";
 const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the computer";
 /// How a card closes when the run that asked it ends first.
 const RUN_ENDED: &str = "the session ended before anyone answered";
+
+/// Why a hosted run's card closed when an app's Stop ended its turn before anyone answered.
+const STOPPED_BEFORE_ANSWER: &str = "The turn was stopped before anyone answered.";
 /// What claude is told of a hosted run's request whose card no app could show.
 const TOO_LARGE_TO_SHOW: &str = "This request is too large to show in the app, so it was refused.";
 
 /// The closing of a hosted run's card nobody answered: its host withdrew the
 /// request, or its run ended. It closes the card; no answer is recorded, so a late
 /// answer to it finds no card rather than an answer.
-fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
+fn host_card_closure(session: &SessionKey, request_id: &str, detail: &str) -> PendingEvent {
     let outcome = AnswerOutcome {
         request_id: request_id.to_string(),
         session_id: session.name.clone(),
@@ -11960,7 +12044,7 @@ fn host_card_closure(session: &SessionKey, request_id: &str) -> PendingEvent {
         answered_on: None,
         applied_via: AnswerPath::HookReturn,
         resolved_at: protocol::time::now_rfc3339(),
-        detail: Some(RUN_ENDED.into()),
+        detail: Some(detail.into()),
         inferred: false,
         indeterminate: false,
     };
