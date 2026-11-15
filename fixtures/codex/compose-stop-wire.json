@@ -23,7 +23,14 @@
     {
       "events": [
         {
+          "kind": "link_state",
+          "link": "attached",
+          "source_event_id": null,
+          "turn_id": null
+        },
+        {
           "kind": "user_message",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-f38f-7d12-98eb-ab4ef797b491",
           "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
         }
@@ -69,39 +76,58 @@
     {
       "events": [
         {
+          "kind": "link_state",
+          "link": "detached",
+          "source_event_id": null,
+          "turn_id": null
+        },
+        {
           "kind": "session_start",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:thread_started",
           "turn_id": null
         },
         {
           "kind": "agent_message",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
           "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
         },
         {
           "kind": "turn_complete",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
           "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
         },
         {
           "kind": "user_message",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
           "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
         },
         {
           "kind": "tool_result",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:post:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
           "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
         },
         {
           "kind": "agent_message",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
           "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
         },
         {
           "kind": "turn_complete",
+          "link": null,
           "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-ffc4-7202-9065-0a760f49ed10",
           "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        {
+          "kind": "link_state",
+          "link": "attached",
+          "source_event_id": null,
+          "turn_id": null
         }
       ],
       "step": "reconnected",
@@ -146,6 +172,7 @@
       "events": [
         {
           "kind": "session_end",
+          "link": null,
           "source_event_id": "exit:{uid}",
           "turn_id": null
         }

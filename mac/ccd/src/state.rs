@@ -10086,13 +10086,31 @@ impl Daemon {
         ))
     }
 
-    /// The run `session_uid`'s agent host or app-server is attached, by `link`.
+    /// The run `session_uid`'s agent host or app-server is attached, by `link`. Then, with the
+    /// link in place, a `link_state` fact says so, and an app can read the fleet again on it. A
+    /// Codex run is `live` by then, so the fleet offers its controls; a Claude run's link
+    /// attaches while the run is `starting`, and the start's outcome makes it `live`.
     pub(crate) async fn host_link_attached(&self, session_uid: &str, link: HostLink) {
         self.inner
             .lock()
             .await
             .host_links
             .insert(session_uid.to_string(), link);
+        self.file_host_link_state(session_uid, "attached", "agent host linked")
+            .await;
+    }
+
+    /// A hosted run's link change as a `link_state` fact, in the supervisor pair's shape.
+    async fn file_host_link_state(&self, session_uid: &str, link: &str, reason: &str) {
+        let pending = PendingEvent::new(
+            &SessionKey::new(session_uid, session_uid),
+            EventKind::LinkState,
+            serde_json::json!({"link": link, "reason": reason}),
+            Source::Daemon,
+        );
+        if let Err(err) = self.ingest(pending).await {
+            crate::log_error!("{session_uid}: could not record its link {link}: {err:#}");
+        }
     }
 
     /// Send the run `session_uid`'s agent host `command` through its link. Whether a Claude
@@ -10369,12 +10387,25 @@ impl Daemon {
         }
     }
 
-    /// The run `session_uid`'s connection to its agent host has ended.
+    /// The run `session_uid`'s connection to its agent host has ended. A `link_state` fact says
+    /// so only while the run is still `live` (its host died, or the connection dropped). A run
+    /// that is ending is `stopping` here (a Codex link ends before its run does) or already
+    /// `exited` (a Claude host reports claude's exit first), and its end is the fact that tells.
     pub(crate) async fn host_link_detached(&self, session_uid: &str) {
-        let mut inner = self.inner.lock().await;
-        inner.host_links.remove(session_uid);
-        inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
-        inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
+        {
+            let mut inner = self.inner.lock().await;
+            inner.host_links.remove(session_uid);
+            inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
+            inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
+        }
+        let live = matches!(
+            self.db.get_session(session_uid.to_string()).await,
+            Ok(Some(row)) if row.lifecycle == Lifecycle::Live
+        );
+        if live {
+            self.file_host_link_state(session_uid, "detached", "agent host disconnected")
+                .await;
+        }
     }
 
     /// Whether this daemon is attached to the hosted run `session_uid`'s agent host now.

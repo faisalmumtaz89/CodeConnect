@@ -2576,10 +2576,21 @@ mod tests {
         rows.map(Result::unwrap).collect()
     }
 
+    /// The `link` of each of the run's [`stored`] `link_state` facts, oldest first.
+    fn link_facts(rig: &Rig, uid: &str) -> Vec<String> {
+        stored(rig, uid)
+            .iter()
+            .filter(|event| event["kind"] == "link_state")
+            .map(|event| event["payload"]["link"].as_str().unwrap().to_string())
+            .collect()
+    }
+
     /// A live run's [`stored`] events after the person's first words, which the start's
     /// outcome filed first.
     fn after_words(rig: &Rig, uid: &str) -> Vec<serde_json::Value> {
         let mut stored = stored(rig, uid);
+        // The link's own facts (`link_state`) are not the run's messages.
+        stored.retain(|event| event["kind"] != "link_state");
         assert_eq!(
             stored[0]["kind"], "user_message",
             "the person's words first"
@@ -2624,9 +2635,9 @@ mod tests {
     /// **A live run's SDK messages are its events (G1, G2, G3).** The recorded session's
     /// 150 messages, each filed with the run's cursor in one transaction, then
     /// acknowledged: by each ack the cursor is that message's seq. The first, a
-    /// command's `queued`, files nothing. After the person's first words, the run's events
-    /// are the mapper's, each turn's carrying its init's uuid, each broadcast once and in
-    /// order. The session id stays
+    /// command's `queued`, files nothing. After the link's attach and the person's first
+    /// words, the run's events are the mapper's, each turn's carrying its init's uuid, each
+    /// broadcast once and in order. The session id stays
     /// through the `/clear` (line 133) and is the next init's from line 135. A message
     /// sent again with its seq files nothing and is not acknowledged: the link ends.
     #[tokio::test]
@@ -2671,7 +2682,7 @@ mod tests {
                 seqs.push(event.seq);
             }
         }
-        assert_eq!(seqs, (1..=110).collect::<Vec<u64>>(), "each once, in order");
+        assert_eq!(seqs, (1..=111).collect::<Vec<u64>>(), "each once, in order");
 
         let last = messages.len() as u64 + 2;
         sdk(&mut played.write, last, messages.last().unwrap().clone()).await;
@@ -2683,7 +2694,8 @@ mod tests {
 
     /// **G1's injected failure:** a result's second event cannot be stored (a test
     /// trigger aborts its insert). Its first event, already inserted, goes too; the
-    /// cursor stays, nothing is broadcast, and the message is not acknowledged.
+    /// cursor stays, none of its events is broadcast, and the message is not acknowledged:
+    /// the link ends there while the run is live, so its detach is all that is broadcast.
     #[tokio::test]
     async fn a_message_whose_events_cannot_all_be_stored_files_none() {
         let rig = rig();
@@ -2704,6 +2716,11 @@ mod tests {
         assert_eq!(next(&mut played.lines).await, None);
         assert!(after_words(&rig, &played.uid).is_empty());
         assert_eq!(cursor(&rig, &played.uid), 2);
+        let event = broadcast.try_recv().unwrap();
+        assert_eq!(
+            (event.kind, event.payload["link"].as_str()),
+            (EventKind::LinkState, Some("detached"))
+        );
         assert!(broadcast.try_recv().is_err());
         stop(&played.dir);
     }
@@ -2754,7 +2771,18 @@ mod tests {
             stop(&played.dir);
             played.uid
         });
-        assert!(stored(&rig, &uid).is_empty());
+        // Nothing but the link's attach: no message was applied.
+        let filed: Vec<(serde_json::Value, serde_json::Value)> = stored(&rig, &uid)
+            .iter()
+            .map(|event| (event["kind"].clone(), event["payload"]["link"].clone()))
+            .collect();
+        assert_eq!(
+            filed,
+            [(
+                serde_json::json!("link_state"),
+                serde_json::json!("attached")
+            )]
+        );
         assert_eq!(cursor(&rig, &uid), 1);
 
         let rig = self::rig();
@@ -2779,7 +2807,9 @@ mod tests {
                 played.uid
             }
         );
-        assert!(stored(&rig, &uid).is_empty());
+        // Only the link's attach again: a failed run's link ends with no detach.
+        assert_eq!(link_facts(&rig, &uid), ["attached"]);
+        assert_eq!(stored(&rig, &uid).len(), 1);
         assert_eq!(cursor(&rig, &uid), 2);
     }
 
@@ -2821,9 +2851,10 @@ mod tests {
             sdk(&mut played.write, seq, message).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
         }
+        // The link's attach is the run's first fact, and the person's words its second.
         let mode = protocol::event::Fact {
             value: capture()[2]["permissionMode"].as_str().unwrap().to_string(),
-            seq: 2,
+            seq: 3,
         };
         assert_eq!(
             summary(&rig.daemon, &played.uid).await.permission_mode,
@@ -2918,6 +2949,15 @@ mod tests {
         let played = live_run(&rig).await;
         let (uid, dir) = (played.uid.clone(), played.dir.clone());
         drop(played);
+        // The first daemon stays up in this test, so it sees its connection drop while the
+        // run is live and files a detach; a ccd that restarts is gone and files none. Let
+        // that detach land before the restarted daemon attaches.
+        for _ in 0..100 {
+            if link_facts(&rig, &uid).len() == 2 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
         let (mut lines, mut write) = restart(&rig, &dir).await;
         assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
         for (index, message) in capture().into_iter().take(3).enumerate() {
@@ -2954,9 +2994,14 @@ mod tests {
         expected.push("session_end".into());
         let filed: Vec<String> = stored(&rig, &uid)
             .iter()
+            .filter(|event| event["kind"] != "link_state")
             .map(|event| event["kind"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(filed, expected);
+        // The run's link facts: attached by the first daemon, detached when this test drops
+        // that daemon's connection while the run is live, and attached again by the restarted
+        // daemon. The run's end, after its host said it exited, adds none.
+        assert_eq!(link_facts(&rig, &uid), ["attached", "detached", "attached"]);
     }
 
     /// **G1, a run still starting across a restart:** its start was sent and its outcome
@@ -3187,7 +3232,11 @@ mod tests {
             assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq }));
         }
         stop(&dir);
-        let continued = stored(&rig, &uid).split_off(before);
+        let continued: Vec<serde_json::Value> = stored(&rig, &uid)
+            .split_off(before)
+            .into_iter()
+            .filter(|event| event["kind"] != "link_state")
+            .collect();
         assert!(!continued.is_empty(), "the rest of the turn is filed");
         for event in continued {
             assert_eq!(event["turn_id"], capture[12]["uuid"], "{event}");
@@ -3736,7 +3785,7 @@ mod tests {
         let filed: Vec<serde_json::Value> = stored(&rig, &uid)
             .split_off(before)
             .into_iter()
-            .filter(|event| event["kind"] != "session_end")
+            .filter(|event| event["kind"] != "session_end" && event["kind"] != "link_state")
             .collect();
         let key = SessionKey::new(&uid, &uid);
         let expected: usize = capture
@@ -5986,7 +6035,8 @@ mod tests {
     /// The recorded session through a live run's link, as the wire delivers its events:
     /// the store's own `Event`s, serialized. Only what differs between runs is pinned,
     /// each checked first: the run's uid, which is also its name, each event's clock read
-    /// (`ts`), and the start's uuid, which names the person's first words.
+    /// (`ts`), and the start's uuid, which names the person's first words. The link's
+    /// `link_state` fact, the daemon's too, carries no id and is kept as filed.
     async fn the_capture_as_the_wire_delivers_it() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
@@ -6014,7 +6064,7 @@ mod tests {
             event["session_uid"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
             event["session_id"] = serde_json::json!("01K1B3XQ8ZC0DE5FGH7JKMNPQR");
             event["ts"] = serde_json::json!("2026-11-13T12:00:00.000Z");
-            if event["source"] == "daemon" {
+            if event["source"] == "daemon" && event["kind"] != "link_state" {
                 assert_eq!(event["source_event_id"], first_words.as_str(), "{event}");
                 event["source_event_id"] =
                     serde_json::json!("say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b");

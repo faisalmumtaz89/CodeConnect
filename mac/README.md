@@ -1268,7 +1268,10 @@ and a Stop for a turn whose stop is already on its way is refused at once.
 Both apps offer Stop and the composer on the run's `codex_link` in the fleet. For a run
 started on the engine it reads `subscribed` while the run's link is attached and the run is
 `live`, and `none` otherwise: before its reconnect, after one that failed, and while it is
-stopping.
+stopping. A run started from an app, of either agent, files a `link_state` fact when its link
+attaches (`attached`, "agent host linked"), once the link is in place, and when its link ends
+while the run is live (`detached`, "agent host disconnected"); End run and a ccd restart
+file no `detached` fact.
 An app's message (`compose`) goes through the same link as `turn/start`, under a uuid named
 from the run and the request id, as a Claude run's message is. Codex runs it as a new turn
 when the run is idle, and adds it to the running turn otherwise. The answer names that turn
