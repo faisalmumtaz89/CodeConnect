@@ -700,6 +700,11 @@ async fn resend(daemon: &Daemon, session: &SessionKey, client: &Client, id: &str
     }
 }
 
+/// What an answer to a card is told while an earlier answer to it waits for Codex to confirm
+/// it: by the link, and by the daemon when the run has no link ([`Daemon::answer`]).
+pub(crate) const ANSWER_ALREADY_WAITING: &str =
+    "an answer to that card is already waiting to be confirmed, so nothing was sent again";
+
 /// A phone's answer to one of the link's cards: claimed, then written to the request. Its
 /// outcome is told when Codex says the request is resolved ([`settle`]).
 async fn answer(
@@ -716,10 +721,7 @@ async fn answer(
         return not_applied(ask, "this card is no longer open, so nothing was sent");
     };
     if card.answer.is_some() {
-        return not_applied(
-            ask,
-            "an answer to that card is already waiting to be confirmed, so nothing was sent again",
-        );
+        return not_applied(ask, ANSWER_ALREADY_WAITING);
     }
     if card.wire.is_null() {
         return not_applied(
@@ -3467,6 +3469,99 @@ mod tests {
         assert_eq!((stopped, left), (1, Vec::<u32>::new()));
         assert!(!group_alive(leader), "the app-server outlived the stop");
         drop(ws);
+    }
+
+    /// Once the run `uid`'s link has detached, within 10 s.
+    async fn link_gone(daemon: &Daemon, uid: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while daemon.engine_commands_for_tests(uid).await.is_some() {
+            assert!(Instant::now() < deadline, "the run's link did not detach");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// **A Stop retried after its run's link has gone is answered from the record.** Codex
+    /// took the first and the connection then ended, so its claim is still `applying`: the
+    /// retry is told it was sent and what became of it is not known, never that nothing was.
+    #[tokio::test]
+    async fn a_stop_retried_after_its_link_has_gone_is_answered_from_the_record() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-restop", thread, turn).await;
+        tell(&mut ws, &turn_started(thread, turn)).await;
+        let first = stopping(&rig.daemon, &uid, "req-restop-1", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        drop(ws);
+        assert!(matches!(
+            first.await.unwrap(),
+            protocol::ws::InterruptResult::Indeterminate { .. }
+        ));
+        link_gone(&rig.daemon, &uid).await;
+        let claim = rig
+            .daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                uid.clone(),
+                "req-restop-1".into(),
+            )
+            .await
+            .unwrap()
+            .map(|state| state.status);
+        assert_eq!(claim, Some(AnswerStatus::Applying));
+        assert_eq!(
+            stopping(&rig.daemon, &uid, "req-restop-1", turn)
+                .await
+                .unwrap(),
+            protocol::ws::InterruptResult::Indeterminate {
+                reason: crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into()
+            }
+        );
+        end_run(&rig, &uid).await;
+    }
+
+    /// **An answer retried after its run's link has gone is answered from the record.** The
+    /// first was written and Codex had not confirmed it when the connection ended, so its claim
+    /// is still `applying`: the retry is told it is waiting, never that nothing was sent.
+    #[tokio::test]
+    async fn an_answer_retried_after_its_link_has_gone_is_answered_from_the_record() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-reanswer", thread, turn).await;
+        for frame in &frames[1..=17] {
+            tell(&mut ws, frame).await;
+        }
+        let cards = cards_of(&rig.daemon, &uid, 1).await;
+        assert_eq!(cards.len(), 1);
+        let first = answering(&rig.daemon, &uid, &cards[0], "accept");
+        assert!(
+            response_to(&mut ws, &frames[17]["id"], Duration::from_secs(10))
+                .await
+                .is_some(),
+            "the first answer was not written"
+        );
+        drop(ws);
+        assert!(matches!(
+            first.await.unwrap(),
+            protocol::ws::AnswerResult::Rejected { .. }
+        ));
+        link_gone(&rig.daemon, &uid).await;
+        assert_eq!(
+            ledger(&rig.daemon, &uid, &cards[0].request_id).await,
+            Some(AnswerStatus::Applying)
+        );
+        assert_eq!(
+            answered(&rig.daemon, &uid, &cards[0], "accept").await,
+            protocol::ws::AnswerResult::Rejected {
+                reason: ANSWER_ALREADY_WAITING.into()
+            }
+        );
+        end_run(&rig, &uid).await;
     }
 
     /// **X8-1 G9: with its link not attached, an engine run refuses an answer and a Stop with
