@@ -19,6 +19,8 @@ final class RestartOrderTests: XCTestCase {
 
     private final class Sent {
         var subscribed: Set<String> = []
+        /// How many times the model asked the daemon for the fleet.
+        var fleetAsks = 0
     }
 
     func testARestartLeavesTheOrderAndTheAgesWhereActivityPutThem() async throws {
@@ -41,6 +43,36 @@ final class RestartOrderTests: XCTestCase {
         XCTAssertEqual(row(a, model)?.lastActive, stamp(8))
     }
 
+    /// **A link fact or an end the list has not seen asks for the fleet at once**, and one the list already holds asks
+    /// nothing. The daemon sends a list only when asked, so a run whose link attached a moment after the list was taken
+    /// (a start, a restart's re-attach) or that has just ended kept its earlier state in the fleet until the next timed
+    /// refresh. A burst costs two requests at most: the first fact asks, the rest wait for its answer, and one more
+    /// follows it.
+    func testALinkFactOrAnEndTheListHasNotSeenAsksForTheFleet() async throws {
+        let wire = try XCTUnwrap(WireRecording.json("restart-link-state-wire") as? [String: Any])
+        let (model, sent) = model()
+        // The first list answers a request, as every list does.
+        model.refreshFleet()
+
+        try await deliver(wire, "before_restart", to: model, sent: sent, list: true)
+        XCTAssertEqual(sent.fleetAsks, 1, "a link fact the list already holds asked for the fleet")
+
+        try await deliver(wire, "restart", to: model, sent: sent, list: false)
+        XCTAssertEqual(sent.fleetAsks, 2, "the restart's three re-attach facts did not fold into one request")
+
+        try list(wire, "restart", to: model)
+        XCTAssertEqual(sent.fleetAsks, 3, "no follow-up went when the answer caught up with the facts that waited")
+
+        try await deliver(wire, "activity", to: model, sent: sent, list: false)
+        XCTAssertEqual(sent.fleetAsks, 3, "a tool call asked for the fleet")
+
+        try list(wire, "activity", to: model)
+        XCTAssertEqual(sent.fleetAsks, 3, "an answer with no fact waiting asked again")
+
+        try await deliver(wire, "end", to: model, sent: sent, list: false)
+        XCTAssertEqual(sent.fleetAsks, 4, "the run's end did not ask for the fleet")
+    }
+
     private func model() -> (AppModel, Sent) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("restart-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -53,6 +85,7 @@ final class RestartOrderTests: XCTestCase {
             if case .subscribe(let session, _) = message {
                 MainActor.assumeIsolated { _ = sent.subscribed.insert(session) }
             }
+            if case .sessions = message { MainActor.assumeIsolated { sent.fleetAsks += 1 } }
         }
         addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
         for key in [a, b, c] { addTeardownBlock { ReviewMarks.forget(sessionKey: key) } }
@@ -66,8 +99,7 @@ final class RestartOrderTests: XCTestCase {
     ) async throws {
         let stage = try XCTUnwrap(wire[name] as? [String: Any], "no stage \(name)")
         if list {
-            let sessions = try JSONSerialization.data(withJSONObject: try XCTUnwrap(stage["sessions"]))
-            model.connection.injectForTesting(.sessions(try JSONDecoder().decode([SessionSummary].self, from: sessions)))
+            try self.list(wire, name, to: model)
             try await until("\(name): every run subscribed") { [a, b, c].allSatisfy(sent.subscribed.contains) }
         }
         let events = try WireRecording.decode(try XCTUnwrap(stage["events"] as? [[String: Any]]))
@@ -77,6 +109,13 @@ final class RestartOrderTests: XCTestCase {
         try await until("\(name): every event drawn") {
             through.allSatisfy { model.shown(for: $0.key)?.drawnThrough == $0.value }
         }
+    }
+
+    /// A stage's `sessions` list, as the daemon answers a request for the fleet.
+    private func list(_ wire: [String: Any], _ name: String, to model: AppModel) throws {
+        let stage = try XCTUnwrap(wire[name] as? [String: Any], "no stage \(name)")
+        let sessions = try JSONSerialization.data(withJSONObject: try XCTUnwrap(stage["sessions"]))
+        model.connection.injectForTesting(.sessions(try JSONDecoder().decode([SessionSummary].self, from: sessions)))
     }
 
     private func until(_ what: String, _ done: () -> Bool) async throws {
