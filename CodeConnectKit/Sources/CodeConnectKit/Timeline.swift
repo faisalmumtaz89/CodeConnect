@@ -514,7 +514,8 @@ public enum TimelineBuilder {
                                     tool: name, input: event.toolInput),
                                 status: outcome?.status ?? .unresolved,
                                 durationMS: outcome?.durationMS,
-                                input: event.toolInput,
+                                // What the result says its call was given, never the outcome as if it were the input.
+                                input: event.callInput,
                                 output: outcome?.text,
                                 isTruncated: event.isTruncated))))
 

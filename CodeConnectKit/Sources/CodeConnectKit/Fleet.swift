@@ -147,7 +147,9 @@ public struct FleetRow: Sendable, Identifiable, Hashable {
     public var label: RunLabel
     public var capability: CapabilityBadge
     public var blockedCount: Int
-    public var lastEventAt: Date?
+    /// The run's newest event that is not a link fact (`SessionState.Shown.lastActivityAt`); nil before it has done
+    /// anything this app has seen.
+    public var lastActivityAt: Date?
     /// Non-nil when nothing live has arrived for this session this launch.
     public var cachedAt: Date?
     /// The machine the run is on (`PairedMachine.id`; nil in the sample fleet
@@ -161,6 +163,11 @@ public struct FleetRow: Sendable, Identifiable, Hashable {
     /// cannot tell them apart renders one of them. A run's uid is minted once,
     /// for it alone, so two machines' runs never share one either.
     public var id: String { summary.sessionKey }
+
+    /// When the run last did anything: its newest real event, else the daemon's own stamp for it, which a run that
+    /// has done nothing yet has from its launch and a daemon restart leaves alone. The fleet's order and every age
+    /// shown for a run read this.
+    public var lastActive: Date { lastActivityAt ?? summary.updatedDate }
 }
 
 // MARK: - The one number, and the one sentence that carries it
@@ -307,9 +314,7 @@ enum FleetOrdering {
     static func sort(_ rows: [FleetRow]) -> [FleetRow] {
         rows.sorted { lhs, rhs in
             if lhs.status != rhs.status { return lhs.status < rhs.status }
-            let left = lhs.lastEventAt ?? lhs.summary.updatedDate
-            let right = rhs.lastEventAt ?? rhs.summary.updatedDate
-            if left != right { return left > right }
+            if lhs.lastActive != rhs.lastActive { return lhs.lastActive > rhs.lastActive }
             // The key, not the name: two runs called `cc-1` need a total order
             // or they can swap places between renders.
             return lhs.summary.sessionKey < rhs.summary.sessionKey

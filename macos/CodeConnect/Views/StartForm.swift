@@ -6,7 +6,9 @@ import SwiftUI
 /// and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
 /// the iPhone; the Mac shows it as one form. The computer defaults to the one used last, the model to the Default of
 /// the agent last used in the folder, else of the first one there. Once sent, the form gives way to the start's
-/// progress, and the sheet closes when the run is in the list.
+/// progress, and the sheet closes when the run is in the list. The sent start is followed by its request on its own
+/// computer, so it stays while that computer is away; until it is answered or its retries are stopped, the sheet
+/// opens on it again.
 struct StartForm: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
@@ -24,6 +26,12 @@ struct StartForm: View {
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
+
+    /// `resuming`: a start this Mac sent with no answer yet, which the sheet opens on instead of a fresh form.
+    init(resuming: String?, started: @escaping () -> Void) {
+        _requestID = State(initialValue: resuming)
+        self.started = started
+    }
 
     private var contexts: [StartContext] { machines.startContexts }
 
@@ -62,16 +70,24 @@ struct StartForm: View {
 
     var body: some View {
         Group {
-            if let context, let requestID, let start = context.starter.starts[requestID] {
+            // Found by its request on whichever computer it was sent to, not through the computers that can start
+            // right now, which its own leaves while its link is down.
+            if let requestID, let owner = machines.models.first(where: { $0.starter.starts[requestID] != nil }),
+                let start = owner.starter.starts[requestID]
+            {
                 if case .needsTrust(let path) = start.outcome {
                     FolderStep(
-                        start: start, path: path, computer: context.machineName,
-                        answer: { answer(start, $0, in: context) }, back: { self.requestID = nil })
+                        start: start, path: path, computer: start.machineName,
+                        answer: { answer(start, $0, in: StartContext(model: owner)) }, back: { backToForm(from: start) })
                 } else {
                     StartProgress(
                         start: start,
-                        shown: { uid in machines.models.first { $0.machineID == context.id }?.shown(for: uid) != nil },
-                        again: { self.requestID = nil },
+                        shown: { owner.shown(for: $0) != nil },
+                        again: { backToForm(from: start) },
+                        stopRetrying: {
+                            owner.starter.stopRetrying(start.requestID)
+                            dismiss()
+                        },
                         started: {
                             started()
                             dismiss()
@@ -135,6 +151,13 @@ struct StartForm: View {
         guard blocked == nil, let context, let folder, let pick else { return }
         requestID = context.start(
             folder, agent: pick.agent, model: pick.model, prompt: message.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Back to the form from a start that failed or asked about its folder, with its first message put back when the
+    /// form has none, as in a sheet opened on that start.
+    private func backToForm(from start: SessionStart) {
+        if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { message = start.prompt ?? "" }
+        requestID = nil
     }
 
     /// The folder question's answer: the start that asked, sent again with it. Only the question on screen is
@@ -345,6 +368,8 @@ private struct StartProgress: View {
     let start: SessionStart
     let shown: (String) -> Bool
     let again: () -> Void
+    /// No more sends of the start from this Mac, and the sheet closes.
+    let stopRetrying: () -> Void
     let started: () -> Void
     @Environment(\.dismiss) private var dismiss
     /// The computer's own words for a launch that failed are shown.
@@ -391,6 +416,21 @@ private struct StartProgress: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Your first message").font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text3)
                         Text(prompt).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                // While the computer hasn't answered, this Mac can stop sending the start, so one whose computer went
+                // away is not left resending with no way out, nor the one the sheet keeps opening on. It says only
+                // what it did: the computer may already have started it.
+                if start.outcome == nil, !start.retryStopped {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button("Stop retrying", action: stopRetrying)
+                            .buttonStyle(.hover(outset: 5, id: "start.stopRetrying"))
+                            .font(Theme.ui(12.5))
+                            .foregroundStyle(Theme.text2)
+                            .accessibilityIdentifier("start.stopRetrying")
+                        Text("No more sends from this Mac; \(start.machineName) may already have started it.")
+                            .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

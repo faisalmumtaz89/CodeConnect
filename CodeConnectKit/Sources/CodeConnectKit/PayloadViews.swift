@@ -56,6 +56,21 @@ extension Event {
         if let input = payload["tool_input"] { return input }
         return payload["tool"] == nil ? nil : payload
     }
+    /// The fields a Codex result adds to what its call carried: `status`, `interrupted`, `exit_code`,
+    /// `aggregated_output` and `duration_ms` (ccd's codex_adapter.rs, `tool_result_payload` beside
+    /// `tool_call_payload`), and `belongs_before`, where a result read back after its turn belongs (protocol's
+    /// event.rs, `BELONGS_BEFORE`).
+    static let codexResultFields: Set<String> = [
+        "status", "interrupted", "exit_code", "aggregated_output", "duration_ms", "belongs_before",
+    ]
+    /// What a result says of its call's input, for a row whose call was never seen. A hook's PostToolUse names it
+    /// under `tool_input`. A Codex result carries its call's own fields beside the ones a result adds, so it is the
+    /// payload without those: a command's line, a file change's changes. Nil for a result that carries neither.
+    public var callInput: JSONValue? {
+        if let input = payload["tool_input"] { return input }
+        guard payload["tool"] != nil, case .object(let fields) = payload else { return nil }
+        return .object(fields.filter { !Self.codexResultFields.contains($0.key) })
+    }
     /// Hook events carry it at the top level and also in `item_id`; a transcript
     /// `tool_result` hides it inside the message block. `item_id` is *not* a
     /// valid fallback for transcript events, where it holds the entry uuid.

@@ -151,7 +151,7 @@ final class FleetRowHeightTests: XCTestCase {
                                         summary: summary, status: state.status, subtitle: subtitle,
                                         activity: activity, label: RunLabel(project: "alpha", qualifier: nil),
                                         capability: capability, blockedCount: state.cards,
-                                        lastEventAt: Date(timeIntervalSinceNow: -64),
+                                        lastActivityAt: Date(timeIntervalSinceNow: -64),
                                         cachedAt: cached ? Date(timeIntervalSinceNow: -360) : nil,
                                         machineID: nil, machineName: nil)
                                     let blocked = state.risk.map {
@@ -192,7 +192,7 @@ final class FleetRowHeightTests: XCTestCase {
                 FleetRow(
                     summary: summary, status: status, subtitle: "Finished the change and ran the tests.",
                     activity: nil, label: RunLabel(project: "alpha", qualifier: nil), capability: .control,
-                    blockedCount: 0, lastEventAt: Date(timeIntervalSinceNow: -64), cachedAt: nil,
+                    blockedCount: 0, lastActivityAt: Date(timeIntervalSinceNow: -64), cachedAt: nil,
                     machineID: nil, machineName: nil))
         }
         let reds = Set(stride(from: 0, to: pictures[0].count, by: 4).map { pictures[0][$0] })
