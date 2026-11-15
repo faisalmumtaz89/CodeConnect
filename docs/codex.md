@@ -149,10 +149,12 @@ to read them and show them to you. Claude Code is woken by a hook CodeConnect in
 waits in the background after each turn and at start (`asyncRewake` on `Stop` and
 `SessionStart`, for up to 12 hours), and only between turns, as Claude Code's own transcript
 records them: mail that arrives while it works is read once it is done, after any prompt you
-queued meanwhile. Codex is woken through `codex queue`, which runs the line after any turn that
-is running and, after Esc, holds it until your next turn ends. Mail that no wake can reach —
-after Esc in Claude Code, past 12 hours idle, or after three woken turns that left it unread —
-waits for your next prompt, and is read in that turn or right after it.
+queued meanwhile. A Claude Code session started from an app is woken by CodeConnect itself, also
+only between turns: the line goes into the session's input marked as a background notice, not
+as your words. Codex is woken through `codex queue`, which runs the line after any turn that is
+running and, after Esc, holds it until your next turn ends. Mail that no wake can reach — after
+Esc in Claude Code or a Stop from an app, past 12 hours idle, or after three woken turns that
+left it unread — waits for your next prompt, and is read in that turn or right after it.
 
 `send_message` answers with the message's id and where it stands: waiting for that session,
 still being sent, or refused, and why; when CodeConnect stops before answering, it says the

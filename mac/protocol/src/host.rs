@@ -60,6 +60,14 @@ pub enum ToHost {
         uuid: String,
         text: String,
     },
+    /// The line that wakes the run's agent for its mail, `text` being the fixed nudge: one
+    /// more message into Claude's input, stamped with `uuid` and marked as a background
+    /// notification, not the person's words. Queued with the person's messages, answered as
+    /// a `say` is.
+    Wake {
+        uuid: String,
+        text: String,
+    },
     /// The answer to the permission request `tool_use_id`.
     Answer {
         uuid: String,
@@ -261,6 +269,7 @@ mod tests {
             ToHost::Ack { .. } => "ack",
             ToHost::Start { .. } => "start",
             ToHost::Say { .. } => "say",
+            ToHost::Wake { .. } => "wake",
             ToHost::Answer { .. } => "answer",
             ToHost::SetModel { .. } => "set_model",
             ToHost::SetMode { .. } => "set_mode",
@@ -280,11 +289,12 @@ mod tests {
         }
     }
 
-    const TO_HOST: [&str; 9] = [
+    const TO_HOST: [&str; 10] = [
         "attach",
         "ack",
         "start",
         "say",
+        "wake",
         "answer",
         "set_model",
         "set_mode",
@@ -360,6 +370,10 @@ mod tests {
             to(ToHost::Say {
                 uuid: "c-say".into(),
                 text: "also the README".into(),
+            }),
+            to(ToHost::Wake {
+                uuid: "c-wake".into(),
+                text: crate::ipc::MAIL_NUDGE_ACT.into(),
             }),
             to(ToHost::Answer {
                 uuid: "c-allow".into(),

@@ -5,6 +5,7 @@ import type { InitializeAnswer, Json, StartOptions, ToHost } from './protocol.ts
 
 export type Start = Extract<ToHost, { type: 'start' }>;
 export type Say = Extract<ToHost, { type: 'say' }>;
+export type Wake = Extract<ToHost, { type: 'wake' }>;
 
 /** What the state message reports of the run, besides the pending requests. */
 export interface Facts {
@@ -38,17 +39,18 @@ export function queryOptions(options: StartOptions) {
 }
 
 /**
- * A message the person sent into Claude's input, stamped with ccd's uuid and marked as typed by a person: the SDK
- * treats a user message with no `origin` as unattributed (its `SDKMessageOrigin`).
+ * A message into Claude's input, stamped with ccd's uuid and marked by who it is from (the SDK treats a user message
+ * with no `origin` as unattributed, its `SDKMessageOrigin`): a `say` as typed by a person, a `wake` as a background
+ * notification, which the mail nudge is.
  */
-export function userMessage(uuid: string, text: string) {
+export function userMessage(uuid: string, text: string, from: 'say' | 'wake' = 'say') {
   return {
     type: 'user',
     message: { role: 'user', content: text },
     parent_tool_use_id: null,
     session_id: '',
     uuid,
-    origin: { kind: 'human' },
+    origin: from === 'wake' ? ({ kind: 'task-notification' } as const) : ({ kind: 'human' } as const),
   } as const;
 }
 

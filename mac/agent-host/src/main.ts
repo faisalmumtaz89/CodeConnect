@@ -9,7 +9,9 @@
 // every message the query yields follows as `sdk`, a `commands_changed` without the claude.ai connectors' commands as
 // the answer is (start.ts); after a refusal, none does. A `say` is one more message from the
 // person, given to the query in the order ccd sent it, with its outcome `done` once the SDK has taken it; one the run
-// cannot take (before the start, or once its input has ended) is `refused`. claude's permission requests are held for
+// cannot take (before the start, or once its input has ended) is `refused`. A `wake` is ccd's line waking the agent
+// for its mail, queued and answered as a `say` is, marked as a background notification rather than the person's
+// words (start.ts `userMessage`). claude's permission requests are held for
 // ccd's `answer` (permissions.ts), each answer told back once the SDK has written it into claude's input; the state
 // message lists those still open. `set_model` and `set_mode` change the run's model, effort or permission mode
 // through the SDK's own calls, one line at a time in the order ccd sent them: a model with `setModel`, an effort alone
@@ -41,6 +43,7 @@ import {
   type Start,
   startFacts,
   userMessage,
+  type Wake,
 } from './start.ts';
 
 const runDir = process.argv[2];
@@ -67,6 +70,7 @@ let facts: Facts = {};
 const link = createLink({
   start: begin,
   say: (command) => (say ? say(command) : refuse(command.uuid)),
+  wake: (command) => (say ? say(command) : refuse(command.uuid)),
   answer: (command) =>
     permissions
       ? permissions.answer(command)
@@ -93,8 +97,8 @@ function refuse(uuid: string): void {
   link.send({ type: 'outcome', uuid, status: 'refused', detail: 'the run is not taking messages' });
 }
 
-// The run's later messages, while its input is open.
-let say: ((command: Say) => void) | undefined;
+// The run's later messages, the person's and ccd's mail wakes, while its input is open.
+let say: ((command: Say | Wake) => void) | undefined;
 
 // A start after the first is ignored: ccd re-sends a start whose outcome it does not hold yet, and the first one's
 // outcome is still to come.
@@ -117,7 +121,7 @@ function begin(start: Start): void {
   let claudeEnded: Promise<{ code: number | null; signal: string | null }> | undefined;
   // The run's later messages, in the order ccd sent them. Each one's outcome is `done` once the SDK has taken it from
   // the input; claude then folds it into the running turn or runs it next.
-  const queued: Say[] = [];
+  const queued: (Say | Wake)[] = [];
   let wake = () => {};
   let inputEnded = false;
   say = (command) => {
@@ -141,7 +145,7 @@ function begin(start: Start): void {
       }
       if (inputEnded) return;
       const command = queued.shift()!;
-      yield userMessage(command.uuid, command.text);
+      yield userMessage(command.uuid, command.text, command.type);
       link.send({ type: 'outcome', uuid: command.uuid, status: 'done' });
     }
   })();
