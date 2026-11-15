@@ -96,7 +96,7 @@ struct MainWindow: View {
             }
         #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: repairing) {
+            AddSheet(kind: kind, address: $repairing) {
                 // The run just started is on screen: every active agent, unfiltered.
                 scope = .active
                 filter = nil
