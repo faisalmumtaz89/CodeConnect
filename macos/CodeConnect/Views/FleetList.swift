@@ -55,6 +55,12 @@ struct FleetList: View {
     /// Opens Start an agent.
     let newAgent: () -> Void
     @State private var folded: Set<String> = []
+    /// The row under the pointer, and the row whose "…" panel is open.
+    @State private var hovered: String?
+    @State private var moreOpen: String?
+    /// The run End Run… is asking about, and what its computer said when it did not end.
+    @State private var ending: FleetRow?
+    @State private var endNote: String?
 
     var body: some View {
         let rows = narrowed(scope.rows(machines.fleet))
@@ -106,14 +112,26 @@ struct FleetList: View {
                             if !isFolded {
                                 ForEach(group.rows) { row in
                                     let selected = opened == row.id
-                                    Button { opened = selected ? nil : row.id } label: {
-                                        FleetLine(row: row, selected: selected)
+                                    let endable = machines.model(for: row.machineID)?.canEndRun(row.summary) == true
+                                    let more = endable && (hovered == row.id || moreOpen == row.id)
+                                    Button {
+                                        moreOpen = nil
+                                        opened = selected ? nil : row.id
+                                    } label: {
+                                        FleetLine(row: row, selected: selected, roomForMore: more)
                                     }
                                     .buttonStyle(.hover(radius: 0, id: "fleet.row.\(row.id)"))
                                     .accessibilityElement(children: .contain)
                                     .accessibilityAction { opened = selected ? nil : row.id }
                                     .accessibilityIdentifier("fleet.row.\(row.id)")
                                     .accessibilityAddTraits(selected ? .isSelected : [])
+                                    // The run's "…" (decision 185): on hover, its panel holding End Run…; for VoiceOver,
+                                    // which does not hover, End Run… is the row's own action.
+                                    .accessibilityActions { if endable { Button("End Run…") { ending = row }.accessibilityIdentifier("fleet.row.\(row.id).endRunAction") } }
+                                    .overlay(alignment: .trailing) { moreButton(row, shown: more) }
+                                    .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
+                                    // Its panel opens below the row, over the rows after it.
+                                    .zIndex(moreOpen == row.id ? 1 : 0)
                                     .id(group.id + "/" + row.id)
                                 }
                             }
@@ -136,7 +154,8 @@ struct FleetList: View {
                             .accessibilityIdentifier("fleet.showFinished")
                         }
                     }
-                    .padding(.bottom, 8)
+                    // Room below the last row for its "…" panel, which opens downward and a scroll view clips.
+                    .padding(.bottom, 40)
                 }
             }
 
@@ -150,6 +169,43 @@ struct FleetList: View {
             .frame(height: 34)
         }
         .background(Theme.window)
+        #if DEBUG
+            .onAppear { moreOpen = RenderWindow.openRunMenu }
+        #endif
+        // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
+        .alert(
+            "End this run?", isPresented: Binding(get: { ending != nil }, set: { if !$0 { ending = nil } }),
+            presenting: ending
+        ) { row in
+            Button("End Run", role: .destructive) { endRun(row) }.accessibilityIdentifier("endRun.confirm")
+            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("endRun.cancel")
+        } message: { row in
+            Text("\(row.summary.agent.displayName) stops, and the run moves to Finished.")
+        }
+        .alert(
+            "End Run", isPresented: Binding(get: { endNote != nil }, set: { if !$0 { endNote = nil } }),
+            presenting: endNote
+        ) { _ in
+            Button("OK", role: .cancel) {}.accessibilityIdentifier("endRun.ok")
+        } message: { note in
+            Text(note)
+        }
+    }
+
+    /// The row's "…" while it is shown: on hover, or while its panel is open.
+    @ViewBuilder private func moreButton(_ row: FleetRow, shown: Bool) -> some View {
+        if shown {
+            RunMore(
+                id: "fleet.row.\(row.id).more",
+                open: Binding(get: { moreOpen == row.id }, set: { moreOpen = $0 ? row.id : nil })
+            ) { ending = row }
+            .padding(.trailing, 10)
+        }
+    }
+
+    private func endRun(_ row: FleetRow) {
+        guard let model = machines.model(for: row.machineID) else { return }
+        Task { endNote = await model.endRun(row.summary) }
     }
 
     /// The computer the list is narrowed to, when it was refused for running a different version of CodeConnect,
@@ -278,6 +334,8 @@ private struct FleetLine: View {
     let row: FleetRow
     /// Open beside the list: the selected fill, and a bar on its leading edge.
     let selected: Bool
+    /// The run's "…" stands at the trailing edge: its width is kept clear.
+    let roomForMore: Bool
     @State private var lastTick = Date()
 
     private var since: Date { row.lastActive }
@@ -292,8 +350,10 @@ private struct FleetLine: View {
                 .lineLimit(1)
                 .layoutPriority(1)
             // What it is on: the tool call in prose and its argument as code, or else the
-            // daemon's own sentence.
-            if let activity = row.activity {
+            // daemon's own sentence; asked to end, that it is stopping, until it has.
+            if row.status == .stopping {
+                Text("Stopping…").font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
+            } else if let activity = row.activity {
                 Text(activity.tool).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(1)
                 if let argument = activity.argument, !argument.isEmpty {
                     Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
@@ -308,6 +368,7 @@ private struct FleetLine: View {
                 .foregroundStyle(Theme.text3)
                 .monospacedDigit()
                 .frame(width: 26, alignment: .trailing)
+            if roomForMore { Color.clear.frame(width: RunMore.width) }
         }
         .padding(.horizontal, 16)
         .frame(height: 36)
@@ -318,6 +379,53 @@ private struct FleetLine: View {
         .task(id: AgeClock(since: since, scale: .age)) {
             await AgeTick.follow(AgeClock(since: since, scale: .age)) { lastTick = $0 }
         }
+    }
+}
+
+/// A run's "…" on its row, and the panel it opens below it, in the app's own panel style (the model panel's), holding
+/// End Run…, which asks before anything is sent.
+private struct RunMore: View {
+    static let width: CGFloat = 26
+    let id: String
+    @Binding var open: Bool
+    let endRun: () -> Void
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.text2)
+                .frame(width: Self.width, height: 22)
+                .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 5, id: id))
+        .help("More")
+        .accessibilityLabel("More")
+        .accessibilityIdentifier(id)
+        .accessibilityValue(open ? "open" : "closed")
+        .overlay(alignment: .topTrailing) {
+            if open { panel.offset(y: 28) }
+        }
+    }
+
+    private var panel: some View {
+        Button {
+            open = false
+            endRun()
+        } label: {
+            Text("End Run…").font(Theme.ui(12.5)).foregroundStyle(Theme.red).lineLimit(1)
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 5, id: "\(id).endRun"))
+        .padding(4)
+        .frame(width: 180)
+        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
+        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .accessibilityIdentifier("\(id).endRun")
     }
 }
 
@@ -335,6 +443,8 @@ struct StateIcon: View {
                 Circle().strokeBorder(Theme.text3.opacity(0.5), lineWidth: 1.5)
                 Circle().trim(from: 0, to: 0.62).stroke(Theme.text, lineWidth: 1.5).rotationEffect(.degrees(-90))
                     .padding(0.75)
+            case .stopping:
+                Circle().strokeBorder(Theme.text3.opacity(0.5), lineWidth: 1.5)
             case .failed:
                 Circle().fill(Theme.red)
                 Image(systemName: "xmark").font(.system(size: 6.5, weight: .heavy)).foregroundStyle(Theme.window)

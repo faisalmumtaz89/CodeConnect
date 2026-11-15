@@ -15,7 +15,8 @@ import XCTest
 final class SessionRemovalTests: XCTestCase {
 
     private func summary(
-        lifecycle: String, uid: String = "01K1B3XQ8ZC0DE5FGH7JKMNPQR", tmux: String = "cc-1"
+        lifecycle: String, uid: String = "01K1B3XQ8ZC0DE5FGH7JKMNPQR", tmux: String = "cc-1",
+        id: String = "cc-1"
     )
         -> SessionSummary
     {
@@ -24,7 +25,7 @@ final class SessionRemovalTests: XCTestCase {
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"\(uid)","session_id":"cc-1",
+                {"session_uid":"\(uid)","session_id":"\(id)",
                  "tmux_session":"\(tmux)","cwd":"/tmp/x","lifecycle":"\(lifecycle)",
                  "link":"attached","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
                  "updated_at":"2026-08-02T10:00:00Z","blocked_on":[]}
@@ -220,27 +221,31 @@ final class SessionRemovalTests: XCTestCase {
 
     // MARK: The removal gate, as a matrix
 
-    /// The phone's gate mirrors the daemon's rule exactly. Hosted rows need the
-    /// proof (`lifecycle == .exited`); unhosted rows — empty `tmux_session`,
-    /// adopted, nothing ever put them in tmux — are removable at any lifecycle,
-    /// because the proof cannot exist and a row waiting on an unobtainable
-    /// proof would be immortal.
+    /// The phone's gate mirrors the daemon's rule exactly. A run needs the
+    /// proof (`exited` or `failed`), a run CodeConnect started (no tmux session,
+    /// named by its uid) included; an adopted row (`claude:`) is removable at
+    /// any lifecycle, because the proof cannot exist and a row waiting on an
+    /// unobtainable proof would be immortal.
     func testTheRemovalGateMatrix() {
         XCTAssertFalse(summary(lifecycle: "live").isRemovable)
         XCTAssertFalse(summary(lifecycle: "unknown").isRemovable)
         XCTAssertTrue(summary(lifecycle: "exited").isRemovable)
+        XCTAssertTrue(summary(lifecycle: "failed").isRemovable)
+        XCTAssertFalse(
+            summary(lifecycle: "live", tmux: "", id: "01K1B3XQ8ZC0DE5FGH7JKMNPQR").isRemovable,
+            "a live run CodeConnect started is not removable")
         for lifecycle in ["live", "unknown", "exited"] {
             XCTAssertTrue(
-                summary(lifecycle: lifecycle, tmux: "").isRemovable,
-                "an unhosted \(lifecycle) row must be removable")
+                summary(lifecycle: lifecycle, tmux: "", id: "claude:conv-1").isRemovable,
+                "an adopted \(lifecycle) row must be removable")
         }
     }
 
-    /// And the gate is what `removeSession` consults: an unhosted live run IS
+    /// And the gate is what `removeSession` consults: an adopted live run IS
     /// asked about, where a hosted live run never is.
-    func testAnUnhostedLiveRunIsAskedAbout() async {
+    func testAnAdoptedLiveRunIsAskedAbout() async {
         let model = connectedModel()
-        let target = summary(lifecycle: "live", tmux: "")
+        let target = summary(lifecycle: "live", tmux: "", id: "claude:conv-1")
         let result = await model.removeSession(target)
         XCTAssertEqual(result, .deleted(events: 3))
         XCTAssertEqual(model.connection.deleteRequests, [target.sessionUID])
@@ -345,7 +350,7 @@ final class SessionRemovalTests: XCTestCase {
     /// check stands between it and a removal nobody chose.
     func testABatchKeepsARunThatIsNoLongerEnded() async {
         let model = batchModel([uidA: .deleted(events: 1), uidB: .deleted(events: 1)])
-        let adoptedAndLive = summary(lifecycle: "live", uid: uidB, tmux: "")
+        let adoptedAndLive = summary(lifecycle: "live", uid: uidB, tmux: "", id: "claude:conv-2")
         XCTAssertTrue(adoptedAndLive.isRemovable, "the premise: removable at any lifecycle")
         model.adoptSummariesForTesting([summary(lifecycle: "exited", uid: uidA), adoptedAndLive])
         let refused = await model.removeSessions(keys: [uidA, uidB])

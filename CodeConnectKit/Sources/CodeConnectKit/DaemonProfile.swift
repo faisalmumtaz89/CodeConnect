@@ -64,6 +64,10 @@ public struct DaemonProfile: Sendable, Hashable {
     /// no swipe, because the row would stay and the user would not know why.
     public var removesSessions: Bool { capabilities?.deletesSessions == true }
 
+    /// The daemon ends a run CodeConnect started (`stop_run`, minor 35). Unknown
+    /// is false, so End run is only offered where it can be sent.
+    public var endsRuns: Bool { capabilities?.endsRuns == true }
+
     /// The daemon answers `get_diff`: every connected daemon does.
     public var servesDiff: Bool { isConnected }
 

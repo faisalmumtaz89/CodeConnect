@@ -721,16 +721,24 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// `Event.sessionKey` for why it is read off the data rather than off a flag.
     public var sessionKey: String { sessionUID.isEmpty ? sessionID : sessionUID }
 
-    /// Whether the phone may offer to remove this run.
+    /// An adopted run: Claude Code reported it through its hooks, but nothing on
+    /// the computer started or hosts it. ccd's own test is the session id's
+    /// `claude:` prefix, which the hook mints for a session CodeConnect did not
+    /// launch; such a run has no tmux session either.
+    var isAdopted: Bool { sessionID.hasPrefix("claude:") }
+
+    /// Started by CodeConnect itself, from an app: ccd's agent host runs it, and
+    /// ccd names it by its uid with no tmux session. A run in tmux, or an adopted
+    /// one, is neither.
+    public var startedByCodeConnect: Bool { tmuxSession.isEmpty && !isAdopted }
+
+    /// Whether the phone may offer to remove this run: ccd's own rule.
     ///
-    /// Two routes. A run in tmux must be proven `exited` — `lifecycle`, never
-    /// the derived Ended status. A run with an empty `tmux_session` is offered
-    /// at any lifecycle: an adopted one, because no probe can ever prove it
-    /// ended and a row awaiting an unobtainable proof would be immortal. A run
-    /// started through ccd's agent host also has no tmux session, and the
-    /// daemon refuses one that has not ended (`exited` or `failed`) with
-    /// `still_running`, a complete answer.
-    public var isRemovable: Bool { lifecycle == .exited || tmuxSession.isEmpty }
+    /// A run must have ended — `lifecycle` `exited` or `failed`, never the
+    /// derived Ended status. An adopted run is offered at any lifecycle, because
+    /// no probe can ever prove it ended and a row awaiting an unobtainable proof
+    /// would be immortal.
+    public var isRemovable: Bool { lifecycle == .exited || lifecycle == .failed || isAdopted }
 
     public var id: String { sessionKey }
     public var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }

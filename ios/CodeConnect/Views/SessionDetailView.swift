@@ -1004,6 +1004,9 @@ struct SessionDetailView: View {
     private var surface: Surface { surfaceBinding.wrappedValue }
     @State private var showDiff = false
     @State private var showLinkDetail = false
+    @State private var confirmingEndRun = false
+    /// Why End run did not go through, in the computer's words: said once.
+    @State private var endRunNote: String?
     @State private var appearedAt = Date()
     /// The composer's focus, owned here rather than inside the bar: the
     /// timeline gives the keyboard back on a tap of its own.
@@ -1179,6 +1182,21 @@ struct SessionDetailView: View {
         } message: {
             Text(ClearConfirmation.message)
         }
+        .alert("End this run?", isPresented: $confirmingEndRun) {
+            Button("End run", role: .destructive) { endRun() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(summary?.agent.displayName ?? "The agent") stops, and the run moves to Ended.")
+        }
+        .alert(
+            "End run",
+            isPresented: Binding(get: { endRunNote != nil }, set: { if !$0 { endRunNote = nil } }),
+            presenting: endRunNote
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { note in
+            Text(note)
+        }
         .sheet(item: $openApproval) { approval in
             // `openApproval` is only the sheet's IDENTITY (and a last-known
             // display). `DecisionCardView` re-derives the authoritative, live
@@ -1265,11 +1283,18 @@ struct SessionDetailView: View {
         .accessibilityIdentifier("session-title")
     }
 
+    /// The run as it was when End run was confirmed; the row reads Stopping once ccd takes it.
+    private func endRun() {
+        guard let summary else { return }
+        Task { endRunNote = await model.endRun(summary) }
+    }
+
     /// **Everything the bar does not show, one tap away.** First the terminal,
     /// the most used: on the terminal the same item reads Timeline, so the way
     /// back is the same place. Then the session's changes, whose sheet counts
     /// them, and the link's health under the name of the computer the session
-    /// is on, which is a heading, not an action.
+    /// is on, which is a heading, not an action. Last, on a live run
+    /// CodeConnect started, End run.
     private var moreMenu: some View {
         let onTerminal = surface == .terminal
         return Menu {
@@ -1294,6 +1319,14 @@ struct SessionDetailView: View {
                     } label: {
                         Label("Link health", image: "desktop")
                     }
+                }
+            }
+            // Ending a run cannot be undone, so it is last, and asks first.
+            if let summary, model.canEndRun(summary) {
+                Button(role: .destructive) {
+                    confirmingEndRun = true
+                } label: {
+                    Label("End run", image: "power")
                 }
             }
         } label: {
