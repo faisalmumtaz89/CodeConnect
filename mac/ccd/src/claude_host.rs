@@ -5561,11 +5561,49 @@ mod tests {
         .unwrap();
     }
 
+    /// `summary` as an app reads it in the fleet, with what differs between runs pinned,
+    /// each checked first: the run's uid (`uid` to `pinned`), and its name when that is the
+    /// uid; the rig's folder (`root`) in `cwd`, and the label made from it; and the two clock
+    /// reads. Nothing else of the rig or the run's uid is left in it.
+    fn pinned_summary(
+        summary: &protocol::event::SessionSummary,
+        uid: &str,
+        pinned: &str,
+        root: &Path,
+    ) -> serde_json::Value {
+        let mut wire = serde_json::to_value(summary).unwrap();
+        assert_eq!(wire["session_uid"], uid);
+        wire["session_uid"] = pinned.into();
+        if wire["session_id"] == uid {
+            wire["session_id"] = pinned.into();
+        }
+        let root = root.to_str().unwrap();
+        if wire["cwd"] == root {
+            let label = Path::new(root).file_name().unwrap().to_str().unwrap();
+            assert_eq!(wire["project_label"], label);
+            wire["cwd"] = "/tmp/cc-rig".into();
+            wire["project_label"] = "cc-rig".into();
+        }
+        for key in ["created_at", "updated_at"] {
+            assert!(
+                protocol::time::unix_ms_from_rfc3339(wire[key].as_str().unwrap()).is_some(),
+                "{key} is a clock read: {wire}"
+            );
+            wire[key] = "2026-11-15T09:00:00.000Z".into();
+        }
+        let text = wire.to_string();
+        assert!(!text.contains(root) && !text.contains(uid), "{text}");
+        wire
+    }
+
     /// The capabilities a paired phone is offered, with `claude_interrupt`; the Interrupt an
     /// app sends for a Claude run's turn; each answer ccd gives a hosted run's Stop, from a
     /// run on a stand-in host (aborted, a second Stop while one waits, ended on its own, not
     /// the turn the host runs, no connection); the person's row of a message, with its
-    /// request id; and the notice for that message, which the Stop cancelled.
+    /// request id; and the notice for that message, which the Stop cancelled. And the
+    /// fleet's session summaries an app decides from: the hosted run live, with the turn the
+    /// Interrupt names running, and its events then; a tmux Claude run on the same daemon;
+    /// and the hosted run once its host is gone and the run has ended.
     async fn derived_minor_37_wire() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
@@ -5585,6 +5623,31 @@ mod tests {
             "9d1f0000-0000-4000-8000-000000000013",
         ];
         turn_begins(&mut played, 3, turns[0]).await;
+        let hosted_live = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        let first_words = format!("say:{}", played.start_uuid());
+        let mut hosted_live_events = serde_json::to_value(
+            rig.daemon
+                .db
+                .events_after(uid.clone(), 0, 100)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        for event in hosted_live_events.as_array_mut().unwrap() {
+            assert_eq!(event["session_uid"], uid.as_str());
+            assert_eq!(event["session_id"], uid.as_str());
+            assert!(
+                protocol::time::unix_ms_from_rfc3339(event["ts"].as_str().unwrap()).is_some(),
+                "ts is a clock read: {event}"
+            );
+            event["session_uid"] = fixed.into();
+            event["session_id"] = fixed.into();
+            event["ts"] = "2026-11-15T09:00:00.000Z".into();
+            if event["source"] == "daemon" {
+                assert_eq!(event["source_event_id"], first_words.as_str(), "{event}");
+                event["source_event_id"] = "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b".into();
+            }
+        }
         let (_, _) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "send-1", "and the docs"),
             host_takes(&mut played, 4, "done")
@@ -5613,7 +5676,53 @@ mod tests {
         drop(played);
         until_detached(&rig.daemon, &uid).await;
         let no_connection = stop_as_app(&rig.daemon, &uid, "stop-5", turns[2]).await;
+        let host = pid_in(&dir, "stub.pid");
         stop(&dir);
+        for _ in 0..100 {
+            // SAFETY: kill(2) with signal 0 only asks whether the pid is in use.
+            if unsafe { libc::kill(host, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", None).await;
+        let hosted_ended =
+            pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        let (tx, _supervisor) = tokio::sync::mpsc::channel(Config::default().ipc_write_queue);
+        let tmux = rig
+            .daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: None,
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .unwrap()
+            .session
+            .uid;
+        let tmux_live = pinned_summary(
+            &summary(&rig.daemon, &tmux).await,
+            &tmux,
+            "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
+            &rig.root,
+        );
         let payload = |find: &dyn Fn(&serde_json::Value) -> bool| {
             events
                 .iter()
@@ -5638,6 +5747,10 @@ mod tests {
             "person_row": payload(&|event| event["kind"] == "user_message"
                 && event["payload"]["text"] == "and the docs"),
             "send_not_sent": payload(&|event| event["payload"]["notification_type"] == "send_not_sent"),
+            "session_hosted_live": hosted_live,
+            "session_hosted_live_events": hosted_live_events,
+            "session_tmux_live": tmux_live,
+            "session_hosted_ended": hosted_ended,
         })
     }
 
