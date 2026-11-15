@@ -40,7 +40,8 @@ final class RunSettingsTests: XCTestCase {
         }
         XCTAssertEqual(s.models.map(\.value), ["default", "sonnet"])
         XCTAssertEqual(s.modes.map(\.value), ["default", "acceptEdits", "plan"])
-        // Selection: "sonnet (claude-sonnet-5-5)" → "sonnet", "plan" → "plan", "high" → "high".
+        // Selection: the daemon's `selected_model` ("sonnet") for the model; the mode and effort facts
+        // ("plan", "high") match their menu values directly.
         XCTAssertEqual(s.selectedModel?.value, "sonnet")
         XCTAssertEqual(s.selectedMode?.value, "plan")
         XCTAssertEqual(s.selectedEffort?.value, "high")
@@ -52,6 +53,23 @@ final class RunSettingsTests: XCTestCase {
             s.efforts.map(\.label), ["Low", "Medium", "High", "Extra high", "Maximum"])
         XCTAssertFalse(s.inFlight)
         XCTAssertNil(s.lastOutcome)
+    }
+
+    /// **The fix's reason, against the daemon's own init-shape summary.** After claude's next init the
+    /// model fact is its full id ("claude-sonnet-5-5"), which is not a menu value; the selection follows
+    /// the daemon's `selected_model` ("sonnet"), so the right row — and its efforts — still draw.
+    /// Reading the fact's text instead (the rule this replaced) would select nothing here: the must-fail.
+    func testTheInitShapeSelectsViaTheDaemonField() throws {
+        let fact = try summary("session_hosted_live_init").model?.value
+        XCTAssertEqual(fact, "claude-sonnet-5-5", "the init fact is claude's full id, not a menu value")
+        guard case .hostedLive(let s) = RunSettings.of(summary: try summary("session_hosted_live_init"))
+        else {
+            return XCTFail("a live hosted run with menus is hostedLive")
+        }
+        XCTAssertEqual(s.selectedModel?.value, "sonnet", "selection follows selected_model, not the fact")
+        XCTAssertEqual(s.modelDisplay, "Sonnet")
+        XCTAssertEqual(s.selectedEffort?.value, "high")
+        XCTAssertEqual(s.selectedMode?.value, "plan")
     }
 
     /// The same daemon's older summary — no `menus` — draws no picker: the model fact shows read-only,

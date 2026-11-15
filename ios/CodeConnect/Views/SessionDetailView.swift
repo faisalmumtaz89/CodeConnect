@@ -963,6 +963,7 @@ struct SessionDetailView: View {
     @State private var showModelSheet = false
     @State private var modelSheetPrefill = ""
     @State private var showEffortSheet = false
+    @State private var showHostedSettingsSheet = false
     @State private var showCompactSheet = false
     @State private var compactSheetPrefill = ""
     @State private var showClearConfirm = false
@@ -1150,6 +1151,11 @@ struct SessionDetailView: View {
         }
         .sheet(isPresented: $showEffortSheet) {
             EffortSheet(sessionKey: key, onLanded: consumeDraft)
+                .environment(model)
+                .ccResizableSheet()
+        }
+        .sheet(isPresented: $showHostedSettingsSheet) {
+            HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
                 .environment(model)
                 .ccResizableSheet()
         }
@@ -1573,15 +1579,27 @@ struct SessionDetailView: View {
     private func route(_ action: CommandAction) {
         switch action {
         case .nativeModel(let prefillArgs):
-            modelSheetPrefill = prefillArgs
-            showModelSheet = true
+            // A hosted run offers structured menus the daemon validates — model, effort and mode in one
+            // sheet; a terminal run has only the typed path and keeps its legacy picker.
+            switch model.runSettings(for: key) {
+            case .hostedLive, .hostedReadOnly:
+                showHostedSettingsSheet = true
+            case .deferToOtherPath:
+                modelSheetPrefill = prefillArgs
+                showModelSheet = true
+            }
         case .nativeDiff:
             // The app renders the working tree itself; typing the Mac's own
             // `/diff` would open a view of something already on this screen.
             composeText = ""
             showDiff = true
         case .nativeEffort:
-            showEffortSheet = true
+            switch model.runSettings(for: key) {
+            case .hostedLive, .hostedReadOnly:
+                showHostedSettingsSheet = true
+            case .deferToOtherPath:
+                showEffortSheet = true
+            }
         case .nativeCompact(let prefillInstructions):
             compactSheetPrefill = prefillInstructions
             showCompactSheet = true

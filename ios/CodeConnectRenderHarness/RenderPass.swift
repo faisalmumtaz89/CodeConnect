@@ -72,6 +72,16 @@ final class RenderPass: XCTestCase {
         try render(at: .large, RenderCatalog.all.filter { $0.name == "session-not-sent-stopped" })
     }
 
+    /// The hosted run's unified model / effort / mode sheet (B8, minor 39), with minor-39's menus in
+    /// their worst shapes — the one screen worth a look at the smallest phone and the largest type.
+    func testRendersHostedSettingsSheetAtLarge() throws {
+        try render(at: .large, RenderCatalog.all.filter { $0.name.hasPrefix("session-hosted-settings") })
+    }
+
+    func testRendersHostedSettingsSheetAtAX5() throws {
+        try render(at: .ax5, RenderCatalog.all.filter { $0.name.hasPrefix("session-hosted-settings") })
+    }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

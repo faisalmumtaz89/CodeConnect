@@ -832,6 +832,44 @@ enum RenderCatalog {
                     "the variant line the raw id resolves to")
             }),
         RenderScenario(
+            name: "session-hosted-settings-sheet",
+            purpose:
+                "the hosted run's unified model/effort/mode sheet, minor-39 menus in their worst shapes",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.require(
+                    driver.text(containing: "Permission mode", in: app), "the mode section")
+                try driver.require(
+                    driver.element(containing: "Extra high", in: app),
+                    "the labelled efforts the hosted sheet draws")
+            }),
+        RenderScenario(
+            name: "session-hosted-settings-model",
+            purpose:
+                "the hosted settings sheet at its top — the Model section with minor-39's longest detail",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.require(
+                    driver.element(containing: "currently Opus 5.5", in: app),
+                    "the longest model detail the menu carries")
+            }),
+        RenderScenario(
+            name: "session-hosted-settings-modes",
+            purpose: "the hosted settings sheet scrolled to Permission mode — Plan is the selected row",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.require(driver.text(containing: "Plan", in: app), "the Plan mode row")
+            }),
+        RenderScenario(
             name: "session-effort-sheet",
             purpose: "the /effort sheet — five rows, no current-state claim",
             arguments: [

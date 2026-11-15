@@ -843,6 +843,17 @@ extension ModelSource: Codable {
 public struct RunMenus: Codable, Sendable, Hashable {
     public let models: [MenuModel]
     public let modes: [MenuMode]
+    /// The menu model `value` the daemon says is chosen now (minor 39). The daemon states it because
+    /// only it and claude know which alias a run's model fact resolves to — the fact at every turn's
+    /// init is claude's full id, not a menu value. Absent from an older daemon, or when the fact
+    /// matches no entry. **Display only** — it changes nothing on the run. Effort and mode need no such
+    /// field: their facts already carry the menu's own words.
+    public let selectedModel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case models, modes
+        case selectedModel = "selected_model"
+    }
 }
 
 /// One model of a run's menu: the agent's own `value` (what a `set_model` carries), the label and

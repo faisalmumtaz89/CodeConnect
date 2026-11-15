@@ -42,6 +42,7 @@ final class Minor39WireTests: XCTestCase {
         XCTAssertEqual(menus.models.first?.efforts, ["low", "medium", "high", "xhigh", "max"])
         XCTAssertEqual(menus.modes.map(\.value), ["default", "acceptEdits", "plan"])
         XCTAssertEqual(menus.modes.map(\.label), ["Ask before edits", "Accept edits", "Plan"])
+        XCTAssertEqual(menus.selectedModel, "sonnet", "the daemon states the chosen model (minor 39)")
         XCTAssertEqual(s.effort?.value, "high")
         XCTAssertEqual(s.model?.value, "sonnet (claude-sonnet-5-5)")
         XCTAssertEqual(s.permissionMode?.value, "plan")
