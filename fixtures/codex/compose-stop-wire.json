@@ -1,0 +1,247 @@
+{
+  "fleet_over_a_run": [
+    {
+      "events": [],
+      "step": "started",
+      "summary": {
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "none",
+        "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
+        "created_at": "2026-11-15T00:00:00Z",
+        "cwd": "/Users/person/project",
+        "last_seq": 0,
+        "lifecycle": "starting",
+        "link": "detached",
+        "project_label": "project",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-15T00:00:00Z"
+      }
+    },
+    {
+      "events": [
+        {
+          "kind": "user_message",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        }
+      ],
+      "step": "first message taken",
+      "summary": {
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
+        "created_at": "2026-11-15T00:00:00Z",
+        "cwd": "/Users/person/project",
+        "last_seq": 0,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "project",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-15T00:00:00Z"
+      }
+    },
+    {
+      "events": [],
+      "step": "ccd restarted, before its reconnect",
+      "summary": {
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "none",
+        "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
+        "created_at": "2026-11-15T00:00:00Z",
+        "cwd": "/Users/person/project",
+        "last_seq": 0,
+        "lifecycle": "live",
+        "link": "detached",
+        "project_label": "project",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-15T00:00:00Z"
+      }
+    },
+    {
+      "events": [
+        {
+          "kind": "session_start",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:thread_started",
+          "turn_id": null
+        },
+        {
+          "kind": "agent_message",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        {
+          "kind": "turn_complete",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        {
+          "kind": "user_message",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        {
+          "kind": "tool_result",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:post:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        {
+          "kind": "agent_message",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        {
+          "kind": "turn_complete",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        }
+      ],
+      "step": "reconnected",
+      "summary": {
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
+        "created_at": "2026-11-15T00:00:00Z",
+        "cwd": "/Users/person/project",
+        "last_seq": 0,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "project",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-15T00:00:00Z"
+      }
+    },
+    {
+      "events": [],
+      "step": "End run",
+      "summary": {
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "none",
+        "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
+        "created_at": "2026-11-15T00:00:00Z",
+        "cwd": "/Users/person/project",
+        "last_seq": 0,
+        "lifecycle": "stopping",
+        "link": "attached",
+        "project_label": "project",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-15T00:00:00Z"
+      }
+    },
+    {
+      "events": [
+        {
+          "kind": "session_end",
+          "source_event_id": "exit:{uid}",
+          "turn_id": null
+        }
+      ],
+      "step": "ended",
+      "summary": {
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "none",
+        "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
+        "created_at": "2026-11-15T00:00:00Z",
+        "cwd": "/Users/person/project",
+        "last_seq": 0,
+        "lifecycle": "exited",
+        "link": "detached",
+        "project_label": "project",
+        "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "",
+        "updated_at": "2026-11-15T00:00:00Z"
+      }
+    }
+  ],
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "claude_interrupt": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "machine_stats": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "stop_run": true,
+    "terminal_pty": false,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "person_row": {
+    "request_id": "send-1",
+    "text": "and the docs"
+  },
+  "send_not_sent": {
+    "message": "Not sent: stopped",
+    "notification_type": "send_not_sent",
+    "reason": "stopped",
+    "request_id": "send-1"
+  },
+  "session_summary": {
+    "agent": "codex",
+    "blocked_on": [],
+    "codex_link": "subscribed",
+    "codex_thread_id": "01a01282-ba87-7660-9f8d-05e2219cd505",
+    "created_at": "2026-11-15T00:00:00Z",
+    "cwd": "/Users/person/project",
+    "last_seq": 0,
+    "lifecycle": "live",
+    "link": "attached",
+    "project_label": "project",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T00:00:00Z"
+  },
+  "session_summary_stopping": {
+    "agent": "codex",
+    "blocked_on": [],
+    "codex_link": "none",
+    "codex_thread_id": "01a01282-ba87-7660-9f8d-05e2219cd505",
+    "created_at": "2026-11-15T00:00:00Z",
+    "cwd": "/Users/person/project",
+    "last_seq": 0,
+    "lifecycle": "stopping",
+    "link": "attached",
+    "project_label": "project",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T00:00:00Z"
+  }
+}

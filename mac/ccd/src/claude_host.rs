@@ -1125,8 +1125,9 @@ async fn release_send(daemon: &Daemon, uid: &str, request_id: &str) {
 }
 
 /// The uuid of the message ccd sends a run's host for the app's request `request_id`:
-/// the same for a retry, and found again by a restarted ccd.
-fn send_uuid(uid: &str, request_id: &str) -> String {
+/// the same for a retry, and found again by a restarted ccd. A Codex run's message is named
+/// the same way ([`crate::codex_host`]).
+pub(crate) fn send_uuid(uid: &str, request_id: &str) -> String {
     protocol::uid::uuid_named(&format!("{uid}\0{request_id}"))
 }
 
@@ -1378,8 +1379,13 @@ pub(crate) async fn answer(
 }
 
 /// The person's words `text`, sent as the message `uuid` (the start's or a later
-/// send's), as the run's event.
-fn person_row(uid: &str, uuid: &str, text: &str, request_id: Option<&str>) -> PendingEvent {
+/// send's), as the run's event. A Codex run's later sends file the same row.
+pub(crate) fn person_row(
+    uid: &str,
+    uuid: &str,
+    text: &str,
+    request_id: Option<&str>,
+) -> PendingEvent {
     let mut payload = serde_json::json!({ "text": text });
     if let Some(request_id) = request_id {
         payload["request_id"] = request_id.into();
@@ -1573,22 +1579,28 @@ async fn not_sent(
         .into_iter()
         .filter_map(|request_id| {
             let uuid = send_uuid(uid, &request_id);
-            cancelled.contains(&uuid).then(|| {
-                PendingEvent::new(
-                    &SessionKey::new(uid, uid),
-                    EventKind::Notification,
-                    serde_json::json!({
-                        "notification_type": protocol::event::notice::SEND_NOT_SENT,
-                        "message": "Not sent: stopped",
-                        "request_id": request_id,
-                        "reason": "stopped",
-                    }),
-                    Source::Daemon,
-                )
-                .with_source_event_id(format!("not_sent:{uuid}"))
-            })
+            cancelled
+                .contains(&uuid)
+                .then(|| not_sent_notice(uid, &uuid, &request_id))
         })
         .collect())
+}
+
+/// The `send_not_sent` notice for the app's send `request_id`, the message `uuid`, which the
+/// run's agent dropped when its turn was stopped. A Codex run's dropped message gets the same.
+pub(crate) fn not_sent_notice(uid: &str, uuid: &str, request_id: &str) -> PendingEvent {
+    PendingEvent::new(
+        &SessionKey::new(uid, uid),
+        EventKind::Notification,
+        serde_json::json!({
+            "notification_type": protocol::event::notice::SEND_NOT_SENT,
+            "message": "Not sent: stopped",
+            "request_id": request_id,
+            "reason": "stopped",
+        }),
+        Source::Daemon,
+    )
+    .with_source_event_id(format!("not_sent:{uuid}"))
 }
 
 /// The host's outcome for an answer ccd sent it: the answer it names, found by its uuid

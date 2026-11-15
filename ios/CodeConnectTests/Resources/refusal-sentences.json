@@ -7,8 +7,8 @@
   },
   "counts": {
     "link_state": 22,
-    "permanent": 45,
-    "total": 74,
+    "permanent": 46,
+    "total": 75,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -151,7 +151,7 @@
       "id": "engine_no_connection",
       "outcome": "rejected",
       "text": "CodeConnect has no connection to this run right now, so nothing was sent.",
-      "verb": "interrupt"
+      "verb": "both"
     },
     {
       "category": "link_state",
@@ -529,6 +529,13 @@
       "id": "replay_compose_settled",
       "outcome": "rejected",
       "text": "this message is already settled and will not be sent again; check the computer",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "replay_compose_stopped",
+      "outcome": "rejected",
+      "text": "this message was not sent: the turn it joined was stopped before Codex read it, and it will not be sent again under this request",
       "verb": "compose"
     }
   ],

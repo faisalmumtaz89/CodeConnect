@@ -122,8 +122,8 @@ pub(crate) const INTERRUPT_NO_LINK: &str =
     stop the turn at the computer";
 
 /// A run started on the engine whose link is not attached, before its reconnect or after one
-/// that failed: an answer or a stop is refused with the fact alone. Such a run has no screen
-/// at the computer to send the person to.
+/// that failed: an answer, a stop or a message is refused with the fact alone. Such a run has
+/// no screen at the computer to send the person to.
 pub(crate) const ENGINE_NO_CONNECTION: &str =
     "CodeConnect has no connection to this run right now, so nothing was sent.";
 
@@ -467,6 +467,12 @@ pub(crate) const REPLAY_COMPOSE_REFUSED: &str =
 pub(crate) const REPLAY_COMPOSE_SETTLED: &str =
     "this message is already settled and will not be sent again; check the computer";
 
+/// A replay of a message that joined a running turn and was dropped when that turn was
+/// stopped ([`crate::store::COMPOSE_STOPPED`]).
+pub(crate) const REPLAY_COMPOSE_STOPPED: &str =
+    "this message was not sent: the turn it joined was stopped before Codex read it, and it \
+    will not be sent again under this request";
+
 /// [`INTERRUPT_CONNECTION_ENDED`]'s twin for a Claude run CodeConnect started: its agent host's
 /// link ended after the stop was sent and before its outcome came.
 pub(crate) const CLAUDE_CONNECTION_ENDED: &str =
@@ -668,7 +674,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
         ),
         row(
             "engine_no_connection",
-            "interrupt",
+            "both",
             "rejected",
             "link_state",
             ENGINE_NO_CONNECTION.to_string(),
@@ -1050,6 +1056,13 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "rejected",
             "permanent",
             REPLAY_COMPOSE_SETTLED.to_string(),
+        ),
+        row(
+            "replay_compose_stopped",
+            "compose",
+            "rejected",
+            "permanent",
+            REPLAY_COMPOSE_STOPPED.to_string(),
         ),
     ]
 }

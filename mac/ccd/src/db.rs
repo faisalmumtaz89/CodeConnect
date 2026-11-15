@@ -840,6 +840,28 @@ impl Db {
         .await
     }
 
+    pub async fn settle_mutation_with_event(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        outcome: &'static str,
+        settled_at: String,
+        event: PendingEvent,
+    ) -> Result<Vec<Event>> {
+        self.run(move |store| {
+            store.settle_mutation_with_event(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                outcome,
+                &settled_at,
+                &event,
+            )
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_host_card(
         &self,
