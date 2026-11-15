@@ -1,10 +1,22 @@
 [
   {
+    "kind": "link_state",
+    "payload": {
+      "link": "attached",
+      "reason": "agent host linked"
+    },
+    "seq": 1,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "ts": "2026-11-13T12:00:00.000Z"
+  },
+  {
     "kind": "user_message",
     "payload": {
       "text": "fix the tests"
     },
-    "seq": 1,
+    "seq": 2,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "daemon",
@@ -18,7 +30,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 2,
+    "seq": 3,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -48,7 +60,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 3,
+    "seq": 4,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -71,7 +83,7 @@
         ]
       }
     },
-    "seq": 4,
+    "seq": 5,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -94,7 +106,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 5,
+    "seq": 6,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -116,7 +128,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 6,
+    "seq": 7,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -132,7 +144,7 @@
       "num_turns": 2,
       "subtype": "success"
     },
-    "seq": 7,
+    "seq": 8,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -180,7 +192,7 @@
         "speed": "standard"
       }
     },
-    "seq": 8,
+    "seq": 9,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -195,7 +207,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 9,
+    "seq": 10,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -218,7 +230,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 10,
+    "seq": 11,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -248,7 +260,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 11,
+    "seq": 12,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -271,7 +283,7 @@
         ]
       }
     },
-    "seq": 12,
+    "seq": 13,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -294,7 +306,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 13,
+    "seq": 14,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -316,7 +328,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 14,
+    "seq": 15,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -332,7 +344,7 @@
       "num_turns": 2,
       "subtype": "success"
     },
-    "seq": 15,
+    "seq": 16,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -380,7 +392,7 @@
         "speed": "standard"
       }
     },
-    "seq": 16,
+    "seq": 17,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -395,7 +407,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 17,
+    "seq": 18,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -440,7 +452,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 18,
+    "seq": 19,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -462,7 +474,7 @@
         ]
       }
     },
-    "seq": 19,
+    "seq": 20,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -484,7 +496,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 20,
+    "seq": 21,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -500,7 +512,7 @@
       "num_turns": 2,
       "subtype": "success"
     },
-    "seq": 21,
+    "seq": 22,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -548,7 +560,7 @@
         "speed": "standard"
       }
     },
-    "seq": 22,
+    "seq": 23,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -562,7 +574,7 @@
     "payload": {
       "permissionMode": "plan"
     },
-    "seq": 23,
+    "seq": 24,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -577,7 +589,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "plan"
     },
-    "seq": 24,
+    "seq": 25,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -600,7 +612,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 25,
+    "seq": 26,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -630,7 +642,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 26,
+    "seq": 27,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -653,7 +665,7 @@
         ]
       }
     },
-    "seq": 27,
+    "seq": 28,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -676,7 +688,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 28,
+    "seq": 29,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -706,7 +718,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 29,
+    "seq": 30,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -728,7 +740,7 @@
         ]
       }
     },
-    "seq": 30,
+    "seq": 31,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -758,7 +770,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 31,
+    "seq": 32,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -785,7 +797,7 @@
         ]
       }
     },
-    "seq": 32,
+    "seq": 33,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -815,7 +827,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 33,
+    "seq": 34,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -829,7 +841,7 @@
     "payload": {
       "permissionMode": "default"
     },
-    "seq": 34,
+    "seq": 35,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -851,7 +863,7 @@
         ]
       }
     },
-    "seq": 35,
+    "seq": 36,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -880,7 +892,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 36,
+    "seq": 37,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -902,7 +914,7 @@
         ]
       }
     },
-    "seq": 37,
+    "seq": 38,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -934,7 +946,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 38,
+    "seq": 39,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -956,7 +968,7 @@
         ]
       }
     },
-    "seq": 39,
+    "seq": 40,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -986,7 +998,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 40,
+    "seq": 41,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1009,7 +1021,7 @@
         ]
       }
     },
-    "seq": 41,
+    "seq": 42,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1031,7 +1043,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 42,
+    "seq": 43,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1047,7 +1059,7 @@
       "num_turns": 8,
       "subtype": "success"
     },
-    "seq": 43,
+    "seq": 44,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1095,7 +1107,7 @@
         "speed": "standard"
       }
     },
-    "seq": 44,
+    "seq": 45,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1110,7 +1122,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 45,
+    "seq": 46,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1142,7 +1154,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 46,
+    "seq": 47,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1169,7 +1181,7 @@
         ]
       }
     },
-    "seq": 47,
+    "seq": 48,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1192,7 +1204,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 48,
+    "seq": 49,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1214,7 +1226,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 49,
+    "seq": 50,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1230,7 +1242,7 @@
       "num_turns": 2,
       "subtype": "success"
     },
-    "seq": 50,
+    "seq": 51,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1278,7 +1290,7 @@
         "speed": "standard"
       }
     },
-    "seq": 51,
+    "seq": 52,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1293,7 +1305,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 52,
+    "seq": 53,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1324,7 +1336,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 53,
+    "seq": 54,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1347,7 +1359,7 @@
         ]
       }
     },
-    "seq": 54,
+    "seq": 55,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1377,7 +1389,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 55,
+    "seq": 56,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1400,7 +1412,7 @@
         ]
       }
     },
-    "seq": 56,
+    "seq": 57,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1422,7 +1434,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 57,
+    "seq": 58,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1438,7 +1450,7 @@
       "num_turns": 3,
       "subtype": "success"
     },
-    "seq": 58,
+    "seq": 59,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1486,7 +1498,7 @@
         "speed": "standard"
       }
     },
-    "seq": 59,
+    "seq": 60,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1501,7 +1513,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 60,
+    "seq": 61,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1532,7 +1544,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 61,
+    "seq": 62,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1555,7 +1567,7 @@
         ]
       }
     },
-    "seq": 62,
+    "seq": 63,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1576,7 +1588,7 @@
         ]
       }
     },
-    "seq": 63,
+    "seq": 64,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1592,7 +1604,7 @@
       "num_turns": 3,
       "subtype": "error_during_execution"
     },
-    "seq": 64,
+    "seq": 65,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1640,7 +1652,7 @@
         "speed": "standard"
       }
     },
-    "seq": 65,
+    "seq": 66,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1655,7 +1667,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 66,
+    "seq": 67,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1686,7 +1698,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 67,
+    "seq": 68,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1709,7 +1721,7 @@
         ]
       }
     },
-    "seq": 68,
+    "seq": 69,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1730,7 +1742,7 @@
         ]
       }
     },
-    "seq": 69,
+    "seq": 70,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1746,7 +1758,7 @@
       "num_turns": 3,
       "subtype": "error_during_execution"
     },
-    "seq": 70,
+    "seq": 71,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1794,7 +1806,7 @@
         "speed": "standard"
       }
     },
-    "seq": 71,
+    "seq": 72,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1809,7 +1821,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 72,
+    "seq": 73,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1832,7 +1844,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 73,
+    "seq": 74,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1854,7 +1866,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 74,
+    "seq": 75,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1870,7 +1882,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 75,
+    "seq": 76,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1918,7 +1930,7 @@
         "speed": "standard"
       }
     },
-    "seq": 76,
+    "seq": 77,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1933,7 +1945,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 77,
+    "seq": 78,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1955,7 +1967,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 78,
+    "seq": 79,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1971,7 +1983,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 79,
+    "seq": 80,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2019,7 +2031,7 @@
         "speed": "standard"
       }
     },
-    "seq": 80,
+    "seq": 81,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2034,7 +2046,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 81,
+    "seq": 82,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2049,7 +2061,7 @@
       "message": "Conversation compacted",
       "notification_type": "compacted"
     },
-    "seq": 82,
+    "seq": 83,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2065,7 +2077,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 83,
+    "seq": 84,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2101,7 +2113,7 @@
         "speed": "standard"
       }
     },
-    "seq": 84,
+    "seq": 85,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2116,7 +2128,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 85,
+    "seq": 86,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2138,7 +2150,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 86,
+    "seq": 87,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2154,7 +2166,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 87,
+    "seq": 88,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2202,7 +2214,7 @@
         "speed": "standard"
       }
     },
-    "seq": 88,
+    "seq": 89,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2217,7 +2229,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 89,
+    "seq": 90,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2239,7 +2251,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 90,
+    "seq": 91,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2255,7 +2267,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 91,
+    "seq": 92,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2303,7 +2315,7 @@
         "speed": "standard"
       }
     },
-    "seq": 92,
+    "seq": 93,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2318,7 +2330,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 93,
+    "seq": 94,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2340,7 +2352,7 @@
         "model": "<synthetic>"
       }
     },
-    "seq": 94,
+    "seq": 95,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2356,7 +2368,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 95,
+    "seq": 96,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2392,7 +2404,7 @@
         "speed": "standard"
       }
     },
-    "seq": 96,
+    "seq": 97,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2407,7 +2419,7 @@
       "message": "Conversation cleared",
       "notification_type": "conversation_cleared"
     },
-    "seq": 97,
+    "seq": 98,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2422,7 +2434,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 98,
+    "seq": 99,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2438,7 +2450,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 99,
+    "seq": 100,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2474,7 +2486,7 @@
         "speed": "standard"
       }
     },
-    "seq": 100,
+    "seq": 101,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2489,7 +2501,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 101,
+    "seq": 102,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2512,7 +2524,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 102,
+    "seq": 103,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2534,7 +2546,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 103,
+    "seq": 104,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2550,7 +2562,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 104,
+    "seq": 105,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2598,7 +2610,7 @@
         "speed": "standard"
       }
     },
-    "seq": 105,
+    "seq": 106,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2613,7 +2625,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 106,
+    "seq": 107,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2636,7 +2648,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 107,
+    "seq": 108,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2658,7 +2670,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 108,
+    "seq": 109,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2674,7 +2686,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 109,
+    "seq": 110,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2722,7 +2734,7 @@
         "speed": "standard"
       }
     },
-    "seq": 110,
+    "seq": 111,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",

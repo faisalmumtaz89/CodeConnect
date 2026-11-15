@@ -4547,6 +4547,87 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
+    /// The `link` word of each of the run's `link_state` facts, in the order filed.
+    async fn link_states(daemon: &Daemon, uid: &str) -> Vec<String> {
+        daemon
+            .db
+            .events_after(uid.to_string(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::LinkState)
+            .map(|event| {
+                event.payload["link"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The run's `link_state` facts once there are `n`, within 10 s.
+    async fn link_states_once(daemon: &Daemon, uid: &str, n: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let states = link_states(daemon, uid).await;
+            if states.len() >= n || Instant::now() >= deadline {
+                return states;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// **An engine run's link files a `link_state` fact when it attaches, on a start and on a
+    /// reconnect, once the link is in place**: the fleet then offers the run (`subscribed`), so
+    /// an app that reads the fleet on the fact sees what it can do. The first daemon's dropped
+    /// connection, its run still live, files one `detached`.
+    #[tokio::test]
+    async fn an_engine_runs_link_files_its_attach_on_a_start_and_a_reconnect() {
+        use protocol::event::CodexLink;
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let after = capture["answerAfter"]["result"].clone();
+        let thread = after["thread"]["id"].as_str().unwrap();
+        let first = after["thread"]["turns"][0]["id"].as_str().unwrap();
+        let (uid, ws) = engine_run(&rig, "req-attach", thread, first).await;
+        assert_eq!(link_states_once(&rig.daemon, &uid, 1).await, ["attached"]);
+        assert_eq!(
+            summary_of(&rig.daemon, &uid).await.codex_link,
+            CodexLink::Subscribed,
+            "at the start's attach"
+        );
+        let (restarted, ws, _) = resumed_with(&rig, ws, after).await;
+        assert_eq!(
+            link_states_once(&restarted, &uid, 3).await,
+            ["attached", "detached", "attached"]
+        );
+        assert_eq!(
+            summary_of(&restarted, &uid).await.codex_link,
+            CodexLink::Subscribed,
+            "at the reconnect's attach"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A run ended by End run files no `detached` fact**: its link ends while it is
+    /// `stopping`, and its end is the fact that tells.
+    #[tokio::test]
+    async fn an_end_run_files_no_detached_fact() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-end-quiet", "thr-end-quiet", "turn-1").await;
+        assert_eq!(link_states_once(&rig.daemon, &uid, 1).await, ["attached"]);
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        drop(ws);
+        row_once(&rig, &uid, Lifecycle::Exited).await;
+        link_gone(&rig.daemon, &uid).await;
+        assert_eq!(link_states(&rig.daemon, &uid).await, ["attached"]);
+        end_run(&rig, &uid).await;
+    }
+
     /// The run `uid`'s summary as the fleet sends it, its identity, folder, times and count of
     /// events fixed so the fixture is the same on every run.
     async fn summary_as_sent(daemon: &Daemon, uid: &str) -> serde_json::Value {
@@ -4587,6 +4668,7 @@ mod tests {
                     "kind": event.kind.as_str(),
                     "source_event_id": event.source_event_id.map(|id| id.replace(uid, "{uid}")),
                     "turn_id": event.turn_id,
+                    "link": event.payload.get("link").filter(|_| event.kind == EventKind::LinkState),
                 })
             })
             .collect();
