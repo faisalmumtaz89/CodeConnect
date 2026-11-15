@@ -50,16 +50,31 @@ impl SessionFacts {
 }
 
 /// What one event says the run's effort is, if anything: the `effort` of a `model_set`
-/// notice, which ccd files when claude has taken an app's effort change (minor 39).
-/// claude reports no effort of its own.
+/// notice, which ccd files when claude has taken an app's effort change (minor 39), or
+/// claude's own receipt for a typed `/effort` on a user line (`Set effort level to low (this
+/// session only): …`), read as [`model_fact`] reads `Set model to`. A receipt in another
+/// wording is not read.
 pub fn effort_fact(event: &Event) -> Option<Fact> {
-    if event.kind != EventKind::Notification
-        || event.payload.get("notification_type")?.as_str()? != crate::event::notice::MODEL_SET
-    {
-        return None;
-    }
+    let value = match event.kind {
+        EventKind::Notification => {
+            if event.payload.get("notification_type")?.as_str()? != crate::event::notice::MODEL_SET
+            {
+                return None;
+            }
+            event.payload.get("effort")?.as_str()?.to_string()
+        }
+        EventKind::UserMessage => {
+            let content = event.payload.get("message")?.get("content")?.as_str()?;
+            local_command_output(content)?
+                .strip_prefix("Set effort level to ")?
+                .split_whitespace()
+                .next()?
+                .to_string()
+        }
+        _ => return None,
+    };
     Some(Fact {
-        value: event.payload.get("effort")?.as_str()?.to_string(),
+        value,
         seq: event.seq,
     })
 }
@@ -240,9 +255,11 @@ mod tests {
         )
     }
 
-    /// **The effort is a `model_set` notice's, and nothing else's** (minor 39).
+    /// **The effort is a `model_set` notice's or claude's `/effort` receipt's, and nothing
+    /// else's** (minor 39). The receipt is the one a hosted run files from claude's recorded
+    /// answer to `/effort low` (`fixtures/claude/minor-38-wire.json`'s `output_effort`).
     #[test]
-    fn the_effort_is_a_model_set_notices() {
+    fn the_effort_is_a_model_set_notices_or_claudes_receipts() {
         let notice = event(
             7,
             EventKind::Notification,
@@ -256,7 +273,23 @@ mod tests {
                 seq: 7
             })
         );
+        let receipt = user_line(
+            11,
+            "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>",
+        );
+        assert_eq!(
+            effort_fact(&receipt),
+            Some(Fact {
+                value: "low".into(),
+                seq: 11
+            })
+        );
         for other in [
+            user_line(12, "Set effort level to low"),
+            user_line(
+                13,
+                "<local-command-stdout>Effort set to low</local-command-stdout>",
+            ),
             event(
                 8,
                 EventKind::Notification,

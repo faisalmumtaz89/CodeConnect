@@ -99,6 +99,10 @@
     "codex_link": "none",
     "created_at": "2026-11-15T09:00:00.000Z",
     "cwd": "/tmp/cc-rig",
+    "effort": {
+      "seq": 4,
+      "value": "low"
+    },
     "last_seq": 5,
     "lifecycle": "live",
     "link": "detached",

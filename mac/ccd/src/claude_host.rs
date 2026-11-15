@@ -1185,7 +1185,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             Told::NoAnswer => {
                 return SettingResult::Indeterminate {
                     reason: before(
-                        "The computer lost the session before Claude answered; the change may or may not have been made.",
+                        "Claude didn't answer, so the change may or may not have been made.",
                     ),
                 }
             }
@@ -6516,8 +6516,9 @@ mod tests {
     /// **B8 part 2 S3, S4: a setting reaches the host one part per line, and is answered as
     /// claude answered.** A model while idle applies now; a mode while a turn runs, from the
     /// next turn. A model taken and an effort refused reads refused, saying so, and files
-    /// nothing. An effort taken is the run's effort, filed as a `model_set` notice, and still
-    /// after a restart.
+    /// nothing. An effort taken is the run's effort, filed as a `model_set` notice. Then the
+    /// person types `/effort low`: claude's recorded receipt for it is the run's effort, and
+    /// still after a restart.
     #[tokio::test]
     async fn a_setting_reaches_the_host_part_by_part_and_is_answered_as_claude_answered() {
         let rig = rig();
@@ -6603,10 +6604,18 @@ mod tests {
                 serde_json::json!({"notification_type": "model_set", "effort": "high", "message": "Effort set to high"})
             ]
         );
+        sdk(&mut played.write, 9, capture()[130].clone()).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 9 }));
+        let typed = summary(&rig.daemon, &uid)
+            .await
+            .effort
+            .expect("the run's effort");
+        assert_eq!(typed.value, "low");
+        assert!(typed.seq > fact.seq);
         stop(&played.dir);
         let restarted = daemon_on(&rig.root);
         restarted.recover().await;
-        assert_eq!(summary(&restarted, &uid).await.effort, Some(fact));
+        assert_eq!(summary(&restarted, &uid).await.effort, Some(typed));
     }
 
     /// **B8 part 2 S3: an answer that does not come in time, and a link that is down.** No
@@ -6741,8 +6750,9 @@ mod tests {
     /// whose link ended before its answer; the effort's `model_set` notice; the capabilities
     /// a paired phone is offered; and the fleet's summaries an app decides from, pinned as
     /// minor 37's are: the run still starting (no menus yet), the run with its menus, the
-    /// effort set and claude's echoes of the model and the mode filed, and a tmux Claude run
-    /// (none).
+    /// effort set and claude's echoes of the model and the mode filed, that run as an older
+    /// daemon sends it (minor 38's summary has neither `effort` nor `menus`), and a tmux
+    /// Claude run (none).
     async fn derived_minor_39_wire() -> serde_json::Value {
         let rig = rig();
         let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
@@ -6814,6 +6824,13 @@ mod tests {
             }
         );
         let hosted = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        let mut older = hosted.clone();
+        for field in ["effort", "menus"] {
+            assert!(
+                older.as_object_mut().unwrap().remove(field).is_some(),
+                "{field}"
+            );
+        }
         let notice = stored(&rig, &uid)
             .into_iter()
             .find(|event| event["payload"]["notification_type"] == "model_set")
@@ -6877,6 +6894,7 @@ mod tests {
             "effort_notice": notice,
             "session_hosted_starting": starting,
             "session_hosted_live": hosted,
+            "session_hosted_live_minor_38": older,
             "session_tmux_live": tmux_live,
         })
     }
@@ -8637,8 +8655,9 @@ mod tests {
     }
 
     /// **B8 part 2 S7: a real claude takes its settings from the app** (app-qa's rig, one
-    /// prompt). The start asks claude to run `sleep 8` with Bash, and its card is allowed from
-    /// the app. While that turn runs the model is set, which applies from the next turn; once
+    /// prompt). The start asks claude to run `echo s7 > s7.txt && sleep 8` with Bash (a command
+    /// that writes, so claude asks), and its card is allowed from the app. While that turn
+    /// runs the model is set, which applies from the next turn; once
     /// the turn has settled, the effort and then the mode, which apply now. Printed: each
     /// answer, the run's model, mode and effort after them, and claude's own echoes filed
     /// after the changes (its `<local-command-stdout>` rows and its mode statuses), each cut
@@ -8646,7 +8665,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_real_claude_takes_its_settings_from_the_app() {
-        let prompt = "Use the Bash tool to run exactly one command, then say done. The command, once: sleep 8";
+        let prompt = "Use the Bash tool to run exactly one command, then say done. The command, once: echo s7 > s7.txt && sleep 8";
         let (rig, uid, host_pid) = real_claude_run("s7b8", prompt).await;
         let card = first_card(&rig, &uid).await;
         let allowed = allow_from_app(&rig, &uid, &card).await;

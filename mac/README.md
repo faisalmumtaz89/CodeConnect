@@ -1168,17 +1168,19 @@ argument hint (`entries`); it is `unavailable` until an init names the commands 
 to its own screen.
 An app changes such a run's model, its effort or its permission mode with `set_model` and
 `set_mode` (minor 39), each answered with a `setting_result`. Each value must be one the run's
-`menus` offer (its summary's: the models of its start's answer, each with the efforts claude
-lists for it, and three modes, "Ask before edits", "Accept edits" and "Plan"; never
-`bypassPermissions`), checked before anything is sent. Each part then goes to the host as a
+`menus` offer (its summary's while it is live: the models of its start's answer, each with
+the efforts claude lists for it, and three modes, "Ask before edits", "Accept edits" and
+"Plan"; never `bypassPermissions`), checked before anything is sent. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it
 (`setModel`, `applyFlagSettings`, `setPermissionMode`), one line at a time. The answer is
 `applied`, from `now` between turns or from the `next_turn` while one runs; `refused` with
 claude's reason, saying so when the model was changed and the effort was not; or
-`indeterminate` when no answer came within 10 s. The model and the mode then show as claude
-reports them, its `Set model to …` receipt and its permission-mode status. The effort, which
-claude does not report, shows from a `model_set` notice ccd files when claude takes it, even
-from an answer that comes late. A retry applies the change again. A change whose answer is lost
+`indeterminate` when no answer came within 10 s or the run's link ended first. The model and
+the mode then show as claude reports them, its `Set model to …` receipt and its permission-mode
+status. claude echoes nothing for an app's effort, so that shows from a `model_set` notice ccd
+files when claude takes it, even from an answer that comes late; an effort typed as
+`/effort low` shows from claude's own `Set effort level to low …` receipt (a receipt in another
+wording is not read). A retry applies the change again. A change whose answer is lost
 across a ccd restart leaves the effort as it was last set. A Claude run in a terminal, and a
 Codex run, take no settings from an app.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as

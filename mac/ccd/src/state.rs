@@ -506,7 +506,7 @@ struct Inner {
         ),
     >,
     /// Settings sent to a run's agent host and waiting for its outcome, by the line's uuid
-    /// ([`crate::claude_host::set_model`]). Kept past the app's wait, so an outcome that
+    /// ([`crate::claude_host::set_setting`]). Kept past the app's wait, so an outcome that
     /// comes late still files the effort it set; dropped when the run's link ends.
     host_settings: HashMap<String, PendingSetting>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
@@ -9886,10 +9886,10 @@ impl Daemon {
                 requests.insert((uid, request_id), filed);
             }
         }
-        // A Claude run CodeConnect started offers its settings from its start's answer.
+        // A live Claude run CodeConnect started offers its settings from its start's answer.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         for row in &rows {
-            if row.agent != protocol::agent::AgentKind::Claude {
+            if row.agent != protocol::agent::AgentKind::Claude || row.lifecycle != Lifecycle::Live {
                 continue;
             }
             if let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? {
@@ -9959,7 +9959,7 @@ impl Daemon {
 
     /// [`ClientMessage::SetModel`](protocol::ws::ClientMessage::SetModel) and
     /// [`ClientMessage::SetMode`](protocol::ws::ClientMessage::SetMode): change a Claude run
-    /// CodeConnect started ([`crate::claude_host::set_model`]).
+    /// CodeConnect started ([`crate::claude_host::set_setting`]).
     pub async fn set_setting(
         &self,
         session_ref: &str,
@@ -9979,9 +9979,6 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
-        if row.agent != protocol::agent::AgentKind::Claude {
-            return refuse(crate::claude_host::NOT_FROM_THE_APP);
-        }
         crate::claude_host::set_setting(self, &row.session_uid, setting).await
     }
 
