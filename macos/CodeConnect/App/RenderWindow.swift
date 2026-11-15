@@ -100,9 +100,14 @@
             FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE")?.capitalized ?? "") ?? .active
         }
 
-        /// `-CC_FLEET_GROUPING project`: the list opens grouped by project.
-        static var fleetGrouping: FleetGroup.Kind {
-            UserDefaults.standard.string(forKey: "CC_FLEET_GROUPING") == "project" ? .project : .computer
+        /// `-CC_FLEET_GROUPING project` or `computer`: the list opens grouped so, whatever this Mac keeps, and keeps
+        /// nothing of it; nil when not given.
+        static var fleetGrouping: FleetGroup.Kind? {
+            switch UserDefaults.standard.string(forKey: "CC_FLEET_GROUPING") {
+            case "project": .project
+            case "computer": .computer
+            default: nil
+            }
         }
 
         /// `-CC_FILTER computer` or `project`: the list opens narrowed to the sidebar's first computer or project.

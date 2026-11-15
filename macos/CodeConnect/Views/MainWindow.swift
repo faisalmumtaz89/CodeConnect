@@ -11,7 +11,8 @@ struct MainWindow: View {
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
     @State private var scope = FleetScope.active
-    @State private var grouping = FleetGroup.Kind.computer
+    /// The grouping last chosen on this Mac, kept in its preferences, else by computer.
+    @State private var grouping = FleetGroup.Kind.kept(in: .standard)
     /// What the sidebar narrows the list to, if anything.
     @State private var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
@@ -30,7 +31,7 @@ struct MainWindow: View {
                 initialValue: RenderWindow.opensOnIPhone
                     ? .iPhone : RenderWindow.opensOnAgent ? .agent : RenderWindow.opensAddComputer ? .computer : nil)
             _scope = State(initialValue: RenderWindow.fleetScope)
-            _grouping = State(initialValue: RenderWindow.fleetGrouping)
+            if let given = RenderWindow.fleetGrouping { _grouping = State(initialValue: given) }
             _opened = State(initialValue: RenderWindow.opened)
         #endif
     }
@@ -44,6 +45,8 @@ struct MainWindow: View {
                 let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
                 let model = open.flatMap { machines.model(forSession: $0.id) }
                 FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
+                    // Kept when the person changes it, never at launch.
+                    .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
                     // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
                     // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
                     .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
@@ -93,7 +96,7 @@ struct MainWindow: View {
             }
         #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: repairing) {
+            AddSheet(kind: kind, address: $repairing) {
                 // The run just started is on screen: every active agent, unfiltered.
                 scope = .active
                 filter = nil
