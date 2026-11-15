@@ -333,19 +333,19 @@ final class CodexProseTests: XCTestCase {
         XCTAssertNil(
             CodexProse.stopUnavailable(
                 agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
-                link: .subscribed, runningTurn: "t-1"))
+                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         XCTAssertTrue(
             CodexProse.stopUnavailable(
                 agent: .codex, daemonHonoursStop: false, hosted: true, isLive: true,
-                link: .subscribed, runningTurn: "t-1")!
+                link: .subscribed, runLink: .attached, runningTurn: "t-1")!
                 .contains("too old"))
 
         // **The one honest hide**: no turn, nothing to name.
         XCTAssertEqual(
             CodexProse.stopUnavailable(
                 agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
-                link: .subscribed, runningTurn: nil),
+                link: .subscribed, runLink: .attached, runningTurn: nil),
             "Nothing is running to stop.")
 
         for link in [
@@ -354,47 +354,55 @@ final class CodexProseTests: XCTestCase {
             XCTAssertNotNil(
                 CodexProse.stopUnavailable(
                     agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
-                    link: link, runningTurn: "t-1"),
+                    link: link, runLink: .attached, runningTurn: "t-1"),
                 "\(link) cannot be stopped, and the control says why")
         }
     }
 
     /// A hosted Claude run is stopped when the daemon honours it, the run is live,
-    /// and a turn is running — with **no** control-link check. The must-fail: before
-    /// the Claude branch, a Claude run read "Only a Codex session can be stopped
-    /// from here" here instead of being offered.
+    /// a turn is running, and its link to the host is attached — with no *Codex*
+    /// control-link check. The must-fail: before the Claude branch, a Claude run read
+    /// "Only a Codex session can be stopped from here" here instead of being offered.
     func testWhyClaudeStopIsNotOffered() {
         // Offered: hosted, live, a running turn, the capability. The link is never
         // consulted, so a `.none` link (never relevant to a hosted run) still offers.
         XCTAssertNil(
             CodexProse.stopUnavailable(
                 agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
-                link: .none, runningTurn: "t-1"))
+                link: .none, runLink: .attached, runningTurn: "t-1"))
 
         XCTAssertTrue(
             CodexProse.stopUnavailable(
                 agent: .claude, daemonHonoursStop: false, hosted: true, isLive: true,
-                link: .subscribed, runningTurn: "t-1")!
+                link: .subscribed, runLink: .attached, runningTurn: "t-1")!
                 .contains("too old"))
 
         // Not hosted (a terminal run): not offered.
         XCTAssertNotNil(
             CodexProse.stopUnavailable(
                 agent: .claude, daemonHonoursStop: true, hosted: false, isLive: true,
-                link: .subscribed, runningTurn: "t-1"))
+                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         // Not live (ended): not offered.
         XCTAssertNotNil(
             CodexProse.stopUnavailable(
                 agent: .claude, daemonHonoursStop: true, hosted: true, isLive: false,
-                link: .subscribed, runningTurn: "t-1"))
+                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         // The honest hide: no running turn.
         XCTAssertEqual(
             CodexProse.stopUnavailable(
                 agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
-                link: .subscribed, runningTurn: nil),
+                link: .subscribed, runLink: .attached, runningTurn: nil),
             "Nothing is running to stop.")
+
+        // G-1: a detached hosted run — live, hosted, a turn running — is NOT offered;
+        // ccd's link to the host has dropped and the interrupt cannot reach it.
+        XCTAssertNotNil(
+            CodexProse.stopUnavailable(
+                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                link: .none, runLink: .detached, runningTurn: "t-1"),
+            "a detached hosted run cannot be stopped")
     }
 
     /// The Stop banner names the agent that stopped: "Codex stopped the turn." for
