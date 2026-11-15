@@ -23,6 +23,8 @@ struct DecisionBlock: View {
     /// leave of the foot, so the answers never leave the window.
     @State private var answersHeight: CGFloat = 0
     @Environment(\.pendingSlot) private var slot
+    /// The conversation's follow, for a card drawn in the column; nil at the pane's foot.
+    @Environment(\.conversationTail) private var tail
 
     /// The card as the fleet holds it now; nil once nothing backs it.
     private var live: ApprovalItem? { model.shownApproval(sessionKey: approval.sessionKey, id: approval.id) }
@@ -216,10 +218,22 @@ struct DecisionBlock: View {
         return nil
     }
 
+    /// Opening the input or the rest of the files is choosing to read: in the column, the follow hears first, before
+    /// the card grows.
+    private func toggleInput() {
+        if !showInput { tail?.leave() }
+        showInput.toggle()
+    }
+
+    private func openAllChanges() {
+        tail?.leave()
+        showAllChanges = true
+    }
+
     /// Every field a Claude tool was called with, as the iPhone offers it under "Full tool input", and the ids the
     /// answer is checked against. Codex cards show no wire. Display-safe: JSON leaves direction marks as they are.
     @ViewBuilder private var fullInput: some View {
-        Button { showInput.toggle() } label: {
+        Button { toggleInput() } label: {
             HStack(spacing: 6) {
                 Image(systemName: showInput ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .semibold))
                     .accessibilityHidden(true)
@@ -297,7 +311,7 @@ struct DecisionBlock: View {
                     Text("\(plan.heldBack) more lines not drawn here").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                 }
                 if all.count > shown.count {
-                    Button("Show \(all.count - shown.count) more files") { showAllChanges = true }
+                    Button("Show \(all.count - shown.count) more files") { openAllChanges() }
                         .buttonStyle(.hover(outset: 4, id: "\(id).moreChanges"))
                         .font(Theme.ui(12)).foregroundStyle(Theme.text2)
                         .accessibilityIdentifier("\(id).moreChanges")
