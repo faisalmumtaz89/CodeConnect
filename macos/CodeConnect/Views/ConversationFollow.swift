@@ -148,7 +148,7 @@ final class Tail {
         }
         let dy = y - last.y, grown = height - last.height, resized = pane != last.pane
         guard abs(dy) > 0.5 || grown != 0 || resized else { return }
-        readTop(scrollView, dy: dy, grown: grown, resized: resized)
+        readTop(scrollView, dy: dy)
         let gap = height - (y + pane.height)
         if height <= pane.height {
             arrive()
@@ -176,9 +176,11 @@ final class Tail {
     }
 
     /// The top, as the iPhone's `HeadObserver` reads it. A column shorter than the pane pages back on its own; a hand
-    /// within a pane's height of the top asks for the page above, and so does a move up that reaches the top while
-    /// nothing changes size.
-    private func readTop(_ scrollView: NSScrollView, dy: CGFloat, grown: CGFloat, resized: Bool) {
+    /// within a pane's height of the top asks for the page above, and so does any reading that finds the reader at the
+    /// top, by a move up or while away from the newest rows, whatever changed size with it: there a move cannot be the
+    /// list's own, and the rows coming on screen there are measured as they come, so the reading that arrives can carry
+    /// a change of size, and none follows it once the top is reached.
+    private func readTop(_ scrollView: NSScrollView, dy: CGFloat) {
         if PageAnchor.isShort(scrollView) {
             if hand {
                 readerAsks(if: PageAnchor.isShort)
@@ -191,8 +193,8 @@ final class Tail {
             arrived = false
             return
         }
-        let reachesTop = dy < -0.5 && grown == 0 && !resized && scrollView.contentView.bounds.origin.y <= 0.5
-        guard hand || reachesTop else { return }
+        let atTop = scrollView.contentView.bounds.origin.y <= 0.5 && (dy < -0.5 || isAway)
+        guard hand || atTop else { return }
         readerAsks(if: PageAnchor.isNearTop)
     }
 
