@@ -14,7 +14,8 @@
 //! ccd attaches each host still running again from its run's cursor ([`attach_run`]). An
 //! app's message to a live run goes to its host as `say` ([`send_text`]), and the
 //! person's words are filed once the host has taken them; its command menu is what its
-//! claude last reported ([`catalog`]). An
+//! claude last reported ([`catalog`]), and an app changes its model, effort and mode
+//! ([`set_setting`]). An
 //! app ends a live run ([`stop_run`]): it is `stopping`, its host is sent `stop` if its link
 //! is attached, and a host that has not exited 10 s later is stopped by its group
 //! ([`escalate_stop`]).
@@ -32,6 +33,7 @@ use std::time::Duration;
 use protocol::agent::AgentKind;
 use protocol::config::Config;
 use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
+use protocol::event::{MenuMode, MenuModel, RunMenus};
 use protocol::host::{
     FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
     HOST_PROTOCOL_VERSION,
@@ -42,8 +44,9 @@ use protocol::proc_identity::{
 };
 use protocol::sdk_map::Signal;
 use protocol::ws::{
-    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, CommandCatalogResult,
-    CommandEntry, ResolvedBy, SendTextResult, StartFailure, StartSessionResult, StopRunResult,
+    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, Applies,
+    CommandCatalogResult, CommandEntry, ResolvedBy, SendTextResult, SettingResult, StartFailure,
+    StartSessionResult, StopRunResult,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -740,6 +743,7 @@ async fn link(
                 seq,
                 uuid,
                 status,
+                detail,
                 cancelled,
                 terminal_reason,
                 ..
@@ -751,15 +755,24 @@ async fn link(
                     cancelled: cancelled.as_deref(),
                     terminal_reason: terminal_reason.as_deref(),
                 };
-                let applied =
-                    match apply_interrupt_outcome(&daemon, &uid, host, &told, &mut write).await {
+                let applied = match apply_interrupt_outcome(&daemon, &uid, host, &told, &mut write)
+                    .await
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => match apply_setting_outcome(
+                        &daemon, &uid, host, seq, &uuid, status, detail, &mut write,
+                    )
+                    .await
+                    {
                         Ok(true) => Ok(()),
                         Ok(false) => {
                             apply_send_outcome(&daemon, &uid, host, seq, &uuid, status, &mut write)
                                 .await
                         }
                         Err(why) => Err(why),
-                    };
+                    },
+                    Err(why) => Err(why),
+                };
                 if let Err(why) = applied {
                     break why;
                 }
@@ -1005,6 +1018,279 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
 
 /// How long a send waits for the run's host to take the message into claude's input.
 const SEND_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a settings change waits for claude to take each of its parts.
+const SETTING_WAIT: Duration = Duration::from_secs(10);
+
+/// Why a run other than a Claude run CodeConnect started takes no settings from an app.
+pub(crate) const NOT_FROM_THE_APP: &str = "This session's settings can't be changed from the app.";
+
+/// The permission modes an app may choose for such a run, with the names it shows. Never
+/// `bypassPermissions`, which the host's run cannot take, nor claude's other modes.
+const MODES: [(&str, &str); 3] = [
+    ("default", "Ask before edits"),
+    ("acceptEdits", "Accept edits"),
+    ("plan", "Plan"),
+];
+
+/// An app's change of a hosted run's settings.
+pub(crate) enum Setting {
+    /// A model, an effort, or both.
+    Model {
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    /// A permission mode.
+    Mode(String),
+}
+
+/// A hosted run's menus, from its start's answer `models` (each as claude gives it): each
+/// model's `value`, name, description and efforts, and [`MODES`].
+pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
+    let text = |model: &serde_json::Value, key: &str| {
+        model
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    RunMenus {
+        models: models
+            .iter()
+            .filter_map(|model| {
+                let value = text(model, "value")?;
+                Some(MenuModel {
+                    label: text(model, "displayName").unwrap_or_else(|| value.clone()),
+                    detail: text(model, "description"),
+                    efforts: model
+                        .get("supportedEffortLevels")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                    value,
+                })
+            })
+            .collect(),
+        modes: MODES
+            .iter()
+            .map(|(value, label)| MenuMode {
+                value: value.to_string(),
+                label: label.to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// What became of one settings line sent to the host.
+enum Told {
+    Done,
+    Refused(String),
+    /// Nothing was sent: the run's link was down.
+    NotSent,
+    /// Sent, and no outcome came.
+    NoAnswer,
+}
+
+/// An app's change of the hosted Claude run `uid`'s settings. Checked first, with nothing
+/// sent when it fails: a change naming nothing, a mode not in [`MODES`] (so
+/// `bypassPermissions` never reaches the host), a run not hosted here or not live, a model
+/// not in the run's menus, an effort none of its models takes. Then each part goes to the
+/// host as its own line, the model before the effort, and waits for claude to take it: a
+/// part refused ends the change with claude's reason, saying so when the model was changed
+/// and the effort was not. `applied` reads `next_turn` while a turn runs. An effort taken
+/// is filed as the run's ([`apply_setting_outcome`]). Nothing is kept per request: a retry
+/// applies the change again.
+pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) -> SettingResult {
+    let refused = |reason: &str| SettingResult::Refused {
+        reason: reason.to_string(),
+    };
+    let parts: Vec<(Option<String>, Option<String>, Option<String>)> = match setting {
+        Setting::Model {
+            model: None,
+            effort: None,
+        } => return refused("Choose a model or an effort; nothing was changed."),
+        Setting::Model { model, effort } => model
+            .map(|model| (Some(model), None, None))
+            .into_iter()
+            .chain(effort.map(|effort| (None, Some(effort), None)))
+            .collect(),
+        Setting::Mode(mode) => {
+            if !MODES.iter().any(|(value, _)| *value == mode) {
+                return refused(
+                    "That permission mode isn't offered in this session; nothing was changed.",
+                );
+            }
+            vec![(None, None, Some(mode))]
+        }
+    };
+    match daemon.db.hosted_link(uid.to_string()).await {
+        Ok(Some(linked)) if linked.lifecycle == Lifecycle::Live => {}
+        Ok(Some(_)) => return refused("This session isn't running, so nothing was changed."),
+        Ok(None) => return refused(NOT_FROM_THE_APP),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its host: {err:#}");
+            return refused("This computer could not read the session.");
+        }
+    }
+    let menus = match daemon.db.hosted_models(uid.to_string()).await {
+        Ok(Some(models)) => menus(&models),
+        Ok(None) => return refused("This session isn't running, so nothing was changed."),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its models: {err:#}");
+            return refused("This computer could not read the session.");
+        }
+    };
+    for (model, effort, _) in &parts {
+        if model
+            .as_ref()
+            .is_some_and(|model| !menus.models.iter().any(|offered| &offered.value == model))
+        {
+            return refused(
+                "Claude doesn't offer that model in this session; nothing was changed.",
+            );
+        }
+        if effort.as_ref().is_some_and(|effort| {
+            !menus
+                .models
+                .iter()
+                .any(|offered| offered.efforts.contains(effort))
+        }) {
+            return refused(
+                "Claude doesn't offer that effort in this session; nothing was changed.",
+            );
+        }
+    }
+    let mut model_changed = false;
+    for (model, effort, mode) in parts {
+        let is_model = model.is_some();
+        let told = apply_setting(daemon, uid, model, effort, mode).await;
+        let before = |reason: &str| {
+            if model_changed {
+                format!("The model was changed; the effort was not: {reason}")
+            } else {
+                reason.to_string()
+            }
+        };
+        match told {
+            Told::Done => model_changed |= is_model,
+            Told::Refused(reason) => return refused(&before(&reason)),
+            Told::NotSent => {
+                return refused(&before(
+                    "The computer lost its connection to this session, so nothing was changed.",
+                ))
+            }
+            Told::NoAnswer => {
+                return SettingResult::Indeterminate {
+                    reason: before(
+                        "The computer lost the session before Claude answered; the change may or may not have been made.",
+                    ),
+                }
+            }
+        }
+    }
+    let applies = match daemon.db.turn_running(uid.to_string()).await {
+        Ok(false) => Applies::Now,
+        Ok(true) => Applies::NextTurn,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read whether a turn runs: {err:#}");
+            Applies::NextTurn
+        }
+    };
+    SettingResult::Applied { applies }
+}
+
+/// One settings line to the run `uid`'s host, with a uuid of its own, and its outcome.
+async fn apply_setting(
+    daemon: &Daemon,
+    uid: &str,
+    model: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+) -> Told {
+    let uuid = match protocol::uid::new() {
+        Ok(uuid) => uuid,
+        Err(err) => {
+            crate::log_error!("{uid}: could not name a settings line: {err:#}");
+            return Told::NotSent;
+        }
+    };
+    let told = daemon.await_host_setting(uid, &uuid, effort.clone()).await;
+    let line = match mode {
+        Some(mode) => ToHost::SetMode {
+            uuid: uuid.clone(),
+            mode,
+        },
+        None => ToHost::SetModel {
+            uuid: uuid.clone(),
+            model,
+            effort,
+        },
+    };
+    if !daemon.send_to_host(uid, line).await {
+        daemon.take_host_setting(&uuid).await;
+        return Told::NotSent;
+    }
+    match tokio::time::timeout(SETTING_WAIT, told).await {
+        Ok(Ok((true, _))) => Told::Done,
+        Ok(Ok((false, detail))) => {
+            Told::Refused(detail.unwrap_or_else(|| "Claude didn't take the change.".into()))
+        }
+        Ok(Err(_)) | Err(_) => Told::NoAnswer,
+    }
+}
+
+/// The host's outcome for a settings line this daemon sent ([`apply_setting`]): committed
+/// with its cursor, with a `model_set {effort}` notice when it set an effort and claude took
+/// it, then acknowledged, and whoever waits is told. It files even when nobody waits any
+/// more, so an effort taken late is still the run's. `false` for an outcome that names no
+/// settings line.
+#[allow(clippy::too_many_arguments)]
+async fn apply_setting_outcome(
+    daemon: &Daemon,
+    uid: &str,
+    host: ProcessIdentity,
+    seq: u64,
+    uuid: &str,
+    status: OutcomeStatus,
+    detail: Option<String>,
+    write: &mut OwnedWriteHalf,
+) -> Result<bool, String> {
+    let Some(pending) = daemon.take_host_setting(uuid).await else {
+        return Ok(false);
+    };
+    let taken = matches!(status, OutcomeStatus::Done);
+    let notices = match pending.effort.as_deref().filter(|_| taken) {
+        Some(effort) => vec![PendingEvent::new(
+            &SessionKey::new(uid, uid),
+            EventKind::Notification,
+            serde_json::json!({
+                "notification_type": protocol::event::notice::MODEL_SET,
+                "effort": effort,
+                "message": format!("Effort set to {effort}"),
+            }),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("setting:{uuid}"))],
+        None => Vec::new(),
+    };
+    match daemon
+        .ingest_host_message(uid, host, seq, notices, RunNotes::default())
+        .await
+    {
+        Ok(true) => send(write, &ToHost::Ack { seq }).await?,
+        Ok(false) => {
+            return Err(format!(
+                "message {seq} is not past the run's cursor for this host"
+            ))
+        }
+        Err(err) => return Err(format!("{err:#}")),
+    }
+    let _ = pending.tell.send((taken, detail));
+    Ok(true)
+}
 
 /// The commands an app opens a screen of its own for that this ccd refuses on a hosted
 /// run, each with the reason the app shows. One list, read twice: [`send_text`] refuses
@@ -2019,7 +2305,14 @@ mod tests {
     fn initialize_answer() -> serde_json::Value {
         serde_json::json!({
             "commands": [{"name": "compact"}],
-            "models": [{"value": "opus"}],
+            "models": [
+                {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)",
+                 "description": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok", "supportsEffort": true,
+                 "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet",
+                 "description": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", "supportsEffort": true,
+                 "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]}
+            ],
             "account": {"api_provider": "firstParty"},
             "claude_code_version": "2.1.322"
         })
@@ -5645,8 +5938,9 @@ mod tests {
 
     /// `summary` as an app reads it in the fleet, with what differs between runs pinned,
     /// each checked first: the run's uid (`uid` to `pinned`), and its name when that is the
-    /// uid; the rig's folder (`root`) in `cwd`, and the label made from it; and the two clock
-    /// reads. Nothing else of the rig or the run's uid is left in it.
+    /// uid; the rig's folder (`root`) in `cwd`, and the label made from it; and the clock reads
+    /// (the two times, and the model fact's). Nothing else of the rig or the run's uid is left
+    /// in it.
     fn pinned_summary(
         summary: &protocol::event::SessionSummary,
         uid: &str,
@@ -5672,6 +5966,13 @@ mod tests {
                 "{key} is a clock read: {wire}"
             );
             wire[key] = "2026-11-15T09:00:00.000Z".into();
+        }
+        if let Some(at) = wire.get_mut("model").and_then(|model| model.get_mut("at")) {
+            assert!(
+                protocol::time::unix_ms_from_rfc3339(at.as_str().unwrap()).is_some(),
+                "the model's at is a clock read: {at}"
+            );
+            *at = "2026-11-15T09:00:00.000Z".into();
         }
         let text = wire.to_string();
         assert!(!text.contains(root) && !text.contains(uid), "{text}");
@@ -5771,34 +6072,7 @@ mod tests {
         until_ended(&rig, &uid, "exited", None).await;
         let hosted_ended =
             pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
-        let (tx, _supervisor) = tokio::sync::mpsc::channel(Config::default().ipc_write_queue);
-        let tmux = rig
-            .daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-1".into(),
-                    session_uid: None,
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
-            .await
-            .unwrap()
-            .session
-            .uid;
+        let (tmux, _supervisor) = register_tmux_run(&rig).await;
         let tmux_live = pinned_summary(
             &summary(&rig.daemon, &tmux).await,
             &tmux,
@@ -6077,6 +6351,533 @@ mod tests {
                 result: status,
             })
             .unwrap(),
+        })
+    }
+
+    /// A tmux Claude run `cc-1` on the rig's daemon, registered as its supervisor registers
+    /// it: its uid, and the supervisor's end of its channel, held to keep it attached.
+    async fn register_tmux_run(
+        rig: &Rig,
+    ) -> (
+        String,
+        tokio::sync::mpsc::Receiver<protocol::ipc::DaemonFrame>,
+    ) {
+        let (tx, supervisor) = tokio::sync::mpsc::channel(Config::default().ipc_write_queue);
+        let uid = rig
+            .daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: None,
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .unwrap()
+            .session
+            .uid;
+        (uid, supervisor)
+    }
+
+    /// The host's side of one settings line: it reads it, then answers `status` (with
+    /// `detail`) as message `seq` and reads ccd's ack. The line, its uuid cleared.
+    async fn host_answers_setting(
+        played: &mut Played,
+        seq: u64,
+        status: &str,
+        detail: Option<&str>,
+    ) -> ToHost {
+        let line = next(&mut played.lines)
+            .await
+            .expect("a settings line reached the host");
+        let (uuid, cleared) = match line {
+            ToHost::SetModel {
+                uuid,
+                model,
+                effort,
+            } => (
+                uuid,
+                ToHost::SetModel {
+                    uuid: String::new(),
+                    model,
+                    effort,
+                },
+            ),
+            ToHost::SetMode { uuid, mode } => (
+                uuid,
+                ToHost::SetMode {
+                    uuid: String::new(),
+                    mode,
+                },
+            ),
+            other => panic!("not a settings line: {other:?}"),
+        };
+        let mut outcome =
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": status});
+        if let Some(detail) = detail {
+            outcome["detail"] = detail.into();
+        }
+        say(&mut played.write, outcome).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        cleared
+    }
+
+    fn set_model(model: Option<&str>, effort: Option<&str>) -> Setting {
+        Setting::Model {
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+        }
+    }
+
+    fn model_line(model: Option<&str>, effort: Option<&str>) -> ToHost {
+        ToHost::SetModel {
+            uuid: String::new(),
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+        }
+    }
+
+    fn refusal(result: SettingResult) -> String {
+        match result {
+            SettingResult::Refused { reason } => reason,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    /// **B8 part 2 S2: a setting is checked before anything reaches the host.** A change
+    /// naming nothing, a model or an effort the run's menus do not list, and a mode not among
+    /// the three, `bypassPermissions` above all, are refused with nothing sent; so is any
+    /// change to a run not running, and to a Claude run in a terminal.
+    #[tokio::test]
+    async fn a_setting_is_checked_before_anything_reaches_the_host() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        for (setting, reason) in [
+            (
+                set_model(None, None),
+                "Choose a model or an effort; nothing was changed.",
+            ),
+            (
+                set_model(Some("gpt-9"), None),
+                "Claude doesn't offer that model in this session; nothing was changed.",
+            ),
+            (
+                set_model(Some("sonnet"), Some("turbo")),
+                "Claude doesn't offer that effort in this session; nothing was changed.",
+            ),
+            (
+                Setting::Mode("bypassPermissions".into()),
+                "That permission mode isn't offered in this session; nothing was changed.",
+            ),
+            (
+                Setting::Mode("dontAsk".into()),
+                "That permission mode isn't offered in this session; nothing was changed.",
+            ),
+        ] {
+            assert_eq!(refusal(rig.daemon.set_setting(&uid, setting).await), reason);
+        }
+        assert_eq!(next(&mut played.lines).await, None, "nothing sent");
+        force_lifecycle(&rig, &uid, "stopping");
+        assert_eq!(
+            refusal(
+                rig.daemon
+                    .set_setting(&uid, Setting::Mode("plan".into()))
+                    .await
+            ),
+            "This session isn't running, so nothing was changed."
+        );
+        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        assert_eq!(
+            refusal(
+                rig.daemon
+                    .set_setting(&tmux, Setting::Mode("plan".into()))
+                    .await
+            ),
+            NOT_FROM_THE_APP
+        );
+        stop(&played.dir);
+    }
+
+    /// **B8 part 2 S3, S4: a setting reaches the host one part per line, and is answered as
+    /// claude answered.** A model while idle applies now; a mode while a turn runs, from the
+    /// next turn. A model taken and an effort refused reads refused, saying so, and files
+    /// nothing. An effort taken is the run's effort, filed as a `model_set` notice, and still
+    /// after a restart.
+    #[tokio::test]
+    async fn a_setting_reaches_the_host_part_by_part_and_is_answered_as_claude_answered() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (idle, line) = tokio::join!(
+            rig.daemon
+                .set_setting(&uid, set_model(Some("sonnet"), None)),
+            host_answers_setting(&mut played, 3, "done", None)
+        );
+        assert_eq!(line, model_line(Some("sonnet"), None));
+        assert_eq!(
+            idle,
+            SettingResult::Applied {
+                applies: Applies::Now
+            }
+        );
+        turn_begins(&mut played, 4, "9d1f0000-0000-4000-8000-000000000041").await;
+        let (running, line) = tokio::join!(
+            rig.daemon.set_setting(&uid, Setting::Mode("plan".into())),
+            host_answers_setting(&mut played, 5, "done", None)
+        );
+        assert_eq!(
+            line,
+            ToHost::SetMode {
+                uuid: String::new(),
+                mode: "plan".into()
+            }
+        );
+        assert_eq!(
+            running,
+            SettingResult::Applied {
+                applies: Applies::NextTurn
+            }
+        );
+        let (partial, lines) = tokio::join!(
+            rig.daemon
+                .set_setting(&uid, set_model(Some("default"), Some("low"))),
+            async {
+                let first = host_answers_setting(&mut played, 6, "done", None).await;
+                let second =
+                    host_answers_setting(&mut played, 7, "refused", Some("Invalid effort level"))
+                        .await;
+                (first, second)
+            }
+        );
+        assert_eq!(
+            lines,
+            (
+                model_line(Some("default"), None),
+                model_line(None, Some("low"))
+            )
+        );
+        assert_eq!(
+            refusal(partial),
+            "The model was changed; the effort was not: Invalid effort level"
+        );
+        assert_eq!(summary(&rig.daemon, &uid).await.effort, None);
+        let (effort, line) = tokio::join!(
+            rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
+            host_answers_setting(&mut played, 8, "done", None)
+        );
+        assert_eq!(line, model_line(None, Some("high")));
+        assert_eq!(
+            effort,
+            SettingResult::Applied {
+                applies: Applies::NextTurn
+            }
+        );
+        let fact = summary(&rig.daemon, &uid)
+            .await
+            .effort
+            .expect("the run's effort");
+        assert_eq!(fact.value, "high");
+        let notices: Vec<serde_json::Value> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["payload"]["notification_type"] == "model_set")
+            .map(|event| event["payload"].clone())
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                serde_json::json!({"notification_type": "model_set", "effort": "high", "message": "Effort set to high"})
+            ]
+        );
+        stop(&played.dir);
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        assert_eq!(summary(&restarted, &uid).await.effort, Some(fact));
+    }
+
+    /// **B8 part 2 S3: an answer that does not come in time, and a link that is down.** No
+    /// outcome within the wait reads indeterminate, and the outcome that then comes still
+    /// files the effort it set. A run whose link is down sends nothing and reads refused.
+    #[tokio::test]
+    async fn a_late_answer_reads_indeterminate_and_still_files_and_a_down_link_refuses() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (late, uuid) = tokio::join!(
+            rig.daemon.set_setting(&uid, set_model(None, Some("low"))),
+            async {
+                let Some(ToHost::SetModel { uuid, .. }) = next(&mut played.lines).await else {
+                    panic!("no settings line reached the host");
+                };
+                uuid
+            }
+        );
+        assert!(
+            matches!(late, SettingResult::Indeterminate { .. }),
+            "{late:?}"
+        );
+        assert_eq!(summary(&rig.daemon, &uid).await.effort, None);
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            summary(&rig.daemon, &uid)
+                .await
+                .effort
+                .map(|fact| fact.value),
+            Some("low".to_string())
+        );
+        stop(&played.dir);
+        let down = self::rig();
+        let (dir, detached) =
+            detached_run(&down, &stub_host(&down, HOST_PROTOCOL_VERSION, None)).await;
+        assert_eq!(
+            refusal(
+                down.daemon
+                    .set_setting(&detached, Setting::Mode("plan".into()))
+                    .await
+            ),
+            "The computer lost its connection to this session, so nothing was changed."
+        );
+        stop(&dir);
+    }
+
+    /// **B8 part 2 S5: a hosted run's menus are its start's answer's.** Each model's value,
+    /// name, description and efforts, and the three modes with their names, never
+    /// `bypassPermissions`; a tmux run has none.
+    #[tokio::test]
+    async fn a_hosted_runs_menus_are_its_starts_answers() {
+        let rig = rig();
+        let played = live_run(&rig).await;
+        let efforts = ["low", "medium", "high", "xhigh", "max"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            summary(&rig.daemon, &played.uid).await.menus,
+            Some(RunMenus {
+                models: vec![
+                    MenuModel {
+                        value: "default".into(),
+                        label: "Default (recommended)".into(),
+                        detail: Some(
+                            "Use the default model (currently Opus 5.5) · $4/$20 per Mtok".into()
+                        ),
+                        efforts: efforts.clone(),
+                    },
+                    MenuModel {
+                        value: "sonnet".into(),
+                        label: "Sonnet".into(),
+                        detail: Some(
+                            "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok".into()
+                        ),
+                        efforts,
+                    },
+                ],
+                modes: [
+                    ("default", "Ask before edits"),
+                    ("acceptEdits", "Accept edits"),
+                    ("plan", "Plan"),
+                ]
+                .map(|(value, label)| MenuMode {
+                    value: value.into(),
+                    label: label.into(),
+                })
+                .to_vec(),
+            })
+        );
+        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        assert_eq!(summary(&rig.daemon, &tmux).await.menus, None);
+        stop(&played.dir);
+    }
+
+    #[tokio::test]
+    async fn the_minor_39_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-39-wire.json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(FIXTURE).unwrap(),
+            derived_minor_39_wire().await,
+            "the committed minor 39 wire fixture no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_39_wire_fixture, then copy it over any copy under ios/ \
+             or the Kit"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-39-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_39_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_39_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-39-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The frames of a hosted run's settings and each answer ccd gives, from a run on a
+    /// stand-in host: a model applied while idle, a mode while a turn runs, an effort, a mode
+    /// refused (`bypassPermissions`), a model taken with its effort refused, and a change
+    /// whose link ended before its answer; the effort's `model_set` notice; the capabilities
+    /// a paired phone is offered; and the fleet's summaries an app decides from, pinned as
+    /// minor 37's are: the run still starting (no menus yet), the run with its menus, the
+    /// effort set and claude's echoes of the model and the mode filed, and a tmux Claude run
+    /// (none).
+    async fn derived_minor_39_wire() -> serde_json::Value {
+        let rig = rig();
+        let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (started, (mut played, starting)) =
+            tokio::join!(start(&daemon, run(&rig, "req-live", &cwd, &host)), async {
+                let mut played = play_to_start(&rig).await;
+                let starting = summary(&rig.daemon, &played.uid).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                (played, starting)
+            });
+        let uid = played.uid.clone();
+        assert_eq!(started_uid(&started), uid);
+        let starting = pinned_summary(&starting, &uid, fixed, &rig.root);
+        let (now, _) = tokio::join!(
+            rig.daemon
+                .set_setting(&uid, set_model(Some("sonnet"), None)),
+            host_answers_setting(&mut played, 3, "done", None)
+        );
+        // claude's own echoes of a change, as the recorded session has them (its lines 108
+        // and 29): its receipt of a model, and its status of a mode.
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "user", "isReplay": true, "uuid": "9d1f0000-0000-4000-8000-000000000061",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "message": {"role": "user", "content": "<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>"}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000051").await;
+        let (next_turn, _) = tokio::join!(
+            rig.daemon.set_setting(&uid, Setting::Mode("plan".into())),
+            host_answers_setting(&mut played, 6, "done", None)
+        );
+        sdk(
+            &mut played.write,
+            7,
+            serde_json::json!({"type": "system", "subtype": "status", "permissionMode": "plan",
+                "uuid": "9d1f0000-0000-4000-8000-000000000062",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 7 }));
+        let (effort, _) = tokio::join!(
+            rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
+            host_answers_setting(&mut played, 8, "done", None)
+        );
+        let bypass = rig
+            .daemon
+            .set_setting(&uid, Setting::Mode("bypassPermissions".into()))
+            .await;
+        let (partial, _) = tokio::join!(
+            rig.daemon
+                .set_setting(&uid, set_model(Some("default"), Some("low"))),
+            async {
+                host_answers_setting(&mut played, 9, "done", None).await;
+                host_answers_setting(&mut played, 10, "refused", Some("Invalid effort level"))
+                    .await;
+            }
+        );
+        let hosted = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        let notice = stored(&rig, &uid)
+            .into_iter()
+            .find(|event| event["payload"]["notification_type"] == "model_set")
+            .map(|event| event["payload"].clone())
+            .expect("the effort's notice");
+        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        let tmux_live = pinned_summary(
+            &summary(&rig.daemon, &tmux).await,
+            &tmux,
+            "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
+            &rig.root,
+        );
+        let dir = played.dir.clone();
+        let (lost, _) = tokio::join!(
+            rig.daemon
+                .set_setting(&uid, Setting::Mode("acceptEdits".into())),
+            async move {
+                let mut played = played;
+                assert!(matches!(
+                    next(&mut played.lines).await,
+                    Some(ToHost::SetMode { .. })
+                ));
+                drop(played);
+            }
+        );
+        stop(&dir);
+        let answer = |request_id: &str, result: SettingResult| {
+            serde_json::to_value(protocol::ws::ServerMessage::SettingResult {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let request = |message: protocol::ws::ClientMessage| serde_json::to_value(message).unwrap();
+        serde_json::json!({
+            "hello_ack_capabilities": crate::ws_server::capabilities(&rig.daemon, false, false, true),
+            "set_model_request": request(protocol::ws::ClientMessage::SetModel {
+                session_id: fixed.into(),
+                request_id: "model-1".into(),
+                model: Some("sonnet".into()),
+                effort: None,
+            }),
+            "set_effort_request": request(protocol::ws::ClientMessage::SetModel {
+                session_id: fixed.into(),
+                request_id: "effort-1".into(),
+                model: None,
+                effort: Some("high".into()),
+            }),
+            "set_mode_request": request(protocol::ws::ClientMessage::SetMode {
+                session_id: fixed.into(),
+                request_id: "mode-1".into(),
+                mode: "plan".into(),
+            }),
+            "applied_now": answer("model-1", now),
+            "applied_next_turn": answer("mode-1", next_turn),
+            "applied_effort": answer("effort-1", effort),
+            "refused_bypass": answer("mode-2", bypass),
+            "refused_partial": answer("model-2", partial),
+            "indeterminate": answer("mode-3", lost),
+            "effort_notice": notice,
+            "session_hosted_starting": starting,
+            "session_hosted_live": hosted,
+            "session_tmux_live": tmux_live,
         })
     }
 
@@ -7832,6 +8633,105 @@ mod tests {
         assert_eq!(stopping, StopRunResult::Stopping);
         assert!(ended && host_gone, "the run did not end");
         assert_eq!(left, Vec::<String>::new());
+    }
+
+    /// **B8 part 2 S7: a real claude takes its settings from the app** (app-qa's rig, one
+    /// prompt). The start asks claude to run `sleep 8` with Bash, and its card is allowed from
+    /// the app. While that turn runs the model is set, which applies from the next turn; once
+    /// the turn has settled, the effort and then the mode, which apply now. Printed: each
+    /// answer, the run's model, mode and effort after them, and claude's own echoes filed
+    /// after the changes (its `<local-command-stdout>` rows and its mode statuses), each cut
+    /// to 60 characters. Then End run, as G2. Ignored and gated as G2 is.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_takes_its_settings_from_the_app() {
+        let prompt = "Use the Bash tool to run exactly one command, then say done. The command, once: sleep 8";
+        let (rig, uid, host_pid) = real_claude_run("s7b8", prompt).await;
+        let card = first_card(&rig, &uid).await;
+        let allowed = allow_from_app(&rig, &uid, &card).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let before = stored(&rig, &uid).len();
+        let model = rig
+            .daemon
+            .set_setting(&uid, set_model(Some("sonnet"), None))
+            .await;
+        let settled = settled_after_words(&rig, &uid).await;
+        let effort = rig
+            .daemon
+            .set_setting(&uid, set_model(None, Some("low")))
+            .await;
+        let mode = rig
+            .daemon
+            .set_setting(&uid, Setting::Mode("plan".into()))
+            .await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let session = summary(&rig.daemon, &uid).await;
+        let echoes: Vec<String> = stored(&rig, &uid)[before..]
+            .iter()
+            .filter_map(|event| {
+                let content = event["payload"]["message"]["content"].as_str();
+                match event["kind"].as_str() {
+                    Some("user_message") => content
+                        .filter(|content| content.starts_with("<local-command-std"))
+                        .map(|content| content.chars().take(60).collect()),
+                    Some("transcript_permission-mode") => Some(format!(
+                        "status permissionMode={}",
+                        event["payload"]["permissionMode"]
+                    )),
+                    _ => None,
+                }
+            })
+            .collect();
+        println!("B8P2 S7: card {card:?}; allowed {allowed:?}; turn settled {settled}");
+        println!("B8P2 S7: model during the turn {model:?}; effort {effort:?}; mode {mode:?}");
+        println!(
+            "B8P2 S7: after: model {:?}; mode {:?}; effort {:?}",
+            session
+                .model
+                .as_ref()
+                .map(|fact| (&fact.value, fact.source)),
+            session.permission_mode.as_ref().map(|fact| &fact.value),
+            session.effort.as_ref().map(|fact| &fact.value)
+        );
+        println!("B8P2 S7: claude's echoes {echoes:?}");
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("B8P2 S7: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert!(card.is_some(), "claude asked nothing");
+        assert!(settled, "the turn did not settle");
+        assert_eq!(
+            model,
+            SettingResult::Applied {
+                applies: Applies::NextTurn
+            }
+        );
+        for (name, result) in [("effort", &effort), ("mode", &mode)] {
+            assert_eq!(
+                result,
+                &SettingResult::Applied {
+                    applies: Applies::Now
+                },
+                "{name}"
+            );
+        }
+        assert_eq!(
+            session.effort.map(|fact| fact.value).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            session.permission_mode.map(|fact| fact.value).as_deref(),
+            Some("plan")
+        );
+        assert!(
+            session
+                .model
+                .is_some_and(|fact| fact.value.contains("sonnet")),
+            "the model claude reports"
+        );
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
     }
 
     /// **B7 part 2 S11: a real claude's turn stopped from the app** (app-qa's rig). Turn 1:

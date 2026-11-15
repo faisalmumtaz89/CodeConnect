@@ -218,6 +218,28 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
     },
+    /// **Change a Claude run's model, its effort, or both** (minor 39), for the rest of the
+    /// session, answered with [`ServerMessage::SettingResult`]. At least one of the two, each
+    /// one the run's [`crate::event::RunMenus`] lists: `model` a model's `value`, `effort` one
+    /// of the efforts listed. A client sends it only for a run whose summary carries `menus`.
+    /// Nothing is kept per `request_id`: a setting is the same state however often it is
+    /// applied, so a retry applies it again.
+    SetModel {
+        session_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    /// **Change a Claude run's permission mode** (minor 39) to one of its `menus`' modes, for
+    /// the rest of the session, answered with [`ServerMessage::SettingResult`]. As
+    /// [`ClientMessage::SetModel`], a retry applies it again.
+    SetMode {
+        session_id: String,
+        request_id: String,
+        mode: String,
+    },
     /// "Prove the doorbell rings." Sends one real APNs notification to **this
     /// connection's own device**, so the whole chain — stored token, provider
     /// key, Apple, banner — is demonstrated rather than implied.
@@ -649,6 +671,12 @@ pub enum ServerMessage {
         session_id: String,
         request_id: String,
         result: StopRunResult,
+    },
+    /// What became of a [`ClientMessage::SetModel`] or [`ClientMessage::SetMode`].
+    SettingResult {
+        session_id: String,
+        request_id: String,
+        result: SettingResult,
     },
     TestPushResult {
         request_id: String,
@@ -1751,6 +1779,29 @@ pub enum StopRunResult {
     Refused { reason: String },
 }
 
+/// What became of a [`ClientMessage::SetModel`] or [`ClientMessage::SetMode`] (minor 39).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SettingResult {
+    /// claude took it, from `applies` on.
+    Applied { applies: Applies },
+    /// Nothing more was changed, and `reason` says why: human text, safe to show. When the
+    /// model was changed and the effort was not, `reason` says so.
+    Refused { reason: String },
+    /// Sent, and no answer came: it may or may not have been applied.
+    Indeterminate { reason: String },
+}
+
+/// When an applied setting takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Applies {
+    /// The run was between turns, so its next turn runs with it.
+    Now,
+    /// A turn was running: from the next message that starts a turn.
+    NextTurn,
+}
+
 /// What became of a `delete_session`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -2316,9 +2367,13 @@ mod tests {
             "the command menu and a command's output on a Claude run CodeConnect started \
              (`entries`) are minor 38"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 39,
+            "a Claude run's settings from an app (`set_model`, `set_mode`, `menus`) are minor 39"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 38);
+        assert_eq!(crate::PROTOCOL_MINOR, 39);
     }
 
     /// **The tags, pinned on this side too.**

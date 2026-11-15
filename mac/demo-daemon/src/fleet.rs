@@ -677,6 +677,8 @@ impl Run {
                 .collect(),
             model: facts.model,
             permission_mode: facts.permission_mode,
+            effort: None,
+            menus: None,
             git_branch: None,
             diff_stat: None,
         }

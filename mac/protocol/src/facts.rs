@@ -1,8 +1,8 @@
 //! What a run's latest facts are, read off its events (minor 23).
 //!
 //! A phone that holds only a run's newest events cannot see the event that last
-//! set its model or its permission mode once that event is older than what it
-//! holds. The daemon keeps both from the whole log and sends them on the run's
+//! set its model, its permission mode or its effort once that event is older than
+//! what it holds. The daemon keeps them from the whole log and sends them on the run's
 //! [`crate::event::SessionSummary`], each with the seq of the event that decided
 //! it, so a phone keeps whichever of the two is newer.
 //!
@@ -20,6 +20,7 @@ pub const TRANSCRIPT_PERMISSION_MODE: &str = "transcript_permission-mode";
 pub struct SessionFacts {
     pub model: Option<ModelFact>,
     pub permission_mode: Option<Fact>,
+    pub effort: Option<Fact>,
 }
 
 impl SessionFacts {
@@ -40,7 +41,27 @@ impl SessionFacts {
                 self.permission_mode = Some(fact);
             }
         }
+        if let Some(fact) = effort_fact(event) {
+            if self.effort.as_ref().is_none_or(|held| held.seq < fact.seq) {
+                self.effort = Some(fact);
+            }
+        }
     }
+}
+
+/// What one event says the run's effort is, if anything: the `effort` of a `model_set`
+/// notice, which ccd files when claude has taken an app's effort change (minor 39).
+/// claude reports no effort of its own.
+pub fn effort_fact(event: &Event) -> Option<Fact> {
+    if event.kind != EventKind::Notification
+        || event.payload.get("notification_type")?.as_str()? != crate::event::notice::MODEL_SET
+    {
+        return None;
+    }
+    Some(Fact {
+        value: event.payload.get("effort")?.as_str()?.to_string(),
+        seq: event.seq,
+    })
 }
 
 /// What one event says the run's model is, if anything: a `session_start`
@@ -217,6 +238,46 @@ mod tests {
             Source::Transcript,
             json!({"type": "user", "message": {"role": "user", "content": content}}),
         )
+    }
+
+    /// **The effort is a `model_set` notice's, and nothing else's** (minor 39).
+    #[test]
+    fn the_effort_is_a_model_set_notices() {
+        let notice = event(
+            7,
+            EventKind::Notification,
+            Source::Daemon,
+            serde_json::json!({"notification_type": "model_set", "effort": "high"}),
+        );
+        assert_eq!(
+            effort_fact(&notice),
+            Some(Fact {
+                value: "high".into(),
+                seq: 7
+            })
+        );
+        for other in [
+            event(
+                8,
+                EventKind::Notification,
+                Source::Daemon,
+                serde_json::json!({"notification_type": "compacted", "effort": "high"}),
+            ),
+            event(
+                9,
+                EventKind::Notification,
+                Source::Daemon,
+                serde_json::json!({"notification_type": "model_set"}),
+            ),
+            event(
+                10,
+                EventKind::UserMessage,
+                Source::Sdk,
+                serde_json::json!({"effort": "high"}),
+            ),
+        ] {
+            assert_eq!(effort_fact(&other), None, "{other:?}");
+        }
     }
 
     /// **The same strings, through the phone's parser and through this one.**

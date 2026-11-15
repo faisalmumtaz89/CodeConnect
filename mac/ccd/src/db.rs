@@ -379,6 +379,19 @@ impl Db {
             .await
     }
 
+    pub async fn hosted_models(
+        &self,
+        session_uid: String,
+    ) -> Result<Option<Vec<serde_json::Value>>> {
+        self.run(move |store| store.hosted_models(&session_uid))
+            .await
+    }
+
+    pub async fn turn_running(&self, session_uid: String) -> Result<bool> {
+        self.run(move |store| store.turn_running(&session_uid))
+            .await
+    }
+
     /// Remove one ended run. Small next to a prune, and off the runtime for the
     /// same reason: it is still a multi-table transaction on the write
     /// connection, and the phone is waiting on the answer.

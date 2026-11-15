@@ -1,0 +1,214 @@
+{
+  "applied_effort": {
+    "request_id": "effort-1",
+    "result": {
+      "applies": "next_turn",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "applied_next_turn": {
+    "request_id": "mode-1",
+    "result": {
+      "applies": "next_turn",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "applied_now": {
+    "request_id": "model-1",
+    "result": {
+      "applies": "now",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "effort_notice": {
+    "effort": "high",
+    "message": "Effort set to high",
+    "notification_type": "model_set"
+  },
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "claude_interrupt": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "machine_stats": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "stop_run": true,
+    "terminal_pty": false,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "indeterminate": {
+    "request_id": "mode-3",
+    "result": {
+      "reason": "The computer lost the session before Claude answered; the change may or may not have been made.",
+      "status": "indeterminate"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "refused_bypass": {
+    "request_id": "mode-2",
+    "result": {
+      "reason": "That permission mode isn't offered in this session; nothing was changed.",
+      "status": "refused"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "refused_partial": {
+    "request_id": "model-2",
+    "result": {
+      "reason": "The model was changed; the effort was not: Invalid effort level",
+      "status": "refused"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "session_hosted_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "effort": {
+      "seq": 5,
+      "value": "high"
+    },
+    "last_seq": 5,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ]
+    },
+    "model": {
+      "at": "2026-11-15T09:00:00.000Z",
+      "seq": 2,
+      "source": "command",
+      "value": "claude-sonnet-5-5"
+    },
+    "permission_mode": {
+      "seq": 4,
+      "value": "plan"
+    },
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_starting": {
+    "agent": "claude",
+    "blocked_on": [],
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 0,
+    "lifecycle": "starting",
+    "link": "attached",
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_tmux_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp",
+    "last_seq": 1,
+    "lifecycle": "live",
+    "link": "attached",
+    "project_label": "tmp",
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
+    "tmux_session": "cc-1",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "set_effort_request": {
+    "effort": "high",
+    "request_id": "effort-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_model"
+  },
+  "set_mode_request": {
+    "mode": "plan",
+    "request_id": "mode-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_mode"
+  },
+  "set_model_request": {
+    "model": "sonnet",
+    "request_id": "model-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_model"
+  }
+}
