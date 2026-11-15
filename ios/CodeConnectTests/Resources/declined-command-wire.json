@@ -1,0 +1,47 @@
+{
+  "frames": [
+    {
+      "event": {
+        "item_id": "exec-fb57181a-a61b-4f29-8dd0-8361c0a069c2",
+        "kind": "tool_result",
+        "payload": {
+          "aggregated_output": null,
+          "command": "/bin/zsh -lc 'touch /work/probe.txt'",
+          "duration_ms": null,
+          "exit_code": null,
+          "interrupted": false,
+          "status": "declined",
+          "tool": "command_execution"
+        },
+        "seq": 1,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7DEC1NED",
+        "source": "codex",
+        "source_event_id": "01a0713f-11b9-7481-b95e-dd734f980bc7:post:exec-fb57181a-a61b-4f29-8dd0-8361c0a069c2",
+        "ts": "2026-11-15T00:00:00.000Z",
+        "turn_id": "01a0713f-2b64-7c73-8c31-b3b83d0ff6c9"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "turn_complete",
+        "payload": {
+          "completed_at": 1788606364,
+          "duration_ms": 4425,
+          "error": null,
+          "started_at": 1788606360,
+          "status": "interrupted"
+        },
+        "seq": 2,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7DEC1NED",
+        "source": "codex",
+        "source_event_id": "01a0713f-11b9-7481-b95e-dd734f980bc7:turn:01a0713f-2b64-7c73-8c31-b3b83d0ff6c9",
+        "ts": "2026-11-15T00:00:00.000Z",
+        "turn_id": "01a0713f-2b64-7c73-8c31-b3b83d0ff6c9"
+      },
+      "type": "event"
+    }
+  ]
+}

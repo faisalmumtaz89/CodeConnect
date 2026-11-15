@@ -27093,4 +27093,117 @@ mod tests {
         std::fs::write(MAIL_WAKE_TURN_PATH, rendered).expect("the fixture is writable");
         println!("wrote {MAIL_WAKE_TURN_PATH}");
     }
+
+    // ------------------------------- a declined command, as the apps are sent it
+
+    /// The run the declined-command fixture is emitted for.
+    const DECLINED_UID: &str = "01K1B3XQ8ZC0DE5FGH7DEC1NED";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const DECLINED_AT: &str = "2026-11-15T00:00:00.000Z";
+    /// A live capture of a command approval refused from the keyboard: codex completes the
+    /// item `declined`, then ends the turn.
+    const DECLINED_CAPTURE: &str =
+        include_str!("../../../fixtures/codex/approval-switch-p1-ctrlc-new-0.153.jsonl");
+    const DECLINED_COMMAND: &str =
+        include_str!("../../../fixtures/codex/declined-command-wire.json");
+    const DECLINED_COMMAND_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/codex/declined-command-wire.json"
+    );
+    const REGENERATE_DECLINED_COMMAND: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_declined_command_fixture";
+
+    /// The events this build files for the capture's notifications on its own thread, as
+    /// the `event` frames a subscribed app is sent, in seq order.
+    async fn declined_command() -> Value {
+        let session = SessionKey {
+            uid: DECLINED_UID.into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let captured: Vec<Value> = DECLINED_CAPTURE
+            .lines()
+            .filter_map(|line| {
+                serde_json::from_str::<Value>(line)
+                    .ok()?
+                    .get("frame")
+                    .cloned()
+            })
+            .collect();
+        let thread = captured
+            .iter()
+            .find_map(|frame| frame["params"]["threadId"].as_str())
+            .expect("the capture names its thread")
+            .to_string();
+        {
+            let mut conn = visiting(&daemon, &session, &mut adapter, &mut amend, &thread, 1);
+            for frame in captured.iter().filter(|frame| {
+                frame.get("id").is_none() && frame["params"]["threadId"] == thread.as_str()
+            }) {
+                conn.observe_notification(frame).await;
+            }
+        }
+        let frames: Vec<Value> = daemon
+            .store
+            .events_after(&session.uid, 0, 10_000)
+            .expect("the event log reads")
+            .into_iter()
+            .map(|event| {
+                serde_json::to_value(protocol::ws::ServerMessage::Event { event })
+                    .expect("the frame serialises")
+            })
+            .collect();
+        let mut out = json!({ "frames": frames });
+        normalise_clock(&mut out, DECLINED_AT);
+        drop(db);
+        out
+    }
+
+    /// **A command codex completes `declined` reaches the apps as a `tool_result` whose
+    /// status says so, and this file is what this build sends for it.**
+    ///
+    /// `fixtures/codex/declined-command-wire.json` is the apps' pin for a refused Codex
+    /// command's row. Gate one reads the committed bytes: one `tool_result`, `declined`.
+    /// Gate two re-derives the file from this build and requires the same bytes.
+    #[tokio::test]
+    async fn the_declined_command_fixture_is_what_this_build_emits() {
+        let committed: Value =
+            serde_json::from_str(DECLINED_COMMAND).expect("the fixture must be JSON");
+        let results: Vec<_> = fixture_events(&committed)
+            .into_iter()
+            .filter(|event| event.kind == protocol::event::EventKind::ToolResult)
+            .collect();
+        assert_eq!(results.len(), 1, "the declined command's one result");
+        assert_eq!(results[0].payload["status"], "declined");
+
+        let derived = declined_command().await;
+        assert_eq!(
+            derived, committed,
+            "the committed declined command no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_DECLINED_COMMAND}"
+        );
+        assert_eq!(
+            DECLINED_COMMAND,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&derived).expect("the fixture serialises")
+            ),
+            "the committed bytes are not this build's rendering of them (a reformat, or \
+             an edit by hand). Regenerate it: {REGENERATE_DECLINED_COMMAND}"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/declined-command-wire.json` from this build.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_declined_command_fixture() {
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&declined_command().await).expect("it serialises")
+        );
+        std::fs::write(DECLINED_COMMAND_PATH, rendered).expect("the fixture is writable");
+        println!("wrote {DECLINED_COMMAND_PATH}");
+    }
 }

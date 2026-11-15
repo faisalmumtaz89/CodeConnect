@@ -710,10 +710,20 @@ public enum TimelineBuilder {
 
     /// A call with no result is only "running" while there is still a turn it
     /// could belong to.
+    ///
+    /// A deny given from an app, and confirmed, means the call never ran, so it
+    /// outranks the error result Claude then files for it. A deny the computer
+    /// recorded is no such proof (a Yes at the Mac followed by Esc records one),
+    /// so the result keeps its reading.
     private static func status(
         for toolUseID: String?, outcome: ToolOutcome?, eventSeq: UInt64,
         approvals: [String: AnswerOutcome], turnEnd: UInt64
     ) -> ToolStatus {
+        if let toolUseID, approvals[toolUseID]?.resolvedBy == .phone,
+            let denied = statusFromApproval(toolUseID: toolUseID, approvals: approvals)
+        {
+            return denied
+        }
         if let outcome { return outcome.status }
         if let fromApproval = statusFromApproval(toolUseID: toolUseID, approvals: approvals) {
             return fromApproval

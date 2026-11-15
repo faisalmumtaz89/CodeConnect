@@ -1,0 +1,337 @@
+[
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 3,
+    "ts": "2026-11-15T10:31:52.042Z",
+    "kind": "agent_message",
+    "payload": {
+      "message": {
+        "content": [
+          {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_01SpA61bTRh6dFwPj24FNHmz",
+            "input": {
+              "command": "touch qa-allow.txt",
+              "description": "Create empty file qa-allow.txt"
+            },
+            "name": "Bash",
+            "type": "tool_use"
+          }
+        ],
+        "model": "claude-haiku-5-5"
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "831fc538-3c46-4a7b-bafa-567098b4373b/agent_message/0",
+    "turn_id": "9ee6bb24-e1b5-4e24-a5a7-66d1c9a05310",
+    "item_id": "831fc538-3c46-4a7b-bafa-567098b4373b"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 4,
+    "ts": "2026-11-15T10:31:52.059Z",
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "allow_for_session": true,
+        "display_text": "Bash\n{\"command\":\"touch qa-allow.txt\",\"description\":\"Create empty file qa-allow.txt\"}",
+        "generation": 0,
+        "identity_bound": true,
+        "payload_hash": "32cb0a7ee94541bc8b09be24478efe1f72bf5eafd44d0db0839de331e1c10c8a",
+        "permission_suggestions": [
+          {
+            "behavior": "allow",
+            "destination": "localSettings",
+            "rules": [
+              {
+                "ruleContent": "touch qa-allow.txt",
+                "toolName": "Bash"
+              }
+            ],
+            "type": "addRules"
+          },
+          {
+            "destination": "session",
+            "directories": [
+              "/private/tmp/ccqa.pp47cN/h/0-qa-stock-1330"
+            ],
+            "type": "addDirectories"
+          },
+          {
+            "destination": "session",
+            "mode": "acceptEdits",
+            "type": "setMode"
+          }
+        ],
+        "question_hold": "held",
+        "request_id": "toolu_01SpA61bTRh6dFwPj24FNHmz",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "command": "touch qa-allow.txt",
+          "description": "Create empty file qa-allow.txt"
+        },
+        "tool_name": "Bash"
+      }
+    },
+    "source": "daemon",
+    "source_event_id": "perm:toolu_01SpA61bTRh6dFwPj24FNHmz",
+    "turn_id": null,
+    "item_id": null
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 5,
+    "ts": "2026-11-15T10:31:57.020Z",
+    "kind": "approval_resolved",
+    "payload": {
+      "answered_on": "iphone",
+      "applied_via": "hook_return",
+      "decision": {
+        "type": "allow"
+      },
+      "request_id": "toolu_01SpA61bTRh6dFwPj24FNHmz",
+      "resolved_at": "2026-11-15T10:31:57.019Z",
+      "resolved_by": "phone",
+      "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH"
+    },
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_01SpA61bTRh6dFwPj24FNHmz",
+    "turn_id": null,
+    "item_id": null
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 6,
+    "ts": "2026-11-15T10:31:57.059Z",
+    "kind": "tool_result",
+    "payload": {
+      "message": {
+        "content": [
+          {
+            "content": "(Bash completed with no output)",
+            "is_error": false,
+            "tool_use_id": "toolu_01SpA61bTRh6dFwPj24FNHmz",
+            "type": "tool_result"
+          }
+        ]
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "c3b79e6c-b51a-4edf-a1dc-b3d59196acd1/tool_result/0",
+    "turn_id": "9ee6bb24-e1b5-4e24-a5a7-66d1c9a05310",
+    "item_id": "c3b79e6c-b51a-4edf-a1dc-b3d59196acd1"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 7,
+    "ts": "2026-11-15T10:31:58.676Z",
+    "kind": "agent_message",
+    "payload": {
+      "message": {
+        "content": [
+          {
+            "text": "done",
+            "type": "text"
+          }
+        ],
+        "model": "claude-haiku-5-5"
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "d739232f-ec19-4e6a-88d0-c19d10be0cea/agent_message/0",
+    "turn_id": "9ee6bb24-e1b5-4e24-a5a7-66d1c9a05310",
+    "item_id": "d739232f-ec19-4e6a-88d0-c19d10be0cea"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 8,
+    "ts": "2026-11-15T10:31:58.681Z",
+    "kind": "turn_complete",
+    "payload": {
+      "is_error": false,
+      "num_turns": 2,
+      "subtype": "success"
+    },
+    "source": "sdk",
+    "source_event_id": "a3a44d49-7b96-4e59-9944-c10e4edbcc6f/turn_complete/0",
+    "turn_id": "9ee6bb24-e1b5-4e24-a5a7-66d1c9a05310",
+    "item_id": "a3a44d49-7b96-4e59-9944-c10e4edbcc6f"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 32,
+    "ts": "2026-11-15T10:33:35.916Z",
+    "kind": "agent_message",
+    "payload": {
+      "message": {
+        "content": [
+          {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_019Ah3gUoKTckG3SLtu6jcEy",
+            "input": {
+              "command": "touch qa-deny.txt",
+              "description": "Create empty file qa-deny.txt"
+            },
+            "name": "Bash",
+            "type": "tool_use"
+          }
+        ],
+        "model": "claude-haiku-5-5"
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "161eac6c-4037-41d0-bac7-08c99bfa39a0/agent_message/0",
+    "turn_id": "3ccc3168-7d6c-488b-b2a0-b31fe3d52947",
+    "item_id": "161eac6c-4037-41d0-bac7-08c99bfa39a0"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 33,
+    "ts": "2026-11-15T10:33:35.922Z",
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "allow_for_session": true,
+        "display_text": "Bash\n{\"command\":\"touch qa-deny.txt\",\"description\":\"Create empty file qa-deny.txt\"}",
+        "generation": 0,
+        "identity_bound": true,
+        "payload_hash": "181a158699bd4ff07e741b02d0fd429d2b075a7e5fa6f911cc54d8e03aeb1688",
+        "permission_suggestions": [
+          {
+            "behavior": "allow",
+            "destination": "localSettings",
+            "rules": [
+              {
+                "ruleContent": "touch qa-deny.txt",
+                "toolName": "Bash"
+              }
+            ],
+            "type": "addRules"
+          },
+          {
+            "destination": "session",
+            "directories": [
+              "/private/tmp/ccqa.pp47cN/h/0-qa-stock-1330"
+            ],
+            "type": "addDirectories"
+          },
+          {
+            "destination": "session",
+            "mode": "acceptEdits",
+            "type": "setMode"
+          }
+        ],
+        "question_hold": "held",
+        "request_id": "toolu_019Ah3gUoKTckG3SLtu6jcEy",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "command": "touch qa-deny.txt",
+          "description": "Create empty file qa-deny.txt"
+        },
+        "tool_name": "Bash"
+      }
+    },
+    "source": "daemon",
+    "source_event_id": "perm:toolu_019Ah3gUoKTckG3SLtu6jcEy",
+    "turn_id": null,
+    "item_id": null
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 34,
+    "ts": "2026-11-15T10:33:42.501Z",
+    "kind": "approval_resolved",
+    "payload": {
+      "answered_on": "iphone",
+      "applied_via": "hook_return",
+      "decision": {
+        "type": "deny"
+      },
+      "request_id": "toolu_019Ah3gUoKTckG3SLtu6jcEy",
+      "resolved_at": "2026-11-15T10:33:42.500Z",
+      "resolved_by": "phone",
+      "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH"
+    },
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_019Ah3gUoKTckG3SLtu6jcEy",
+    "turn_id": null,
+    "item_id": null
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 35,
+    "ts": "2026-11-15T10:33:42.506Z",
+    "kind": "tool_result",
+    "payload": {
+      "message": {
+        "content": [
+          {
+            "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+            "is_error": true,
+            "tool_use_id": "toolu_019Ah3gUoKTckG3SLtu6jcEy",
+            "type": "tool_result"
+          }
+        ]
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "866ce6ba-59dc-46d4-8cf4-42a19daaf622/tool_result/0",
+    "turn_id": "3ccc3168-7d6c-488b-b2a0-b31fe3d52947",
+    "item_id": "866ce6ba-59dc-46d4-8cf4-42a19daaf622"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 36,
+    "ts": "2026-11-15T10:33:42.506Z",
+    "kind": "user_message",
+    "payload": {
+      "message": {
+        "content": [
+          {
+            "text": "[Request interrupted by user for tool use]",
+            "type": "text"
+          }
+        ]
+      }
+    },
+    "source": "sdk",
+    "source_event_id": "0392665c-19f5-4aa9-8430-618f871764a2/user_message/0",
+    "turn_id": "3ccc3168-7d6c-488b-b2a0-b31fe3d52947",
+    "item_id": "0392665c-19f5-4aa9-8430-618f871764a2"
+  },
+  {
+    "session_uid": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "session_id": "01M7FC6Q6F26S94D6SEQPQA5EH",
+    "seq": 37,
+    "ts": "2026-11-15T10:33:42.507Z",
+    "kind": "turn_complete",
+    "payload": {
+      "is_error": true,
+      "num_turns": 3,
+      "subtype": "error_during_execution"
+    },
+    "source": "sdk",
+    "source_event_id": "7d3a5f8b-95c6-409a-bc92-8e8c225080e0/turn_complete/0",
+    "turn_id": "3ccc3168-7d6c-488b-b2a0-b31fe3d52947",
+    "item_id": "7d3a5f8b-95c6-409a-bc92-8e8c225080e0"
+  }
+]
