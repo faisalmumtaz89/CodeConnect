@@ -1105,6 +1105,10 @@ extension AnswerDecision: Codable {
         case .allow: return "Allowed"
         case .deny: return "Denied"
         case .option(let index): return "Chose option \(index)"
+        // "Allow for this session" is sent as this one option id, by a Claude
+        // card that offered it and by the Codex MCP card alike; both mean the
+        // same thing, so the resolved line reads it as the grant it was.
+        case .optionId("acceptForSession"): return "Allowed for this session"
         case .optionId(let id): return "Chose option \(id)"
         case .text: return "Denied with a reason"
         case .answers: return "Answered"
@@ -1793,6 +1797,11 @@ public struct ApprovalCard: Codable, Sendable, Hashable {
     /// from minor 22. A later `question_hold` event overrides it — see
     /// `ApprovalItem.questionHold`.
     public var questionHold: QuestionHold? = nil
+    /// Whether the computer offers "Allow for this session" on this card: a
+    /// hosted Claude card whose permission suggestions include a session rule
+    /// the daemon would apply. Absent — older daemons, or no such rule — reads
+    /// as false; the phone then shows only Allow and Deny.
+    public var allowForSession: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
@@ -1805,6 +1814,7 @@ public struct ApprovalCard: Codable, Sendable, Hashable {
         case permissionMode = "permission_mode"
         case risk
         case questionHold = "question_hold"
+        case allowForSession = "allow_for_session"
     }
 }
 

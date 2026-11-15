@@ -16,9 +16,11 @@ public enum DecisionCard {
     /// So this is a fork, not an addition.
     public enum AnswerSurface: Sendable, Hashable {
         /// Claude's card, held for the phone: Allow, Deny, and a denial with a
-        /// reason. In a run started in a terminal, "Always" is chosen at the Mac,
-        /// where Claude's own dialog says what it saves.
-        case allowDeny
+        /// reason. `allowForSession` is true when the computer also offers "Allow
+        /// for this session" on this card (`ApprovalCard.allowForSession`), drawn
+        /// as a third affirmative; false is the plain Allow/Deny. In a run started
+        /// in a terminal, "Always" is still chosen at the Mac.
+        case allowDeny(allowForSession: Bool)
         /// A Codex card: **the option table and nothing else.** Every count,
         /// including two — the `> 2` rule that suppresses Claude's redundant
         /// yes/no pair would leave a two-option Codex card with Allow and Deny,
@@ -85,12 +87,38 @@ public enum DecisionCard {
             // is on screen, which can be another agent's; and a card no hook is
             // held for is answered at the Mac.
             guard hookOnlyApprovals, hold == .held else { return .noneAnswerable }
-            return .allowDeny
+            return .allowDeny(allowForSession: card.allowForSession == true)
         case .unsupported:
             // An agent this build cannot drive gets no answer surface at all.
             // Guessing a vocabulary for it would be guessing on the wire.
             return .noneAnswerable
         }
+    }
+
+    /// The rule(s) "Allow for this session" grants, as Claude writes them, for the
+    /// caption under the action bar: one `addRules`/`allow` permission suggestion
+    /// per rule, `toolName(ruleContent)` or `toolName` when it names no content,
+    /// joined on one line. It mirrors the daemon's own selection (ccd's
+    /// `session_rules` — the same `addRules`/`allow` filter over this card's
+    /// `permission_suggestions`), so a person reads exactly what the grant covers,
+    /// which can be broader than the one command on the card. `nil` when there is
+    /// no such rule, which is exactly when `allow_for_session` is false.
+    public static func sessionRuleCaption(card: ApprovalCard) -> String? {
+        guard let suggestions = card.permissionSuggestions?.arrayValue else { return nil }
+        let rules =
+            suggestions
+            .filter { $0["type"]?.stringValue == "addRules" && $0["behavior"]?.stringValue == "allow" }
+            .compactMap { $0["rules"]?.arrayValue }
+            .flatMap { $0 }
+            .compactMap { rule -> String? in
+                guard let tool = rule["toolName"]?.stringValue else { return nil }
+                if let content = rule["ruleContent"]?.stringValue, !content.isEmpty {
+                    return "\(tool)(\(content))"
+                }
+                return tool
+            }
+        // One rule per line, so each starts readably when a card carries several.
+        return rules.isEmpty ? nil : rules.joined(separator: "\n")
     }
 
     /// **The question this card asks, when the phone can show it as asked.**
@@ -147,6 +175,27 @@ public enum DecisionCard {
         default: return true
         }
     }
+
+    /// The control an affirmative takes at a tier — a 1.2s hold at HIGH, a tap
+    /// below — decided once so no two affirmatives on a card ask different
+    /// amounts for the same risk. A grant that outlives the card ("Allow for
+    /// this session") is an affirmative too, so it takes the SAME control as
+    /// Allow: an outline hold where Allow is a filled one, a ghost tap where
+    /// Allow is the primary. The second factor at HIGH is decided separately
+    /// (`needsSecondFactor`); this is the hold.
+    public enum AffirmativeControl: Sendable, Hashable {
+        case hold
+        case tap
+    }
+
+    public static func affirmativeControl(at risk: RiskClass) -> AffirmativeControl {
+        risk == .high ? .hold : .tap
+    }
+
+    /// The caption under "Allow for this session" wraps to this many lines
+    /// before it truncates at the tail: the rule it names can be broader than
+    /// the one command on the card, so a person must be able to read it.
+    public static let sessionCaptionLineLimit = 3
 
     /// The read-before-you-decide gate, as a value.
     ///

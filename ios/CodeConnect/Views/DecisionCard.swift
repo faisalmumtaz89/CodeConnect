@@ -136,6 +136,12 @@ struct DecisionCardView: View {
         return []
     }
 
+    /// Whether the computer offers "Allow for this session" on this Claude card.
+    private var offersAllowForSession: Bool {
+        if case .allowDeny(let session) = answerSurface { return session }
+        return false
+    }
+
     var body: some View {
         if let questions = DecisionCard.questionCard(card: approval.card, agent: sessionAgent) {
             QuestionCardView(
@@ -1399,6 +1405,48 @@ struct DecisionCardView: View {
     @ViewBuilder
     private var subordinateControls: some View {
         VStack(spacing: CC.space.sm) {
+            // **"Allow for this session", with what it grants.** The computer
+            // offers it only on a card whose rule it would apply; the caption
+            // names that rule as Claude writes it, because the rule can be
+            // broader than the one command on the card and a person must not
+            // grant more than they can read — so it wraps to three lines before
+            // it truncates, at the tail, never the middle. It is an affirmative
+            // that outlives the card, so it takes the SAME control as Allow at
+            // every tier (`affirmativeControl`): a hold at HIGH, a tap below,
+            // over the read gate and the HIGH second factor — never less than a
+            // one-time Allow.
+            if offersAllowForSession {
+                if let caption = DecisionCard.sessionRuleCaption(card: approval.card) {
+                    Text(caption)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .lineLimit(DecisionCard.sessionCaptionLineLimit)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel("Allowing for this session grants \(caption)")
+                }
+                switch DecisionCard.affirmativeControl(at: risk) {
+                case .hold:
+                    CCHoldButton(
+                        "Hold to allow for this session", emphasis: .outline,
+                        isLoading: inFlight == "acceptForSession",
+                        disabledReason: CCDisabledReason(blockedReason)
+                    ) {
+                        submit(.optionId("acceptForSession"), key: "acceptForSession")
+                    }
+                    .accessibilityIdentifier("allow-for-session")
+                case .tap:
+                    CCButton(
+                        "Allow for this session", icon: "clock", variant: .ghost, size: .md,
+                        fullWidth: true,
+                        isLoading: inFlight == "acceptForSession",
+                        disabledReason: CCDisabledReason(blockedReason)
+                    ) {
+                        submit(.optionId("acceptForSession"), key: "acceptForSession")
+                    }
+                    .accessibilityIdentifier("allow-for-session")
+                }
+            }
             if !showDenyField {
                 CCButton(
                     "Deny with a reason", icon: "chat-text", variant: .ghost, size: .md,
@@ -1482,7 +1530,8 @@ struct DecisionCardView: View {
 
     @ViewBuilder
     private var allowControl: some View {
-        if risk == .high {
+        switch DecisionCard.affirmativeControl(at: risk) {
+        case .hold:
             CCHoldButton(
                 "Hold to allow",
                 // Filled white, like the tap `Allow` it replaces. What makes
@@ -1493,7 +1542,7 @@ struct DecisionCardView: View {
             ) {
                 submit(.allow, key: "allow")
             }
-        } else {
+        case .tap:
             CCButton(
                 "Allow",
                 variant: .primary,
