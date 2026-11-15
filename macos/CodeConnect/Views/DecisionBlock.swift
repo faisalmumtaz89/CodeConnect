@@ -88,7 +88,9 @@ struct DecisionBlock: View {
                     if answerable {
                         Group {
                             if held {
-                                controls.padding(.horizontal, 28).padding(.bottom, 14)
+                                // One block, so the foot measures all of the answers, the session grant's rule too.
+                                VStack(alignment: .leading, spacing: 10) { controls }
+                                    .padding(.horizontal, 28).padding(.bottom, 14)
                             } else {
                                 ReplyBoxFrame {
                                     outcomeLine
@@ -328,11 +330,12 @@ struct DecisionBlock: View {
 
     /// The answers. In the box (`boxed`): for Allow/Deny the reason a Deny carries, then Deny and Allow, whose keys
     /// (`keyed`) follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return denies with it, and Allow
-    /// keeps no key); for Codex its options, ⌘1 onwards. Held above the reply box: the same answers, with no field and
-    /// no keys.
+    /// keeps no key); where the card offers it, "Allow for this session" between them, waiting as Allow waits and with
+    /// no key, the rule it grants under the row; for Codex its options, ⌘1 onwards. Held above the reply box: the same
+    /// answers, with no field and no keys.
     @ViewBuilder private var controls: some View {
         switch surface {
-        case .allowDeny:
+        case .allowDeny(let allowForSession):
             if boxed {
                 TextField(
                     "", text: Binding { reason } set: { reason = $0 },
@@ -360,12 +363,32 @@ struct DecisionBlock: View {
                 }
                 .disabled(refusalBlocked != nil)
                 .answerKey(reasonTyped ? .return : "d", reasonTyped ? [] : .command, when: keyed)
+                if allowForSession {
+                    // A grant that outlives this card says yes as Allow does, so it waits as Allow waits; no key.
+                    ActionButton(title: "Allow for this session", key: nil, prominent: false, id: "\(id).allowSession") {
+                        send(.optionId("acceptForSession"), from: "allowSession")
+                    }
+                    .disabled(assentBlocked != nil)
+                    .opacity(assentBlocked != nil ? 0.45 : 1)
+                }
                 ActionButton(title: "Allow", key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
                     send(.allow, from: "allow")
                 }
                 .disabled(assentBlocked != nil)
                 .opacity(assentBlocked != nil ? 0.45 : 1)
                 .answerKey(.return, .command, when: keyed && !reasonTyped)
+            }
+            // What the session grant covers, as Claude writes the rule: it can be broader than the one command asked.
+            if allowForSession, let rule = DecisionCard.sessionRuleCaption(card: approval.card) {
+                Text(rule)
+                    .font(Theme.mono(11.5))
+                    .foregroundStyle(Theme.text3)
+                    .lineLimit(DecisionCard.sessionCaptionLineLimit)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("Allowing for this session grants \(rule)")
+                    .accessibilityIdentifier("\(id).sessionRule")
             }
         case .codexOptions(let options):
             VStack(alignment: .leading, spacing: 4) {
