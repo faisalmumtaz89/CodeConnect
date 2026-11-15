@@ -336,6 +336,7 @@ public final class DaemonConnection {
     private var interruptWaiters: [String: [Waiter<InterruptResult>]] = [:]
     private var stopRunWaiters: [String: [Waiter<StopRunResult>]] = [:]
     private var composeWaiters: [String: [Waiter<ComposeResult>]] = [:]
+    private var settingWaiters: [String: [Waiter<SettingResult>]] = [:]
     /// Which session each in-flight mutation was sent for, so the echoed
     /// `session_id` on its result can be checked rather than trusted.
     private var mutationSessions: [String: String] = [:]
@@ -1212,6 +1213,35 @@ public final class DaemonConnection {
             send: .stopRun(session: session, requestID: requestID))
     }
 
+    /// **Set a hosted Claude run's model and/or effort** (minor 39). `effort` rides this frame, so a
+    /// change to effort alone passes `model: nil`. The gate is structural rather than a hello
+    /// capability: a run carries `menus` only from a daemon that understands these frames, and the
+    /// controls are drawn only where `menus` is — so no frame leaves for a daemon that could not
+    /// answer it. The daemon checks the value against the run's own menus and refuses what it does
+    /// not offer, with a sentence, so an app-side value list is neither needed nor kept.
+    public func setModel(session: String, requestID: String, model: String?, effort: String?)
+        async throws -> SettingResult
+    {
+        mutationSessions[requestID] = session
+        defer { mutationSessions.removeValue(forKey: requestID) }
+        return try await request(
+            key: requestID,
+            store: \.settingWaiters,
+            send: .setModel(session: session, requestID: requestID, model: model, effort: effort))
+    }
+
+    /// **Set a hosted Claude run's permission mode** (minor 39), to one its menu lists. Gated and
+    /// checked as `setModel`.
+    public func setMode(session: String, requestID: String, mode: String) async throws -> SettingResult
+    {
+        mutationSessions[requestID] = session
+        defer { mutationSessions.removeValue(forKey: requestID) }
+        return try await request(
+            key: requestID,
+            store: \.settingWaiters,
+            send: .setMode(session: session, requestID: requestID, mode: mode))
+    }
+
     /// **Say something to a Codex session.**
     ///
     /// The strictest gate in the app, and the reason is not politeness: a
@@ -1367,6 +1397,10 @@ public final class DaemonConnection {
         let composes = composeWaiters
         composeWaiters = [:]
         for queue in composes.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
+        let settings = settingWaiters
+        settingWaiters = [:]
+        for queue in settings.values { for w in queue { w.continuation?.resume(throwing: error) } }
     }
 
     /// Why this `hello_ack` cannot be accepted, or `nil` when it can. Pure,
@@ -1482,6 +1516,10 @@ public final class DaemonConnection {
             guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "compose")
             else { break }
             deliver(store: \.composeWaiters, key: requestID, value: result)
+        case .settingResult(let sessionID, let requestID, let result):
+            guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "setting")
+            else { break }
+            deliver(store: \.settingWaiters, key: requestID, value: result)
         case .error(let code, let message):
             lastErrorMessage = "\(message) (\(code))"
             lastErrorAt = Date()
