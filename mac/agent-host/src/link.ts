@@ -19,6 +19,8 @@ export interface Run {
   answer(command: Extract<ToHost, { type: 'answer' }>): void;
   /** An app's Stop of the turn the command names. */
   interrupt(command: Extract<ToHost, { type: 'interrupt' }>): void;
+  /** A change of the run's model, effort or permission mode. */
+  setting(command: Extract<ToHost, { type: 'set_model' | 'set_mode' }>): void;
   /** ccd ends the run (H5). */
   stop(): void;
   facts(): Facts;
@@ -95,6 +97,7 @@ export function createLink(run: Run) {
     else if (message.type === 'say') run.say(message);
     else if (message.type === 'answer') run.answer(message);
     else if (message.type === 'interrupt') run.interrupt(message);
+    else if (message.type === 'set_model' || message.type === 'set_mode') run.setting(message);
     else if (message.type === 'stop') run.stop();
   }
 

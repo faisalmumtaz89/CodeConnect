@@ -461,6 +461,16 @@ impl LivenessSweep {
     }
 }
 
+/// One settings line sent to a run's agent host ([`Inner::host_settings`]).
+pub(crate) struct PendingSetting {
+    /// The run's `session_uid`.
+    pub uid: String,
+    /// The effort the line sets, filed as the run's once claude has taken it.
+    pub effort: Option<String>,
+    /// Whoever waits: told whether claude took it, with its reason when it did not.
+    pub tell: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
+}
+
 #[derive(Default)]
 struct Inner {
     /// Per-device floor between deliberate test pushes. A stolen credential
@@ -495,6 +505,10 @@ struct Inner {
             tokio::sync::oneshot::Sender<crate::codex_link::InterruptReport>,
         ),
     >,
+    /// Settings sent to a run's agent host and waiting for its outcome, by the line's uuid
+    /// ([`crate::claude_host::set_setting`]). Kept past the app's wait, so an outcome that
+    /// comes late still files the effort it set; dropped when the run's link ends.
+    host_settings: HashMap<String, PendingSetting>,
     /// **The epoch of the newest registration that has BEGUN for this session** —
     /// staked before its first persistent write, and long before its handle or its
     /// control link are installed.
@@ -9872,12 +9886,23 @@ impl Daemon {
                 requests.insert((uid, request_id), filed);
             }
         }
+        // A live Claude run CodeConnect started offers its settings from its start's answer.
+        let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
+        for row in &rows {
+            if row.agent != protocol::agent::AgentKind::Claude || row.lifecycle != Lifecycle::Live {
+                continue;
+            }
+            if let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? {
+                menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
+            }
+        }
         let inner = self.inner.lock().await;
         Ok(Self::assemble_sessions(
             &inner,
             rows,
             &last_seqs,
             &requests,
+            &menus,
             &self.config,
         ))
     }
@@ -9930,6 +9955,31 @@ impl Daemon {
             return refuse("Only a Claude run CodeConnect started can be ended from here.");
         }
         crate::claude_host::stop_run(self, &row.session_uid).await
+    }
+
+    /// [`ClientMessage::SetModel`](protocol::ws::ClientMessage::SetModel) and
+    /// [`ClientMessage::SetMode`](protocol::ws::ClientMessage::SetMode): change a Claude run
+    /// CodeConnect started ([`crate::claude_host::set_setting`]).
+    pub async fn set_setting(
+        &self,
+        session_ref: &str,
+        setting: crate::claude_host::Setting,
+    ) -> protocol::ws::SettingResult {
+        let refuse = |reason: &str| protocol::ws::SettingResult::Refused {
+            reason: reason.to_string(),
+        };
+        let row = match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refuse("There is no such session on this computer."),
+            Err(err) => {
+                crate::log_error!(
+                    "setting for {}: session lookup failed: {err:#}",
+                    logged_session_ref(session_ref)
+                );
+                return refuse("This computer could not read its sessions.");
+            }
+        };
+        crate::claude_host::set_setting(self, &row.session_uid, setting).await
     }
 
     /// [`ClientFrame::StopHostedRuns`](protocol::ipc::ClientFrame::StopHostedRuns), for
@@ -10053,6 +10103,34 @@ impl Daemon {
         inner.host_links.remove(session_uid);
         inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
         inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
+        inner
+            .host_settings
+            .retain(|_, pending| pending.uid != session_uid);
+    }
+
+    /// Wait for the outcome of the settings line `uuid` this daemon is sending the run
+    /// `session_uid`'s agent host, which sets `effort` when it names one.
+    pub(crate) async fn await_host_setting(
+        &self,
+        session_uid: &str,
+        uuid: &str,
+        effort: Option<String>,
+    ) -> tokio::sync::oneshot::Receiver<(bool, Option<String>)> {
+        let (tell, told) = tokio::sync::oneshot::channel();
+        self.inner.lock().await.host_settings.insert(
+            uuid.to_string(),
+            PendingSetting {
+                uid: session_uid.to_string(),
+                effort,
+                tell,
+            },
+        );
+        told
+    }
+
+    /// The settings line `uuid`, when this daemon sent it and its outcome has not come.
+    pub(crate) async fn take_host_setting(&self, uuid: &str) -> Option<PendingSetting> {
+        self.inner.lock().await.host_settings.remove(uuid)
     }
 
     /// Whether this daemon is attached to the hosted run `session_uid`'s agent host now.
@@ -10615,6 +10693,7 @@ impl Daemon {
         rows: Vec<SessionRow>,
         last_seqs: &HashMap<String, u64>,
         requests: &HashMap<ApprovalId, (u64, Option<String>)>,
+        menus: &HashMap<String, protocol::event::RunMenus>,
         config: &Config,
     ) -> Vec<SessionSummary> {
         let now = protocol::time::now_unix_ms();
@@ -10721,6 +10800,8 @@ impl Daemon {
                 pending,
                 model: facts.and_then(|facts| facts.model.clone()),
                 permission_mode: facts.and_then(|facts| facts.permission_mode.clone()),
+                effort: facts.and_then(|facts| facts.effort.clone()),
+                menus: menus.get(&row.session_uid).cloned(),
                 // Read from the cache `refresh_tree` fills, never from git here:
                 // this listing is answered on every fleet refresh.
                 git_branch: tree.and_then(|tree| tree.branch.clone()),

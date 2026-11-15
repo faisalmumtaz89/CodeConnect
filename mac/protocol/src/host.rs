@@ -66,10 +66,12 @@ pub enum ToHost {
         tool_use_id: String,
         decision: Decision,
     },
-    /// The model, and with it the effort when one is named.
+    /// The model, the effort, or both in that order, for the rest of the session. ccd sends
+    /// one of the two per line, so each outcome is one change.
     SetModel {
         uuid: String,
-        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
@@ -387,7 +389,7 @@ mod tests {
             }),
             to(ToHost::SetModel {
                 uuid: "c-model".into(),
-                model: "sonnet".into(),
+                model: Some("sonnet".into()),
                 effort: Some("high".into()),
             }),
             to(ToHost::SetMode {

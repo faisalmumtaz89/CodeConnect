@@ -2063,8 +2063,9 @@ impl Store {
     ///
     /// Each read is narrowed in SQL to the rows that can decide its fact under
     /// [`protocol::facts`] — a `session_start` or a user line for the model, a
-    /// hook, Claude's permission-mode line or an SDK run's init for the mode — so a
-    /// long run costs those rows down to the deciding one, not its whole log.
+    /// hook, Claude's permission-mode line or an SDK run's init for the mode, a
+    /// notification or a user line for the effort — so a long run costs those rows
+    /// down to the deciding one, not its whole log.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
         let conn = self.read();
         Ok(protocol::facts::SessionFacts {
@@ -2089,6 +2090,16 @@ impl Store {
                     Source::Sdk.as_str(),
                 ],
                 protocol::facts::permission_mode_fact,
+            )?,
+            effort: newest_decided(
+                &conn,
+                session_uid,
+                "kind IN (?2, ?3)",
+                &[
+                    EventKind::Notification.as_str(),
+                    EventKind::UserMessage.as_str(),
+                ],
+                protocol::facts::effort_fact,
             )?,
         })
     }
@@ -2970,6 +2981,43 @@ impl Store {
         }
         tx.commit()?;
         Ok(Some(filed))
+    }
+
+    /// The models of the hosted run `session_uid`'s start's answer, each as claude gives
+    /// it; `None` when the run has no `run_hosts` row or its start is not answered.
+    pub fn hosted_models(&self, session_uid: &str) -> Result<Option<Vec<serde_json::Value>>> {
+        let conn = self.read();
+        let models = conn
+            .query_row(
+                "SELECT json_extract(initialize, '$.models') FROM run_hosts WHERE session_uid = ?1",
+                [session_uid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        models
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .context("a hosted run's models")
+    }
+
+    /// Whether the run `session_uid` is in a turn: its newest `session_start` has no
+    /// `turn_complete` after it.
+    pub fn turn_running(&self, session_uid: &str) -> Result<bool> {
+        let conn = self.read();
+        let newest = conn
+            .query_row(
+                "SELECT kind FROM events WHERE session_uid = ?1 AND kind IN (?2, ?3)
+                  ORDER BY seq DESC LIMIT 1",
+                params![
+                    session_uid,
+                    EventKind::SessionStart.as_str(),
+                    EventKind::TurnComplete.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
     }
 
     /// What the hosted run `session_uid`'s command menu is read from; `None` when the

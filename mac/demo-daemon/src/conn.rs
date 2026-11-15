@@ -297,6 +297,17 @@ where
             )
             .await?
         }
+        // The demo's runs carry no `menus`: answered as a daemon below minor 39 answers it.
+        ClientMessage::SetModel { .. } | ClientMessage::SetMode { .. } => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    code: "bad_request".into(),
+                    message: "the demo daemon does not change settings".into(),
+                },
+            )
+            .await?
+        }
         // Not advertised (`stop_run` is false): answered as a daemon below minor 35
         // answers it.
         ClientMessage::StopRun { .. } => {
