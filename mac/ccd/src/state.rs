@@ -36483,7 +36483,8 @@ mod tests {
     /// - A and B each start a tool call, A first;
     /// - C does nothing, so its only event is its registration's link fact;
     /// - the daemon restarts, and B, C, then A register again, so A's link fact is the newest;
-    /// - A then starts another tool call.
+    /// - A then starts another tool call;
+    /// - C's supervisor reports it exited.
     ///
     /// Each stage is recorded as the `sessions` list after it and the events it added, in the order the daemon wrote
     /// them. Every clock read becomes the stamp of the step it fell in, so the bytes are the same on every build and
@@ -36579,6 +36580,12 @@ mod tests {
         step(&mut steps).await;
         tool_call(&restarted, "cc-a", A, "toolu_cc-a_2").await;
         record("activity", restarted.sessions().await.unwrap());
+
+        step(&mut steps).await;
+        restarted
+            .session_exited("cc-c", Some(C), Some(0), None, None)
+            .await;
+        record("end", restarted.sessions().await.unwrap());
 
         let mut wire = serde_json::Value::Object(stages);
         normalise_clocks(&mut wire, &steps);
