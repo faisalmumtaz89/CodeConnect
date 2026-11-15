@@ -5996,10 +5996,13 @@ mod tests {
         .unwrap();
     }
 
-    /// The catalog request an app sends for a hosted run; the answers before the run's first
-    /// init and after a `commands_changed`, from a run on a stand-in host (`probed_at` is
-    /// when the list was taken, so it is fixed here); a command's output from each of the
-    /// SDK's three ways, as the run's events file it; and the `/status` refusal.
+    /// The capabilities a paired phone is offered; the catalog request an app sends for a
+    /// hosted run; the answers before the run's first init and after a `commands_changed`,
+    /// from a run on a stand-in host (`probed_at` is when the list was taken, so it is fixed
+    /// here); the run's session summary as the fleet gives it once its menu is there, and
+    /// again with ccd's connection to its host down, the host still running; a command's
+    /// output from each of the SDK's three ways, as the run's events file it; and the
+    /// `/status` refusal.
     async fn derived_minor_38_wire() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
@@ -6021,6 +6024,7 @@ mod tests {
         sdk(&mut played.write, 4, commands_changed()).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
         let available = rig.daemon.command_catalog(&uid).await;
+        let hosted_live = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
         let outputs = [
             serde_json::json!({"type": "user", "uuid": "9d1f0000-0000-4000-8000-000000000031", "isReplay": true,
                 "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
@@ -6040,7 +6044,12 @@ mod tests {
         }
         let status = send_as_app(&rig.daemon, &uid, "status-1", "/status").await;
         let events = stored(&rig, &uid);
-        stop(&played.dir);
+        let dir = played.dir.clone();
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        let hosted_detached =
+            pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        stop(&dir);
         let row = |item: &str| {
             events
                 .iter()
@@ -6051,6 +6060,9 @@ mod tests {
                 .expect("the event")
         };
         serde_json::json!({
+            "hello_ack_capabilities": crate::ws_server::capabilities(&rig.daemon, false, false, true),
+            "session_hosted_live": hosted_live,
+            "session_hosted_detached": hosted_detached,
             "catalog_request": serde_json::to_value(protocol::ws::ClientMessage::GetCommandCatalog {
                 session_id: fixed.into(),
             })
@@ -7740,8 +7752,9 @@ mod tests {
     /// of a claude.ai connector's commands, of its screen-only ones or of
     /// [`REFUSED_SCREENS`], and `usage` among them. Then `/effort low` and `/usage`, each
     /// sent as a message, file their output as a terminal run does: a `user_message` with
-    /// claude's `<local-command-stdout>` string, printed, which records what a headless
-    /// `/usage` prints. Then End run, as G2. Ignored and gated as G2 is.
+    /// claude's `<local-command-stdout>` string. `/effort`'s is printed; of `/usage`'s only
+    /// its shape (the wrapper and a length), as it holds the signed-in account's own usage.
+    /// Then End run, as G2. Ignored and gated as G2 is.
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_real_claude_lists_its_commands_and_files_their_output() {
@@ -7776,7 +7789,18 @@ mod tests {
             "B8 G6: first turn settled {first}; screen-only {screen_only:?}; catalog {catalog:?}"
         );
         for (command, sent, settled, output) in &said {
-            println!("B8 G6: {command}: {sent:?}; settled {settled}; output {output:?}");
+            let shown: Vec<String> = if *command == "/usage" {
+                output
+                    .iter()
+                    .map(|row| {
+                        let wrapper = row.split('>').next().unwrap_or_default();
+                        format!("user_message {wrapper}> {} bytes", row.len())
+                    })
+                    .collect()
+            } else {
+                output.clone()
+            };
+            println!("B8 G6: {command}: {sent:?}; settled {settled}; output {shown:?}");
         }
         let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
         println!("B8 G6: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");

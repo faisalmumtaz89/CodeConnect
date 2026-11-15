@@ -35,6 +35,39 @@
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "type": "get_command_catalog"
   },
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "claude_interrupt": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "machine_stats": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "stop_run": true,
+    "terminal_pty": false,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
   "output_effort": {
     "kind": "user_message",
     "payload": {
@@ -58,6 +91,38 @@
         "content": "<local-command-stdout>Compacted </local-command-stdout>"
       }
     }
+  },
+  "session_hosted_detached": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 5,
+    "lifecycle": "live",
+    "link": "detached",
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 2,
+    "lifecycle": "live",
+    "link": "attached",
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "status_refused": {
     "result": {
