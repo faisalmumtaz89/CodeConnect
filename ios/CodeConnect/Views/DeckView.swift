@@ -196,6 +196,14 @@ struct DeckView: View {
                 arrivedCount += new.count - old.count
                 announceArrival()
             }
+            .onChange(of: machines.deck.map(\.id)) { _, pending in
+                // A card the person answered while its answer was unconfirmed
+                // (`.sentUnconfirmed`) stays in the queue until the computer
+                // confirms it, and the confirmation drops it from the pending
+                // set. Reconcile so it is counted on the finish line — it was
+                // answered — rather than removed as if nothing was waiting.
+                pass.reconcile(pending: Set(pending))
+            }
             .onDisappear {
                 arrivalNoticeTask?.cancel()
                 machines.deckClosed()
@@ -312,6 +320,15 @@ struct DeckView: View {
             DecisionCardView(
                 approval: card,
                 onSettled: { settle(card) },
+                onSent: {
+                    // Reconcile at once, not only on the next pending change: if the
+                    // card was already resolved (answered at the computer) before the
+                    // phone's send timed out, it has already left the pending set and
+                    // no later change will count it. The receipt must not depend on
+                    // which arrived first.
+                    pass.recordSent(card.id)
+                    pass.reconcile(pending: Set(machines.deck.map(\.id)))
+                },
                 comeBackToThis: canPostpone ? { advance(past: card) } : nil
             )
             .environment(machines.model(forSession: card.sessionKey) ?? model)

@@ -745,7 +745,7 @@ final class FleetCountTests: XCTestCase {
             summary: summary(id, blockedOn: (0..<blockedCount).map { "r\($0)" }, folder: folder),
             status: status, subtitle: "", activity: nil,
             label: RunLabel(project: project ?? id, qualifier: nil),
-            capability: .control, blockedCount: blockedCount, lastEventAt: nil, cachedAt: nil,
+            capability: .control, blockedCount: blockedCount, lastActivityAt: nil, cachedAt: nil,
             machineID: machine, machineName: machine.map { "\($0) name" })
     }
 

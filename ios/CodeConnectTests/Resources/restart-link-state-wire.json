@@ -1,0 +1,347 @@
+{
+  "activity": {
+    "events": [
+      {
+        "item_id": "toolu_cc-a_2",
+        "kind": "tool_call",
+        "payload": {
+          "cwd": "/tmp",
+          "hook_event_name": "PreToolUse",
+          "tool_input": {
+            "command": "echo hi"
+          },
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_cc-a_2"
+        },
+        "seq": 4,
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "hook",
+        "source_event_id": "pre:toolu_cc-a_2",
+        "ts": "2026-01-01T00:08:00.000Z"
+      }
+    ],
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:00:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 4,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "cc-a",
+        "updated_at": "2026-01-01T00:08:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:01:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 3,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "tmux_session": "cc-b",
+        "updated_at": "2026-01-01T00:04:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:02:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 2,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "tmux_session": "cc-c",
+        "updated_at": "2026-01-01T00:02:00.000Z"
+      }
+    ]
+  },
+  "before_restart": {
+    "events": [
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "supervisor registered"
+        },
+        "seq": 1,
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "daemon",
+        "ts": "2026-01-01T00:00:00.000Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "supervisor registered"
+        },
+        "seq": 1,
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "source": "daemon",
+        "ts": "2026-01-01T00:01:00.000Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "supervisor registered"
+        },
+        "seq": 1,
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "source": "daemon",
+        "ts": "2026-01-01T00:02:00.000Z"
+      },
+      {
+        "item_id": "toolu_cc-a_1",
+        "kind": "tool_call",
+        "payload": {
+          "cwd": "/tmp",
+          "hook_event_name": "PreToolUse",
+          "tool_input": {
+            "command": "echo hi"
+          },
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_cc-a_1"
+        },
+        "seq": 2,
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "hook",
+        "source_event_id": "pre:toolu_cc-a_1",
+        "ts": "2026-01-01T00:03:00.000Z"
+      },
+      {
+        "item_id": "toolu_cc-b_1",
+        "kind": "tool_call",
+        "payload": {
+          "cwd": "/tmp",
+          "hook_event_name": "PreToolUse",
+          "tool_input": {
+            "command": "echo hi"
+          },
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_cc-b_1"
+        },
+        "seq": 2,
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "source": "hook",
+        "source_event_id": "pre:toolu_cc-b_1",
+        "ts": "2026-01-01T00:04:00.000Z"
+      }
+    ],
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:00:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 2,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "cc-a",
+        "updated_at": "2026-01-01T00:03:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:01:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 2,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "tmux_session": "cc-b",
+        "updated_at": "2026-01-01T00:04:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:02:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 1,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "tmux_session": "cc-c",
+        "updated_at": "2026-01-01T00:02:00.000Z"
+      }
+    ]
+  },
+  "end": {
+    "events": [
+      {
+        "kind": "session_end",
+        "payload": {
+          "exit_code": 0
+        },
+        "seq": 3,
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "source": "daemon",
+        "source_event_id": "exit:01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "ts": "2026-01-01T00:09:00.000Z"
+      }
+    ],
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:00:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 4,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "cc-a",
+        "updated_at": "2026-01-01T00:08:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:01:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 3,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "tmux_session": "cc-b",
+        "updated_at": "2026-01-01T00:04:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:02:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 3,
+        "lifecycle": "exited",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "tmux_session": "cc-c",
+        "updated_at": "2026-01-01T00:09:00.000Z"
+      }
+    ]
+  },
+  "restart": {
+    "events": [
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "supervisor registered"
+        },
+        "seq": 3,
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "source": "daemon",
+        "ts": "2026-01-01T00:05:00.000Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "supervisor registered"
+        },
+        "seq": 2,
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "source": "daemon",
+        "ts": "2026-01-01T00:06:00.000Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "supervisor registered"
+        },
+        "seq": 3,
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "daemon",
+        "ts": "2026-01-01T00:07:00.000Z"
+      }
+    ],
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:00:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 3,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-a",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "tmux_session": "cc-a",
+        "updated_at": "2026-01-01T00:03:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:01:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 3,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-b",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+        "tmux_session": "cc-b",
+        "updated_at": "2026-01-01T00:04:00.000Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-01-01T00:02:00.000Z",
+        "cwd": "/tmp",
+        "last_seq": 2,
+        "lifecycle": "live",
+        "link": "attached",
+        "project_label": "tmp",
+        "session_id": "cc-c",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQT",
+        "tmux_session": "cc-c",
+        "updated_at": "2026-01-01T00:02:00.000Z"
+      }
+    ]
+  }
+}

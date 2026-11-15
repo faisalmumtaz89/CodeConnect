@@ -2966,8 +2966,7 @@ impl Daemon {
         host: protocol::proc_identity::ProcessIdentity,
         seq: u64,
         pendings: Vec<PendingEvent>,
-        session_id: Option<String>,
-        cwd: Option<String>,
+        notes: crate::store::RunNotes,
     ) -> Result<bool> {
         let mut pendings = pendings;
         for pending in &mut pendings {
@@ -2979,14 +2978,7 @@ impl Daemon {
             let _ordered = gate.lock().await;
             let Some(events) = self
                 .db
-                .append_host_message(
-                    session_uid.to_string(),
-                    host,
-                    seq,
-                    pendings,
-                    session_id,
-                    cwd,
-                )
+                .append_host_message(session_uid.to_string(), host, seq, pendings, notes)
                 .await?
             else {
                 return Ok(false);
@@ -7853,9 +7845,10 @@ impl Daemon {
     }
 
     /// Which slash commands this session's Claude Code has, from the binary
-    /// itself. `Unavailable` is a complete answer — the phone falls back to
-    /// its conservative static policy — so every failure path returns one
-    /// with its reason rather than an error.
+    /// itself, or, for a run CodeConnect started, from what its claude last
+    /// reported ([`crate::claude_host::catalog`]). `Unavailable` is a complete
+    /// answer — the phone falls back to its conservative static policy — so
+    /// every failure path returns one with its reason rather than an error.
     pub async fn command_catalog(&self, session_ref: &str) -> protocol::ws::CommandCatalogResult {
         use protocol::ws::CommandCatalogResult;
 
@@ -7884,6 +7877,17 @@ impl Daemon {
             .reason()
         {
             return CommandCatalogResult::Unavailable { reason };
+        }
+        // A run CodeConnect started has no binary of its own to probe: its menu is what
+        // its claude last reported.
+        match self.db.hosted_commands(row.session_uid.clone()).await {
+            Ok(Some(kept)) => return crate::claude_host::catalog(kept),
+            Ok(None) => {}
+            Err(err) => {
+                return CommandCatalogResult::Unavailable {
+                    reason: format!("{err:#}"),
+                }
+            }
         }
         let claude_bin = {
             let inner = self.inner.lock().await;
@@ -7952,6 +7956,7 @@ impl Daemon {
             if let Some(cached) = inner.command_catalogs.get(fingerprint).cloned() {
                 return CommandCatalogResult::Available {
                     commands: cached.commands,
+                    entries: Vec::new(),
                     claude_version: cached.claude_version,
                     probed_at: cached.probed_at,
                 };
@@ -7973,6 +7978,7 @@ impl Daemon {
             Ok(catalog) => {
                 let result = CommandCatalogResult::Available {
                     commands: catalog.commands.clone(),
+                    entries: Vec::new(),
                     claude_version: catalog.claude_version.clone(),
                     probed_at: catalog.probed_at.clone(),
                 };
@@ -8639,7 +8645,11 @@ impl Daemon {
                         .as_ref()
                         .map(|r| r.created_at.clone())
                         .unwrap_or_else(|| info.started_at.clone()),
-                    updated_at: now,
+                    // A registration is not activity: a run registering again (its
+                    // supervisor reconnecting to a restarted daemon) keeps the stamp
+                    // it had, so an idle run keeps its age and its place in the
+                    // fleet. Only a run with no row yet is stamped now.
+                    updated_at: existing.as_ref().map_or(now, |r| r.updated_at.clone()),
                     // The registration is the authority on which agent this run
                     // is. Absent ⇒ Claude; an unrecognised name is preserved and
                     // fails closed downstream. Codex identity is carried through
@@ -15340,6 +15350,7 @@ mod tests {
         let first = daemon.command_catalog(&uid).await;
         let protocol::ws::CommandCatalogResult::Available {
             commands,
+            entries,
             claude_version,
             probed_at,
         } = first
@@ -15347,6 +15358,7 @@ mod tests {
             panic!("first read must be available: {first:?}");
         };
         assert!(commands.iter().any(|c| c == "model"));
+        assert!(entries.is_empty(), "a probed list has names only");
         assert_eq!(claude_version.as_deref(), Some("2.1.221"));
 
         let second = daemon.command_catalog(&uid).await;
@@ -37960,6 +37972,194 @@ mod tests {
                 seq: main_seq,
             })
         );
+    }
+
+    /// **A restart is not activity.** A run's supervisor registering again with a
+    /// restarted daemon, and the `link_state` that files, leave the row's
+    /// `updated_at` where the run's last activity put it, so an idle run keeps its
+    /// age and its place; a hook, which is activity, still moves it.
+    #[tokio::test]
+    async fn a_restart_leaves_a_runs_updated_at_where_its_activity_put_it() {
+        const ACTIVE: &str = "2026-01-01T00:00:00.000Z";
+        let store = shared_store();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let mut row = store.get_session(TEST_UID).unwrap().unwrap();
+        row.updated_at = ACTIVE.into();
+        store.upsert_session(&row).unwrap().assert_present();
+        let links = |store: &Store| {
+            let log = store.events_after(TEST_UID, 0, 100).unwrap();
+            log.iter()
+                .filter(|event| event.kind == EventKind::LinkState)
+                .count()
+        };
+        let before = links(&store);
+
+        let restarted = daemon_on(Arc::clone(&store), Config::default());
+        register(&restarted, "cc-1", Some(TEST_UID)).await;
+        assert_eq!(
+            links(&store),
+            before + 1,
+            "the registration filed its link fact"
+        );
+        assert_eq!(
+            store.get_session(TEST_UID).unwrap().unwrap().updated_at,
+            ACTIVE,
+            "the restart's registration moved the run's updated_at"
+        );
+
+        restarted
+            .handle_hook(post(
+                TEST_UID,
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": "go", "cwd": "/tmp"}),
+                false,
+            ))
+            .await;
+        assert_ne!(
+            store.get_session(TEST_UID).unwrap().unwrap().updated_at,
+            ACTIVE,
+            "a hook did not move the run's updated_at"
+        );
+    }
+
+    /// **A restart, as a phone is sent it.** Three runs on one daemon:
+    /// - A and B each start a tool call, A first;
+    /// - C does nothing, so its only event is its registration's link fact;
+    /// - the daemon restarts, and B, C, then A register again, so A's link fact is the newest;
+    /// - A then starts another tool call;
+    /// - C's supervisor reports it exited.
+    ///
+    /// Each stage is recorded as the `sessions` list after it and the events it added, in the order the daemon wrote
+    /// them. Every clock read becomes the stamp of the step it fell in, so the bytes are the same on every build and
+    /// the order is the daemon's. The phone's fleet tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_restart_link_state_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/restart-link-state-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_restart_link_state_wire().await,
+            committed,
+            "the committed restart wire no longer matches what this build emits. Regenerate it with \
+             cargo test -p ccd --bin ccd -- --ignored regenerate_the_restart_link_state_wire_fixture, then \
+             copy it over its copy under ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/restart-link-state-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_restart_link_state_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_restart_link_state_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/restart-link-state-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn derived_restart_link_state_wire() -> serde_json::Value {
+        const A: &str = TEST_UID;
+        const B: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        const C: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQT";
+        let runs = [(A, "cc-a"), (B, "cc-b"), (C, "cc-c")];
+        let store = shared_store();
+        let mut steps: Vec<String> = Vec::new();
+        // A step's boundary is read after a pause, so every clock read of one step falls after its own boundary and
+        // before the next one.
+        async fn step(steps: &mut Vec<String>) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            steps.push(protocol::time::now_rfc3339());
+        }
+        let mut seen: HashMap<&str, u64> = HashMap::new();
+        let mut stages = serde_json::Map::new();
+        let mut record = |name: &str, daemon_sessions: Vec<SessionSummary>| {
+            let mut events: Vec<Event> = runs
+                .iter()
+                .flat_map(|(uid, _)| {
+                    let after = seen.get(uid).copied().unwrap_or(0);
+                    store.events_after(uid, after, 1000).unwrap()
+                })
+                .collect();
+            for event in &events {
+                let last = seen
+                    .entry(
+                        runs.iter()
+                            .find(|(uid, _)| *uid == event.session_uid)
+                            .unwrap()
+                            .0,
+                    )
+                    .or_insert(0);
+                *last = (*last).max(event.seq);
+            }
+            events.sort_by(|left, right| left.ts.cmp(&right.ts).then(left.seq.cmp(&right.seq)));
+            stages.insert(
+                name.into(),
+                json!({"sessions": daemon_sessions, "events": events}),
+            );
+        };
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        for (uid, name) in runs {
+            step(&mut steps).await;
+            register(&daemon, name, Some(uid)).await;
+        }
+        for (uid, name) in [runs[0], runs[1]] {
+            step(&mut steps).await;
+            tool_call(&daemon, name, uid, &format!("toolu_{name}_1")).await;
+        }
+        record("before_restart", daemon.sessions().await.unwrap());
+
+        let restarted = daemon_on(Arc::clone(&store), Config::default());
+        for (uid, name) in [runs[1], runs[2], runs[0]] {
+            step(&mut steps).await;
+            register(&restarted, name, Some(uid)).await;
+        }
+        record("restart", restarted.sessions().await.unwrap());
+
+        step(&mut steps).await;
+        tool_call(&restarted, "cc-a", A, "toolu_cc-a_2").await;
+        record("activity", restarted.sessions().await.unwrap());
+
+        step(&mut steps).await;
+        restarted
+            .session_exited("cc-c", Some(C), Some(0), None, None)
+            .await;
+        record("end", restarted.sessions().await.unwrap());
+
+        let mut wire = serde_json::Value::Object(stages);
+        normalise_clocks(&mut wire, &steps);
+        wire
+    }
+
+    /// Every RFC 3339 stamp in `ts`, `created_at` and `updated_at` becomes the fixed stamp of the step it fell in:
+    /// minute `k` for a read at or after `steps[k]`. Equal steps read equal, and the order is kept.
+    fn normalise_clocks(value: &mut serde_json::Value, steps: &[String]) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, field) in map.iter_mut() {
+                    match field {
+                        serde_json::Value::String(stamp)
+                            if matches!(key.as_str(), "ts" | "created_at" | "updated_at") =>
+                        {
+                            let step = steps
+                                .iter()
+                                .rposition(|start| start.as_str() <= stamp.as_str())
+                                .unwrap_or(0);
+                            *stamp = format!("2026-01-01T00:{step:02}:00.000Z");
+                        }
+                        _ => normalise_clocks(field, steps),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .for_each(|item| normalise_clocks(item, steps)),
+            _ => {}
+        }
     }
 
     /// **A quiet run's facts are right after a restart**, rebuilt from the log:

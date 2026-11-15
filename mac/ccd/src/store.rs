@@ -639,6 +639,33 @@ pub struct HostedLink {
     pub turn: Option<String>,
 }
 
+/// What one host message tells a hosted run's row besides its events
+/// ([`Store::append_host_message`]): from an init, the run's Claude session id, the
+/// folder claude runs in and the commands it offers on its own screen only; from a
+/// `commands_changed`, claude's command list.
+#[derive(Debug, Default)]
+pub struct RunNotes {
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub screen_only: Option<Vec<String>>,
+    pub commands: Option<Vec<serde_json::Value>>,
+}
+
+/// What a hosted run's command menu is read from ([`Store::hosted_commands`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostedCommands {
+    /// claude's command list as it last reported it, each command as it gives it;
+    /// `None` before the start is done.
+    pub commands: Option<Vec<serde_json::Value>>,
+    /// When ccd took that list.
+    pub commands_at: Option<String>,
+    /// The commands the run's latest init names as its screen's only; `None` before
+    /// the first init.
+    pub screen_only: Option<Vec<String>>,
+    /// The version of the claude that answered the start.
+    pub claude_version: Option<String>,
+}
+
 fn watched_host_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<WatchedHost> {
     let boot = match (row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?) {
         (Some(boot_sec), Some(boot_usec)) => Some(BootIdentity {
@@ -2658,7 +2685,8 @@ impl Store {
 
     /// Commit the start's outcome, message `seq` from the host `host`, in one
     /// transaction: the cursor, as [`Store::commit_cursor`] advances it, with the
-    /// SDK's initialize answer (`initialize`, as JSON) on a done start; then the
+    /// SDK's initialize answer (`initialize`, as JSON) on a done start, whose
+    /// commands are then claude's list as last reported; then the
     /// run's lifecycle, `starting` to `lifecycle` (`Live` or `Failed`), only while it
     /// is `starting`, so a run already ended keeps its end; and, when that made it
     /// `live`, `events` (the person's first words). `None`, with nothing written,
@@ -2674,10 +2702,13 @@ impl Store {
         events: &[PendingEvent],
     ) -> Result<Option<Vec<Event>>> {
         let seq = i64::try_from(seq).context("a host sequence number past i64")?;
+        let now = protocol::time::now_rfc3339();
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let changed = tx.execute(
-            "UPDATE run_hosts SET cursor = ?5, initialize = ?6
+            "UPDATE run_hosts SET cursor = ?5, initialize = ?6,
+                    commands = json_extract(?6, '$.commands'),
+                    commands_at = CASE WHEN ?6 IS NULL THEN NULL ELSE ?7 END
               WHERE session_uid = ?1 AND host_pid = ?2
                 AND host_start_sec = ?3 AND host_start_usec = ?4 AND cursor < ?5",
             params![
@@ -2686,13 +2717,13 @@ impl Store {
                 host.birth.start_sec,
                 host.birth.start_usec,
                 seq,
-                initialize
+                initialize,
+                now
             ],
         )?;
         if changed != 1 {
             return Ok(None);
         }
-        let now = protocol::time::now_rfc3339();
         let mut moved = 0;
         for table in SESSION_TABLES {
             moved += tx.execute(
@@ -2892,18 +2923,16 @@ impl Store {
 
     /// File one SDK message from the host `host`, message `seq`, in one transaction:
     /// the cursor, as [`Store::commit_cursor`] advances it, then the message's
-    /// `events`, then, from its init, the run's Claude `session_id` and the folder
-    /// claude runs in (`cwd`). `None`, with nothing written, when the cursor does not
-    /// move, and then the caller must not acknowledge `seq` (H3); otherwise the events
-    /// newly stored, which a replay leaves empty.
+    /// `events`, then what it tells the run's row (`notes`). `None`, with nothing
+    /// written, when the cursor does not move, and then the caller must not acknowledge
+    /// `seq` (H3); otherwise the events newly stored, which a replay leaves empty.
     pub fn append_host_message(
         &self,
         session_uid: &str,
         host: &ProcessIdentity,
         seq: u64,
         events: &[PendingEvent],
-        session_id: Option<&str>,
-        cwd: Option<&str>,
+        notes: &RunNotes,
     ) -> Result<Option<Vec<Event>>> {
         let seq = i64::try_from(seq).context("a host sequence number past i64")?;
         let mut conn = self.write();
@@ -2931,7 +2960,7 @@ impl Store {
         }
         // A hosted run is Claude's, so its row is in Claude's table.
         let (table, _) = session_tables_for(&AgentKind::Claude);
-        if let Some(id) = session_id {
+        if let Some(id) = &notes.session_id {
             tx.execute(
                 &format!(
                     "UPDATE {table} SET claude_session_id = ?2
@@ -2940,14 +2969,67 @@ impl Store {
                 params![session_uid, id],
             )?;
         }
-        if let Some(cwd) = cwd {
+        if let Some(cwd) = &notes.cwd {
             tx.execute(
                 &format!("UPDATE {table} SET cwd = ?2 WHERE session_uid = ?1 AND cwd != ?2"),
                 params![session_uid, cwd],
             )?;
         }
+        if let Some(names) = &notes.screen_only {
+            tx.execute(
+                "UPDATE run_hosts SET screen_only = ?2 WHERE session_uid = ?1",
+                params![session_uid, serde_json::to_string(names)?],
+            )?;
+        }
+        if let Some(commands) = &notes.commands {
+            tx.execute(
+                "UPDATE run_hosts SET commands = ?2, commands_at = ?3 WHERE session_uid = ?1",
+                params![
+                    session_uid,
+                    serde_json::to_string(commands)?,
+                    protocol::time::now_rfc3339()
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(Some(filed))
+    }
+
+    /// What the hosted run `session_uid`'s command menu is read from; `None` when the
+    /// run has no `run_hosts` row.
+    pub fn hosted_commands(&self, session_uid: &str) -> Result<Option<HostedCommands>> {
+        let conn = self.read();
+        let row = conn
+            .query_row(
+                "SELECT commands, commands_at, screen_only,
+                        json_extract(initialize, '$.claude_code_version')
+                   FROM run_hosts WHERE session_uid = ?1",
+                [session_uid],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((commands, commands_at, screen_only, claude_version)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(HostedCommands {
+            commands: commands
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .context("a hosted run's command list")?,
+            commands_at,
+            screen_only: screen_only
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .context("a hosted run's screen-only commands")?,
+            claude_version,
+        }))
     }
 
     /// End a hosted run in one transaction: with `cursor`, the run's cursor first, as
@@ -6722,7 +6804,11 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         -- its host's kernel identity (null until the host has written host.json),
         -- the highest host message whose effects are committed, and the SDK's
         -- initialize answer from the start's outcome (JSON, null until a start
-        -- is done): the run's facts before its first turn's init. The row is
+        -- is done): the run's facts before its first turn's init. `commands` is
+        -- claude's command list as it last reported it (JSON: the answer's, then
+        -- each `commands_changed`'s), taken at `commands_at`; `screen_only` the
+        -- names its latest init offers on claude's own screen only (JSON, null
+        -- until the first init). The row is
         -- written with the run's own session row, before anything is spawned, so
         -- a repeated request finds the run instead of starting another. `start`
         -- is the run's `start` line, as ccd sends it, kept so a restarted ccd can
@@ -6737,7 +6823,10 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             initialize      TEXT,
             boot_sec        INTEGER,
             boot_usec       INTEGER,
-            start           TEXT
+            start           TEXT,
+            commands        TEXT,
+            commands_at     TEXT,
+            screen_only     TEXT
         );
 
         -- A deletion is a decision, and this is its record. A uid here was

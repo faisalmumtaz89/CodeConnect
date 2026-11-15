@@ -385,20 +385,18 @@ impl Db {
         host: protocol::proc_identity::ProcessIdentity,
         seq: u64,
         events: Vec<PendingEvent>,
-        session_id: Option<String>,
-        cwd: Option<String>,
+        notes: crate::store::RunNotes,
     ) -> Result<Option<Vec<Event>>> {
-        self.run(move |store| {
-            store.append_host_message(
-                &session_uid,
-                &host,
-                seq,
-                &events,
-                session_id.as_deref(),
-                cwd.as_deref(),
-            )
-        })
-        .await
+        self.run(move |store| store.append_host_message(&session_uid, &host, seq, &events, &notes))
+            .await
+    }
+
+    pub async fn hosted_commands(
+        &self,
+        session_uid: String,
+    ) -> Result<Option<crate::store::HostedCommands>> {
+        self.run(move |store| store.hosted_commands(&session_uid))
+            .await
     }
 
     /// Remove one ended run. Small next to a prune, and off the runtime for the

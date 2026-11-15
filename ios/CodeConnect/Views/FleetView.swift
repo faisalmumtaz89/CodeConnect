@@ -2121,7 +2121,7 @@ struct FleetRowView: View {
     private var clock: AgeClock {
         isBlockedOrFailed
             ? AgeClock(since: waitingSince, scale: .clock)
-            : AgeClock(since: row.lastEventAt ?? row.summary.updatedDate, scale: .age)
+            : AgeClock(since: row.lastActive, scale: .age)
     }
 
     var body: some View {
@@ -2498,7 +2498,7 @@ struct FleetRowView: View {
     /// last touched the record. Printing `no events` there spent the row's
     /// trailing column on a non-fact, and it was the widest string on the screen.
     private var freshness: String {
-        Format.age(since: row.lastEventAt ?? row.summary.updatedDate, now: now)
+        Format.age(since: row.lastActive, now: now)
     }
 
     /// **One meaningful stop that says everything the row says.**
@@ -2530,8 +2530,8 @@ struct FleetRowView: View {
         parts.append(spokenActivity)
         if isBlockedOrFailed {
             parts.append("waiting \(Format.spokenDuration(now.timeIntervalSince(waitingSince)))")
-        } else if let last = row.lastEventAt {
-            parts.append("last activity \(Format.spokenAge(now.timeIntervalSince(last)))")
+        } else {
+            parts.append("last activity \(Format.spokenAge(now.timeIntervalSince(row.lastActive)))")
         }
         // Silent while unsettled: VoiceOver asserting "observe only" during
         // the handshake is the same flash, spoken.

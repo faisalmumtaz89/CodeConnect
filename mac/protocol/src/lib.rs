@@ -741,7 +741,26 @@ pub const PROTOCOL_MISMATCH: &str =
 ///       - A `notification` event `send_not_sent` (`{request_id, reason: "stopped"}`):
 ///         a Stop cancelled the person's message before claude ran it. The person's
 ///         own row of a message sent to such a run carries its `request_id`.
-pub const PROTOCOL_MINOR: u32 = 37;
+///   * `38` — **The command menu and a command's output on a Claude run CodeConnect
+///     started.**
+///
+///     Additive:
+///       - [`ws::ClientMessage::GetCommandCatalog`] for such a run answers `available`
+///         once an init has named the commands claude keeps to its own screen: the
+///         commands its claude last reported, but for those screen-only ones and
+///         those whose app screen the daemon refuses on such a run (`clear`,
+///         `model`, `effort`), with
+///         [`ws::CommandCatalogResult::Available`]'s `entries` (each command's
+///         description and argument hint). Left out when empty, so a probed catalog
+///         reads as before. A daemon below 38 answers `unavailable` for such a run.
+///       - A command's output (`/usage`, `/effort low`, `/compact`'s "Compacted") is
+///         a `user_message` whose `message.content` is the
+///         `<local-command-stdout>…</local-command-stdout>` string a terminal run
+///         files, where a daemon below 38 filed nothing, or `/effort`'s output as an
+///         `agent_message`.
+///       - `/usage` and `/cost` sent to such a run are messages; `/status` is
+///         refused, as its claude does not offer it.
+pub const PROTOCOL_MINOR: u32 = 38;
 
 #[cfg(test)]
 mod ledger_tests {

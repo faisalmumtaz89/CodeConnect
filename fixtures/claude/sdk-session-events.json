@@ -1939,13 +1939,29 @@
     "turn_id": "1cc58cf5-85aa-43cc-ae02-81b89a5b6b42"
   },
   {
+    "item_id": "8a2381fc-1a9d-4370-a712-c6381a27ea13",
+    "kind": "user_message",
+    "payload": {
+      "message": {
+        "content": "<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>"
+      }
+    },
+    "seq": 78,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "8a2381fc-1a9d-4370-a712-c6381a27ea13/user_message/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "1cc58cf5-85aa-43cc-ae02-81b89a5b6b42"
+  },
+  {
     "item_id": "e4de448b-c5e0-4bf6-bb35-d957d28c4964",
     "kind": "session_start",
     "payload": {
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 78,
+    "seq": 79,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1967,7 +1983,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 79,
+    "seq": 80,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1983,7 +1999,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 80,
+    "seq": 81,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2031,7 +2047,7 @@
         "speed": "standard"
       }
     },
-    "seq": 81,
+    "seq": 82,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2046,7 +2062,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 82,
+    "seq": 83,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2061,11 +2077,27 @@
       "message": "Conversation compacted",
       "notification_type": "compacted"
     },
-    "seq": 83,
+    "seq": 84,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
     "source_event_id": "d1280241-7f1c-4dfc-9dca-8b4dba7ff316/notification/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "0732db90-272a-4771-85bf-2abc8d6c5474"
+  },
+  {
+    "item_id": "e7812bfa-d5ca-4311-97b8-5a658e76663e",
+    "kind": "user_message",
+    "payload": {
+      "message": {
+        "content": "<local-command-stdout>Compacted </local-command-stdout>"
+      }
+    },
+    "seq": 85,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "e7812bfa-d5ca-4311-97b8-5a658e76663e/user_message/0",
     "ts": "2026-11-13T12:00:00.000Z",
     "turn_id": "0732db90-272a-4771-85bf-2abc8d6c5474"
   },
@@ -2077,7 +2109,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 84,
+    "seq": 86,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2113,7 +2145,7 @@
         "speed": "standard"
       }
     },
-    "seq": 85,
+    "seq": 87,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2128,7 +2160,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 86,
+    "seq": 88,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2150,7 +2182,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 87,
+    "seq": 89,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2166,7 +2198,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 88,
+    "seq": 90,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2214,7 +2246,7 @@
         "speed": "standard"
       }
     },
-    "seq": 89,
+    "seq": 91,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2229,7 +2261,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 90,
+    "seq": 92,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2251,7 +2283,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 91,
+    "seq": 93,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2267,7 +2299,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 92,
+    "seq": 94,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2315,7 +2347,7 @@
         "speed": "standard"
       }
     },
-    "seq": 93,
+    "seq": 95,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2330,7 +2362,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 94,
+    "seq": 96,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2340,23 +2372,17 @@
   },
   {
     "item_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7",
-    "kind": "agent_message",
+    "kind": "user_message",
     "payload": {
       "message": {
-        "content": [
-          {
-            "text": "Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead",
-            "type": "text"
-          }
-        ],
-        "model": "<synthetic>"
+        "content": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"
       }
     },
-    "seq": 95,
+    "seq": 97,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
-    "source_event_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7/agent_message/0",
+    "source_event_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7/user_message/0",
     "ts": "2026-11-13T12:00:00.000Z",
     "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
   },
@@ -2368,7 +2394,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 96,
+    "seq": 98,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2404,7 +2430,7 @@
         "speed": "standard"
       }
     },
-    "seq": 97,
+    "seq": 99,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2419,7 +2445,7 @@
       "message": "Conversation cleared",
       "notification_type": "conversation_cleared"
     },
-    "seq": 98,
+    "seq": 100,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2434,7 +2460,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 99,
+    "seq": 101,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2450,7 +2476,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 100,
+    "seq": 102,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2486,7 +2512,7 @@
         "speed": "standard"
       }
     },
-    "seq": 101,
+    "seq": 103,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2501,7 +2527,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 102,
+    "seq": 104,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2524,7 +2550,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 103,
+    "seq": 105,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2546,7 +2572,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 104,
+    "seq": 106,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2562,7 +2588,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 105,
+    "seq": 107,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2610,7 +2636,7 @@
         "speed": "standard"
       }
     },
-    "seq": 106,
+    "seq": 108,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2625,7 +2651,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 107,
+    "seq": 109,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2648,7 +2674,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 108,
+    "seq": 110,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2670,7 +2696,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 109,
+    "seq": 111,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2686,7 +2712,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 110,
+    "seq": 112,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2734,7 +2760,7 @@
         "speed": "standard"
       }
     },
-    "seq": 111,
+    "seq": 113,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",

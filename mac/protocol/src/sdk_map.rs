@@ -11,10 +11,16 @@
 //! and the login's expiry. A connector the agent calls is part of the conversation
 //! and is kept like any tool call.
 //!
+//! A command's own output (`/usage`, `/effort low`, `/compact`'s "Compacted") is
+//! filed as a terminal run's transcript holds it: a `user_message` whose content is
+//! its `<local-command-stdout>` (or stderr) string. The SDK gives it three ways: a
+//! replayed user line with that content, an assistant line's `local_command_source`
+//! (`/effort`'s), and `system/local_command_output`'s bare `content`.
+//!
 //! What is not a row comes back as a [`Signal`]: the echo of a person's message,
-//! a stamped command's lifecycle, the session id and the folder every `system/init`
-//! carries, and a `/clear`. A subagent's own messages, and every type with no row here, are
-//! skipped.
+//! a stamped command's lifecycle, the session id, the folder and the screen-only
+//! commands every `system/init` carries, claude's command list, and a `/clear`. A
+//! subagent's own messages, and every type with no row here, are skipped.
 
 use serde_json::{json, Map, Value};
 
@@ -36,6 +42,12 @@ pub enum Signal {
     /// `/clear` began a new conversation. Its id is not the session id a run
     /// resumes: the next `system/init` carries that.
     Reset { new_conversation_id: String },
+    /// The commands claude has now, from a `system/commands_changed`, each as it
+    /// gives it (`name`, `description`, `argumentHint`, ...).
+    Commands { commands: Vec<Value> },
+    /// The commands claude offers on its own screen only, from every
+    /// `system/init`'s `terminal_slash_commands`.
+    ScreenOnly { names: Vec<String> },
 }
 
 /// The events and signals of one SDK message.
@@ -74,6 +86,13 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
     };
     let text = |key: &str| message.get(key).and_then(Value::as_str);
     let flag = |key: &str| message.get(key).and_then(Value::as_bool) == Some(true);
+    let output = |content: &str| {
+        event(
+            EventKind::UserMessage,
+            0,
+            json!({"message": {"content": content}}),
+        )
+    };
 
     match (text("type"), text("subtype")) {
         (Some("system"), Some("init")) => {
@@ -87,6 +106,32 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             }
             if let Some(path) = text("cwd") {
                 mapped.signals.push(Signal::Cwd { path: path.into() });
+            }
+            if let Some(names) = message
+                .get("terminal_slash_commands")
+                .and_then(Value::as_array)
+            {
+                mapped.signals.push(Signal::ScreenOnly {
+                    names: names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                });
+            }
+        }
+        (Some("system"), Some("commands_changed")) => {
+            if let Some(commands) = message.get("commands").and_then(Value::as_array) {
+                mapped.signals.push(Signal::Commands {
+                    commands: commands.clone(),
+                });
+            }
+        }
+        (Some("system"), Some("local_command_output")) => {
+            if let Some(content) = text("content") {
+                mapped.events.push(output(&format!(
+                    "<local-command-stdout>{content}</local-command-stdout>"
+                )));
             }
         }
         (Some("system"), Some("status")) if message.get("permissionMode").is_some() => {
@@ -104,19 +149,30 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             ));
         }
         (Some("assistant"), _) => {
-            let mut payload = Map::new();
-            if let Some(inner) = message.get("message") {
-                payload.insert("message".into(), pick(inner, &["model", "content"]));
+            if let Some(source) = text("local_command_source") {
+                mapped.events.push(output(source));
+            } else {
+                let mut payload = Map::new();
+                if let Some(inner) = message.get("message") {
+                    payload.insert("message".into(), pick(inner, &["model", "content"]));
+                }
+                if flag("isApiErrorMessage") {
+                    payload.insert("isApiErrorMessage".into(), Value::Bool(true));
+                }
+                mapped
+                    .events
+                    .push(event(EventKind::AgentMessage, 0, Value::Object(payload)));
             }
-            if flag("isApiErrorMessage") {
-                payload.insert("isApiErrorMessage".into(), Value::Bool(true));
-            }
-            mapped
-                .events
-                .push(event(EventKind::AgentMessage, 0, Value::Object(payload)));
             mapped.signals.extend(delivered(message));
         }
         (Some("user"), _) if flag("isReplay") => {
+            if let Some(content) = message
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .filter(|content| is_command_output(content))
+            {
+                mapped.events.push(output(content));
+            }
             mapped.signals.push(Signal::Delivered { uuid: uuid.into() });
         }
         (Some("user"), _) => {
@@ -198,6 +254,11 @@ fn delivered(message: &Value) -> Vec<Signal> {
         .filter_map(Value::as_str)
         .map(|uuid| Signal::Delivered { uuid: uuid.into() })
         .collect()
+}
+
+/// A command's own output, as claude wraps it.
+fn is_command_output(content: &str) -> bool {
+    content.starts_with("<local-command-stdout>") || content.starts_with("<local-command-stderr>")
 }
 
 fn is_tool_result(block: &Value) -> bool {
@@ -298,8 +359,9 @@ mod tests {
         .unwrap();
     }
 
-    /// The recorded session's 150 messages file 109 events: one for each message that
-    /// has a row, and two, its end and its usage, for each turn's result.
+    /// The recorded session's 150 messages file 111 events: one for each message that
+    /// has a row, and two, its end and its usage, for each turn's result. Three of the
+    /// `user_message`s are commands' output (`/model`'s, `/compact`'s and `/effort`'s).
     #[test]
     fn the_session_files_its_events_by_kind() {
         let mut counts = BTreeMap::new();
@@ -309,9 +371,9 @@ mod tests {
         let expected: BTreeMap<String, i32> = [
             ("session_start", 17),
             ("transcript_permission-mode", 2),
-            ("agent_message", 37),
+            ("agent_message", 36),
             ("tool_result", 15),
-            ("user_message", 2),
+            ("user_message", 5),
             ("turn_complete", 17),
             ("usage", 17),
             ("notification", 2),
@@ -338,8 +400,8 @@ mod tests {
     }
 
     /// Every delivery names a person's message whose echo the session carries,
-    /// and every echo is a delivery; one session id and one folder per init; the
-    /// lifecycles and the one `/clear`.
+    /// and every echo is a delivery; one session id, one folder and the screen-only
+    /// commands per init; the lifecycles, the two command lists and the one `/clear`.
     #[test]
     fn the_signals_are_the_session_s_deliveries_lifecycles_ids_and_reset() {
         let echoes: BTreeSet<String> = messages()
@@ -361,6 +423,139 @@ mod tests {
         assert_eq!(count(|s| matches!(s, Signal::Cwd { .. })), 17);
         assert_eq!(count(|s| matches!(s, Signal::Lifecycle { .. })), 12);
         assert_eq!(count(|s| matches!(s, Signal::Reset { .. })), 1);
+        assert_eq!(count(|s| matches!(s, Signal::Commands { .. })), 2);
+        let screen_only = [
+            "doctor",
+            "send-to-project",
+            "color",
+            "focus",
+            "reload-plugins",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|s| matches!(s, Signal::ScreenOnly { names } if *names == screen_only))
+                .count(),
+            17
+        );
+        let lists: Vec<&Vec<Value>> = signals
+            .iter()
+            .filter_map(|signal| match signal {
+                Signal::Commands { commands } => Some(commands),
+                _ => None,
+            })
+            .collect();
+        let changed: Vec<Value> = messages()
+            .into_iter()
+            .filter(|message| message["subtype"] == "commands_changed")
+            .map(|message| message["commands"].clone())
+            .collect();
+        assert_eq!(
+            lists
+                .into_iter()
+                .cloned()
+                .map(Value::Array)
+                .collect::<Vec<_>>(),
+            changed
+        );
+    }
+
+    /// **B8 G3: a command's output is the person's row in a terminal run's shape**, from
+    /// each of the SDK's three ways of giving it; on the recorded session those are
+    /// `/model`'s line 108, `/compact`'s line 118 and `/effort`'s line 131, and no other
+    /// line.
+    #[test]
+    fn a_commands_output_is_filed_as_a_terminal_run_files_it() {
+        let row = |content: &str| json!({"message": {"content": content}});
+        for (message, content) in [
+            (
+                json!({"type": "user", "uuid": "o1", "isReplay": true,
+                    "message": {"role": "user", "content": "<local-command-stdout>Compacted </local-command-stdout>"}}),
+                "<local-command-stdout>Compacted </local-command-stdout>",
+            ),
+            (
+                json!({"type": "user", "uuid": "o2", "isReplay": true,
+                    "message": {"role": "user", "content": "<local-command-stderr>No such model</local-command-stderr>"}}),
+                "<local-command-stderr>No such model</local-command-stderr>",
+            ),
+            (
+                json!({"type": "assistant", "uuid": "o3",
+                    "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Set effort level to low"}]},
+                    "local_command_run": {"command": "effort", "args": "low"},
+                    "local_command_source": "<local-command-stdout>Set effort level to low</local-command-stdout>"}),
+                "<local-command-stdout>Set effort level to low</local-command-stdout>",
+            ),
+            (
+                json!({"type": "system", "subtype": "local_command_output", "uuid": "o4",
+                    "content": "Current session: 3% used"}),
+                "<local-command-stdout>Current session: 3% used</local-command-stdout>",
+            ),
+        ] {
+            let events = map(&session(), Some("t1"), &message).events;
+            assert_eq!(events.len(), 1, "{message}");
+            assert_eq!(events[0].kind, EventKind::UserMessage, "{message}");
+            assert_eq!(events[0].payload, row(content), "{message}");
+            assert_eq!(events[0].turn_id.as_deref(), Some("t1"));
+        }
+        let outputs: Vec<(usize, Value)> = messages()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, message)| {
+                let events = map(&session(), None, message).events;
+                events
+                    .iter()
+                    .find(|event| {
+                        event.kind == EventKind::UserMessage
+                            && event.payload["message"]["content"]
+                                .as_str()
+                                .is_some_and(is_command_output)
+                    })
+                    .map(|event| (at + 1, event.payload["message"]["content"].clone()))
+            })
+            .collect();
+        assert_eq!(
+            outputs,
+            vec![
+                (108, json!("<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>")),
+                (118, json!("<local-command-stdout>Compacted </local-command-stdout>")),
+                (131, json!("<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>")),
+            ]
+        );
+    }
+
+    /// The person's own echo, and a replayed line that is not a command's output, file
+    /// nothing: each is only a delivery.
+    #[test]
+    fn the_persons_echo_is_only_a_delivery() {
+        for message in [
+            json!({"type": "user", "uuid": "e1", "isReplay": true,
+                "message": {"role": "user", "content": "and the docs"}}),
+            json!({"type": "user", "uuid": "e2", "isReplay": true,
+                "message": {"role": "user", "content": "see <local-command-stdout>x</local-command-stdout>"}}),
+            json!({"type": "user", "uuid": "e3", "isReplay": true,
+                "message": {"role": "user", "content": [{"type": "text", "text": "<local-command-stdout>x</local-command-stdout>"}]}}),
+        ] {
+            let mapped = map(&session(), None, &message);
+            assert!(mapped.events.is_empty(), "{message}");
+            assert_eq!(
+                mapped.signals,
+                vec![Signal::Delivered {
+                    uuid: message["uuid"].as_str().unwrap().into()
+                }]
+            );
+        }
+        let echoes = messages()
+            .into_iter()
+            .filter(|message| {
+                message["isReplay"] == true
+                    && !message["message"]["content"]
+                        .as_str()
+                        .is_some_and(is_command_output)
+            })
+            .count();
+        assert_eq!(echoes, 15);
     }
 
     /// The account's metadata never reaches an event: the payloads keep what a

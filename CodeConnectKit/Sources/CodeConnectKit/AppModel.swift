@@ -316,6 +316,8 @@ public final class AppModel {
     @ObservationIgnored private var sessionsWritten = 0
     @ObservationIgnored private var sessionsAnswered = 0
     @ObservationIgnored private var sessionsCountGeneration = -1
+    /// A fact the fleet had not seen came while a `sessions` request was unanswered (`askFleetForFact`).
+    @ObservationIgnored private var factAskWaiting = false
     /// The link generation whose session list `summaries` is. Open cards are
     /// fetched only from a list the current link sent: one loaded from the
     /// cache, or sent on a link since gone, can name cards the Mac has resolved.
@@ -1711,6 +1713,22 @@ public final class AppModel {
         sessionsCountGeneration = connection.generation
         sessionsWritten = 0
         sessionsAnswered = 0
+        factAskWaiting = false
+    }
+
+    /// Asks for the fleet because of a fact it has not seen, once for any burst of them. With no request unanswered,
+    /// it asks now. Otherwise the fact waits, and one more request goes with the next answer
+    /// (`askFleetForWaitingFact`): an answer to a request written before the fact was filed can predate it. So a
+    /// restart's re-attach facts cost two requests at most, however many runs there are.
+    private func askFleetForFact() {
+        syncSessionsCount()
+        if sessionsWritten > sessionsAnswered { factAskWaiting = true } else { refreshFleet() }
+    }
+
+    private func askFleetForWaitingFact() {
+        guard factAskWaiting else { return }
+        factAskWaiting = false
+        refreshFleet()
     }
 
     // MARK: - Derived state
@@ -1818,7 +1836,7 @@ public final class AppModel {
                     capability: FleetStatusRule.capability(
                         summary: summary, capabilities: connection.capabilities),
                     blockedCount: max(summary.blockedOn.count, pending.count),
-                    lastEventAt: shown?.lastEventAt,
+                    lastActivityAt: shown?.lastActivityAt,
                     cachedAt: (shown?.hasLiveData ?? false) ? nil : shown?.loadedFromCacheAt,
                     machineID: machineID, machineName: name)
             })
@@ -2181,6 +2199,7 @@ public final class AppModel {
             }
             publishList()
             advanceCatchUp()
+            askFleetForWaitingFact()
         case .event(let event):
             let sessionState = state(for: event.sessionKey)
             let heldThrough = sessionState.lastSeq
@@ -2190,6 +2209,15 @@ public final class AppModel {
             // A resolution or a new card changes the fleet's top band.
             if event.kind == .approvalRequest || event.kind == .approvalResolved {
                 refreshFleet()
+            }
+            // A run's link attaching or dropping, or the run ending, changes what the fleet says of it, and the daemon
+            // sends a list only when asked: a fact newer than the list holds is asked about now, not at the next
+            // timed refresh. A replayed older fact is in the list already.
+            if event.kind == .linkState || event.isSessionExit,
+                let summary = summaries.first(where: { $0.sessionKey == event.sessionKey }),
+                event.seq > summary.lastSeq
+            {
+                askFleetForFact()
             }
             if catchUp != nil {
                 // Only a session still short of what it owes is progress: one
