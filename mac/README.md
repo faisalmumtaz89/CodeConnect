@@ -1002,7 +1002,10 @@ gate then refuses.
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
 `send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
-`codex_compose`, `question_card`, `hook_only_approvals`, `history_pages` and `supported_agents` so the app disables
+`codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
+`can_approve_reliably`, `fail_mode`, `answer_path`, `hold_secs`, `slash_composer_recovery`,
+`command_catalog`, `terminal_pty`, `start_session`, `start_worktree`, `browse_folders`,
+`machine_stats` and `stop_run` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a

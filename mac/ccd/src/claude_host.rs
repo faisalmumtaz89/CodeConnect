@@ -8548,8 +8548,9 @@ mod tests {
         false
     }
 
-    /// **B8 G6: a real claude's command menu and a command's output reach the app**
-    /// (app-qa's rig). After a first turn, the run's catalog is what claude reported: none
+    /// **B8 G6: what the daemon serves of a real claude's command menu, and how it files a
+    /// command's output** (app-qa's rig; the test binary drives the daemon, no app). After a
+    /// first turn, the run's catalog is what claude reported: none
     /// of a claude.ai connector's commands, of its screen-only ones or of
     /// [`REFUSED_SCREENS`], and `usage` among them. Then `/effort low` and `/usage`, each
     /// sent as a message, file their output as a terminal run does: a `user_message` with
