@@ -1167,9 +1167,9 @@ included, are filed once the host has taken them. A message sent while one of Cl
 tools is running reaches Claude with that tool's result; one sent at any other time in a
 turn runs as Claude's next turn. A retry with the same request id is answered from its
 first send, so nothing is sent twice.
-For such a run the Model and Effort sheets' typed confirmations are refused ("Changing the
-model isn't available for this session yet.", the same for the effort: the sheets set them
-with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude
+For such a run the Model and Effort screens are refused, as a sheet's typed confirmation or
+typed alone (`/model`, `/effort`) ("Changing the model isn't available for this session
+yet.", the same for the effort: the sheets set them with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude
 doesn't offer /status in this session."); `/usage`, `/cost` and `/clear` are messages. A
 clear goes on in the same run, as at claude's keyboard: claude starts its new session, the
 run's events carry a "Conversation cleared" notice with the earlier history above it, and a
