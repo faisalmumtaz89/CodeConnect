@@ -7,7 +7,8 @@ import SwiftUI
 /// without asking) ends in "…" and asks first, in the reply box's confirmation. The checks follow the run's facts, never
 /// a guess between a click and its answer. While one of its calls is in flight the list is disabled and a small spinner
 /// stands in the chevron's place; what became of the call is the reply box's note line. Its last rows are the reply
-/// box's own: Compact… opens its compact form, and Clear… its confirmation.
+/// box's own: Compact… opens its compact form, and Clear… its confirmation. Closed, the button names the run's mode
+/// beside the model whenever it is not the agent's asking default, a `confirm` mode in red.
 struct HostedSettingsButton: View {
     let model: AppModel
     let key: String
@@ -24,6 +25,13 @@ struct HostedSettingsButton: View {
 
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
 
+    /// The run's mode when it is not the agent's asking default (the menu's first mode), named beside the model in the
+    /// agent's own words so that a run left in another mode says so at rest; one the menu marks `confirm` is red. It
+    /// follows the run's fact, as the list's check does.
+    private var standingMode: MenuMode? {
+        settings.selectedMode == settings.modes.first ? nil : settings.selectedMode
+    }
+
     var body: some View {
         Button {
             open.toggle()
@@ -31,6 +39,9 @@ struct HostedSettingsButton: View {
             HStack(spacing: 5) {
                 AgentMark(agent: .claude)
                 Text(name).foregroundStyle(Theme.text)
+                if let standingMode {
+                    Text("· \(standingMode.label)").foregroundStyle(standingMode.confirm ? Theme.red : Theme.text)
+                }
                 if settings.inFlight {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
                 } else {
@@ -46,7 +57,7 @@ struct HostedSettingsButton: View {
         }
         .buttonStyle(.hover(radius: 5, id: "session.composer.commands"))
         .help(help)
-        .accessibilityLabel(name)
+        .accessibilityLabel(standingMode.map { "\(name) · \($0.label)" } ?? name)
         .accessibilityIdentifier("session.composer.commands")
         .accessibilityValue(open ? "open" : "closed")
         .overlay(alignment: .bottomTrailing) {
