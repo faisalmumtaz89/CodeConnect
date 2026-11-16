@@ -3,8 +3,8 @@ import XCTest
 @testable import CodeConnect
 @testable import CodeConnectKit
 
-/// A daemon-emitted wire recording (`ios/CodeConnectTests/Resources/<name>.json`,
-/// re-derived by `ccd/src/fixture_replay.rs`), replayed into one session the way
+/// A daemon-emitted wire recording (`ios/CodeConnectTests/Resources/<name>.json`;
+/// `fixtures/README.md` says which daemon emitted each), replayed into one session the way
 /// the phone builds it, and the fleet status a live, attached session reads
 /// from it.
 @MainActor

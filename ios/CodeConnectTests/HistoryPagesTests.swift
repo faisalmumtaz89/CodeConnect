@@ -230,7 +230,7 @@ final class HistoryPagesTests: XCTestCase {
             template, ["value": .string(value), "seq": .int(Int64(seq))].merging(changes) { $1 })
     }
 
-    /// Claude's permission-mode transcript line, as the tailer files it.
+    /// Claude's permission-mode transcript line, as an earlier build's tailer filed it.
     private func modeLine(_ seq: UInt64, _ mode: String) throws -> ServerMessage {
         let frame = try eventFrame(seq)
         let event = try setting(

@@ -6,9 +6,9 @@ import XCTest
 /// A built-in slash command typed after a turn ended.
 ///
 /// `transcript-local-commands-wire.json` is emitted, not written: Claude Code
-/// 2.1.308, recorded against a fake model, through the daemon's production
-/// tailer and store as the events a phone is sent (`ccd/src/fixture_replay.rs`
-/// re-derives it). `model-after-turn`: a turn closed (seq 9), `/model sonnet`
+/// 2.1.308, recorded against a fake model, through an earlier daemon's
+/// transcript tailer and store as the events a phone is sent (frozen, as that
+/// daemon emitted it; never regenerated: `fixtures/README.md`). `model-after-turn`: a turn closed (seq 9), `/model sonnet`
 /// — caveat (21), invocation (22), output (23), no reply, no turn end — then a
 /// typed prompt (25) answered and closed (30). `plan-goal`: a turn closed (19),
 /// `/plan <description>` (22, 23) answered and closed (27), then `/goal
@@ -139,9 +139,10 @@ final class LocalCommandStatusTests: XCTestCase {
     /// A skill invoked after a finished turn is work, though its line carries
     /// neither `promptSource` nor `turnOrigin`.
     ///
-    /// `transcript-skill-invocation-wire.json` is emitted through the daemon's
-    /// production tailer and store, and `ccd/src/fixture_replay.rs` re-derives
-    /// it from `transcript/skill-invocation-unstamped.jsonl`, built on
+    /// `transcript-skill-invocation-wire.json` is emitted through an earlier
+    /// daemon's transcript tailer and store (frozen, as that daemon emitted it;
+    /// never regenerated: `fixtures/README.md`), from
+    /// `transcript/skill-invocation-unstamped.jsonl`, built on
     /// `plan-goal-2.1.308.jsonl`: a turn closed (19), then a skill's
     /// `<command-message>`-first line with no stamp (21), the skill's `isMeta`
     /// body (22), Claude's reply (23) and the turn's end (24) — the shape

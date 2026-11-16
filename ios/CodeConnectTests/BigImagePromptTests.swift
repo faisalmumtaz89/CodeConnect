@@ -7,9 +7,9 @@ import XCTest
 ///
 /// `transcript-big-image-prompt-wire.json` is emitted, not written: Claude Code
 /// 2.1.308, two typed prompts with a pasted image each (seq 5 and 12), each
-/// answered (9, 16) and closed (10, 17), through the daemon's production tailer
-/// and ingest with its payload limit at 4 KiB, as the events a phone is sent
-/// (`ccd/src/state.rs` re-derives it). The second prompt is over the limit and
+/// answered (9, 16) and closed (10, 17), through an earlier daemon's transcript
+/// tailer and ingest with its payload limit at 4 KiB, as the events a phone is
+/// sent (frozen, as that daemon emitted it; never regenerated: `fixtures/README.md`). The second prompt is over the limit and
 /// arrives with its fields and words, its image reduced to `{"type": "image"}`.
 @MainActor
 final class BigImagePromptTests: XCTestCase {
