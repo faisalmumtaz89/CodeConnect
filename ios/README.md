@@ -685,7 +685,9 @@ function of the events:
   cleared." already says it (for `/clear` with or without a name, and for `/new` and
   `/reset`, which Claude Code records as `/clear`). In a session started from an app,
   whose agent host files a start at every turn, one that says nothing of why it started
-  draws none, and a clear's "Conversation cleared." is ccd's own notice; a Codex start
+  draws none, a clear's "Conversation cleared." and a compaction's "Conversation compacted"
+  are ccd's own notices, and an effort set from the app is drawn in the effort menu's words
+  ("Effort set to Extra high"); a Codex start
   never says, and draws "Session started";
 * Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
   drawn, as the card states the question and how it ended. Every other tool keeps its
