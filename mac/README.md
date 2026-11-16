@@ -1133,8 +1133,12 @@ so its menu entry is marked `confirm` (minor 40): an app sends it with `confirme
 person has confirmed it in the app, and ccd refuses it without, nothing sent ("Turning on
 Bypass permissions needs your confirmation in the app; nothing was changed."). Every hosted
 claude starts with the SDK's guard for that mode set (`allowDangerouslySkipPermissions`),
-which sets no mode by itself; a ccd restart keeps the mode the person confirmed for the same
-process, and a new claude, a relaunch included, starts in the person's own default. Each part then goes to the host as a
+which names no mode: a start takes the person's own `defaultMode`, so a person whose own
+settings default to `bypassPermissions` now gets it on a run started from the app without
+the app's confirmation, as when they run claude directly, and a project's settings cannot
+set it (claude drops an escalating `defaultMode` from repo-committed settings); the run's
+mode fact says so from its first turn. A ccd restart keeps the mode the person confirmed for
+the same process, and a new claude starts in the person's own default. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it
 (`setModel`, `applyFlagSettings`, `setPermissionMode`), one line at a time. The answer is
 `applied`, from `now` between turns or from the `next_turn` while one runs; `refused` with

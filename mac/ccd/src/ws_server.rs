@@ -10220,6 +10220,35 @@ mod tests {
         );
     }
 
+    /// **215 G1 at the wire: a `set_mode` frame that does not say the person confirmed Bypass
+    /// permissions is refused.** The frame as an app without the confirmation sends it, with no
+    /// `confirmed`, to a Claude run this daemon knows, is answered with the confirmation
+    /// refusal: ccd checks the mode before it looks for the run's host.
+    #[tokio::test]
+    async fn a_set_mode_frame_without_the_confirmation_is_refused() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        hosting_a_claude_run(&server.daemon, uid);
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let frame = serde_json::json!({"type": "set_mode", "session_id": uid,
+            "request_id": "mode-1", "mode": "bypassPermissions"});
+        phone.send(Message::Text(frame.to_string())).await.unwrap();
+        let answer = loop {
+            let reply = next_json(&mut phone).await.expect("an answer to set_mode");
+            if reply["type"] == "setting_result" {
+                break reply;
+            }
+        };
+        assert_eq!(answer["request_id"], "mode-1", "{answer}");
+        assert_eq!(
+            answer["result"]["reason"],
+            "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.",
+            "{answer}"
+        );
+    }
+
     /// On the LAN the operator switched on with `ws_allow_plaintext`, a
     /// paired device may start sessions and browse folders, as it may read, answer and
     /// say there. The bootstrap token still may not, and the terminal stays on private

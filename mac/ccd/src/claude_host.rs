@@ -7692,10 +7692,11 @@ mod tests {
         }
     }
 
-    /// **B8 part 2 S2: a setting is checked before anything reaches the host.** A change
-    /// naming nothing, a model or an effort the run's menus do not list, and a mode not among
-    /// the three, `bypassPermissions` above all, are refused with nothing sent; so is any
-    /// change to a run not running, and to a Claude run in a terminal.
+    /// **B8 part 2 S2, and 215 G1: a setting is checked before anything reaches the host.** A
+    /// change naming nothing, a model or an effort the run's menus do not list, a mode not
+    /// among the four, and `bypassPermissions` without the person's confirmation are refused
+    /// with nothing sent; so is any change to a run not running, and to a Claude run in a
+    /// terminal.
     #[tokio::test]
     async fn a_setting_is_checked_before_anything_reaches_the_host() {
         let rig = rig();
@@ -8204,8 +8205,10 @@ mod tests {
     /// **Decisions 215 and 214: the mode that asks nothing, as the apps are sent it (minor
     /// 40).** `fixtures/claude/minor-40-wire.json` is the apps' pin: the run's menu modes with
     /// `bypassPermissions` alone marked `confirm`, its `set_mode` sent bare (no `confirmed` on
-    /// the wire) and refused, and sent `confirmed` and applied. Gate one reads the committed
-    /// file; gate two re-derives it and requires the same JSON.
+    /// the wire) and refused, and sent `confirmed` and applied; and a run that starts in the
+    /// person's own Bypass permissions, its mode fact saying so from its first turn, so the
+    /// apps explain it. Gate one reads the committed file; gate two re-derives it and requires
+    /// the same JSON.
     #[tokio::test]
     async fn the_minor_40_wire_fixture_is_what_this_build_emits() {
         const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-40-wire.json");
@@ -8228,6 +8231,11 @@ mod tests {
             "left out when false"
         );
         assert_eq!(committed["set_mode_confirmed_request"]["confirmed"], true);
+        assert_eq!(
+            committed["session_hosted_started_in_bypass"]["permission_mode"]["value"],
+            "bypassPermissions",
+            "a run that starts in the person's own Bypass permissions says so from its first turn"
+        );
         assert_eq!(
             derived_minor_40_wire().await,
             committed,
@@ -8301,12 +8309,34 @@ mod tests {
             })
             .unwrap()
         };
+        // A start whose claude reports Bypass permissions at its first init, as claude does
+        // for a person whose own settings default to it: the run's mode says so from then on.
+        let in_bypass = self::rig();
+        let mut begun = live_run(&in_bypass).await;
+        sdk(
+            &mut begun.write,
+            3,
+            serde_json::json!({"type": "system", "subtype": "init",
+                "uuid": "9d1f0000-0000-4000-8000-000000000081",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "model": "claude-sonnet-5-5", "permissionMode": "bypassPermissions"}),
+        )
+        .await;
+        assert_eq!(next(&mut begun.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let started_in_bypass = pinned_summary(
+            &summary(&in_bypass.daemon, &begun.uid).await,
+            &begun.uid,
+            fixed,
+            &in_bypass.root,
+        );
+        stop(&begun.dir);
         serde_json::json!({
             "menus_modes": modes,
             "set_mode_bare_request": request("mode-1", false),
             "refused_unconfirmed": answer("mode-1", bare),
             "set_mode_confirmed_request": request("mode-2", true),
             "applied_confirmed": answer("mode-2", confirmed),
+            "session_hosted_started_in_bypass": started_in_bypass,
         })
     }
 
@@ -9588,12 +9618,26 @@ mod tests {
     /// in a folder of its own, `name`, under `CODECONNECT_TEST_RIG_DIR`, as G6's run is:
     /// the rig, the run's uid and its host's pid.
     async fn real_claude_run(name: &str, prompt: &str) -> (Rig, String, i32) {
+        real_claude_run_in(name, prompt, None).await
+    }
+
+    /// [`real_claude_run`], with `project_settings`, when given, written as the run's folder's
+    /// own `.claude/settings.json` and the folder trusted, so claude reads them.
+    async fn real_claude_run_in(
+        name: &str,
+        prompt: &str,
+        project_settings: Option<serde_json::Value>,
+    ) -> (Rig, String, i32) {
         let var =
             |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
         let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
         let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
         let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join(name);
         std::fs::create_dir(&root).unwrap();
+        if let Some(settings) = &project_settings {
+            std::fs::create_dir(root.join(".claude")).unwrap();
+            std::fs::write(root.join(".claude/settings.json"), settings.to_string()).unwrap();
+        }
         let mut environment: HashMap<OsString, OsString> = [
             "HOME",
             "USER",
@@ -9622,7 +9666,11 @@ mod tests {
                 prompt,
                 model: None,
                 worktree: None,
-                trust: Trust::NotTrusted,
+                trust: if project_settings.is_some() {
+                    Trust::Trusted
+                } else {
+                    Trust::NotTrusted
+                },
                 claude_path: claude.to_str().unwrap(),
                 host_bin: &host,
                 codeconnect: &codeconnect,
@@ -9635,6 +9683,160 @@ mod tests {
             .unwrap()
             .host_pid;
         (rig, uid, host_pid)
+    }
+
+    /// **215 G4 and G4b: Bypass permissions on a real claude, confirmed from the app**
+    /// (app-qa's rig, two prompts). Printed (`G4:`, `G4b:`): the run's mode at its start, which
+    /// is the person's own default since no start names a mode; prompt 1 asks for a command that
+    /// writes, so a card is open, and the app's confirmed switch is sent while it is: its answer,
+    /// and what claude then does with the open card (still open, or how ccd closed it) and the
+    /// mode claude reports. The card, if still open, is denied; prompt 2 asks for a second
+    /// command that writes, and whether claude asks for it or runs it. Then End run, as G2.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_takes_bypass_permissions_confirmed_from_the_app() {
+        let write = |name: &str| {
+            format!(
+                "Use the Bash tool to run exactly one command, then say done. The command, once: echo g4 > {name}"
+            )
+        };
+        let (rig, uid, host_pid) = real_claude_run("g4", &write("g4-first.txt")).await;
+        let mode = |session: protocol::event::SessionSummary| {
+            session.permission_mode.map(|fact| fact.value)
+        };
+        let card = first_card(&rig, &uid).await;
+        let at_start = mode(summary(&rig.daemon, &uid).await);
+        let switched = rig
+            .daemon
+            .set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true,
+                },
+            )
+            .await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let open = cards(&rig.daemon, &uid).await.1;
+        let still_open = card
+            .as_ref()
+            .is_some_and(|(request_id, _)| open.contains(request_id));
+        let closed = card.as_ref().and_then(|(request_id, _)| {
+            stored(&rig, &uid)
+                .into_iter()
+                .find(|event| event["source_event_id"] == format!("resolved:{request_id}"))
+                .map(|event| event["payload"]["detail"].clone())
+        });
+        let first_written = rig.root.join("g4-first.txt").exists();
+        println!(
+            "G4: mode at start {at_start:?}; a card {}; the confirmed switch {switched:?}; mode after {:?}",
+            card.is_some(),
+            mode(summary(&rig.daemon, &uid).await)
+        );
+        println!(
+            "G4b: 10 s after the switch the card is open {still_open}; closed with {closed:?}; g4-first.txt written {first_written}"
+        );
+        if let (true, Some((request_id, hash))) = (still_open, card.as_ref()) {
+            let denied = rig
+                .daemon
+                .answer(
+                    request_id,
+                    hash,
+                    AnswerDecision::Deny,
+                    Some(&uid),
+                    AnsweredOn::Iphone,
+                )
+                .await;
+            println!("G4b: the open card denied {denied:?}");
+        }
+        let ends = |rig: &Rig| {
+            stored(rig, &uid)
+                .iter()
+                .filter(|event| event["kind"] == "turn_complete")
+                .count()
+        };
+        for _ in 0..120 {
+            if ends(&rig) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let asked_before = stored(&rig, &uid)
+            .iter()
+            .filter(|event| event["kind"] == "approval_request")
+            .count();
+        let sent = send_as_app(&rig.daemon, &uid, "g4-second", &write("g4-second.txt")).await;
+        for _ in 0..180 {
+            if ends(&rig) >= 2 || rig.root.join("g4-second.txt").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let asked = stored(&rig, &uid)
+            .iter()
+            .filter(|event| event["kind"] == "approval_request")
+            .count()
+            - asked_before;
+        println!(
+            "G4: prompt 2 {sent:?}; cards asked for it {asked}; g4-second.txt written {}; mode {:?}",
+            rig.root.join("g4-second.txt").exists(),
+            mode(summary(&rig.daemon, &uid).await)
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("G4: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
+    /// **215 G4's veto: a claude whose settings disable Bypass permissions refuses the switch,
+    /// and its reason reaches the app** (app-qa's rig, one prompt). The run's folder is trusted
+    /// and its own settings say `permissions.disableBypassPermissionsMode: "disable"`; after a
+    /// turn that writes nothing, the app's confirmed switch is answered with claude's refusal.
+    /// Printed (`G4V:`): the answer and the mode after. Then End run, as G2.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_that_disables_bypass_refuses_it_with_its_reason() {
+        let prompt =
+            "Use the Bash tool to run exactly one command, then say done. The command, once: echo g4v";
+        let veto = serde_json::json!({"permissions": {"disableBypassPermissionsMode": "disable"}});
+        let (rig, uid, host_pid) = real_claude_run_in("g4veto", prompt, Some(veto)).await;
+        for _ in 0..180 {
+            if stored(&rig, &uid)
+                .iter()
+                .any(|event| event["kind"] == "turn_complete")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let switched = rig
+            .daemon
+            .set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true,
+                },
+            )
+            .await;
+        println!(
+            "G4V: the confirmed switch {switched:?}; mode after {:?}",
+            summary(&rig.daemon, &uid)
+                .await
+                .permission_mode
+                .map(|fact| fact.value)
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("G4V: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
     }
 
     /// The run `uid`'s first card, once claude has asked: its request id and the hash an
