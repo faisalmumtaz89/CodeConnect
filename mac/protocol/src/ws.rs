@@ -1726,27 +1726,23 @@ pub struct CodexResolutionPayload {
     pub resolution: CodexResolution,
 }
 
-/// What the daemon knows about the installed Claude Code's slash commands.
+/// What the daemon knows about a Claude run's slash commands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CommandCatalogResult {
-    /// The binary's own inventory, read from its init message, or, for a run
-    /// CodeConnect started, the list its claude last reported. Names come
-    /// without the leading slash, exactly as emitted — the daemon adds and
+    /// For a run CodeConnect started, the list its claude last reported. Names
+    /// come without the leading slash, exactly as emitted — the daemon adds and
     /// invents nothing.
     Available {
         commands: Vec<String>,
-        /// What claude says of each command, for a run CodeConnect started
-        /// (minor 38); empty, and left out, for one probed from its binary.
+        /// What claude says of each command (minor 38); left out when empty.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         entries: Vec<CommandEntry>,
-        /// The version claude reported, when it did: its init message's, or,
-        /// for a run CodeConnect started, its initialize answer's.
+        /// The version claude reported in its initialize answer, when it did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claude_version: Option<String>,
-        /// When this list was actually read from the binary. A cache hit
-        /// reports the original probe time, not the request time — the age of
-        /// a fact is part of the fact.
+        /// When ccd took this list from claude: the start's initialize answer or
+        /// its latest `commands_changed`. The age of a fact is part of the fact.
         probed_at: String,
     },
     /// No list. A complete answer, not an error: the phone must fall back to
