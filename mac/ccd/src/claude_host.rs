@@ -2253,13 +2253,22 @@ pub(crate) fn person_row(
 
 /// The command `text` is to claude: its first word `/<name>` when `<name>` is one of the
 /// run's commands as claude last reported them (`commands`, kept from the start's
-/// initialize answer and each `commands_changed`), with or without an argument. Any other
-/// text, one that merely starts with a slash among it, is a message.
+/// initialize answer and each `commands_changed`), by its name or one of its `aliases`,
+/// with or without an argument. It is named as typed, as claude's end of it names it:
+/// `/cost`, an alias of `usage`, is `cost`. Any other text, one that merely starts with a
+/// slash among it, is a message.
 fn sent_command<'a>(text: &'a str, commands: &[serde_json::Value]) -> Option<&'a str> {
     let name = text.split_whitespace().next()?.strip_prefix('/')?;
+    let is_name = |value: &serde_json::Value| value.as_str() == Some(name);
     commands
         .iter()
-        .any(|command| command.get("name").and_then(serde_json::Value::as_str) == Some(name))
+        .any(|command| {
+            command.get("name").is_some_and(is_name)
+                || command
+                    .get("aliases")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|aliases| aliases.iter().any(is_name))
+        })
         .then_some(name)
 }
 
@@ -5850,14 +5859,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ("/help", None),
-                ("/cost", None),
+                ("/cost", Some(serde_json::json!("cost"))),
                 (
                     "/config autoCompact=false",
                     Some(serde_json::json!("config"))
                 ),
             ],
-            "the person's commands after the clear: one claude does not list (/help) or lists \
-             only as another's alias (/cost) names none"
+            "the person's commands after the clear: one claude does not list (/help) names \
+             none; one claude lists as another's alias (/cost) names the alias"
         );
         assert_eq!(
             events
@@ -8126,6 +8135,23 @@ mod tests {
             assert_eq!(sent_command(text, commands), command, "{text:?}");
         }
         assert_eq!(sent_command("/clear", &[]), None, "no list, no command");
+    }
+
+    /// A command typed by one of its aliases is that command, named as typed: claude's
+    /// recorded list (sdk-session-0.3.322.jsonl:125) holds `cost` as an alias of `usage`,
+    /// and claude's end of `/cost` names `cost`; `help` is in that list under no name.
+    #[test]
+    fn a_command_typed_by_its_alias_is_that_command() {
+        let capture = capture();
+        assert_eq!(capture[124]["subtype"], "commands_changed");
+        let commands = capture[124]["commands"].as_array().unwrap();
+        for (text, command) in [
+            ("/cost", Some("cost")),
+            ("/usage", Some("usage")),
+            ("/help", None),
+        ] {
+            assert_eq!(sent_command(text, commands), command, "{text:?}");
+        }
     }
 
     #[tokio::test]

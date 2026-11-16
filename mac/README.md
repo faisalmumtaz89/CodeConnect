@@ -1025,8 +1025,10 @@ died before it recorded the run's host becomes `failed`.
 An app's message to a live Claude run (`send_text`) goes into claude's input through the run's
 host, as one more message from the person; the person's words, the start's prompt
 included, are filed once the host has taken them. A later message whose first word is
-`/<name>`, `<name>` one of claude's commands as the run last had them, is filed naming it
-(`command`: `/effort low` is `effort`); any other text, and the start's prompt, names none.
+`/<name>`, `<name>` one of claude's commands or one of their aliases as the run last had
+them, is filed naming it as typed (`command`: `/effort low` is `effort`, and `/cost`, an alias
+of `usage`, is `cost`, as claude's end of it names it); any other text, and the start's
+prompt, names none.
 A command's own turn ends naming it too, with claude's own `local_command` on the
 `turn_complete`, which an agent turn's end never carries. A message sent while one of Claude's
 tools is running reaches Claude with that tool's result; one sent at any other time in a

@@ -294,6 +294,7 @@
     {
       "kind": "user_message",
       "payload": {
+        "command": "cost",
         "request_id": "r-command-1",
         "text": "/cost"
       },
