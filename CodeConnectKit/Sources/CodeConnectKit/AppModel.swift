@@ -2244,6 +2244,12 @@ public final class AppModel {
             // the event that completes a catch-up flips `launchSettled` true, so reading it afterward
             // would read a replay's last event as live. Used by the "Not sent: stopped" hand-back.
             let wasLiveArrival = launchSettled && catchUp == nil
+            // The run's setting-fact seqs before ingest, to learn whether this event moves one: the
+            // sheet's model/effort/mode selection is the daemon's resolved value, carried only by the
+            // list, so a fact an event changes is asked for below rather than waited for at the next poll.
+            let modeSeqBefore = sessionState.permissionModeSeq
+            let modelSeqBefore = sessionState.lastConfirmedModelSeq
+            let effortSeqBefore = sessionState.lastConfirmedEffortSeq
             sessionState.ingest(event)
             scheduleCacheWrite(event.sessionKey)
             if !launchSettled { settleLaunchIfCaughtUp() }
@@ -2252,10 +2258,19 @@ public final class AppModel {
             if event.kind == .approvalRequest || event.kind == .approvalResolved || event.kind == .sessionEnd {
                 refreshFleet()
             }
-            // A run's link attaching or dropping, or the run ending, changes what the fleet says of it, and the daemon
-            // sends a list only when asked: a fact newer than the list holds is asked about now, not at the next
-            // timed refresh. A replayed older fact is in the list already.
-            if event.kind == .linkState || event.isSessionExit,
+            // A run's link attaching or dropping, the run ending, or a setting fact the sheet's selection
+            // follows (its permission mode, a /model receipt's model, or an effort notice) moving on this
+            // event — each changes what the fleet says of the run, and the daemon sends a list only when
+            // asked: a fact newer than the list holds is asked about now, not at the next timed refresh. A
+            // replayed older fact is in the list already. For a setting fact the event is the trigger, so
+            // the fact already exists when the pull goes out — no race with a setting's reply. The model
+            // fact is also read off session_start, which carries the current model at every turn init, not
+            // a change; it is excluded so a streaming turn is not a poll storm, leaving the /model receipt
+            // (a `.userMessage`). Mode and effort never advance on session_start.
+            let settingFactMoved = sessionState.permissionModeSeq != modeSeqBefore
+                || sessionState.lastConfirmedEffortSeq != effortSeqBefore
+                || (event.kind != .sessionStart && sessionState.lastConfirmedModelSeq != modelSeqBefore)
+            if event.kind == .linkState || event.isSessionExit || settingFactMoved,
                 let summary = summaries.first(where: { $0.sessionKey == event.sessionKey }),
                 event.seq > summary.lastSeq
             {
@@ -3354,10 +3369,10 @@ public final class AppModel {
 
     /// Set this run's permission mode. The label the outcome names is the menu's own.
     @discardableResult
-    public func setMode(for key: String, modeValue: String) async -> SettingResult? {
+    public func setMode(for key: String, modeValue: String, confirmed: Bool = false) async -> SettingResult? {
         await applySetting(
             key: key, setting: .mode, label: menuLabel(key: key, setting: .mode, value: modeValue)
-        ) { try await self.connection.setMode(session: $0, requestID: $1, mode: modeValue) }
+        ) { try await self.connection.setMode(session: $0, requestID: $1, mode: modeValue, confirmed: confirmed) }
     }
 
     /// **One call in flight per run.** A second tap while one is in flight is dropped — the menus are

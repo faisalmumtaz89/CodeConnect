@@ -691,7 +691,8 @@ enum Fixtures {
         "detail":"Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",\
         "efforts":["low","medium","high","xhigh","max"]}],\
         "modes":[{"value":"default","label":"Ask before edits"},\
-        {"value":"acceptEdits","label":"Accept edits"},{"value":"plan","label":"Plan"}]}}\
+        {"value":"acceptEdits","label":"Accept edits"},{"value":"plan","label":"Plan"},\
+        {"value":"bypassPermissions","label":"Bypass permissions","confirm":true}]}}\
         ]}
         """
     }

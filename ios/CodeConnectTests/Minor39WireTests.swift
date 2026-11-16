@@ -94,7 +94,7 @@ final class Minor39WireTests: XCTestCase {
             try encoded(.setModel(session: uid, requestID: "effort-1", model: nil, effort: "high")),
             try XCTUnwrap(try wire()["set_effort_request"]))
         XCTAssertEqual(
-            try encoded(.setMode(session: uid, requestID: "mode-1", mode: "plan")),
+            try encoded(.setMode(session: uid, requestID: "mode-1", mode: "plan", confirmed: false)),
             try XCTUnwrap(try wire()["set_mode_request"]))
     }
 }

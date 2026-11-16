@@ -21,7 +21,14 @@ struct HostedSettingsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
+    /// A mode the menu marks `confirm`, tapped and awaiting the person's confirmation before it is sent.
+    @State private var confirmingMode: MenuMode?
+
     private var settings: RunSettings { model.runSettings(for: sessionKey) }
+
+    /// The run's agent — the confirmation words are the agent's. Claude for a hosted run, which is all
+    /// this sheet is reached for.
+    private var agent: AgentKind { model.shownSummary(for: sessionKey)?.agent ?? .claude }
 
     var body: some View {
         CCSheetChrome("Settings", onClose: { dismiss() }) {
@@ -44,6 +51,20 @@ struct HostedSettingsSheet: View {
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 outcomeBar
+            }
+            .alert(
+                ModeConfirmation.words(for: agent).title,
+                isPresented: Binding(
+                    get: { confirmingMode != nil },
+                    set: { if !$0 { confirmingMode = nil } }),
+                presenting: confirmingMode
+            ) { mode in
+                Button(ModeConfirmation.words(for: agent).confirm, role: .destructive) {
+                    run { await model.setMode(for: sessionKey, modeValue: mode.value, confirmed: true) }
+                }
+                Button(ModeConfirmation.words(for: agent).cancel, role: .cancel) {}
+            } message: { _ in
+                Text(ModeConfirmation.words(for: agent).message)
             }
         }
     }
@@ -79,10 +100,18 @@ struct HostedSettingsSheet: View {
         card {
             ForEach(Array(live.modes.enumerated()), id: \.element.value) { index, entry in
                 choiceRow(
-                    title: entry.label, subtitle: nil,
+                    title: entry.confirm ? "\(entry.label)…" : entry.label, subtitle: nil,
                     isSelected: live.selectedMode?.value == entry.value,
                     isLast: index == live.modes.count - 1, disabled: live.inFlight
-                ) { await model.setMode(for: sessionKey, modeValue: entry.value) }
+                ) {
+                    // A mode the daemon marks `confirm` asks first; nothing is sent until the alert's
+                    // confirm button, which sends it with `confirmed`.
+                    if entry.confirm {
+                        confirmingMode = entry
+                        return nil
+                    }
+                    return await model.setMode(for: sessionKey, modeValue: entry.value)
+                }
             }
         }
     }
