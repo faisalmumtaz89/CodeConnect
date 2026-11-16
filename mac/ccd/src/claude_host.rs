@@ -1325,9 +1325,12 @@ enum Told {
 /// not in the run's menus, an effort none of its models takes. Then each part goes to the
 /// host as its own line, the model before the effort, and waits for claude to take it: a
 /// part refused ends the change with claude's reason, saying so when the model was changed
-/// and the effort was not. `applied` reads `next_turn` while a turn runs. An effort taken
-/// is filed as the run's ([`apply_setting_outcome`]). Nothing is kept per request: a retry
-/// applies the change again.
+/// and the effort was not. `applied` reads `now`: claude takes a model or a mode from its
+/// next request, the running turn's next step included. A change holding an effort reads
+/// `next_turn` while a turn runs, since nothing yet shows when claude applies an effort; a
+/// change of a model and an effort together, which no app sends, is answered by its effort.
+/// An effort taken is filed as the run's ([`apply_setting_outcome`]). Nothing is kept per
+/// request: a retry applies the change again.
 pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) -> SettingResult {
     let refused = |reason: &str| SettingResult::Refused {
         reason: reason.to_string(),
@@ -1396,6 +1399,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             );
         }
     }
+    let with_effort = parts.iter().any(|(_, effort, _)| effort.is_some());
     let mut model_changed = false;
     for (model, effort, mode) in parts {
         let is_model = model.is_some();
@@ -1423,6 +1427,11 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
                 }
             }
         }
+    }
+    if !with_effort {
+        return SettingResult::Applied {
+            applies: Applies::Now,
+        };
     }
     let applies = match daemon.db.turn_running(uid.to_string()).await {
         Ok(false) => Applies::Now,
@@ -1533,11 +1542,11 @@ async fn apply_setting_outcome(
 const REFUSED_SCREENS: [(&str, &str); 2] = [
     (
         "model",
-        "Changing the model isn't available for this session yet.",
+        "/model's screen isn't available in this session; nothing was changed.",
     ),
     (
         "effort",
-        "Changing the effort isn't available for this session yet.",
+        "/effort's screen isn't available in this session; nothing was changed.",
     ),
 ];
 
@@ -5986,7 +5995,7 @@ mod tests {
                     )
                     .await
             ),
-            "Changing the model isn't available for this session yet."
+            "/model's screen isn't available in this session; nothing was changed."
         );
         let effort_hash = protocol::hash::send_text_hash(&uid, "/effort high", true);
         assert_eq!(
@@ -6002,7 +6011,7 @@ mod tests {
                     )
                     .await
             ),
-            "Changing the effort isn't available for this session yet."
+            "/effort's screen isn't available in this session; nothing was changed."
         );
         assert_eq!(
             refused(send_as_app(&rig.daemon, &uid, "st", "/status").await),
@@ -8385,9 +8394,10 @@ mod tests {
     }
 
     /// **B8 part 2 S3, S4: a setting reaches the host one part per line, and is answered as
-    /// claude answered.** A model while idle applies now; a mode while a turn runs, from the
-    /// next turn. A model taken and an effort refused reads refused, saying so, and files
-    /// nothing. An effort taken is the run's effort, filed as a `model_set` notice. Then the
+    /// claude answered.** A model while idle and a mode while a turn runs apply now; an
+    /// effort while a turn runs, from the next turn. A model taken and an effort refused reads
+    /// refused, saying so, and files nothing. An effort taken is the run's effort, filed as a
+    /// `model_set` notice. Then the
     /// person types `/effort low`: claude's recorded receipt for it is the run's effort, and
     /// still after a restart.
     #[tokio::test]
@@ -8428,7 +8438,7 @@ mod tests {
         assert_eq!(
             running,
             SettingResult::Applied {
-                applies: Applies::NextTurn
+                applies: Applies::Now
             }
         );
         let (partial, lines) = tokio::join!(
@@ -8915,7 +8925,7 @@ mod tests {
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
         turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000051").await;
-        let (next_turn, _) = tokio::join!(
+        let (during_a_turn, _) = tokio::join!(
             rig.daemon.set_setting(
                 &uid,
                 Setting::Mode {
@@ -9038,7 +9048,7 @@ mod tests {
                 confirmed: false,
             }),
             "applied_now": answer("model-1", now),
-            "applied_next_turn": answer("mode-1", next_turn),
+            "applied_mode_during_a_turn": answer("mode-1", during_a_turn),
             "applied_effort": answer("effort-1", effort),
             "refused_bypass": answer("mode-2", bypass),
             "refused_partial": answer("model-2", partial),
@@ -11739,8 +11749,8 @@ mod tests {
     /// **B8 part 2 S7: a real claude takes its settings from the app** (app-qa's rig, one
     /// prompt). The start asks claude to run `echo s7 > s7.txt && sleep 8` with Bash (a command
     /// that writes, so claude asks), and its card is allowed from the app. While that turn
-    /// runs the model is set, which applies from the next turn; once
-    /// the turn has settled, the effort and then the mode, which apply now. Printed: each
+    /// runs the model is set, which applies now, from claude's next request; once the turn
+    /// has settled, the effort and then the mode, which apply now too. Printed: each
     /// answer, the run's model, mode and effort after them, and claude's own echoes filed
     /// after the changes (its `<local-command-stdout>` rows and its mode statuses), each cut
     /// to 60 characters. Then End run, as G2. Ignored and gated as G2 is.
@@ -11809,7 +11819,7 @@ mod tests {
         assert_eq!(
             model,
             SettingResult::Applied {
-                applies: Applies::NextTurn
+                applies: Applies::Now
             }
         );
         for (name, result) in [("effort", &effort), ("mode", &mode)] {

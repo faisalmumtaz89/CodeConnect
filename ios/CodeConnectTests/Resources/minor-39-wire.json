@@ -8,10 +8,10 @@
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "type": "setting_result"
   },
-  "applied_next_turn": {
+  "applied_mode_during_a_turn": {
     "request_id": "mode-1",
     "result": {
-      "applies": "next_turn",
+      "applies": "now",
       "status": "applied"
     },
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

@@ -1809,9 +1809,11 @@ pub enum SettingResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Applies {
-    /// The run was between turns, so its next turn runs with it.
+    /// From the agent's next request: between turns, the next turn; during one, the running
+    /// turn's next step (a Claude run's model or mode).
     Now,
-    /// A turn was running: from the next message that starts a turn.
+    /// A turn was running and the change holds an effort: from the next message that starts a
+    /// turn.
     NextTurn,
 }
 
