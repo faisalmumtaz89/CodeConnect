@@ -645,6 +645,10 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// Whether this Mac can stop or speak to this Codex session **right now**.
     /// Defaulted to `.none` so a daemon predating the field still parses.
     public let codexLink: CodexLinkState
+    /// **The daemon's own answer to "does the next message relaunch this run?"** (protocol minor
+    /// 42), for both agents. Optional: a daemon predating it sends nothing, and the read falls back
+    /// to the Codex-only `codexLink` signal.
+    public let relaunchable: Bool?
     /// Every card in this run still waiting on a human, by reference (minor
     /// 23): the seq of each one's `approval_request`, so a phone holding only
     /// the newest events can fetch the event that carries the card. Empty from
@@ -692,6 +696,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case agent
         case codexThreadID = "codex_thread_id"
         case codexLink = "codex_link"
+        case relaunchable
         case pending
         case model
         case permissionMode = "permission_mode"
@@ -719,6 +724,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         agent = try c.decodeIfPresent(AgentKind.self, forKey: .agent) ?? .claude
         codexThreadID = try c.decodeIfPresent(String.self, forKey: .codexThreadID)
         codexLink = try c.decodeIfPresent(CodexLinkState.self, forKey: .codexLink) ?? .none
+        relaunchable = try c.decodeIfPresent(Bool.self, forKey: .relaunchable)
         pending = try c.decodeIfPresent([PendingRef].self, forKey: .pending) ?? []
         model = try c.decodeIfPresent(ModelFact.self, forKey: .model)
         permissionMode = try c.decodeIfPresent(SessionFact.self, forKey: .permissionMode)
@@ -735,11 +741,11 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// **The daemon says the next message relaunches this ended run** (decision 210): its agent's
     /// process died without anyone stopping it, so a message brings it back and continues the
     /// conversation — unlike a run ended by End run or a failed start, which stay ended. One
-    /// agent-neutral read for both agents: machine's optional `relaunchable` field (protocol minor
-    /// 41) carries it for Claude; until then a Codex run says so with `codexLink` — a thread bound
-    /// but not yet run, on a run that has exited.
+    /// agent-neutral read for both agents: the daemon's own `relaunchable` field (protocol minor 42)
+    /// answers it. A daemon predating the field sends nothing, so the read falls back to the Codex-only
+    /// `codexLink` signal — a thread bound but not yet run, on a run that has exited.
     public var relaunchesOnMessage: Bool {
-        lifecycle == .exited && codexLink == .boundNotStarted
+        relaunchable ?? (lifecycle == .exited && codexLink == .boundNotStarted)
     }
 
     /// What this app files the run's events, subscriptions and marks under, and

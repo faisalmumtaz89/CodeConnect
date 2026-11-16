@@ -50,4 +50,32 @@ final class RelaunchableRunTests: XCTestCase {
         XCTAssertFalse(badge.canAct)
         XCTAssertEqual(badge.reason, "This session has ended.")
     }
+
+    /// **A Claude run its own stop left relaunchable opens its composer too** (minor 42). The daemon's
+    /// `relaunchable` field answers for both agents, so a hosted Claude run whose claude exited on its
+    /// own — with no `codexLink` to lean on — reads relaunchable just as a Codex run does. From the
+    /// daemon's own `minor-37-wire.json`. Must-fail: today's Codex-only read says a Claude run never
+    /// relaunches.
+    func testAClaudeRunTheDaemonMarksRelaunchableOpensItsComposer() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "minor-37-wire", withExtension: "json"),
+            "minor-37-wire.json is not in the test bundle (ios/CodeConnectTests/Resources/)")
+        let claudeWire = try XCTUnwrap(
+            try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue)
+        let summary = try XCTUnwrap(try claudeWire["session_hosted_ended"]?.decoded(SessionSummary.self))
+        let caps = try XCTUnwrap(try claudeWire["hello_ack_capabilities"]?.decoded(Capabilities.self))
+        XCTAssertFalse(summary.isCodex, "it is a Claude run")
+        XCTAssertEqual(summary.codexLink, .none, "with no Codex link to lean on")
+        XCTAssertTrue(
+            summary.relaunchesOnMessage,
+            "the daemon's relaunchable field opens the composer for Claude too")
+        let badge = FleetStatusRule.capability(summary: summary, capabilities: caps)
+        XCTAssertTrue(badge.canAct, "the composer opens")
+        XCTAssertNil(badge.bandNote, "the Observe only band note falls away")
+        // A self-stopped run carries no menus, so its sheet draws no effort or mode line — its effort
+        // reads unset, never the value it held before the stop.
+        XCTAssertEqual(
+            RunSettings.of(summary: summary), .hostedReadOnly(model: nil),
+            "the self-stopped run's effort reads unset, not the old value")
+    }
 }
