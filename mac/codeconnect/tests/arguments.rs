@@ -30,13 +30,11 @@ fn an_argument_a_command_does_not_take_is_refused_before_it_acts() {
         &["token", "--help"][..],
         &["token", "-h"],
         &["token", "help"],
-        &["ls", "--help"],
         &["sessions", "list", "--help"],
         &["devices", "--help"],
         &["pair", "--help"],
         &["revoke", "phone", "--dry-run"],
         &["revoke", "--help"],
-        &["attach", "cc-1", "--help"],
     ]
     .into_iter()
     .map(|args| (args.join(" "), run(&home, args)))

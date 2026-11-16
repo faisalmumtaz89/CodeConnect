@@ -218,86 +218,6 @@ pub fn parse_release_tag(body: &[u8]) -> Option<String> {
 
 // ------------------------------------------------------------------- hold
 
-/// One countdown frame: carriage return, erase-line, the sentence. The
-/// cursor controls are not SGR, so `NO_COLOR` does not touch them.
-pub fn countdown_frame(seconds_left: u64) -> String {
-    format!("\r\u{1b}[2KContinuing in {seconds_left}s\u{2026} Press Return to continue now.")
-}
-
-/// The erase that removes the countdown before the attach takes the screen.
-pub const COUNTDOWN_CLEAR: &str = "\r\u{1b}[2K";
-
-/// Hold the terminal for reading, honestly: a countdown, because nothing is
-/// working — the session already exists, and the pause exists for the
-/// reader. `10` shows immediately; frames follow *elapsed monotonic time*
-/// (a delayed tick shows the true remainder, never replays missed numbers);
-/// `0` is never shown; Return — or stdin closing — ends the hold at once.
-/// `skip(wait)` waits up to `wait` and says whether the reader asked to go on.
-pub fn hold_for_reading(
-    total: std::time::Duration,
-    mut skip: impl FnMut(std::time::Duration) -> bool,
-    out: &mut dyn std::io::Write,
-    mut now: impl FnMut() -> std::time::Instant,
-) {
-    let start = now();
-    let mut last_shown: Option<u64> = None;
-    loop {
-        let elapsed = now().saturating_duration_since(start);
-        if elapsed >= total {
-            break;
-        }
-        let remainder = total - elapsed;
-        let left = (remainder.as_secs_f64().ceil() as u64).max(1);
-        // A timer that wakes a millisecond shy of the boundary recomputes
-        // the same number; re-emitting it would double a frame. The number
-        // is the frame's identity — an unchanged number writes nothing.
-        if last_shown != Some(left) {
-            last_shown = Some(left);
-            let _ = write!(out, "{}", countdown_frame(left));
-            let _ = out.flush();
-        }
-        // Sleep until the displayed number is due to change — remainder
-        // minus the whole seconds the current frame still covers — never a
-        // fixed distance to a boundary the wake-up jitter can straddle.
-        let until_change =
-            remainder.saturating_sub(std::time::Duration::from_secs(left.saturating_sub(1)));
-        let wait = until_change.max(std::time::Duration::from_millis(1));
-        if skip(wait) {
-            break;
-        }
-    }
-    let _ = write!(out, "{COUNTDOWN_CLEAR}");
-    let _ = out.flush();
-}
-
-/// Whether Return was pressed on `fd` — or it closed — within `wait`.
-///
-/// Waited for here, on the caller's thread, and never by a reader left behind:
-/// the attach that follows the hold reads the same terminal in raw mode, and a
-/// reader still parked on it would take the terminal's answers and the user's
-/// keys. A terminal in canonical mode is readable only once a whole line or EOF
-/// is there, so readiness is the Return. Only a lone Return — the answer to
-/// "Press Return to continue now" — or EOF is taken: a typed line is the user's
-/// input to the agent, and stays for the attach to pass on.
-pub fn returned_within(fd: std::os::fd::RawFd, wait: std::time::Duration) -> bool {
-    let mut poll = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let millis = wait.as_millis().min(i32::MAX as u128) as i32;
-    if unsafe { libc::poll(&mut poll, 1, millis) } <= 0 {
-        return false;
-    }
-    let mut pending: libc::c_int = 0;
-    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut pending) };
-    if pending <= 1 {
-        let mut byte = [0u8; 1];
-        unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
-    }
-    true
-}
-
 // ----------------------------------------------------------------- update
 
 /// The lock one `codeconnect update` holds against another.
@@ -325,7 +245,7 @@ fn update_lock_path(root: &std::path::Path) -> PathBuf {
 /// the judgment, never the judgment itself, which has its own tests.
 pub struct UpdateDeps<'a> {
     /// The release this run installs from: `releases/latest` for an update,
-    /// this binary's own release for the tmux it needs.
+    /// this binary's own release for `install-staged`.
     pub fetch_release: &'a dyn Fn() -> Result<Vec<u8>>,
     /// Fetch one asset URL into a file, within a byte ceiling.
     pub download: &'a dyn Fn(&str, &std::path::Path, u64) -> Result<()>,
@@ -337,9 +257,6 @@ pub struct UpdateDeps<'a> {
     pub verify_checksum: &'a dyn Fn(&std::path::Path, &std::path::Path) -> Result<()>,
     /// Run a binary and return its `--version` line.
     pub probe_version: &'a dyn Fn(&std::path::Path) -> Result<String>,
-    /// Run a binary with one argument and return what it printed: `-V` of
-    /// `cc-tmux`, `--tmux-version` of `codeconnect`.
-    pub ask: &'a dyn Fn(&std::path::Path, &str) -> Result<String>,
     /// Restart the managed daemon; `false` means none is loaded.
     pub restart_daemon: &'a dyn Fn() -> Result<bool>,
 }
@@ -373,7 +290,6 @@ pub fn run_update() -> Result<()> {
         #[cfg(target_os = "linux")]
         verify_checksum: &crate::update_install::verify_checksum,
         probe_version: &crate::update_install::version_of,
-        ask: &crate::update_install::answer_of,
         restart_daemon: &crate::service::restart_managed_daemon,
     };
     run_update_at(&protocol::root_dir(), &deps)
@@ -418,20 +334,8 @@ fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
         })
         .collect();
     if crate::update_install::set_is_current(&set, &latest_text) {
-        if tmux_is_installed(&live, deps) {
-            println!("codeconnect {latest_text} is the latest release. Nothing to do.");
-            return Ok(());
-        }
-        // The binaries are current and only tmux is missing or wrong: an older
-        // updater installed this release without it, or it was removed.
-        // Repaired from this same release, without touching the binaries.
-        println!(
-            "CodeConnect's tmux is missing or not the one {latest_text} ships; reinstalling it."
-        );
-        return with_work_dir(root, |work| {
-            let required = (deps.ask)(&live.join("codeconnect"), "--tmux-version")?;
-            install_tmux(&body, &latest_text, &required, work, &live, root, deps)
-        });
+        println!("codeconnect {latest_text} is the latest release. Nothing to do.");
+        return Ok(());
     }
     if latest_text == installed_text && !set.is_empty() {
         for (binary, said) in &set {
@@ -452,114 +356,25 @@ fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
         })
     };
     let core = select(Archive::Core)?;
-    let tmux = select(Archive::Tmux)?;
     let host = select(Archive::AgentHost)?;
 
     println!("codeconnect {installed_text} installed; fetching {latest_text}\u{2026}");
 
     with_work_dir(root, |work| {
-        install_release(&core, &tmux, &host, &latest_text, work, root, deps)
+        install_release(&core, &host, &latest_text, work, root, deps)
     })?;
 
     println!("codeconnect {latest_text} installed.");
     Ok(())
 }
 
-/// How long a session start or an installer waits for another installation
-/// to finish: longer than a slow download takes, shorter than anyone would
+/// How long an installer waits for another installation to finish: longer than a slow download takes, shorter than anyone would
 /// wait at a terminal without being told why.
 const INSTALL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Before a session is created: install CodeConnect's own tmux beside this
-/// binary if it is not there, from this binary's own release.
-///
-/// An updater from before tmux shipped installs a release's binaries and
-/// ignores its tmux, so the first session after that update is where the
-/// gap shows. It is fetched once, announced, and needs no terminal. When it
-/// cannot be fetched the session still starts on a system tmux if there is
-/// one; with none, the session cannot start, and the error says what to run.
-///
-/// macOS only: every Linux release has shipped its tmux, so no Linux install
-/// is missing one this way.
-#[cfg(target_os = "macos")]
-pub fn ensure_tmux() -> Result<()> {
-    let root = protocol::root_dir();
-    let live = root.join("bin");
-    let Ok(exe) = std::env::current_exe() else {
-        return Ok(());
-    };
-    if !bootstrap_applies(std::env::var_os("CODECONNECT_TMUX").is_some(), &exe, &live) {
-        return Ok(());
-    }
-    // A build from source installed here is not the `codeconnect` any release
-    // shipped, so there is no release tmux that belongs to it; it runs on the
-    // system's, as it always has.
-    if crate::update_install::verify_signature(&exe).is_err() {
-        return Ok(());
-    }
-
-    eprintln!("Fetching CodeConnect's tmux\u{2026}");
-    let deps = UpdateDeps {
-        fetch_release: &fetch_own_release,
-        download: &crate::update_install::download,
-        verify_signature: &crate::update_install::verify_signature,
-        probe_version: &crate::update_install::version_of,
-        ask: &crate::update_install::answer_of,
-        restart_daemon: &|| Ok(false),
-    };
-    let Err(why) = ensure_tmux_at(&root, env!("CARGO_PKG_VERSION"), &deps) else {
-        return Ok(());
-    };
-    match protocol::tmux::tmux_bin() {
-        Some(system) => {
-            eprintln!("CodeConnect's tmux could not be installed: {why:#}");
-            eprintln!(
-                "using {} for now; `codeconnect update` installs it.",
-                system.display()
-            );
-            Ok(())
-        }
-        None => anyhow::bail!(
-            "CodeConnect's tmux could not be installed, and this Mac has no other tmux: \
-             {why:#}. Run `codeconnect update` once this is resolved."
-        ),
-    }
-}
-
-/// Whether a session start should install CodeConnect's tmux: no tmux was
-/// named explicitly, this binary is the installed one (through any symlink
-/// to it), and `cc-tmux` is not beside it.
-#[cfg(target_os = "macos")]
-fn bootstrap_applies(explicit_tmux: bool, exe: &std::path::Path, live: &std::path::Path) -> bool {
-    if explicit_tmux {
-        return false;
-    }
-    let (Ok(exe), Ok(live)) = (exe.canonicalize(), live.canonicalize()) else {
-        return false;
-    };
-    exe.parent() == Some(live.as_path()) && !live.join(crate::update_release::TMUX_BINARY).exists()
-}
-
-/// The installation half of [`ensure_tmux`], under the update lock.
-#[cfg(target_os = "macos")]
-fn ensure_tmux_at(root: &std::path::Path, version: &str, deps: &UpdateDeps) -> Result<()> {
-    let live = root.join("bin");
-    let _only_one = wait_for_update_lock(root)?;
-    if live.join(crate::update_release::TMUX_BINARY).exists() {
-        return Ok(());
-    }
-    crate::update_install::clear_leftovers(root)?;
-
-    let body = own_release(version, deps)?;
-    let required = (deps.ask)(&live.join("codeconnect"), "--tmux-version")?;
-    with_work_dir(root, |work| {
-        install_tmux(&body, version, &required, work, &live, root, deps)
-    })
-}
-
 /// `codeconnect install-staged <dir>`: install the release binaries the
-/// website installer downloaded and verified into `<dir>`, with their tmux and
-/// agent host, exactly as `codeconnect update` installs a release. Run as the staged
+/// website installer downloaded and verified into `<dir>`, with their agent
+/// host, exactly as `codeconnect update` installs a release. Run as the staged
 /// `codeconnect` itself, so the version being installed is the one running.
 pub fn run_install_staged(args: &[String]) -> Result<()> {
     let [from] = args else {
@@ -573,7 +388,6 @@ pub fn run_install_staged(args: &[String]) -> Result<()> {
         #[cfg(target_os = "linux")]
         verify_checksum: &crate::update_install::verify_checksum,
         probe_version: &crate::update_install::version_of,
-        ask: &crate::update_install::answer_of,
         restart_daemon: &crate::service::restart_managed_daemon,
     };
     install_staged_at(
@@ -600,11 +414,10 @@ fn install_staged_at(
             anyhow::anyhow!("release {version} cannot be installed: {why}. Nothing was changed.")
         })
     };
-    let tmux = select(Archive::Tmux)?;
     let host = select(Archive::AgentHost)?;
     #[cfg(target_os = "macos")]
     with_work_dir(root, |work| {
-        install_set(from, &tmux, &host, version, work, root, deps)
+        install_set(from, &host, version, work, root, deps)
     })?;
     // A Linux binary carries no signature of its own, so the binaries the
     // installer handed over cannot be proven here; the release's are fetched
@@ -615,16 +428,15 @@ fn install_staged_at(
         let _ = from;
         let core = select(Archive::Core)?;
         with_work_dir(root, |work| {
-            install_release(&core, &tmux, &host, version, work, root, deps)
+            install_release(&core, &host, version, work, root, deps)
         })?;
     }
     Ok(())
 }
 
-/// The update lock, waited for rather than refused: two sessions started
-/// together on a machine without tmux should both start, an installation
-/// already running may install what this one came for, and an installer run
-/// beside either should finish after it rather than fail.
+/// The update lock, waited for rather than refused: an installation already
+/// running may install what this one came for, and an installer run beside it
+/// should finish after it rather than fail.
 fn wait_for_update_lock(root: &std::path::Path) -> Result<ThrottleClaim> {
     let started = std::time::Instant::now();
     loop {
@@ -668,25 +480,6 @@ fn with_work_dir(
         eprintln!("the update work directory could not be removed: {why:#}");
     }
     outcome
-}
-
-/// Whether the installed `cc-tmux` is CodeConnect's, both architectures, and
-/// the build the installed `codeconnect` requires. Anything that cannot be
-/// established reads as not installed, so it is repaired rather than blessed.
-fn tmux_is_installed(live: &std::path::Path, deps: &UpdateDeps) -> bool {
-    let tmux = live.join(crate::update_release::TMUX_BINARY);
-    let Ok(required) = (deps.ask)(&live.join("codeconnect"), "--tmux-version") else {
-        return false;
-    };
-    // On Linux an installed file has nothing of its own to prove it by; what
-    // was downloaded was proven by the release's signed checksum when it was.
-    #[cfg(target_os = "macos")]
-    if (deps.verify_signature)(&tmux).is_err()
-        || crate::update_install::is_universal(&tmux).is_err()
-    {
-        return false;
-    }
-    (deps.ask)(&tmux, "-V").is_ok_and(|said| said == required)
 }
 
 /// Download one archive, prove it intact and well formed, and unpack it.
@@ -752,45 +545,6 @@ fn fresh_staging(root: &std::path::Path) -> Result<std::path::PathBuf> {
     Ok(staged)
 }
 
-/// Download CodeConnect's tmux for `version`, prove it, and stage it.
-///
-/// `required` is what the `codeconnect` it will run beside says `cc-tmux -V`
-/// must print. The signature proves CodeConnect built it; the version line
-/// proves it is the build this `codeconnect` was released with, not a
-/// correctly signed tmux from some other release.
-fn stage_tmux(
-    assets: &crate::update_release::ReleaseAssets,
-    version: &str,
-    required: &str,
-    work: &std::path::Path,
-    staged: &std::path::Path,
-    deps: &UpdateDeps,
-) -> Result<()> {
-    use crate::update_release::TMUX_BINARY;
-
-    let from = fetch_and_unpack(assets, version, Archive::Tmux, work, deps)?;
-    let candidate = from.join(TMUX_BINARY);
-    // On Linux every byte unpacked here was proven by the release's signed
-    // checksum, and a binary for another architecture fails to run below.
-    #[cfg(target_os = "macos")]
-    {
-        (deps.verify_signature)(&candidate)?;
-        crate::update_install::is_universal(&candidate)?;
-    }
-    let reported = (deps.ask)(&candidate, "-V")?;
-    if reported != required {
-        anyhow::bail!(
-            "{TMUX_BINARY} in the {version} release reports `{reported}`, but codeconnect \
-             {version} requires `{required}`, so the release does not contain what it says"
-        );
-    }
-    for file in Archive::Tmux.files() {
-        std::fs::copy(from.join(file), staged.join(file))
-            .with_context(|| format!("staging {file}"))?;
-    }
-    Ok(())
-}
-
 /// The commit point and its proof, shared by every installation: exchange the
 /// staged set into place, run `check` against it where it now lives, and put
 /// the previous set back if that fails.
@@ -837,49 +591,12 @@ fn exchange_and_prove(
     Ok(())
 }
 
-/// The installed `cc-tmux` runs where it now lives and is `required`.
-fn prove_tmux(live: &std::path::Path, required: &str, deps: &UpdateDeps) -> Result<()> {
-    use crate::update_release::TMUX_BINARY;
-    match (deps.ask)(&live.join(TMUX_BINARY), "-V") {
-        Ok(said) if said == required => Ok(()),
-        Ok(said) => anyhow::bail!("{TMUX_BINARY} reports `{said}` after installation"),
-        Err(why) => anyhow::bail!("{TMUX_BINARY} did not run after installation ({why:#})"),
-    }
-}
-
-/// Install only CodeConnect's tmux, from `version`'s release, beside the
-/// binaries already installed. Everything else in `bin` is carried across
-/// unchanged, and the daemon is left running: it finds `cc-tmux` the next
-/// time it runs tmux.
-fn install_tmux(
-    body: &[u8],
-    version: &str,
-    required: &str,
-    work: &std::path::Path,
-    live: &std::path::Path,
-    root: &std::path::Path,
-    deps: &UpdateDeps,
-) -> Result<()> {
-    let assets =
-        crate::update_release::select_assets(body, version, Archive::Tmux).map_err(|why| {
-            anyhow::anyhow!("CodeConnect's tmux cannot be installed: {why}. Nothing was changed.")
-        })?;
-    let staged = fresh_staging(root)?;
-    stage_tmux(&assets, version, required, work, &staged, deps)?;
-    crate::update_install::carry_over_strangers(live, &staged, Archive::Tmux.files())?;
-    crate::update_install::sync_tree(&staged)?;
-    exchange_and_prove(&staged, live, version, || prove_tmux(live, required, deps))?;
-    println!("CodeConnect's tmux ({required}) installed.");
-    Ok(())
-}
-
 /// The download-verify-exchange half, so `run_update` reads as the sequence
 /// it is. Every failure before the exchange leaves the installed set
 /// untouched; a failed smoke test after it swaps the previous set back; a
 /// failed restart keeps the new, proven set and says so.
 fn install_release(
     core: &crate::update_release::ReleaseAssets,
-    tmux: &crate::update_release::ReleaseAssets,
     host: &crate::update_release::ReleaseAssets,
     version: &str,
     work: &std::path::Path,
@@ -887,7 +604,7 @@ fn install_release(
     deps: &UpdateDeps,
 ) -> Result<()> {
     let from = fetch_and_unpack(core, version, Archive::Core, work, deps)?;
-    install_set(&from, tmux, host, version, work, root, deps)
+    install_set(&from, host, version, work, root, deps)
 }
 
 /// Download the agent host for `version`, prove it, and stage it with its
@@ -916,13 +633,12 @@ fn stage_agent_host(
     Ok(())
 }
 
-/// Install the release binaries in `from`, with the release's tmux and agent
-/// host, as one set into `<root>/bin`: each binary proven, all staged with
+/// Install the release binaries in `from`, with the release's agent host, as
+/// one set into `<root>/bin`: each binary proven, all staged with
 /// whatever else `bin` holds, exchanged into place in one step, proven where
 /// they now live, and the managed daemon restarted onto them.
 fn install_set(
     from: &std::path::Path,
-    tmux: &crate::update_release::ReleaseAssets,
     host: &crate::update_release::ReleaseAssets,
     version: &str,
     work: &std::path::Path,
@@ -967,10 +683,6 @@ fn install_set(
     }
     std::fs::copy(from.join("LICENSE"), staged.join("LICENSE"))
         .context("staging the licence that ships with the binaries")?;
-    // The tmux this release requires is asked of this release's own
-    // `codeconnect`, already proven to be CodeConnect's build of it.
-    let required = (deps.ask)(&from.join("codeconnect"), "--tmux-version")?;
-    stage_tmux(tmux, version, &required, work, &staged, deps)?;
     stage_agent_host(host, version, work, &staged, deps)?;
     install::carry_over_strangers(live, &staged, &crate::update_release::SHIPPED_BINARIES)?;
     install::sync_tree(&staged)?;
@@ -984,7 +696,7 @@ fn install_set(
                 anyhow::bail!("{binary} did not run after installation ({why:#})");
             }
         }
-        prove_tmux(live, &required, deps)
+        Ok(())
     })?;
 
     // **After the smoke test, never before.** A daemon restarted onto binaries
@@ -1169,32 +881,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The claim outliving its drop is what the explicit unlock exists to
-    /// prevent, and only a duplicate held past that drop can demonstrate it.
-    /// The test above cannot: it meets one only if a sibling test happens to
-    /// spawn at that moment, which nothing in it arranges. So this one holds
-    /// the duplicate on purpose, until the parent has re-claimed (see
-    /// [`crate::forked_holder`]); a regression guard that waits a fixed time
-    /// is the flake it guards against.
-    #[test]
-    fn a_claim_that_a_child_inherited_is_still_released_by_the_drop() {
-        let dir = temp_dir("inherit");
-        let lock_file = dir.join(".update-check.lock");
-        let claim = claim_throttle_at(&lock_file).expect("first claim wins");
-        let child = crate::forked_holder::Release::new().fork_holder();
-        drop(claim);
-        let reclaimed = claim_throttle_at(&lock_file);
-        assert!(
-            child.release(std::time::Duration::from_secs(5)),
-            "the child left when released"
-        );
-        assert!(
-            reclaimed.is_some(),
-            "a descriptor a child still holds must not keep the lock past the drop"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     /// The one styling decision: not-a-TTY or `TERM=dumb` forces ASCII;
     /// `NO_COLOR` — present even when empty — strips SGR but keeps the TTY
     /// typography; otherwise styled.
@@ -1215,59 +901,6 @@ mod tests {
             style_for(true, Some("xterm-256color"), false),
             Style::Styled
         );
-    }
-
-    /// The countdown speaks whole seconds, `10` first, never `0`, each
-    /// frame erasing the last; the deadline is monotonic elapsed time, so a
-    /// delayed tick shows the true remainder instead of replaying numbers.
-    #[test]
-    fn the_countdown_counts_real_time_down_and_never_says_zero() {
-        assert_eq!(
-            countdown_frame(10),
-            "\r\u{1b}[2KContinuing in 10s\u{2026} Press Return to continue now."
-        );
-
-        let mut out: Vec<u8> = Vec::new();
-        // A fake clock: the first frame reads zero elapsed — "display 10
-        // immediately" — and every later observation has jumped three
-        // seconds. Elapsed time rules, so frames skip numbers (10, 7, 4, 1)
-        // rather than replaying the ones the delay swallowed.
-        let start = std::time::Instant::now();
-        let mut observations = 0u64;
-        hold_for_reading(
-            std::time::Duration::from_secs(10),
-            |_| false,
-            &mut out,
-            move || {
-                let elapsed = observations.saturating_sub(1) * 3;
-                observations += 1;
-                start + std::time::Duration::from_secs(elapsed)
-            },
-        );
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("\r\u{1b}[2KContinuing in 10s"));
-        assert!(text.contains("in 7s"), "a 3s-late tick shows the remainder");
-        assert!(!text.contains("in 0s"), "zero is never shown");
-        assert!(
-            text.ends_with(COUNTDOWN_CLEAR),
-            "the line is erased before attach"
-        );
-    }
-
-    /// Return — or stdin closing — ends the hold at once, with the line
-    /// cleared; the ten seconds are never served blind.
-    #[test]
-    fn return_or_eof_ends_the_hold_immediately() {
-        let mut out: Vec<u8> = Vec::new();
-        let begun = std::time::Instant::now();
-        hold_for_reading(
-            std::time::Duration::from_secs(10),
-            |_| true,
-            &mut out,
-            std::time::Instant::now,
-        );
-        assert!(begun.elapsed() < std::time::Duration::from_secs(2));
-        assert!(String::from_utf8(out).unwrap().ends_with(COUNTDOWN_CLEAR));
     }
 
     /// The exhaustive styling truth table — every combination of the three
@@ -1309,199 +942,6 @@ mod tests {
             Style::Styled
         );
         assert_eq!(style_from_env(false, env(&[])), Style::Ascii);
-    }
-
-    /// The full countdown transcript under a 3s-per-tick clock, byte for
-    /// byte, with exactly one flush per frame plus one for the clear — no
-    /// buffered frame can lag the second it names.
-    #[test]
-    fn the_countdown_transcript_and_flush_discipline_are_exact() {
-        struct CountingSink {
-            bytes: Vec<u8>,
-            flushes: usize,
-        }
-        impl std::io::Write for CountingSink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.bytes.extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.flushes += 1;
-                Ok(())
-            }
-        }
-        let mut sink = CountingSink {
-            bytes: Vec::new(),
-            flushes: 0,
-        };
-        let start = std::time::Instant::now();
-        let mut observations = 0u64;
-        hold_for_reading(
-            std::time::Duration::from_secs(10),
-            |_| false,
-            &mut sink,
-            move || {
-                let elapsed = observations.saturating_sub(1) * 3;
-                observations += 1;
-                start + std::time::Duration::from_secs(elapsed)
-            },
-        );
-        let expected: String = [10u64, 7, 4, 1]
-            .iter()
-            .map(|n| countdown_frame(*n))
-            .collect::<String>()
-            + COUNTDOWN_CLEAR;
-        assert_eq!(String::from_utf8(sink.bytes).unwrap(), expected);
-        assert_eq!(sink.flushes, 5, "four frames and the clear, each flushed");
-    }
-
-    /// The *real* wait, on a real descriptor: a Return line and EOF each end
-    /// the hold at once, and a hold that runs out leaves **nothing** reading —
-    /// what is typed afterwards is still there for the attach that follows.
-    #[test]
-    fn the_wait_signals_on_return_and_eof_and_leaves_no_reader_behind() {
-        use std::io::{Read, Write};
-        use std::os::fd::AsRawFd;
-        let pipe = || {
-            let mut fds = [0; 2];
-            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-            use std::os::fd::FromRawFd;
-            unsafe {
-                (
-                    std::fs::File::from_raw_fd(fds[0]),
-                    std::fs::File::from_raw_fd(fds[1]),
-                )
-            }
-        };
-        let (read, mut write) = pipe();
-        write.write_all(b"\n").unwrap();
-        assert!(returned_within(
-            read.as_raw_fd(),
-            std::time::Duration::from_secs(5)
-        ));
-        let (read, write) = pipe();
-        drop(write);
-        assert!(returned_within(
-            read.as_raw_fd(),
-            std::time::Duration::from_secs(5)
-        ));
-
-        let (mut read, mut write) = pipe();
-        let begun = std::time::Instant::now();
-        hold_for_reading(
-            std::time::Duration::from_secs(1),
-            |wait| returned_within(read.as_raw_fd(), wait),
-            &mut Vec::new(),
-            std::time::Instant::now,
-        );
-        assert!(begun.elapsed() >= std::time::Duration::from_secs(1));
-        write.write_all(b"typed after the hold").unwrap();
-        drop(write);
-        let mut after = Vec::new();
-        read.read_to_end(&mut after).unwrap();
-        assert_eq!(after, b"typed after the hold");
-    }
-
-    /// What is typed during the hold belongs to the session: a lone Return answers
-    /// "Press Return to continue now" and is taken, but a typed line ends the hold
-    /// and stays in the terminal for the attach to pass on, as the agent run
-    /// directly would have read it.
-    #[test]
-    fn a_line_typed_during_the_hold_ends_it_and_stays_for_the_session() {
-        let (mut main, mut side) = (-1, -1);
-        let opened = unsafe {
-            libc::openpty(
-                &mut main,
-                &mut side,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        assert_eq!(opened, 0, "openpty");
-        let type_in = |bytes: &[u8]| {
-            let written = unsafe { libc::write(main, bytes.as_ptr().cast(), bytes.len()) };
-            assert_eq!(written, bytes.len() as isize);
-        };
-        let waiting = || {
-            let mut pending: libc::c_int = 0;
-            assert_eq!(
-                unsafe { libc::ioctl(side, libc::FIONREAD, &mut pending) },
-                0
-            );
-            pending
-        };
-
-        type_in(b"\r");
-        assert!(returned_within(side, std::time::Duration::from_secs(5)));
-        assert_eq!(waiting(), 0, "the lone Return is the hold's, and taken");
-
-        type_in(b"hello\r");
-        assert!(returned_within(side, std::time::Duration::from_secs(5)));
-        assert_eq!(waiting(), 6, "the typed line is left");
-        let mut line = [0u8; 16];
-        let read = unsafe { libc::read(side, line.as_mut_ptr().cast(), line.len()) };
-        assert_eq!(
-            &line[..read.max(0) as usize],
-            b"hello\n",
-            "the typed line is left"
-        );
-        unsafe {
-            libc::close(main);
-            libc::close(side);
-        }
-    }
-
-    /// The boundary races, pinned: a wake 1ms *before* a whole second
-    /// recomputes the same number and must write nothing; landing exactly
-    /// on the boundary, and 1ms after it, each produce their frame exactly
-    /// once. Frame identity is the number, not the timer.
-    #[test]
-    fn boundary_jitter_never_doubles_a_frame() {
-        struct CountingSink {
-            bytes: Vec<u8>,
-            flushes: usize,
-        }
-        impl std::io::Write for CountingSink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.bytes.extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.flushes += 1;
-                Ok(())
-            }
-        }
-        let mut sink = CountingSink {
-            bytes: Vec::new(),
-            flushes: 0,
-        };
-        // Observations, in seconds: the early wake (0.999), the exact
-        // boundary (1.0), a late wake (2.001), then out.
-        let offsets = [0.0, 0.0, 0.999, 1.0, 2.001, 10.0];
-        let start = std::time::Instant::now();
-        let mut calls = 0usize;
-        hold_for_reading(
-            std::time::Duration::from_secs(10),
-            |_| false,
-            &mut sink,
-            move || {
-                let offset = offsets[calls.min(offsets.len() - 1)];
-                calls += 1;
-                start + std::time::Duration::from_secs_f64(offset)
-            },
-        );
-        let expected: String = [10u64, 9, 8]
-            .iter()
-            .map(|n| countdown_frame(*n))
-            .collect::<String>()
-            + COUNTDOWN_CLEAR;
-        assert_eq!(
-            String::from_utf8(sink.bytes).unwrap(),
-            expected,
-            "10 once (early wake writes nothing), 9 at the boundary, 8 after"
-        );
-        assert_eq!(sink.flushes, 4, "three frames and the clear");
     }
 
     /// The downgrade every other check in the updater would walk straight
@@ -1552,21 +992,6 @@ mod tests {
     fn fixture_binary(name: &str, version: &str, build: &str, arm64_only: bool) -> Vec<u8> {
         let mut bytes = fat_header(arm64_only);
         bytes.extend_from_slice(format!("\nSAYS:{name} {version} ({build})\n").as_bytes());
-        // Every `codeconnect` a scenario builds requires the same tmux.
-        if name == "codeconnect" {
-            bytes.extend_from_slice(format!("ASK --tmux-version:{TMUX_LINE}\n").as_bytes());
-        }
-        bytes
-    }
-
-    /// The `cc-tmux -V` line every fixture `codeconnect` requires.
-    const TMUX_LINE: &str = "tmux 3.7c-cc9";
-
-    /// A fixture `cc-tmux` answering `-V` with `says`. `origin` only makes
-    /// two otherwise identical files tell apart which one got installed.
-    fn fixture_tmux(says: &str, origin: &str, arm64_only: bool) -> Vec<u8> {
-        let mut bytes = fat_header(arm64_only);
-        bytes.extend_from_slice(format!("\nASK -V:{says}\nFROM:{origin}\n").as_bytes());
         bytes
     }
 
@@ -1609,13 +1034,6 @@ mod tests {
     /// executable bit "does not run", exactly as `exec` would refuse it.
     fn probe_says(path: &std::path::Path) -> Result<String> {
         line_after(path, "SAYS:")
-    }
-
-    /// The injected stand-in for running `path <question>`: the `ASK` line
-    /// the fixture carries for that question, under the same rule as
-    /// `probe_says`.
-    fn ask_says(path: &std::path::Path, question: &str) -> Result<String> {
-        line_after(path, &format!("ASK {question}:"))
     }
 
     fn line_after(path: &std::path::Path, prefix: &str) -> Result<String> {
@@ -1668,7 +1086,7 @@ mod tests {
         /// Every seam crossing, in order: `fetch`,
         /// `download <url> (max <bytes>)`, `verify <place>/<file>` (macOS),
         /// `authenticate <checksum file>` (Linux),
-        /// `probe <place>/<file>`, `ask <place>/<file> <question>`, `restart`.
+        /// `probe <place>/<file>`, `restart`.
         events: Vec<String>,
     }
 
@@ -1695,11 +1113,6 @@ mod tests {
             );
             old_lines.insert(binary.to_string(), probe_says(&live.join(binary)).unwrap());
         }
-        place_binary(
-            &live.join("cc-tmux"),
-            fixture_tmux(TMUX_LINE, "live", false),
-        );
-        std::fs::write(live.join("THIRD_PARTY_NOTICES"), b"the live notices").unwrap();
         place_binary(&live.join("cc-agent-host"), fixture_host("live", false));
         std::fs::write(live.join("AGENT_HOST_NOTICES"), b"the live host notices").unwrap();
         std::fs::write(live.join("stranger.txt"), b"not ours to judge").unwrap();
@@ -1714,17 +1127,12 @@ mod tests {
             );
         }
         std::fs::write(dir.join("LICENSE"), b"the licence").unwrap();
-        place_binary(
-            &dir.join("cc-tmux"),
-            fixture_tmux(TMUX_LINE, "release", false),
-        );
-        std::fs::write(dir.join("THIRD_PARTY_NOTICES"), b"the release notices").unwrap();
         place_binary(&dir.join("cc-agent-host"), fixture_host("release", false));
         std::fs::write(dir.join("AGENT_HOST_NOTICES"), b"the release host notices").unwrap();
 
         let mut by_url = BTreeMap::new();
         let mut listed = Vec::new();
-        for archive in [Archive::Core, Archive::Tmux, Archive::AgentHost] {
+        for archive in [Archive::Core, Archive::AgentHost] {
             package(&fixtures, version, archive);
             for name in [
                 archive.name(version),
@@ -1759,8 +1167,8 @@ mod tests {
         run_entry(rig, faults, run_update_at)
     }
 
-    /// One scenario through `entry`: `codeconnect update`, or the tmux a
-    /// session start installs.
+    /// One scenario through `entry`: `codeconnect update`, or
+    /// `codeconnect install-staged`.
     fn run_entry(
         rig: &Rig,
         faults: Faults,
@@ -1840,27 +1248,6 @@ mod tests {
             }
             probe_says(path)
         };
-        let ask = |path: &std::path::Path, question: &str| {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let place = if path.parent() == Some(rig.live.as_path()) {
-                "live"
-            } else {
-                "staged"
-            };
-            events
-                .borrow_mut()
-                .push(format!("ask {place}/{name} {question}"));
-            // The smoke test of the new `cc-tmux` at the live path, told apart
-            // from the reading of the one installed before by where it came
-            // from.
-            if place == "live"
-                && faults.refuse_live_probe_of == Some(name.as_str())
-                && line_after(path, "FROM:").is_ok_and(|origin| origin != "live")
-            {
-                anyhow::bail!("{name} does not run here");
-            }
-            ask_says(path, question)
-        };
         let restart = || {
             events.borrow_mut().push("restart".to_string());
             match &faults.restart {
@@ -1878,7 +1265,6 @@ mod tests {
             #[cfg(target_os = "linux")]
             verify_checksum: &verify_checksum,
             probe_version: &probe,
-            ask: &ask,
             restart_daemon: &restart,
         };
         let outcome = entry(&rig.root, &deps);
@@ -2038,8 +1424,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_refused_signature_on_any_of_the_four_stops_everything() {
-        for call in 1..=4 {
+    fn a_refused_signature_on_any_of_the_three_stops_everything() {
+        for call in 1..=3 {
             let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
             let before = snapshot(&fixture.live);
             let ran = run(
@@ -2119,7 +1505,7 @@ mod tests {
     /// listing states are the originals; every edit here keeps them small.
     fn repackage(fixture: &Rig, version: &str) {
         let fixtures = fixture.root.join("fixtures");
-        for archive in [Archive::Core, Archive::Tmux, Archive::AgentHost] {
+        for archive in [Archive::Core, Archive::AgentHost] {
             package(&fixtures, version, archive);
         }
     }
@@ -2155,7 +1541,7 @@ mod tests {
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
 
-        // Exactly the six assets the release named, each under the ceiling
+        // Exactly the four assets the release named, each under the ceiling
         // that protects its kind of file — nothing else, nothing unbounded.
         let downloads: Vec<&String> = ran
             .events
@@ -2163,7 +1549,6 @@ mod tests {
             .filter(|event| event.starts_with("download"))
             .collect();
         let core = Archive::Core.name(&newer());
-        let tmux = Archive::Tmux.name(&newer());
         let host = Archive::AgentHost.name(&newer());
         let max = crate::update_release::MAX_ARCHIVE_BYTES;
         assert_eq!(
@@ -2171,14 +1556,12 @@ mod tests {
             vec![
                 &format!("download https://release.invalid/{core} (max {max})"),
                 &format!("download https://release.invalid/{core}.sha256 (max 4096)"),
-                &format!("download https://release.invalid/{tmux} (max {max})"),
-                &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
                 &format!("download https://release.invalid/{host} (max {max})"),
                 &format!("download https://release.invalid/{host}.sha256 (max 4096)"),
             ]
         );
 
-        // The signature judgment landed on the four unpacked candidates —
+        // The signature judgment landed on the three unpacked candidates —
         // each exactly once, never on a live path, never on the same file
         // twice while another goes unjudged.
         let verifies: Vec<&String> = ran
@@ -2191,7 +1574,6 @@ mod tests {
             vec![
                 "verify staged/codeconnect",
                 "verify staged/ccd",
-                "verify staged/cc-tmux",
                 "verify staged/cc-agent-host"
             ]
         );
@@ -2200,8 +1582,6 @@ mod tests {
         for (binary, run) in [
             ("codeconnect", "probe staged/codeconnect"),
             ("ccd", "probe staged/ccd"),
-            ("codeconnect", "ask staged/codeconnect --tmux-version"),
-            ("cc-tmux", "ask staged/cc-tmux -V"),
         ] {
             let judged = ran
                 .events
@@ -2231,11 +1611,7 @@ mod tests {
             .iter()
             .rposition(|event| event.starts_with("verify"))
             .unwrap();
-        for smoke in [
-            "probe live/codeconnect",
-            "probe live/ccd",
-            "ask live/cc-tmux -V",
-        ] {
+        for smoke in ["probe live/codeconnect", "probe live/ccd"] {
             let smoke_at = last(smoke);
             assert!(
                 last_verify < smoke_at,
@@ -2255,12 +1631,6 @@ mod tests {
             );
         }
         assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-            "release",
-            "the release's tmux replaced the one installed before"
-        );
-        assert_eq!(after["THIRD_PARTY_NOTICES"], b"the release notices");
-        assert_eq!(
             line_after(&fixture.live.join("cc-agent-host"), "FROM:").unwrap(),
             "release",
             "the release's agent host replaced the one installed before"
@@ -2279,7 +1649,7 @@ mod tests {
 
     #[test]
     fn a_smoke_failure_of_any_binary_restores_the_previous_set_and_never_restarts() {
-        for binary in ["codeconnect", "ccd", "cc-tmux"] {
+        for binary in ["codeconnect", "ccd"] {
             let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
             let before = snapshot(&fixture.live);
             let ran = run(
@@ -2321,132 +1691,7 @@ mod tests {
         }
     }
 
-    // ----------------------------------------------------------------- tmux
-
-    /// Current binaries with no tmux beside them: what an updater from before
-    /// tmux shipped leaves. Only tmux is fetched and installed, the binaries
-    /// stay byte for byte, and the daemon keeps running.
-    #[test]
-    fn current_binaries_without_their_tmux_get_only_the_tmux() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
-        std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
-        std::fs::remove_file(fixture.live.join("THIRD_PARTY_NOTICES")).unwrap();
-        let before = snapshot(&fixture.live);
-
-        let ran = run(&fixture, Faults::default());
-        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-        let tmux = Archive::Tmux.name(&running());
-        let downloads: Vec<&String> = ran
-            .events
-            .iter()
-            .filter(|event| event.starts_with("download"))
-            .collect();
-        assert_eq!(
-            downloads,
-            vec![
-                &format!(
-                    "download https://release.invalid/{tmux} (max {})",
-                    crate::update_release::MAX_ARCHIVE_BYTES
-                ),
-                &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
-                #[cfg(target_os = "linux")]
-                &format!("download https://release.invalid/{tmux}.sha256.sig (max 64)"),
-            ]
-        );
-        assert!(!ran.events.contains(&"restart".to_string()));
-
-        let after = snapshot(&fixture.live);
-        for (name, bytes) in &before {
-            assert_eq!(&after[name], bytes, "{name} was carried across unchanged");
-        }
-        assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-            "release"
-        );
-        assert_eq!(after["THIRD_PARTY_NOTICES"], b"the release notices");
-        assert!(!crate::update_install::staging_dir(&fixture.root).exists());
-        assert!(!fixture.root.join("update.work").exists());
-
-        // And then there is nothing left to do.
-        let again = run(&fixture, Faults::default());
-        assert!(again.outcome.is_ok(), "{:?}", again.outcome);
-        assert!(!again
-            .events
-            .iter()
-            .any(|event| event.starts_with("download")));
-    }
-
-    /// A tmux that is there but not the one the binaries require, or not
-    /// CodeConnect's, or not both architectures, is repaired rather than
-    /// blessed.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_wrong_unsigned_or_thin_tmux_beside_current_binaries_is_replaced() {
-        for (live_tmux, refuse_signature_call) in [
-            (fixture_tmux("tmux 3.7c-cc8", "live", false), None),
-            // The first judgment is the live `cc-tmux`'s.
-            (fixture_tmux(TMUX_LINE, "live", false), Some(1)),
-            (fixture_tmux(TMUX_LINE, "live", true), None),
-        ] {
-            let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
-            place_binary(&fixture.live.join("cc-tmux"), live_tmux);
-            let ran = run(
-                &fixture,
-                Faults {
-                    refuse_signature_call,
-                    ..Faults::default()
-                },
-            );
-            assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-            assert_eq!(
-                line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-                "release"
-            );
-        }
-    }
-
-    /// The release's tmux has to be the build its own `codeconnect` names: a
-    /// correctly signed tmux from another release is not this release.
-    #[test]
-    fn a_release_whose_tmux_is_not_the_one_its_codeconnect_requires_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
-        let dir = fixture
-            .root
-            .join("fixtures")
-            .join(format!("codeconnect-{}", newer()));
-        place_binary(
-            &dir.join("cc-tmux"),
-            fixture_tmux("tmux 3.7c-cc8", "release", false),
-        );
-        repackage(&fixture, &newer());
-
-        let before = snapshot(&fixture.live);
-        let ran = run(&fixture, Faults::default());
-        let said = ran.outcome.unwrap_err().to_string();
-        assert!(said.contains("requires `tmux 3.7c-cc9`"), "{said}");
-        assert!(!ran.events.contains(&"restart".to_string()));
-        assert_eq!(snapshot(&fixture.live), before);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_thin_tmux_in_the_release_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
-        let dir = fixture
-            .root
-            .join("fixtures")
-            .join(format!("codeconnect-{}", newer()));
-        place_binary(
-            &dir.join("cc-tmux"),
-            fixture_tmux(TMUX_LINE, "release", true),
-        );
-        repackage(&fixture, &newer());
-
-        let before = snapshot(&fixture.live);
-        let ran = run(&fixture, Faults::default());
-        assert!(ran.outcome.is_err());
-        assert_eq!(snapshot(&fixture.live), before);
-    }
+    // ------------------------------------------------------- the agent host
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -2465,28 +1710,25 @@ mod tests {
         assert_eq!(snapshot(&fixture.live), before);
     }
 
-    /// A release without the tmux archive, or without the agent host's, is
-    /// refused before anything is downloaded: installing its binaries alone
-    /// would leave a machine that cannot start a session, or no Claude run.
+    /// A release without the agent host's archive is refused before anything
+    /// is downloaded: installing its binaries alone would leave no Claude run.
     #[test]
-    fn a_release_without_its_tmux_or_agent_host_is_refused_before_any_download() {
-        for archive in [Archive::Tmux, Archive::AgentHost] {
-            let mut fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
-            let missing = archive.name(&newer());
-            let mut release: serde_json::Value = serde_json::from_slice(&fixture.body).unwrap();
-            release["assets"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|asset| !asset["name"].as_str().unwrap().starts_with(&missing));
-            fixture.body = serde_json::to_vec(&release).unwrap();
+    fn a_release_without_its_agent_host_is_refused_before_any_download() {
+        let mut fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
+        let missing = Archive::AgentHost.name(&newer());
+        let mut release: serde_json::Value = serde_json::from_slice(&fixture.body).unwrap();
+        release["assets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|asset| !asset["name"].as_str().unwrap().starts_with(&missing));
+        fixture.body = serde_json::to_vec(&release).unwrap();
 
-            let before = snapshot(&fixture.live);
-            let ran = run(&fixture, Faults::default());
-            let said = ran.outcome.unwrap_err().to_string();
-            assert!(said.contains(&missing), "{said}");
-            assert!(!ran.events.iter().any(|event| event.starts_with("download")));
-            assert_eq!(snapshot(&fixture.live), before);
-        }
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        let said = ran.outcome.unwrap_err().to_string();
+        assert!(said.contains(&missing), "{said}");
+        assert!(!ran.events.iter().any(|event| event.starts_with("download")));
+        assert_eq!(snapshot(&fixture.live), before);
     }
 
     // ------------------------------------------------------------- Linux
@@ -2497,9 +1739,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_refused_checksum_signature_on_any_archive_stops_everything() {
-        for call in 1..=3 {
+        for call in 1..=2 {
             let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
-            let archive = [Archive::Core, Archive::Tmux, Archive::AgentHost][call - 1];
+            let archive = [Archive::Core, Archive::AgentHost][call - 1];
             let name = archive.name(&newer());
             std::fs::write(
                 fixture
@@ -2521,10 +1763,11 @@ mod tests {
             assert!(said.contains("release key"), "call {call}: {said}");
             assert!(!ran.events.contains(&"restart".to_string()));
             // Nothing from the refused archive ran. The core archive is
-            // judged and its binaries probed before the tmux archive is
-            // fetched, so a refused tmux signature comes after those. Nothing
-            // runs the agent host; that it stays out of `bin` is the snapshot.
-            if let Some(from_refused) = ["probe staged/", "ask staged/cc-tmux"].get(call - 1) {
+            // judged and its binaries probed before the agent host's archive is
+            // fetched, so a refused agent host signature comes after those.
+            // Nothing runs the agent host; that it stays out of `bin` is the
+            // snapshot.
+            if let Some(from_refused) = ["probe staged/"].get(call - 1) {
                 assert!(
                     !ran.events
                         .iter()
@@ -2548,7 +1791,6 @@ mod tests {
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
 
         let core = Archive::Core.name(&newer());
-        let tmux = Archive::Tmux.name(&newer());
         let host = Archive::AgentHost.name(&newer());
         let max = crate::update_release::MAX_ARCHIVE_BYTES;
         let downloads: Vec<&String> = ran
@@ -2562,9 +1804,6 @@ mod tests {
                 &format!("download https://release.invalid/{core} (max {max})"),
                 &format!("download https://release.invalid/{core}.sha256 (max 4096)"),
                 &format!("download https://release.invalid/{core}.sha256.sig (max 64)"),
-                &format!("download https://release.invalid/{tmux} (max {max})"),
-                &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
-                &format!("download https://release.invalid/{tmux}.sha256.sig (max 64)"),
                 &format!("download https://release.invalid/{host} (max {max})"),
                 &format!("download https://release.invalid/{host}.sha256 (max 4096)"),
                 &format!("download https://release.invalid/{host}.sha256.sig (max 64)"),
@@ -2577,19 +1816,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} missing from {:?}", ran.events))
         };
         let core_judged = at(&format!("authenticate {core}.sha256"));
-        let tmux_judged = at(&format!("authenticate {tmux}.sha256"));
         let host_judged = at(&format!("authenticate {host}.sha256"));
-        for run in [
-            "probe staged/codeconnect",
-            "probe staged/ccd",
-            "ask staged/codeconnect --tmux-version",
-        ] {
+        for run in ["probe staged/codeconnect", "probe staged/ccd"] {
             assert!(
                 core_judged < at(run),
                 "the core checksum was judged before `{run}`"
             );
         }
-        assert!(tmux_judged < at("ask staged/cc-tmux -V"));
         assert!(!ran.events.iter().any(|event| event.starts_with("verify")));
 
         let last = |needle: &str| {
@@ -2598,11 +1831,7 @@ mod tests {
                 .rposition(|event| event == needle)
                 .unwrap()
         };
-        for smoke in [
-            "probe live/codeconnect",
-            "probe live/ccd",
-            "ask live/cc-tmux -V",
-        ] {
+        for smoke in ["probe live/codeconnect", "probe live/ccd"] {
             assert!(host_judged < last(smoke), "every judgment before `{smoke}`");
             assert!(last(smoke) < last("restart"), "restart waits for `{smoke}`");
         }
@@ -2613,33 +1842,13 @@ mod tests {
                 format!("{binary} {} (bbbbbbbbbbbb)", newer())
             );
         }
-        for binary in ["cc-tmux", "cc-agent-host"] {
-            assert_eq!(
-                line_after(&fixture.live.join(binary), "FROM:").unwrap(),
-                "release"
-            );
-        }
+        assert_eq!(
+            line_after(&fixture.live.join("cc-agent-host"), "FROM:").unwrap(),
+            "release"
+        );
         assert_eq!(
             snapshot(&fixture.live)["AGENT_HOST_NOTICES"],
             b"the release host notices"
-        );
-    }
-
-    /// An installed tmux that is not the one the binaries require is replaced
-    /// from the release.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_wrong_tmux_beside_current_binaries_is_replaced() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
-        place_binary(
-            &fixture.live.join("cc-tmux"),
-            fixture_tmux("tmux 3.7c-cc8", "live", false),
-        );
-        let ran = run(&fixture, Faults::default());
-        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-        assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-            "release"
         );
     }
 
@@ -2676,116 +1885,6 @@ mod tests {
 
     // ------------------------------------------------------ session start
 
-    #[cfg(target_os = "macos")]
-    fn ensure(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
-        ensure_tmux_at(root, &running(), deps)
-    }
-
-    /// The first session after an updater that predates tmux: only tmux is
-    /// fetched, from this version's own release, and the daemon is left
-    /// alone. The next session finds it and fetches nothing.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_session_start_without_tmux_installs_it_once_from_its_own_release() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
-        std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
-        std::fs::remove_file(fixture.live.join("THIRD_PARTY_NOTICES")).unwrap();
-        let before = snapshot(&fixture.live);
-
-        let ran = run_entry(&fixture, Faults::default(), ensure);
-        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-        let tmux = Archive::Tmux.name(&running());
-        assert_eq!(
-            ran.events
-                .iter()
-                .filter(|event| event.starts_with("download"))
-                .count(),
-            2,
-            "the tmux archive and its checksum: {:?}",
-            ran.events
-        );
-        assert!(ran
-            .events
-            .iter()
-            .any(|event| event.contains(&format!("/{tmux} "))));
-        assert!(!ran.events.contains(&"restart".to_string()));
-        let after = snapshot(&fixture.live);
-        for (name, bytes) in &before {
-            assert_eq!(&after[name], bytes, "{name} was carried across unchanged");
-        }
-        assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-            "release"
-        );
-
-        let again = run_entry(&fixture, Faults::default(), ensure);
-        assert!(again.outcome.is_ok(), "{:?}", again.outcome);
-        assert!(again.events.is_empty(), "{:?}", again.events);
-    }
-
-    /// GitHub answering for another release is not this binary's release,
-    /// however well formed: nothing is downloaded from it.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_session_start_refuses_a_release_that_is_not_its_own() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
-        std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
-        let before = snapshot(&fixture.live);
-        let ran = run_entry(&fixture, Faults::default(), ensure);
-        let said = ran.outcome.unwrap_err().to_string();
-        assert!(said.contains("answered with"), "{said}");
-        assert_eq!(ran.events, vec!["fetch".to_string()]);
-        assert_eq!(snapshot(&fixture.live), before);
-    }
-
-    /// A session start that meets a running installation waits for it, and
-    /// then installs.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_session_start_waits_for_another_installation() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
-        std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
-        let held = claim_throttle_at(&update_lock_path(&fixture.root)).unwrap();
-        let releaser = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            drop(held);
-        });
-        let started = std::time::Instant::now();
-        let ran = run_entry(&fixture, Faults::default(), ensure);
-        releaser.join().unwrap();
-        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-        assert!(
-            started.elapsed() >= std::time::Duration::from_millis(600),
-            "it waited for the holder"
-        );
-        assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
-            "release"
-        );
-    }
-
-    /// Only the installed binary, with nothing named in its place and no tmux
-    /// beside it, installs one.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn only_the_installed_binary_without_tmux_installs_one() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
-        let exe = fixture.live.join("codeconnect");
-        let linked = fixture.root.join("linked-codeconnect");
-        std::os::unix::fs::symlink(&exe, &linked).unwrap();
-        let elsewhere = fixture.root.join("fixtures").join("codeconnect");
-        std::fs::write(&elsewhere, b"").unwrap();
-
-        // tmux is present.
-        assert!(!bootstrap_applies(false, &exe, &fixture.live));
-        std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
-        assert!(bootstrap_applies(false, &exe, &fixture.live));
-        assert!(bootstrap_applies(false, &linked, &fixture.live));
-        // A tmux was named explicitly, or this is some other binary.
-        assert!(!bootstrap_applies(true, &exe, &fixture.live));
-        assert!(!bootstrap_applies(false, &elsewhere, &fixture.live));
-    }
-
     // ------------------------------------------------- the website installer
 
     /// Run `install-staged` against the release binaries the rig unpacked, as
@@ -2801,11 +1900,10 @@ mod tests {
     }
 
     /// A first install: no `bin` at all. The binaries come from the
-    /// installer's directory, tmux and the agent host from the same release,
-    /// and the whole set lands in one exchange, proven before the daemon is
-    /// touched.
+    /// installer's directory, the agent host from the same release, and the
+    /// whole set lands in one exchange, proven before the daemon is touched.
     #[test]
-    fn a_first_install_lands_the_binaries_their_tmux_and_agent_host_together() {
+    fn a_first_install_lands_the_binaries_and_their_agent_host_together() {
         let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_dir_all(&fixture.live).unwrap();
 
@@ -2818,9 +1916,7 @@ mod tests {
             [
                 "AGENT_HOST_NOTICES",
                 "LICENSE",
-                "THIRD_PARTY_NOTICES",
                 "cc-agent-host",
-                "cc-tmux",
                 "ccd",
                 "codeconnect"
             ]
@@ -2834,17 +1930,12 @@ mod tests {
                 .iter()
                 .filter(|event| event.starts_with("download"))
                 .count(),
-            if cfg!(target_os = "macos") { 4 } else { 9 },
-            "macOS fetches the tmux and agent host archives with their checksums; \
-             Linux fetches the release's own core archive too, each with its \
-             signature: {:?}",
+            if cfg!(target_os = "macos") { 2 } else { 6 },
+            "macOS fetches the agent host archive with its checksum; Linux fetches \
+             the release's own core archive too, each with its signature: {:?}",
             ran.events
         );
-        for smoke in [
-            "probe live/codeconnect",
-            "probe live/ccd",
-            "ask live/cc-tmux -V",
-        ] {
+        for smoke in ["probe live/codeconnect", "probe live/ccd"] {
             assert!(
                 ran.events.iter().any(|event| event == smoke),
                 "{smoke}: {:?}",
@@ -2868,7 +1959,7 @@ mod tests {
             b"not ours to judge"
         );
         assert_eq!(
-            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
+            line_after(&fixture.live.join("cc-agent-host"), "FROM:").unwrap(),
             "release"
         );
     }

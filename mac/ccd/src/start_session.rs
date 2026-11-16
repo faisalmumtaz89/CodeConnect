@@ -1150,10 +1150,9 @@ async fn version_at_floor(
     Ok(version)
 }
 
-/// Where the claude a start runs is: the claude the launcher finds, from the same
-/// list ([`protocol::claude_bin`]) with the login shell's `PATH`: config.json's
-/// `claude_bin`, every `claude` on that `PATH`, then the well-known install
-/// locations; the first that is a program and not the launcher itself.
+/// Where the claude a start runs is, from [`protocol::claude_bin`]'s list with the login
+/// shell's `PATH`: config.json's `claude_bin`, every `claude` on that `PATH`, then the
+/// well-known install locations; the first that is a program and not the launcher itself.
 async fn claude_path(
     environment: &HashMap<OsString, OsString>,
     claude_bin: Option<&str>,
@@ -1162,16 +1161,14 @@ async fn claude_path(
     let path_hits = login_path_hits(environment, &home, "claude").await;
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
-        protocol::claude_bin::candidates(claude_bin, None, &home, path_hits),
+        protocol::claude_bin::candidates(claude_bin, &home, path_hits),
         launcher.as_deref(),
     )
 }
 
-/// Where the codex a start runs is, from the list the launcher reads
-/// ([`protocol::codex_bin`]) with the login shell's `PATH`: config.json's `codex_bin`,
-/// every `codex` on that `PATH`, then the well-known install locations; the first
-/// that is a program and not the launcher itself. Unlike the launcher it leaves out
-/// `CODECONNECT_CODEX_BIN`, as [`claude_path`] leaves out Claude's.
+/// Where the codex a start runs is, from [`protocol::codex_bin`]'s list with the login
+/// shell's `PATH`: config.json's `codex_bin`, every `codex` on that `PATH`, then the
+/// well-known install locations; the first that is a program and not the launcher itself.
 pub(crate) async fn codex_path(
     environment: &HashMap<OsString, OsString>,
     codex_bin: Option<&str>,
@@ -1180,7 +1177,7 @@ pub(crate) async fn codex_path(
     let path_hits = login_path_hits(environment, &home, "codex").await;
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
-        protocol::codex_bin::candidates(codex_bin, None, &home, path_hits),
+        protocol::codex_bin::candidates(codex_bin, &home, path_hits),
         launcher.as_deref(),
     )
 }
@@ -4386,7 +4383,7 @@ esac"#;
     /// A codex in one of the list's system locations, which no rig can take away.
     fn system_codex() -> Option<PathBuf> {
         let home = Path::new("/nonexistent-home");
-        protocol::codex_bin::candidates(None, None, home, Vec::new())
+        protocol::codex_bin::candidates(None, home, Vec::new())
             .into_iter()
             .filter(|candidate| !candidate.starts_with(home))
             .find(|candidate| candidate.exists())
@@ -4587,7 +4584,7 @@ esac"#;
     /// a test that needs claude missing would find it, and run it.
     fn system_claude() -> Option<PathBuf> {
         let home = Path::new("/nonexistent-home");
-        protocol::claude_bin::candidates(None, None, home, Vec::new())
+        protocol::claude_bin::candidates(None, home, Vec::new())
             .into_iter()
             .filter(|candidate| !candidate.starts_with(home))
             .find(|candidate| candidate.exists())

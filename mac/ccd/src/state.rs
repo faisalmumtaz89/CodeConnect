@@ -2564,7 +2564,6 @@ impl Daemon {
                     .is_some()
                     .then(protocol::build_identity::build_tag)
             },
-            sessions: self.inner.lock().await.supervisors.len(),
         }
     }
 
@@ -12974,53 +12973,12 @@ fn end_call(inner: &mut Inner, tool_use_id: &str) {
     }
 }
 
-// -------------------------------------------------- codex recovery sweep
+// -------------------------------------------------- the codeconnect launcher
 
-/// The env override naming the launcher this daemon runs the codex recovery pass
-/// through, ahead of every derived candidate. The house shape — a
+/// The env override naming that `codeconnect` ([`codex_launcher`]), ahead of every
+/// derived candidate. The house shape — a
 /// `CODECONNECT_<TOOL>_BIN` checked first, then the places the tool actually lives.
 pub(crate) const LAUNCHER_BIN_ENV: &str = "CODECONNECT_LAUNCHER_BIN";
-
-/// How often the daemon asks again, after the pass it runs at startup.
-///
-/// **Slow on purpose, and a constant rather than a knob.** What the pass repairs is
-/// wreckage — a launch killed inside its own hash→exec window, a custodian that ran
-/// out of patience — so on a healthy Mac every pass finds nothing and the only cost
-/// worth minimising is the one it pays for finding nothing: one short-lived child
-/// every five minutes. Nothing about the right number changes between runs or between
-/// machines, which is the test for whether a value belongs in the config file.
-pub(crate) const CODEX_SWEEP_PERIOD: Duration = Duration::from_secs(300);
-
-/// How long one pass may run before it is abandoned.
-///
-/// **The last resort, not the mechanism.** The pass ends ITSELF at its own deadline,
-/// which is well inside this, so the ordinary ending is a child that exits having said
-/// what it did. This is what is left for a child that cannot reach its own deadline at
-/// all — one wedged on a stalled filesystem. Generous, because a full pass killed
-/// part-way through can leave a record transition whose other half was to be performed
-/// afterwards; the next tick repairs that. Two passes cannot be alive at once, but not
-/// because of this number: the sweeper awaits each pass before it ticks again.
-pub(crate) const CODEX_SWEEP_BUDGET: Duration = Duration::from_secs(60);
-
-/// The most lines of one pass's own account this daemon copies into its log — a bound
-/// on what a pathological sessions directory can write into the log the daemon shares
-/// with everything else. Past the cap the child's output is still DRAINED, because a
-/// child stopped on a full pipe never finishes the repairs it was started for; what is
-/// dropped is counted and said.
-const CODEX_SWEEP_MAX_LINES: usize = 32;
-
-/// What one codex recovery pass came to: what it said, and what (if anything) means
-/// nothing it owed can be assumed done.
-///
-/// `failed` covers three endings that are one thing to the caller — no launcher, a
-/// pass that could not be run or waited for, a pass that exited non-zero — because the
-/// daemon's answer to all three is identical: latch the reason and ask again next
-/// tick. The difference between them is the sentence, and the sentence is in the field.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CodexSweep {
-    said: Vec<String>,
-    failed: Option<String>,
-}
 
 /// **One test at a time may own the process-global log sink.**
 ///
@@ -13131,14 +13089,8 @@ pub(crate) fn logged_session_ref(reference: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The `codeconnect` launcher this daemon runs the recovery pass through.
-///
-/// **Why a subprocess and not a function call.** The launch records are the
-/// launcher's — their lock, their schema, their atomic rename — and so are the rules
-/// for when a launch may be filed as failed and a replacement custodian armed. `ccd`
-/// does not depend on that crate and cannot: it is a binary crate with no library. A
-/// second copy of those rules in this daemon would be a copy that drifts. So the
-/// daemon asks the one process that owns the records to do it, and reads what it says.
+/// The `codeconnect` this daemon names to the runs it starts, as their mail server, and
+/// leaves out when it looks for an agent's binary.
 pub(crate) fn codex_launcher() -> Result<std::path::PathBuf, String> {
     launcher_among(
         std::env::var(LAUNCHER_BIN_ENV).ok(),
@@ -13167,12 +13119,9 @@ fn state_dir_owner() -> Option<u32> {
 /// **Is this override a program this daemon may spawn?**
 ///
 /// `CODECONNECT_LAUNCHER_BIN` was `is_file()` and nothing else, and what it selects
-/// is executed every five minutes by a launchd job holding the APNs signing key and
-/// this Mac's tailnet identity. Its sibling `CODECONNECT_CODEX_BIN` is read exactly
-/// once and pinned by SHA-256 — see
-/// `resolve_codex_bin` in `mac/codeconnect/src/codex.rs`, where that discipline is
-/// written down — because the file an environment variable names is the file that
-/// ends up running.
+/// is named to every run this daemon starts, by a launchd job holding the APNs signing
+/// key and this Mac's tailnet identity — and the file an environment variable names is
+/// the file that ends up running.
 ///
 /// Three conditions, and each is a different way the override stops being the
 /// operator's own choice:
@@ -13183,15 +13132,12 @@ fn state_dir_owner() -> Option<u32> {
 ///   * **owned by the uid that owns this daemon's state.** Another user's file is
 ///     another user's decision about what this daemon runs.
 ///   * **writable by nobody but its owner.** A group- or other-writable path can be
-///     rewritten between this check and the spawn — and between two ticks of a sweep
-///     that runs every five minutes — so a file that passed is not necessarily the
-///     file that runs. `mode & 0o022`, which is both bits and no others: the execute
+///     rewritten between this check and the spawn, so a file that passed is not
+///     necessarily the file that runs. `mode & 0o022`, which is both bits and no others: the execute
 ///     and read bits say nothing about who can revise it.
 ///
-/// **Deliberately NOT `codex.rs`'s digest pin.** The launcher is this build's own
-/// binary and every install replaces it, so a hash would refuse the ordinary upgrade
-/// and stop the recovery sweep on exactly the machines that had just been updated.
-/// What is borrowed is the shape of the question, not its strictness.
+/// **No digest pin.** The launcher is this build's own binary and every install
+/// replaces it, so a hash would refuse the ordinary upgrade.
 ///
 /// `metadata` and not `symlink_metadata`: a symlink is an ordinary way to name an
 /// installed launcher, and the thing that gets executed is the target — so the target
@@ -13235,8 +13181,7 @@ fn launcher_is_spawnable(path: &std::path::Path, owner: Option<u32>) -> Result<(
 /// are the same directory, so the fallback is never taken. What it covers is a `ccd`
 /// started by hand from somewhere else on a machine that has an install. A dev tree
 /// that also has an install can therefore reach the installed launcher, and the
-/// override exists to say otherwise; cross-build drift degrades safely, because a
-/// record the running launcher cannot parse is reported rather than acted on.
+/// override exists to say otherwise.
 ///
 /// Split out so the precedence is exercised without touching the environment. This
 /// process is a daemon with live tasks in it and `setenv` is not thread-safe on this
@@ -13252,8 +13197,7 @@ fn launcher_among(
     let mut looked = Vec::new();
     // An override this daemon will not spawn is REPORTED and then passed, not obeyed:
     // an operator who mistyped the path — or who left it somewhere anyone can rewrite —
-    // should learn that from the log rather than from a recovery pass that quietly
-    // stopped running. Said at startup by [`warn_about_an_ignored_launcher_override`],
+    // should learn that from the log. Said at startup by [`warn_about_an_ignored_launcher_override`],
     // because a fallback that works would otherwise swallow it here, and the reason is
     // carried into `looked` so the no-launcher error names it too.
     //
@@ -13283,8 +13227,7 @@ fn launcher_among(
     }
     looked.push(format!("{} (the install prefix)", installed.display()));
     Err(format!(
-        "no `codeconnect` launcher was found, so codex launch records left without a \
-         guardian cannot be repaired from here; looked at {}",
+        "no `codeconnect` was found; looked at {}",
         looked.join(", ")
     ))
 }
@@ -13293,9 +13236,9 @@ fn launcher_among(
 ///
 /// [`launcher_among`] passes such an override and takes the next candidate, so on a
 /// machine where a candidate exists the mistyped path is never mentioned anywhere — the
-/// daemon runs happily through a launcher the operator did not choose. Said here rather
-/// than per tick because it is a condition of the environment this process was started
-/// in and cannot change under it.
+/// daemon runs happily through a launcher the operator did not choose. Said once at
+/// startup because it is a condition of the environment this process was started in and
+/// cannot change under it.
 pub(crate) fn warn_about_an_ignored_launcher_override() {
     if let Some(why) =
         an_ignored_launcher_override(std::env::var(LAUNCHER_BIN_ENV).ok(), state_dir_owner())
@@ -13318,196 +13261,6 @@ fn an_ignored_launcher_override(named: Option<String>, owner: Option<u32>) -> Op
         "{LAUNCHER_BIN_ENV} names {named}, which this daemon will not spawn because \
          {why}; it is ignored and the launcher is looked for in the usual places"
     ))
-}
-
-/// Run one bounded codex recovery pass through `program`, and bring back what it said.
-///
-/// **Its account is read as it is written, not collected at the end.** The pass says a
-/// line at the moment it settles each claim, and settling one takes the flag off the
-/// binary AND the claim off the record — so a pass killed before it spoke leaves
-/// nothing behind that says either happened. `said` lives outside the raced future for
-/// exactly that reason: what the pass managed to say survives being ended.
-///
-/// stdout is `/dev/null`: the pass says everything on stderr, and a stream nobody
-/// writes to is one more thing that could fill and stop the child.
-pub(crate) async fn sweep_codex_recovery(
-    program: &std::path::Path,
-    socket: &str,
-    budget: Duration,
-) -> CodexSweep {
-    use tokio::io::AsyncBufReadExt as _;
-
-    let mut command = tokio::process::Command::new(program);
-    command
-        .arg(protocol::CODEX_SWEEP_SUBCOMMAND)
-        .args(["--socket", socket])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        // A daemon shutting down mid-pass must not leave the pass itself behind.
-        // Dropping the future drops the child, and this is what makes that a kill — of
-        // the child, and only of it. The pass's own descendants are gate children and
-        // replacement custodians, which are detached on purpose and outlive it.
-        .kill_on_drop(true);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return CodexSweep {
-                said: Vec::new(),
-                failed: Some(format!("{} could not be run: {err}", program.display())),
-            }
-        }
-    };
-    let mut said = Vec::new();
-    let mut dropped = 0usize;
-    let stderr = child.stderr.take();
-    // The borrow ends with the future, so both counters are readable again whether the
-    // pass finished or was ended.
-    let outcome = {
-        let ran = async {
-            if let Some(stderr) = stderr {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                loop {
-                    let line = match lines.next_line().await {
-                        Ok(Some(line)) => line,
-                        Ok(None) => break,
-                        // **Said rather than read as the end.** A read error and an EOF
-                        // are the same empty result otherwise, and this is the channel
-                        // the pass's whole account comes down: a janitor that stopped
-                        // being heard mid-sentence must not look like one that had
-                        // finished speaking.
-                        Err(err) => {
-                            said.push(format!(
-                                "the rest of what the pass said could not be read ({err})"
-                            ));
-                            break;
-                        }
-                    };
-                    let line = line.trim().to_string();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if said.len() >= CODEX_SWEEP_MAX_LINES {
-                        // Kept draining rather than stopping: an unread pipe fills, and
-                        // a child stopped on a full pipe never finishes its repairs.
-                        dropped += 1;
-                        continue;
-                    }
-                    said.push(line);
-                }
-            }
-            child.wait().await
-        };
-        tokio::time::timeout(budget, ran).await
-    };
-    // Counted here rather than at the reader's EOF, so a pass that says more than the
-    // cap and is then ended still states its truncation.
-    if dropped > 0 {
-        said.push(format!(
-            "and {dropped} further line(s) the daemon did not copy into this log; the pass \
-             said them all on its own stderr"
-        ));
-    }
-    let failed = match outcome {
-        Err(_) => Some(format!(
-            "the pass did not finish within {budget:?} and was ended; the next pass asks again"
-        )),
-        Ok(Err(err)) => Some(format!(
-            "the pass could not be waited for: {err}; the next pass asks again"
-        )),
-        Ok(Ok(status)) if status.success() => None,
-        Ok(Ok(status)) => {
-            Some(match status.code() {
-                Some(code) => {
-                    format!("the pass exited {code} with something still owed; the next pass asks again")
-                }
-                None => "the pass was killed by a signal; the next pass asks again".to_string(),
-            })
-        }
-    };
-    CodexSweep { said, failed }
-}
-
-/// What the daemon has already said about the recovery pass, so it does not say it
-/// again.
-///
-/// **Everything is said once.** A line about a repair the pass MADE is a distinct
-/// event and cannot repeat: the repair changes the record, so the next pass has nothing
-/// to say about it. Every other line is a CONDITION — a record that could not be read,
-/// a launcher that is not there — and a condition holds until something changes.
-/// Repeating one every period for the life of a machine buries the events under it,
-/// which is the rule the liveness sweep follows and for its reason.
-#[derive(Debug, Default)]
-struct SweepLatch {
-    said: Vec<String>,
-    complaint: Option<String>,
-}
-
-/// Say what one pass came to, and say nothing when it came to nothing.
-fn report_codex_sweep(sweep: &CodexSweep, latch: &mut SweepLatch) {
-    for line in &sweep.said {
-        if !latch.said.contains(line) {
-            crate::log_info!("codex recovery: {line}");
-        }
-    }
-    latch.said.clone_from(&sweep.said);
-    // Unchanged is unsaid — which is also why a first quiet pass says nothing at all:
-    // `None == None` returns here, and the clearing line below is reachable only when
-    // there was a complaint to clear.
-    if sweep.failed == latch.complaint {
-        return;
-    }
-    match &sweep.failed {
-        Some(why) => crate::log_warn!("codex recovery: {why}"),
-        // Said, because an operator who read the complaint needs to see it end.
-        None => crate::log_info!("codex recovery: the pass is completing again"),
-    }
-    latch.complaint.clone_from(&sweep.failed);
-}
-
-/// The daemon's codex recovery sweeper: **one pass now**, then one every `period`.
-///
-/// **The pass now is the startup recovery** and is the one that matters. Every launch
-/// record on this machine was written by a process a previous boot or a previous
-/// daemon was watching; a launch whose coordinator and custodian both died stays
-/// pending, with its cleanup undone, until something comes back for it. The ticker
-/// behind it is the backstop for the launch that is orphaned while this daemon is
-/// already up.
-///
-/// **Concurrently with the listeners, not before them**, exactly as the liveness sweep
-/// is and for its reason: this shells out, and holding the sockets shut for the length
-/// of a child would put a hole in the hook path on every restart. Nothing is lost by
-/// sweeping late — the record has been orphaned since before this process existed.
-///
-/// **The launcher is looked for on every tick, not once**, because "there is no
-/// launcher" is a state a machine leaves: a first install, an update mid-flight, a
-/// launchd job that came up before the install prefix was populated. Resolving once and
-/// parking on failure would put the feature back in the state this sweeper exists to
-/// end — machinery with no caller — for the life of a daemon that may run for weeks. The cost
-/// of asking again is three `stat` calls per period, and the complaint is latched so a
-/// machine with genuinely no launcher says so once rather than every period.
-pub(crate) async fn run_codex_sweeps<F>(launcher: F, socket: String, period: Duration)
-where
-    F: Fn() -> Result<std::path::PathBuf, String>,
-{
-    let mut latch = SweepLatch::default();
-    let mut ticker = tokio::time::interval(period);
-    // Delay rather than burst: a Mac that has just woken must not fire every missed
-    // tick at once, and each tick's work is identical, so catching up buys nothing.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        // The first tick is immediate, so this IS the startup pass; every one after it
-        // is the ticker's.
-        ticker.tick().await;
-        let sweep = match launcher() {
-            Ok(program) => sweep_codex_recovery(&program, &socket, CODEX_SWEEP_BUDGET).await,
-            Err(why) => CodexSweep {
-                said: Vec::new(),
-                failed: Some(why),
-            },
-        };
-        report_codex_sweep(&sweep, &mut latch);
-    }
 }
 
 /// The job this process belongs to — launchd's on macOS, CodeConnect's systemd
@@ -13787,55 +13540,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ---------------------------------------------- codex recovery sweep
-
-    /// Aborts its task whatever happens, **including the path where an assertion
-    /// panics** — which is the path a broken change takes. A trailing `abort()` runs
-    /// only when the test passes, and a sweeper left running against a tearing-down
-    /// runtime spawns children nobody is waiting for.
-    struct SweeperTask(tokio::task::JoinHandle<()>);
-    impl Drop for SweeperTask {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-
-    /// Removes its stub whatever happens, for the reason [`SweeperTask`] exists.
-    struct StubDir(std::path::PathBuf);
-    impl Drop for StubDir {
-        fn drop(&mut self) {
-            if let Some(dir) = self.0.parent() {
-                std::fs::remove_dir_all(dir).ok();
-            }
-        }
-    }
-
-    /// **The log sink is process-global, so the tests that read it take turns.**
-    ///
-    /// `crate::log::capture` holds one `Vec` for the whole binary: a `drain` takes
-    /// another test's lines with it, an `install` discards them, and an `uninstall`
-    /// stops recording for everybody. The assertion that cannot survive that is the
-    /// NEGATIVE one — a quiet pass proving it wrote nothing would be failed by any
-    /// other test's line arriving in its window. Held across install…uninstall, and
-    /// never poisoned into a panic, so a failing assertion inside the lock does not
-    /// take every other test down with it.
-    /// **Async, because the turnstile is.** Both callers are `#[tokio::test]`, so a
-    /// `blocking_lock` here blocks the very thread that would have to release it and
-    /// tokio refuses outright. `body` stays synchronous: what it runs is a sweep report,
-    /// and the sink must not be shared with anything that could yield inside it.
-    ///
-    /// The turnstile is [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`] and no longer a
-    /// mutex private to this module: the sink it protects is process-global, so a
-    /// turnstile only two callers in one file respect protects nothing from the capture
-    /// users in the others.
-    async fn captured(body: impl FnOnce()) -> Vec<String> {
-        let _turn = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
-        crate::log::capture::install();
-        body();
-        let logged = crate::log::capture::drain();
-        crate::log::capture::uninstall();
-        logged
-    }
+    // ---------------------------------------------- the codeconnect launcher
 
     /// This thread's id, spelled so it can be part of a pathname a shell will see.
     /// `ThreadId`'s own `Debug` is `ThreadId(4)`, and the parentheses in an unquoted
@@ -13845,359 +13550,6 @@ mod tests {
             .chars()
             .filter(char::is_ascii_alphanumeric)
             .collect()
-    }
-
-    /// A stand-in launcher: a script that records the argv it was handed and then
-    /// behaves as `body` says.
-    ///
-    /// A stub rather than the real launcher, and the split is deliberate. What the pass
-    /// DOES to a record is proven in the crate that owns the records, against real
-    /// records and real processes (`codex_sweep_dispatch.rs` runs the built launcher's
-    /// subcommand). What is left for this side is what a daemon can get wrong on its
-    /// own: whether it asks at all, whether it asks again, what it asks for, and what
-    /// it does with the answer. Driving the real launcher from here would prove those
-    /// against the operator's own `~/.codeconnect`, which the suite is not allowed to
-    /// touch.
-    fn a_stub_launcher(tag: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "cc-codex-sweep-{tag}-{}-{}",
-            std::process::id(),
-            // The thread id's own spelling carries parentheses, and this name reaches
-            // a shell script's redirect target.
-            thread_tag()
-        ));
-        std::fs::create_dir_all(&dir).expect("a place for the stub");
-        let ledger = dir.join("asked");
-        let program = dir.join("codeconnect");
-        std::fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n{body}\n",
-                ledger.display()
-            ),
-        )
-        .expect("write the stub");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
-            .expect("make the stub runnable");
-        (program, ledger)
-    }
-
-    /// Everything the stub wrote, one entry per invocation.
-    fn asked(ledger: &std::path::Path) -> Vec<String> {
-        std::fs::read_to_string(ledger)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Wait for the stub to have been asked `want` times, or give up.
-    ///
-    /// **Its own hard deadline**, because this polls a background task: a test that
-    /// waited on a condition a broken change never reaches would hang the suite rather
-    /// than fail it, and a hung suite is the one failure nobody reads.
-    async fn asked_at_least(ledger: &std::path::Path, want: usize) -> Vec<String> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let seen = asked(ledger);
-            if seen.len() >= want {
-                return seen;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the daemon asked {} time(s) in ten seconds; {want} were expected",
-                seen.len()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// **A daemon that starts runs the recovery pass, without being asked.**
-    ///
-    /// Without it the pass is dispatchable machinery with no production caller, so a
-    /// launch whose guardians both died stays pending with its cleanup undone. Every
-    /// launch record on this machine predates this process; the pass at startup is
-    /// what looks at them.
-    #[tokio::test]
-    async fn a_daemon_that_starts_runs_a_codex_recovery_pass() {
-        let (program, ledger) = a_stub_launcher("startup", "exit 0");
-        let _stub = StubDir(program.clone());
-        // An hour, so nothing the ticker does can be mistaken for the startup pass.
-        let found = program.clone();
-        let task = SweeperTask(tokio::spawn(run_codex_sweeps(
-            move || Ok(found.clone()),
-            protocol::TMUX_SOCKET_NAME.to_string(),
-            Duration::from_secs(3600),
-        )));
-
-        let seen = asked_at_least(&ledger, 1).await;
-
-        drop(task);
-        assert_eq!(
-            seen[0],
-            format!(
-                "{} --socket {}",
-                protocol::CODEX_SWEEP_SUBCOMMAND,
-                protocol::TMUX_SOCKET_NAME
-            ),
-            "the daemon must ask for the pass by the name the launcher dispatches, on \
-             the socket the fleet uses"
-        );
-    }
-
-    /// **And it asks again on its tick, which is the backstop for the claim leaked
-    /// while this daemon is already up.**
-    ///
-    /// The startup pass covers what the machine was left holding. A launch killed
-    /// inside its own hash→exec window an hour into the daemon's life is not covered by
-    /// anything else: its custodian is entitled to stop waiting and exit, and the
-    /// launcher's own pass only runs when somebody launches. Driven at a period a test
-    /// can wait out; production's is five minutes.
-    #[tokio::test]
-    async fn the_daemon_asks_again_on_its_periodic_tick() {
-        let (program, ledger) = a_stub_launcher("tick", "exit 0");
-        let _stub = StubDir(program.clone());
-        let found = program.clone();
-        let task = SweeperTask(tokio::spawn(run_codex_sweeps(
-            move || Ok(found.clone()),
-            protocol::TMUX_SOCKET_NAME.to_string(),
-            Duration::from_millis(50),
-        )));
-
-        let seen = asked_at_least(&ledger, 3).await;
-
-        drop(task);
-        assert!(
-            seen.len() >= 3,
-            "a startup pass and at least two ticks were expected; got {seen:?}"
-        );
-        assert!(
-            seen.iter()
-                .all(|line| line.starts_with(protocol::CODEX_SWEEP_SUBCOMMAND)),
-            "every pass must ask the same thing: {seen:?}"
-        );
-    }
-
-    /// **A pass that outruns its budget is ended, and the ending is said.**
-    ///
-    /// This runs unattended for the life of the daemon, so a wedged child would hold
-    /// two pipes and a process slot until the Mac is restarted. The budget is what
-    /// makes the future's own drop a kill.
-    #[tokio::test]
-    async fn a_pass_that_outruns_its_budget_is_ended_and_said() {
-        let (program, _ledger) = a_stub_launcher("wedged", "sleep 3");
-        let _stub = StubDir(program.clone());
-
-        let sweep = sweep_codex_recovery(
-            &program,
-            protocol::TMUX_SOCKET_NAME,
-            Duration::from_millis(200),
-        )
-        .await;
-
-        let why = sweep
-            .failed
-            .as_deref()
-            .expect("a pass past its budget owes another pass");
-        assert!(why.contains("did not finish"), "{why}");
-        assert!(
-            why.contains("asks again"),
-            "and the retry has to be said, or an operator reads one ending as the end \
-             of it: {why}"
-        );
-    }
-
-    /// **A condition is said when it starts and when it ends, not every period; and a
-    /// pass that found nothing says nothing at all.**
-    ///
-    /// "The launcher is missing" and "the pass could not finish" hold until something
-    /// changes. Repeating either every five minutes for the life of a machine would
-    /// bury the lines that are events — the claims the pass actually settled — under a
-    /// complaint the operator read the first time. The clearing is said too, because
-    /// somebody who read the complaint needs to see it end. And nearly every pass on
-    /// nearly every machine finds nothing: a line a period into the log the daemon
-    /// shares with everything else carries no information while burying the ones that
-    /// do.
-    #[tokio::test]
-    async fn a_standing_complaint_is_said_once_and_its_ending_is_said_too() {
-        let (failing, _l1) = a_stub_launcher("latch-bad", "exit 1");
-        let _s1 = StubDir(failing.clone());
-        let (quiet, _l2) = a_stub_launcher("latch-good", "exit 0");
-        let _s2 = StubDir(quiet.clone());
-
-        let bad = sweep_codex_recovery(
-            &failing,
-            protocol::TMUX_SOCKET_NAME,
-            Duration::from_secs(10),
-        )
-        .await;
-        let good =
-            sweep_codex_recovery(&quiet, protocol::TMUX_SOCKET_NAME, Duration::from_secs(10)).await;
-        assert_eq!(
-            good,
-            CodexSweep {
-                said: Vec::new(),
-                failed: None
-            },
-            "a pass with nothing to say owes nothing"
-        );
-
-        let logged = captured(|| {
-            let mut latch = SweepLatch::default();
-            report_codex_sweep(&good, &mut latch);
-            report_codex_sweep(&bad, &mut latch);
-            report_codex_sweep(&bad, &mut latch);
-            report_codex_sweep(&bad, &mut latch);
-            report_codex_sweep(&good, &mut latch);
-            report_codex_sweep(&good, &mut latch);
-        })
-        .await;
-
-        let complaints = logged
-            .iter()
-            .filter(|l| l.contains("something still owed"))
-            .count();
-        assert_eq!(
-            complaints, 1,
-            "three identical failures are one complaint: {logged:?}"
-        );
-        let clearings = logged
-            .iter()
-            .filter(|l| l.contains("completing again"))
-            .count();
-        assert_eq!(
-            clearings, 1,
-            "and its ending is said exactly once: {logged:?}"
-        );
-        // The sink is process-global, so another test's line can land in this window
-        // (`crate::log::capture`): what the quiet passes must not write is a recovery
-        // line, and that is what is counted.
-        assert_eq!(
-            logged
-                .iter()
-                .filter(|l| l.contains("codex recovery:"))
-                .count(),
-            2,
-            "the quiet passes on either side of it must write nothing at all: {logged:?}"
-        );
-    }
-
-    /// **A launcher that cannot be run is not a pass that found nothing.**
-    ///
-    /// The two are the same silence otherwise, and one of them means the flag on
-    /// somebody's codex binary is never coming off.
-    #[tokio::test]
-    async fn a_launcher_that_cannot_be_run_is_told_apart_from_a_quiet_pass() {
-        use std::os::unix::fs::PermissionsExt;
-        let (program, _ledger) = a_stub_launcher("unrunnable", "exit 0");
-        let _stub = StubDir(program.clone());
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let sweep = sweep_codex_recovery(
-            &program,
-            protocol::TMUX_SOCKET_NAME,
-            Duration::from_secs(10),
-        )
-        .await;
-
-        assert!(
-            sweep
-                .failed
-                .as_deref()
-                .is_some_and(|why| why.contains("could not be run")),
-            "a launcher that will not run must be a complaint, not a quiet pass: {sweep:?}"
-        );
-    }
-
-    /// **A condition the pass repeats every tick is written into the log once.**
-    ///
-    /// Only the daemon's own complaint was latched; the pass's ACCOUNT was copied
-    /// unconditionally, on the reasoning that every line names a repair it made and
-    /// each of those is a distinct event. That is not true of every line, and the
-    /// exceptions are permanent: a record that cannot be read is never repaired, so the
-    /// pass writes the same sentence about it on every pass, for ever — 288 identical
-    /// lines a day, in a log the daemon shares with everything else. A repair is
-    /// genuinely new each time, because it changes the record; a condition is not, and
-    /// is said when it starts and when it changes.
-    #[tokio::test]
-    async fn a_condition_the_pass_repeats_every_tick_is_said_once() {
-        let (program, _ledger) = a_stub_launcher(
-            "repeats",
-            "echo 'codex-sweep: u1 could not be examined: the record could not be read' 1>&2\n\
-             exit 0",
-        );
-        let _stub = StubDir(program.clone());
-
-        let mut ticks = Vec::new();
-        for _ in 0..3 {
-            ticks.push(
-                sweep_codex_recovery(
-                    &program,
-                    protocol::TMUX_SOCKET_NAME,
-                    Duration::from_secs(10),
-                )
-                .await,
-            );
-        }
-
-        let logged = captured(|| {
-            let mut latch = SweepLatch::default();
-            for tick in &ticks {
-                report_codex_sweep(tick, &mut latch);
-            }
-        })
-        .await;
-
-        assert_eq!(
-            logged
-                .iter()
-                .filter(|l| l.contains("could not be examined"))
-                .count(),
-            1,
-            "three passes saying the same thing is one thing said: {logged:?}"
-        );
-    }
-
-    /// **A pass cut short at the cap still says by how much, even when it is then
-    /// ended at the budget.**
-    ///
-    /// The dropped-line count was appended only when the child's stderr reached EOF,
-    /// so a pass that said more than the cap and then wedged had its future dropped
-    /// before the count was written — and the truncation was silent, which is the one
-    /// thing the cap is not allowed to be. The machine that hits the budget is the
-    /// machine with the wreckage on it.
-    #[tokio::test]
-    async fn a_truncated_account_says_by_how_much_even_when_the_pass_is_ended() {
-        let (program, _ledger) = a_stub_launcher(
-            "verbose-wedged",
-            "i=0; while [ $i -lt 100 ]; do echo \"codex-sweep: line $i\" 1>&2; i=$((i+1)); \
-             done\nsleep 30",
-        );
-        let _stub = StubDir(program.clone());
-
-        let sweep = sweep_codex_recovery(
-            &program,
-            protocol::TMUX_SOCKET_NAME,
-            Duration::from_millis(2_000),
-        )
-        .await;
-
-        assert!(
-            sweep
-                .failed
-                .as_deref()
-                .is_some_and(|why| why.contains("did not finish")),
-            "a pass past its budget owes another pass: {sweep:?}"
-        );
-        let said = &sweep.said;
-        assert!(
-            said.iter().any(|l| l.contains(&format!(
-                "and {} further line(s)",
-                100 - CODEX_SWEEP_MAX_LINES
-            ))),
-            "the cut must be counted whether the child ended or was ended: {said:?}"
-        );
     }
 
     /// **An override that names nothing is said once, even when a fallback works.**
@@ -14379,10 +13731,9 @@ mod tests {
     ///
     /// A daemon running out of a dev tree on a machine that also has an installed
     /// release must reach the launcher OF ITS OWN BUILD — the one beside it — and not
-    /// hand this build's launch records to another release's reader. The override
-    /// outranks both, and an override that names nothing is reported rather than
-    /// obeyed, so a mistyped path is learned from the log and not from a recovery pass
-    /// that quietly stopped running.
+    /// name another release's `codeconnect` to its runs. The override outranks both,
+    /// and an override that names nothing is reported rather than obeyed, so a mistyped
+    /// path is learned from the log.
     #[test]
     fn the_launcher_is_looked_for_beside_the_daemon_before_the_install_prefix() {
         use std::os::unix::fs::PermissionsExt;

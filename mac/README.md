@@ -6,9 +6,9 @@ Three shipped binaries and two shared libraries in one cargo workspace.
 |---|---|
 | `protocol` | Shared wire types: event envelope, unix-socket frames, WebSocket protocol, session identity, config. |
 | `ccd` | The daemon: SQLite event log, hook gate, transcript tailer, tailnet WebSocket server, push. |
-| `codeconnect` | The shim: `codeconnect codex` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
+| `codeconnect` | The command line: the daemon's LaunchAgent lifecycle, pairing, sessions, the mail tools an agent calls (`mcp`) and updates. |
 | `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
-| `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. It runs in-process inside `codeconnect internal-codex-host`, the host the launcher spawns. |
+| `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. |
 
 ## Run it
 
@@ -29,90 +29,20 @@ system tmux. Both install the agent host, `cc-agent-host`, beside the binaries:
 ccd runs it for every Claude run started from the app. A source build builds it
 with `agent-host/build.sh`, which fetches the Bun it pins.
 
-With no terminal to show a session in — a script, a pipe, `ssh` without `-t` —
-`codeconnect codex` hosts nothing and runs the `codex` it would have hosted directly, so
-its output and exit status are Codex's. A hosted session's `codeconnect codex` exits 0
-whatever the agent exited with; a script that needs that status runs the agent
-directly.
-
-Codex sessions get the environment of the shell that launched them — API
-keys, a virtualenv or direnv `PATH` — not the one the tmux server was started with.
-`TERM` is `tmux-256color` for Codex where macOS describes it (`screen-256color` on macOS
-13) and the calling terminal's for Claude, and the variables
-CodeConnect sets for the session, such as `CODECONNECT_SESSION_UID`, keep CodeConnect's
-values. The values travel in a `0600` file in the session's private directory, never on
-a command line (Claude's `TERM` aside), and the pane deletes the file as it starts. The
-agents do not see `TMUX` or `TMUX_PANE`: their output reaches your terminal unchanged,
-so they behave as they do run there directly (told it is inside tmux, Claude caps itself
-at 256 colours). CodeConnect's own processes in the pane keep them.
-
-The local attachment (`codeconnect codex`, `codeconnect attach`)
-is a tmux control-mode client built into `codeconnect` (`codeconnect/src/attach.rs`):
-it writes the pane's output to your terminal unchanged, types your keys into the pane
-with `send-keys -H`, and follows the terminal's size. tmux itself answers some terminal
-queries for the pane (device attributes, cursor position, XTVERSION, DECRQM, DECRQSS,
-window size reports, and default colours); those are removed from what reaches your
-terminal so the agent gets exactly one answer, and the terminal's default colours are
-reported to tmux at attach. Every other query — kitty's `CSI ? u`, OSC 4, 12 and 52,
-XTGETTCAP — is your terminal's to answer. An attach paints the pane's history and
-screen from `capture-pane`, restores the cursor, the pane title and the modes tmux
-tracks, and never replays earlier output. It also sets `scroll-on-clear off` on the
-pane, so a screen the agent clears is not kept in the history a later attach paints.
-
-Ctrl+Z stops the agent as it does run directly. The agent runs as a job of the pane's
-own process (the host, for Codex), so its stop is
-real; the attachment then stops too, and your shell prints its own job line. `fg`
-resumes the attachment, which asks the pane's process to continue the agent, and the
-agent repaints itself. Every attachment showing a stopped agent stops with it, and one
-that attaches to a stopped agent stops at once. Closing the tab, `exit` or `kill %1`
-while the agent is stopped ends the session, as a stopped job ends when its terminal
-goes, and so does the session or the tmux server going away. The phone's terminal tab
-is not an attachment here: nobody can `fg` from it, so it never keeps a stopped agent
-held, and a Ctrl+Z typed on the phone with no attachment at the Mac is let go at once
-(one typed there while a Mac attachment is open stops the agent as if typed at the Mac).
-Anything the agent prints that looks like the stop marker stops nothing: the attachment
-first asks tmux whether the pane really is stopped.
-
 ## Codex sessions
 
-```sh
-codeconnect codex                 # in any project directory
-```
-
-A new Codex session uses the launching terminal's measured columns and rows before
-the TUI starts, including when the tmux server is already running. With no terminal to
-show a session in — a script, a pipe, `ssh` without `-t` — `codeconnect codex` hosts
-nothing and runs the `codex` it would have hosted directly, with the same arguments, so
-`codeconnect codex exec …` or `codeconnect codex login status` in a script behaves as
-`codex` does, and the TUI refuses in Codex's own words.
-
-Codex has no hooks, so a Codex session is hosted differently: the launcher puts a broker
-in front of Codex's own JSON-RPC app server, and the broker is what makes a phone answer
-safe. From the phone you can answer an approval with Codex's own options, stop a running
-turn, and say something — a new turn when the session is idle, joining the running turn
-when it is busy.
+A Codex session is started from the app: ccd runs Codex's own JSON-RPC app server for
+it, through the login shell, and talks to it over that server's socket.
 
 Both kinds of session get one MCP server of CodeConnect's own, `codeconnect`
-(the Agent SDK's `mcpServers` option for Claude Code; `-c mcp_servers.codeconnect.…` on
-Codex's app server), with which an agent lists the other running sessions, sends one a
+(the Agent SDK's `mcpServers` option for Claude Code; `mcp_servers.codeconnect` in the
+config of a Codex run's thread), with which an agent lists the other running sessions, sends one a
 message, and reads its own. `ccd` keeps a message until the receiving session reads it, on
 this computer or, carried over Tailscale to that computer's `ccd`, on another of the same
 Tailscale user's computers. See
 [docs/codex.md](../docs/codex.md#messages-from-other-agents).
 
-Your arguments reach `codex` as native `codex` would read them — the sandbox, approval
-policy and profile included, flags after the prompt and flags this build does not know
-(passed on unchanged) too — and `--cd <dir>` becomes the session's folder. `--help`,
-`-h`, `--version` and `-V` run `codex` itself in your terminal and start no session.
-Exactly two things are refused, before anything is created: the transport flags
-(`--remote`, `--remote-auth-token-env`), which would take the terminal UI off the
-broker, and codex subcommands, anywhere before `--` (only the interactive TUI is
-hosted). `resume` and `fork` are the interactive TUI, so `codeconnect codex resume --last`
-and `codeconnect codex fork <id>` are hosted like a new session.
-
-**[`docs/codex.md`](../docs/codex.md) is the operator page** — launching, what the phone
-can and cannot do, the security boundary, what happens when Codex updates, quota, and the
-refusal sentences and log lines you will actually see.
+**[`docs/codex.md`](../docs/codex.md) is the operator page.**
 
 What the phone is *allowed* to offer on a Codex session is decided by the daemon's
 protocol minor, which `codeconnect daemon status` prints:
@@ -138,9 +68,6 @@ word actuates neither. A refusal is still the last word: a link can move between
 summary the phone drew and the tap.
 
 ```sh
-codeconnect ls                    # sessions, identities and link state
-codeconnect attach cc-1           # re-attach after closing the tab
-
 codeconnect daemon install        # write the LaunchAgent and start it
 codeconnect daemon status         # plist, launchd job and live daemon, side by side
 codeconnect daemon restart        # launchctl kickstart -k
@@ -158,20 +85,12 @@ codeconnect token                 # the static fallback token
 
 A session has two names and they do different jobs.
 
-`session_id` is the tmux name — `cc-1` — and it is **reused**. `codeconnect codex` takes
-the lowest free number, so when a session exits the next one is called `cc-1`
-again. That is deliberate: the name is what a human types into `codeconnect attach`.
+`session_id` is the tmux name — `cc-1` — and it is **reused**: a session that exits frees
+its number for the next.
 
 `session_uid` is a [ULID](https://github.com/ulid/spec) minted once at spawn and
 never reused. It is what the event log, the tail cursors and the answers ledger
 are keyed by.
-
-tmux's own ids — `$0`, `%0` — are reused as well: once a server exits with its last
-session, the next server hands them out again. So `codeconnect attach` pins what it
-attaches to — its server's pid and start time, the session's creation time and
-`session_uid` — and tmux checks the pin and attaches on
-one connection. A session that has gone is never swapped for one another terminal
-started under the same ids.
 
 The tmux name used to do both jobs, and a new `cc-1` inherited the dead one's
 log and continued its `seq`. Two things were wrong with that:
@@ -192,7 +111,6 @@ forever, and ranking on it would put that ghost above the run that is really
 there. A client on `protocol_minor >= 2` should send the uid and key its own
 store by it.
 
-`codeconnect ls` shows both.
 
 ## Card identity
 
@@ -1067,8 +985,8 @@ it keeps the project out: every folder is untrusted and the repository's own ski
 off. CodeConnect keeps the answer itself and never writes it to Codex's own configuration.
 
 A Claude Code start
-that goes on is then checked, before anything runs: the daemon finds the claude the launcher would run,
-from the same list as `claude_bin` (below) without `CODECONNECT_CLAUDE_BIN` and with
+that goes on is then checked, before anything runs: the daemon finds the claude a run would use,
+from the `claude_bin` list (below) with
 the login shell's `PATH`, and asks that claude itself its `--version` and
 `auth status` from the login shell. It is `agent_missing` when no claude is found,
 and `launch_failed` when it is older than 2.1.268, does not say its version, or is
@@ -1196,9 +1114,8 @@ before claude ran it gets a `send_not_sent` notice ("Not sent: stopped", with it
 which the person's own row of it carries too). A card open when the Stop ends the turn closes
 "The turn was stopped before anyone answered." A Stop in flight when ccd restarts reads unknown,
 and is never sent again.
-A Codex start that goes on is checked the same way: the daemon finds the codex the
-launcher would run, from the same list as `codex_bin` without `CODECONNECT_CODEX_BIN`,
-and asks it its `--version`. It is `agent_missing` when none is found, and
+A Codex start that goes on is checked the same way: the daemon finds the codex a
+run would use, from the `codex_bin` list, and asks it its `--version`. It is `agent_missing` when none is found, and
 `launch_failed` when it is older than 0.167.0 or does not say its version. It then
 writes its run (`starting`, under its `request_id`), makes the run's folder as
 above, and runs, through the user's login shell in a session of its own, a
@@ -1372,9 +1289,7 @@ and Downloads are read with ccd's own permission, asked for once while someone i
 at the Mac: `codeconnect daemon folders`, which the codeconnect.sh installer
 (1.7.7 or later) runs once the daemon is up, at a terminal and not over SSH,
 has ccd itself read each one, so a dialog names ccd and the answer is kept for
-its path, which updates keep. Until it has run once, a `codeconnect codex`
-typed at a terminal on the Mac, not an SSH login, runs it first; ccd keeps the
-note that it has (`folders-asked`), and every later typed start is as before.
+its path, which updates keep.
 Only CodeConnect's own launchd job answers either. An `Operation not permitted` in
 those folders adds where to change the answer (System Settings → Privacy &
 Security → Files and Folders → ccd). External drives are out of scope: the first
@@ -1680,8 +1595,8 @@ that is not valid JSON, whose every setting falls back to its default.
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
-| `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is `CODECONNECT_CLAUDE_BIN` if set, then the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds, without `CODECONNECT_CLAUDE_BIN`. |
-| `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is `CODECONNECT_CODEX_BIN` if set, then the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
+| `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
+| `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
 | `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
@@ -1800,7 +1715,7 @@ shares one peer address, so a small share would act as a global cap on all local
 tooling; and a client may legitimately open several sockets at once.
 
 **Queues.** Each IPC connection's writer is fed by a bounded channel. A client
-that stops reading — a `codeconnect ls` suspended with ctrl-Z, a supervisor whose process
+that stops reading — a client suspended with ctrl-Z, a supervisor whose process
 is stopped — used to have the daemon buffer frames on its behalf without limit.
 Now the read loop simply stops taking new work from a peer that is not consuming
 its replies. Requests *to* a supervisor use `try_send` instead of waiting, so a
@@ -1938,14 +1853,6 @@ fails the suite instead of failing silently in production.
   the card stays open until the session ends. In that same moment, denying a
   subagent's request, or declining its question, also stops Claude's main reply.
   Nothing is ever allowed that the person did not allow.
-* **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
-  repaints the session from tmux's record of it, and tmux does not track kitty
-  keyboard flags or focus reporting: an agent that turned them on when it started
-  (Codex and Claude Code push kitty flags) gets the terminal's default key encoding
-  and no focus events in a re-attached tab. tmux's device-attributes answer also
-  arrives before the terminal's answer to kitty's keyboard query, the order agents
-  read as "no kitty keyboard support". Two tabs on one session share one size: tmux
-  sizes the session for the tab used most recently.
 * **Which transport carries a push is decided at boot, from the config file
   alone.** `push_enabled: false` is off. Any one of `apns_key_path`,
   `apns_key_id`, `apns_team_id` or `apns_topic` is a request for direct

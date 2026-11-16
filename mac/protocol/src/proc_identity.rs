@@ -1,11 +1,9 @@
-//! Kernel-backed process **birth identity**, OS **boot identity**, and a
-//! **boot-relative monotonic clock** — the primitives process signalling, the
-//! exec gate and launch cleanup stand on.
+//! Kernel-backed process **birth identity** and OS **boot identity** — the
+//! primitives process signalling and run cleanup stand on.
 //!
 //! The governing invariant: CodeConnect never signals by name or by bare
-//! pid. Every signal, every "is my coordinator still alive?" check, and every
-//! launch-record admission binds to a `(pid, birth_identity)` pair. A pid on
-//! its own is a liar the instant the kernel reuses it; the birth identity is
+//! pid. Every signal and every liveness check binds to a `(pid, birth_identity)`
+//! pair. A pid on its own is a liar the instant the kernel reuses it; the birth identity is
 //! what makes reuse observable.
 //!
 //! ## Darwin field choice
@@ -16,26 +14,12 @@
 //! same `proc_pidinfo` family the descendant census uses. It is chosen
 //! because:
 //!
-//!   * It is assigned by the kernel at fork and — the load-bearing claim — is
-//!     **preserved across `execve`** (the exec gate needs the identity recorded
-//!     before the gate's `execve` to equal the identity observed after it, with
-//!     the pid held constant). `execve` replaces the image, not the proc
-//!     struct, so `p_starttime` survives. **Proven live**, not assumed:
-//!     `codeconnect`'s `the_recorded_birth_identity_survives_the_targets_execve`
-//!     (tests/exec_gate_integration.rs) reads the identity the gate reports
-//!     before `execve` and again after the target has exec'd, and asserts they
-//!     are equal.
+//!   * It is assigned by the kernel at fork and is **preserved across `execve`**:
+//!     `execve` replaces the image, not the proc struct, so `p_starttime` survives.
 //!   * Together with the pid it disambiguates pid reuse at microsecond
 //!     resolution, which binding every signal to `(pid, birth)` requires.
 //!
-//! The boot identity is `KERN_BOOTTIME` (also a `timeval`); the monotonic clock
-//! is `CLOCK_MONOTONIC`. Both are boot-scoped: a value is only comparable to
-//! another value read on the **same** boot, which is exactly why the launch
-//! record carries the boot identity alongside its monotonic deadline — a reboot
-//! (or a restore-from-image) changes the boot identity, and admission then
-//! fails closed rather than trusting a stale deadline. That `CLOCK_MONOTONIC`
-//! advances consistently across processes and its behaviour across sleep are
-//! [UNVERIFIED].
+//! The boot identity is `KERN_BOOTTIME` (also a `timeval`).
 //!
 //! ## Linux field choice
 //!
@@ -70,8 +54,7 @@ pub struct ProcessIdentity {
 /// The OS boot identity. On macOS the two words are the boot wall-clock instant
 /// in seconds and microseconds; on Linux they are the two 64-bit halves of
 /// `/proc/sys/kernel/random/boot_id`. Either way they are only ever compared
-/// for equality. Two monotonic readings are only comparable when they were
-/// taken under the **same** boot identity.
+/// for equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootIdentity {
     pub boot_sec: i64,
@@ -132,7 +115,7 @@ pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
 
 /// Read the process group id of `pid` off the same `proc_bsdinfo` answer as its
 /// birth identity, so a recorded `(pid, birth, pgid)` triple is internally
-/// consistent (the exec gate records the pgid alongside the birth identity).
+/// consistent.
 #[cfg(target_os = "macos")]
 pub fn read_pgid(pid: i32) -> Option<i32> {
     Some(read_bsdinfo(pid)?.pbi_pgid as i32)
@@ -322,20 +305,6 @@ pub fn boot_identity() -> Option<BootIdentity> {
         boot_sec: (id >> 64) as u64 as i64,
         boot_usec: id as u64 as i64,
     })
-}
-
-/// Nanoseconds on `CLOCK_MONOTONIC`. Boot-relative: only comparable to another
-/// reading taken under the same [`boot_identity`]. Never goes backwards under a
-/// wall-clock change, which is why the launch deadline is expressed in it.
-pub fn monotonic_now_nanos() -> Option<u64> {
-    // SAFETY: single `timespec` out-param.
-    unsafe {
-        let mut ts: libc::timespec = std::mem::zeroed();
-        if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) != 0 {
-            return None;
-        }
-        Some((ts.tv_sec as u64).saturating_mul(1_000_000_000) + ts.tv_nsec as u64)
-    }
 }
 
 /// Whether a process group still has any member this process could signal.
@@ -607,8 +576,7 @@ mod tests {
 
     #[test]
     fn a_reaped_child_reads_as_gone() {
-        // Spawn, let it exit, reap it, then assert Gone — the exact shape the
-        // custodian relies on to notice its coordinator died.
+        // Spawn, let it exit, reap it, then assert Gone.
         let child = std::process::Command::new("/usr/bin/true")
             .spawn()
             .expect("spawn true");
@@ -723,13 +691,6 @@ mod tests {
         let a = boot_identity().expect("boot identity readable");
         let b = boot_identity().expect("boot identity readable");
         assert_eq!(a, b, "boot identity does not change under our feet");
-    }
-
-    #[test]
-    fn the_monotonic_clock_does_not_go_backwards() {
-        let a = monotonic_now_nanos().expect("monotonic clock readable");
-        let b = monotonic_now_nanos().expect("monotonic clock readable");
-        assert!(b >= a, "CLOCK_MONOTONIC is monotonic: {a} then {b}");
     }
 
     /// **X8-2: the groups a run's members started and lead themselves.** The run's group is 100: its leader, and a

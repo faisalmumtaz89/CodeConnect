@@ -1,11 +1,6 @@
 //! `codeconnect sessions` and `codeconnect sessions prune`.
 //!
-//! `codeconnect ls` answers "what can I attach to?" and asks tmux, so it keeps working
-//! with the daemon down. This answers a different question — "what does the
-//! event log think happened?" — and so it asks the daemon. Both exist because a
-//! disagreement between them is exactly the symptom worth seeing: a run listed
-//! here as `live` that tmux does not have is a session the daemon has not yet
-//! reconciled, or one it cannot.
+//! It answers "what does the event log think happened?", and so it asks the daemon.
 //!
 //! ## Why pruning is a command and not a policy
 //!
