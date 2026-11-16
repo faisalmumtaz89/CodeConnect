@@ -684,7 +684,10 @@ function of the events:
   Code reports started it, with its model: "Session started", "Session resumed" or
   "Conversation compacted"; one from `/clear` draws no row, as "Conversation
   cleared." already says it (for `/clear` with or without a name, and for `/new` and
-  `/reset`, which Claude Code records as `/clear`);
+  `/reset`, which Claude Code records as `/clear`). In a session started from an app,
+  whose agent host files a start at every turn, one that says nothing of why it started
+  draws none, and a clear's "Conversation cleared." is ccd's own notice; a Codex start
+  never says, and draws "Session started";
 * Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
   drawn, as the card states the question and how it ended. Every other tool keeps its
   row beside its card.
