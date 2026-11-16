@@ -8,7 +8,6 @@
 
 mod apns;
 mod apns_sender;
-mod catalog;
 mod claude_host;
 mod codex_adapter;
 mod codex_approval;
