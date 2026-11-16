@@ -35,7 +35,7 @@ Run the same command as your own user, not as root. On a machine where you have 
 
 ## Updating
 
-`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces all three binaries and CodeConnect's tmux in one step — a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
+`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces CodeConnect's binaries and its tmux in one step, so a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
 
 The iPhone app updates from the App Store. When the app and a computer cannot understand each other, the app says which one to update: "Update CodeConnect on the computer" (run `codeconnect update` there) or "Update CodeConnect on this iPhone". This page describes CodeConnect 0.17.1, installer 1.7.7 and the iPhone app 1.1.16.
 
@@ -86,7 +86,7 @@ Every key is described in the [configuration reference](https://github.com/faisa
 Claude Code and Codex. For Claude Code: the fleet, approvals, questions, diffs and the live terminal. For Codex: the fleet, approvals, stopping a turn and saying something.
 
 **What exactly is installed on my Mac?**
-Three binaries in `~/.codeconnect/bin` — `codeconnect`, `ccd`, `cc-hook` — and CodeConnect's own tmux (`cc-tmux`) beside them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
+CodeConnect's binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, and CodeConnect's own tmux (`cc-tmux`) beside them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
 
 ## Contact
 
