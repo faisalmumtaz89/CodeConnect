@@ -4746,12 +4746,19 @@ mod tests {
         drop(played);
         // SAFETY: kill(2) of the stand-in host this test started, by its recorded pid.
         unsafe { libc::kill(stub, libc::SIGSTOP) };
-        let (_lines, _write) = restart(&rig, &dir).await;
+        // The test plays the host's side of the run's socket, which the kernel closes when the
+        // host dies: closed here once the stand-in no longer runs, so the link's end reaches
+        // the run as a dead host's does, not only the escalation's one check right after its
+        // SIGKILL, which can come before the frozen host has died.
+        let mut socket = Some(restart(&rig, &dir).await);
         let mut ended = false;
         for _ in 0..300 {
             if kept(&rig, &uid).0 == "exited" {
                 ended = true;
                 break;
+            }
+            if socket.is_some() && !running(stub) {
+                socket = None;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
