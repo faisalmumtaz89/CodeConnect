@@ -1772,8 +1772,8 @@ derived from one shared resource rather than chosen individually.
 
 **File descriptors.** macOS gives a launchd job a soft `RLIMIT_NOFILE` of 256
 under an unlimited hard limit, and a soft limit is a fleet size: every live
-session holds a socket to ccd for its supervisor, a Claude session one more for
-its mail waiter while it waits for you, and the tmux server one per pane. So ccd
+session holds a socket to ccd for its supervisor, and the tmux server one per
+pane. So ccd
 raises its soft limit to 10,240 (macOS's `OPEN_MAX`, or the hard limit if lower)
 before it opens anything, and `codeconnect` does the same as it starts, so the
 tmux server a launch forks, typed or from the phone, and every pane under it,
@@ -1784,7 +1784,7 @@ The daemon needs a few dozen descriptors for itself — five SQLite connections
 plus their WAL and SHM handles, the listeners, the log files, the FSEvents
 watcher, the pipes of up to eight terminal attachments. `ws_max_connections`
 (64, on each of the tailnet and loopback listeners) and `ipc_max_connections`
-(4,096, about two thousand sessions) fit inside the raised limit with room to
+(4,096) fit inside the raised limit with room to
 spare. The split is deliberately lopsided: the local socket carries every hook
 and every supervisor, and a hook that cannot reach the daemon is an agent that
 stops being observable, so the *remote* side gets the smaller share. A test

@@ -176,11 +176,6 @@ pub enum ClientFrame {
     MailRead {
         offer: String,
     },
-    /// A Claude session's mail waiter, which stays connected until it is woken
-    /// ([`DaemonFrame::MailWake`]) or replaced ([`DaemonFrame::MailSuperseded`]).
-    MailWaiter {
-        session_uid: String,
-    },
 }
 
 impl ClientFrame {
@@ -377,13 +372,6 @@ pub enum DaemonFrame {
         /// More unread messages wait than this batch holds.
         more_pending: bool,
     },
-    /// The waiting session has unread mail: its waiter wakes it with `nudge`, the
-    /// line [`mail_nudge`] gives for this computer's mail switch.
-    MailWake {
-        nudge: String,
-    },
-    /// A newer waiter holds this session's lease.
-    MailSuperseded,
 }
 
 /// The line that wakes an agent for its mail when the computer's mail switch is on:

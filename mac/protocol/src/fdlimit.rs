@@ -2,12 +2,12 @@
 //!
 //! macOS hands a launchd job, and everything started from one, a soft
 //! `RLIMIT_NOFILE` of 256 under an unlimited hard limit. That soft limit is a
-//! fleet size: ccd holds a socket for every live session's supervisor and
-//! another for every waiting mail waiter, and the tmux server holds one per
-//! pane, so at 256 one computer stops admitting sessions somewhere past a
-//! hundred. Both are raised where they start: ccd in its own `main`, and the
-//! tmux server through the launcher that forks it — `codeconnect`, for a typed
-//! start and a phone start alike. Every child inherits what its parent raised.
+//! fleet size: ccd holds a socket for every live session's supervisor, and the
+//! tmux server holds one per pane, so at 256 one computer stops admitting
+//! sessions somewhere past a hundred. Both are raised where they start: ccd in
+//! its own `main`, and the tmux server through the launcher that forks it —
+//! `codeconnect`, for a typed start and a phone start alike. Every child
+//! inherits what its parent raised.
 
 /// The soft limit asked for: macOS's `OPEN_MAX`, the most a process may ask for
 /// portably. The pseudo-terminals a session takes (`kern.tty.ptmx_max` is 511)
