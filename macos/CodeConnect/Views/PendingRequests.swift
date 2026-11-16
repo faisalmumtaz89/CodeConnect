@@ -88,7 +88,7 @@ extension View {
     }
 }
 
-/// A request as the agent asked it: a Claude question as its questions, anything else as a decision.
+/// A request as the agent asked it: a question (Claude's or Codex's) as its questions, anything else as a decision.
 struct RequestBlock: View {
     let approval: ApprovalItem
     let model: AppModel
