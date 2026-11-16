@@ -730,6 +730,16 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// asked, so a future agent cannot accidentally inherit it.
     public var isCodex: Bool { agent == .codex }
 
+    /// **The daemon says the next message relaunches this ended run** (decision 210): its agent's
+    /// process died without anyone stopping it, so a message brings it back and continues the
+    /// conversation — unlike a run ended by End run or a failed start, which stay ended. One
+    /// agent-neutral read for both agents: machine's optional `relaunchable` field (protocol minor
+    /// 41) carries it for Claude; until then a Codex run says so with `codexLink` — a thread bound
+    /// but not yet run, on a run that has exited.
+    public var relaunchesOnMessage: Bool {
+        lifecycle == .exited && codexLink == .boundNotStarted
+    }
+
     /// What this app files the run's events, subscriptions and marks under, and
     /// what it sends when it has to name the run on the wire. See
     /// `Event.sessionKey` for why it is read off the data rather than off a flag.

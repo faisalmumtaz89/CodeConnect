@@ -447,6 +447,11 @@ public enum FleetStatusRule {
         // ended, and nothing can answer it anywhere, the Mac included. A failed
         // run never started, which ccd counts as ended too.
         if summary.lifecycle == .exited || summary.lifecycle == .failed {
+            // A run whose agent's process died, not one anyone stopped, continues on
+            // the next message (decision 210): the daemon says so, so its composer
+            // opens and the "Observe only" verdict falls away. An End-run exit and a
+            // failed start stay ended.
+            if summary.relaunchesOnMessage { return .control }
             return .observe(reason: "This session has ended.")
         }
         guard capabilities.canApproveReliably else {
