@@ -76,8 +76,9 @@ final class InterruptedTurnTests: XCTestCase {
         XCTAssertEqual(result, .doneUnreviewed)
     }
 
-    /// "No" at the prompt: the Mac draws the interrupt and then its "done" line,
-    /// because Claude wrote a turn end too — so the phone draws both.
+    /// "No" at the prompt: Claude writes the interrupt and then a turn end, so the
+    /// timeline holds both; the phone draws the interrupt alone as the turn's end
+    /// (`TimelineBuilder.drawn`), and the fleet reads the turn end.
     func testARefusedToolEndsTheTurnAsTheMacDrawsIt() async throws {
         let refused = try events("refuse-tool", through: 22)
         let items = TimelineBuilder.build(refused)
