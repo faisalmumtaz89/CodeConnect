@@ -29,7 +29,7 @@ final class NativeCommandTests: XCTestCase {
                 .failed("Not confirmed: no answer came back. Retry is safe; the command won’t be typed twice."))
             XCTAssertEqual(
                 command.phase(after: .composerLost(command: "/x")),
-                .failed("Couldn’t restore the composer. Open Terminal to recover."))
+                .failed("Couldn’t restore the composer."))
         }
         let recovered = ComposeAttempt.composerRecovered(
             command: "/x", paneSnapshot: nil, capturedAt: "2026-11-10T07:00:00Z")

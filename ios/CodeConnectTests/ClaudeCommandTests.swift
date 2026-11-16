@@ -84,7 +84,6 @@ final class ClaudeCommandPolicyTests: XCTestCase {
             }
             XCTAssertEqual(blocked, command)
             XCTAssertTrue(reason.contains("take over this composer"), reason)
-            XCTAssertTrue(reason.contains("Terminal"), reason)
         }
     }
 
@@ -106,6 +105,19 @@ final class ClaudeCommandPolicyTests: XCTestCase {
     func testMeasuredInlineCommandsPassThrough() {
         for command in ["context", "agents", "focus"] {
             XCTAssertEqual(action("/\(command)"), .passThrough, "/\(command)")
+        }
+    }
+
+    /// Neither app has a terminal, so no refusal sends the reader to one: each ends at why the command is not
+    /// available here.
+    func testNoRefusalSendsTheReaderToATerminal() {
+        let refusals: [(String, Bool)] = [
+            ("/clear everything", true), ("/status", false), ("/help", true), ("/config", true), ("/rename new", true),
+        ]
+        for (typed, recovers) in refusals {
+            guard case .blocked(_, let reason) = ClaudeCommandPolicy.action(for: typed, recoversComposer: recovers)
+            else { return XCTFail("\(typed) must be refused") }
+            XCTAssertFalse(reason.localizedCaseInsensitiveContains("terminal"), "\(typed): \(reason)")
         }
     }
 
