@@ -5456,6 +5456,7 @@ async fn a_phone_answer_runs_the_command_and_dismisses_the_tui_prompt() {
             decision: Some(protocol::ws::AnswerDecision::OptionId {
                 option_id: "accept".into()
             }),
+            answered_on: None,
         }],
         "and the fleet is told who answered and with what — the two facts \
          serverRequest/resolved cannot carry"
@@ -7511,6 +7512,7 @@ async fn the_keyboard_and_the_phone_racing_one_approval_leave_one_truthful_winne
                 decision: Some(protocol::ws::AnswerDecision::OptionId {
                     option_id: "accept".into()
                 }),
+                answered_on: None,
             }],
             "a phone answer that WON must be recorded as the phone's, with the option \
              it named — never as `local`, which is what the terminals that follow the \
@@ -7700,6 +7702,7 @@ async fn accept_for_session_on_a_file_change_is_taken_by_the_app_server() {
             decision: Some(protocol::ws::AnswerDecision::OptionId {
                 option_id: "acceptForSession".into()
             }),
+            answered_on: None,
         }],
         "the fleet is told the phone answered, and with the exact option it named — \
          which is the only record of a widening that outlives this one decision"
@@ -7918,6 +7921,7 @@ async fn a_winning_cancel_is_recorded_as_the_phones_answer_and_not_a_turn_abort(
             decision: Some(protocol::ws::AnswerDecision::OptionId {
                 option_id: "cancel".into()
             }),
+            answered_on: None,
         }],
         "the record must be the phone's answer and the option it named. \
          `cleared{{turn_aborted}}` is what the interrupt this very cancel caused would \
@@ -8162,6 +8166,7 @@ async fn a_phone_answer_that_lost_to_the_keyboard_is_told_what_the_broker_named(
         vec![protocol::ws::CodexResolution::Answered {
             by: protocol::ws::ResolutionActor::Local,
             decision: None,
+            answered_on: None,
         }],
         "the card is retired by the wire's own terminal, which carries no decision — \
          `answered{{by: local}}` with the choice absent is the honest reading, and \

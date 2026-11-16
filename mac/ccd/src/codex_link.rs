@@ -2282,6 +2282,7 @@ async fn settle_won_answer(daemon: &Arc<Daemon>, session: &SessionKey, held: Pen
             protocol::ws::CodexResolution::Answered {
                 by: protocol::ws::ResolutionActor::Phone,
                 decision: Some(held.decision),
+                answered_on: None,
             },
             Some(crate::store::AnswerTerminal::Settled(ANSWER_DELIVERED)),
         )
@@ -7555,6 +7556,7 @@ impl Connection<'_> {
                 protocol::ws::CodexResolution::Answered {
                     by: protocol::ws::ResolutionActor::Local,
                     decision: None,
+                    answered_on: None,
                 },
             )
             .await;
@@ -19071,6 +19073,7 @@ mod tests {
             vec![protocol::ws::CodexResolution::Answered {
                 by: protocol::ws::ResolutionActor::Local,
                 decision: None,
+                answered_on: None,
             }],
             "the decision is absent because the wire does not carry one"
         );
@@ -22896,6 +22899,7 @@ mod tests {
                     claimed_hash: "h".into(),
                     question_decision: None,
                 },
+                answered_on: protocol::ws::AnsweredOn::Iphone,
                 reply,
                 gate: a_gate_guard().await,
             },
@@ -23837,6 +23841,7 @@ mod tests {
             vec![protocol::ws::CodexResolution::Answered {
                 by: protocol::ws::ResolutionActor::Local,
                 decision: None,
+                answered_on: None,
             }],
             "and it retires it as what it is: answered at the keyboard"
         );
@@ -24378,6 +24383,7 @@ mod tests {
                 decision: Some(protocol::ws::AnswerDecision::OptionId {
                     option_id: "acceptWithExecpolicyAmendment".into()
                 }),
+                answered_on: None,
             }],
             "the resolution names the option the phone picked, not the body it \
              expanded to"
@@ -24447,6 +24453,7 @@ mod tests {
                 decision: Some(protocol::ws::AnswerDecision::OptionId {
                     option_id: "accept".into()
                 }),
+                answered_on: None,
             }],
             "ONE resolution, and it names the phone and what the phone chose — the \
              `serverRequest/resolved` behind it has been read and had nothing left \
@@ -24515,6 +24522,7 @@ mod tests {
                 decision: Some(protocol::ws::AnswerDecision::OptionId {
                     option_id: "accept".into()
                 }),
+                answered_on: None,
             }],
             "the turn's own terminal arrived behind the disposition and found the \
              card already retired by the answer that won it"
@@ -24561,6 +24569,7 @@ mod tests {
             vec![protocol::ws::CodexResolution::Answered {
                 by: protocol::ws::ResolutionActor::Local,
                 decision: None,
+                answered_on: None,
             }],
             "the card was retired by the wire's own `serverRequest/resolved`, not by \
              the answer path — which applied nothing and has no decision to name"
@@ -25511,6 +25520,7 @@ mod tests {
             vec![protocol::ws::CodexResolution::Answered {
                 by: protocol::ws::ResolutionActor::Local,
                 decision: None,
+                answered_on: None,
             }],
             "answered at the keyboard, decision unknown — which is all the frame says"
         );
@@ -25689,6 +25699,7 @@ mod tests {
                         decision: Some(protocol::ws::AnswerDecision::OptionId {
                             option_id: "accept".into()
                         }),
+                        answered_on: None,
                     },
                 )
                 .await,

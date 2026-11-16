@@ -5792,7 +5792,11 @@ impl Daemon {
             })
         };
         let report = match link {
-            Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
+            Some(answers) => {
+                answers
+                    .answer(request_id, wire, claimed, answered_on, admitted)
+                    .await
+            }
             // An engine run with no link. An answer already sent stays claimed for the run's
             // reconnect, which sends it once more if Codex asks again.
             None if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) => {
@@ -34380,6 +34384,7 @@ mod tests {
                 decision: Some(protocol::ws::AnswerDecision::OptionId {
                     option_id: "accept".into()
                 }),
+                answered_on: None,
             }
         );
         let _: protocol::ws::CodexResolution = serde_json::from_value(resolved["payload"].clone())
@@ -34657,6 +34662,7 @@ mod tests {
                         decision: Some(protocol::ws::AnswerDecision::OptionId {
                             option_id: "accept".into()
                         }),
+                        answered_on: None,
                     },
                 )
                 .await,
@@ -35008,6 +35014,7 @@ mod tests {
                     protocol::ws::CodexResolution::Answered {
                         by: protocol::ws::ResolutionActor::Local,
                         decision: None,
+                        answered_on: None,
                     },
                 )
                 .await,

@@ -66,6 +66,7 @@
         "event": {
           "kind": "approval_resolved",
           "payload": {
+            "answered_on": "iphone",
             "by": "phone",
             "decision": {
               "answers": [
@@ -158,6 +159,7 @@
         "event": {
           "kind": "approval_resolved",
           "payload": {
+            "answered_on": "iphone",
             "by": "phone",
             "decision": {
               "type": "decline"

@@ -66,7 +66,7 @@ use crate::codex_client::{CallError, Client};
 use crate::state::{Daemon, HostLink, Retirement};
 use crate::store::{AnswerStatus, AnswerTerminal, LiveCodexRun, SessionRow};
 use protocol::composite_id::{CompositeId, ServerRequestId};
-use protocol::ws::{AnswerDecision, ClearCause, CodexResolution, ResolutionActor};
+use protocol::ws::{AnswerDecision, AnsweredOn, ClearCause, CodexResolution, ResolutionActor};
 
 /// How often the start looks for the app-server's socket.
 const POLL: Duration = Duration::from_millis(50);
@@ -492,6 +492,8 @@ pub(crate) struct AnswerRequest {
     /// thread — and `route` is the option the phone named, which is what lets a
     /// recovered terminal say what was attempted.
     pub(crate) claimed: crate::store::ClaimedMaterial,
+    /// The kind of device the answer came from, which the card's resolution files.
+    pub(crate) answered_on: AnsweredOn,
     /// Where the outcome goes.
     pub(crate) reply: tokio::sync::oneshot::Sender<AnswerReport>,
     /// **The answer gate's read guard, owned and travelling with the ask.** It is taken
@@ -539,6 +541,7 @@ impl LinkAnswers {
         request_id: &str,
         decision: Value,
         claimed: crate::store::ClaimedMaterial,
+        answered_on: AnsweredOn,
         // The owned answer-gate read guard, moved in so it travels with the ask and is
         // released only at a pre-write refusal or terminal teardown.
         gate: tokio::sync::OwnedRwLockReadGuard<()>,
@@ -550,6 +553,7 @@ impl LinkAnswers {
                 request_id: request_id.to_string(),
                 decision,
                 claimed,
+                answered_on,
                 reply,
                 gate,
             })
@@ -900,14 +904,17 @@ struct Card {
 
 /// An answer written to a card and waiting for Codex's word.
 enum Answer {
-    /// A phone's, with where its outcome goes and the answer gate it holds until then.
+    /// A phone's, with the kind of device it came from, where its outcome goes and the
+    /// answer gate it holds until then.
     Phone {
         decision: AnswerDecision,
+        answered_on: AnsweredOn,
         reply: tokio::sync::oneshot::Sender<AnswerReport>,
         _gate: tokio::sync::OwnedRwLockReadGuard<()>,
     },
     /// An answer claimed before a restart (R6): sent again if Codex replays the request,
-    /// settled when the card ends; nobody waits on it.
+    /// settled when the card ends; nobody waits on it, and nothing records which device
+    /// sent it.
     Claimed { decision: AnswerDecision },
 }
 
@@ -1169,6 +1176,7 @@ async fn answer(
     }
     card.answer = Some(Answer::Phone {
         decision,
+        answered_on: ask.answered_on,
         reply: ask.reply,
         _gate: ask.gate,
     });
@@ -1674,11 +1682,14 @@ async fn retire(
     answer: Option<Answer>,
     cause: ClearCause,
 ) {
-    let (decision, reply) = match answer {
+    let (decision, answered_on, reply) = match answer {
         Some(Answer::Phone {
-            decision, reply, ..
-        }) => (decision, Some(reply)),
-        Some(Answer::Claimed { decision }) => (decision, None),
+            decision,
+            answered_on,
+            reply,
+            ..
+        }) => (decision, Some(answered_on), Some(reply)),
+        Some(Answer::Claimed { decision }) => (decision, None, None),
         None => {
             daemon
                 .retire_codex_answered(session, id, CodexResolution::Cleared { cause }, None)
@@ -1693,6 +1704,7 @@ async fn retire(
             CodexResolution::Answered {
                 by: ResolutionActor::Phone,
                 decision: Some(decision),
+                answered_on,
             },
             Some(AnswerTerminal::Settled(crate::store::ANSWER_DELIVERED)),
         )
@@ -4333,7 +4345,8 @@ mod tests {
             resolution_of(&rig.daemon, &uid, &card.request_id).await,
             CodexResolution::Answered {
                 by: ResolutionActor::Phone,
-                decision: Some(answers)
+                decision: Some(answers),
+                answered_on: Some(AnsweredOn::Iphone)
             }
         );
         assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
@@ -4373,7 +4386,8 @@ mod tests {
             resolution_of(&rig.daemon, &uid, &cards[0].request_id).await,
             CodexResolution::Answered {
                 by: ResolutionActor::Phone,
-                decision: Some(AnswerDecision::Decline)
+                decision: Some(AnswerDecision::Decline),
+                answered_on: Some(AnsweredOn::Iphone)
             }
         );
         drop(ws);
@@ -4443,7 +4457,8 @@ mod tests {
             resolution_of(&restarted, &uid, &cards[0].request_id).await,
             CodexResolution::Answered {
                 by: ResolutionActor::Phone,
-                decision: Some(answers)
+                decision: Some(answers),
+                answered_on: None
             }
         );
         assert!(cards_of(&restarted, &uid, 0).await.is_empty());
@@ -4453,6 +4468,62 @@ mod tests {
         );
         drop(ws);
         end_run(&rig, &uid).await;
+    }
+
+    /// **A Codex question's resolution says which kind of device answered it**: `mac` for an
+    /// answer from a connection that said hello as the Mac app
+    /// ([`AnsweredOn::MAC_CLIENT_NAME`]), `iphone` from any other client, as Claude's
+    /// answers say.
+    ///
+    /// **Must-fail:** file `answered_on: None` for a phone's answer in [`retire`], and the Mac's
+    /// answer reads `None`.
+    #[tokio::test]
+    async fn a_codex_questions_resolution_names_the_kind_of_device_that_answered() {
+        for (client_name, device) in [
+            (AnsweredOn::MAC_CLIENT_NAME, AnsweredOn::Mac),
+            ("CodeConnect iPhone", AnsweredOn::Iphone),
+        ] {
+            let rig = rig();
+            let (asked, thread, turn) = plan_question();
+            let (uid, mut ws) = engine_run(&rig, "req-answered-on", &thread, &turn).await;
+            tell(&mut ws, &asked).await;
+            let card = cards_of(&rig.daemon, &uid, 1).await.remove(0);
+            let answers = AnswerDecision::Answers {
+                answers: vec![pick(1)],
+            };
+            let (result, _) = tokio::join!(
+                rig.daemon.answer(
+                    &card.request_id,
+                    &card.payload_hash,
+                    answers.clone(),
+                    Some(&uid),
+                    AnsweredOn::from_client_name(Some(client_name)),
+                ),
+                async {
+                    response_to(&mut ws, &asked["id"], Duration::from_secs(20)).await;
+                    tell(
+                        &mut ws,
+                        &resolved(&asked["params"]["threadId"], &asked["id"]),
+                    )
+                    .await;
+                }
+            );
+            assert!(
+                matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+                "{client_name}: {result:?}"
+            );
+            assert_eq!(
+                resolution_of(&rig.daemon, &uid, &card.request_id).await,
+                CodexResolution::Answered {
+                    by: ResolutionActor::Phone,
+                    decision: Some(answers),
+                    answered_on: Some(device)
+                },
+                "{client_name}"
+            );
+            drop(ws);
+            end_run(&rig, &uid).await;
+        }
     }
 
     // ------------------------------- a Codex question card, as the apps are sent it
@@ -4564,7 +4635,7 @@ mod tests {
     /// that did not answer it, with the decision its resolution carries. Gate one reads the
     /// committed bytes: in each run, one card whose `tool_name` is `request_user_input` and whose
     /// `display_text` hashes to its `payload_hash`, and one resolution naming that card and
-    /// carrying that run's decision, from a phone. Gate two re-derives the file from this build
+    /// carrying that run's decision, from an iPhone. Gate two re-derives the file from this build
     /// and requires the same bytes.
     ///
     /// **Mutation:** edit a question's words in the checked-in file and gate one fails at the
@@ -4621,7 +4692,8 @@ mod tests {
                 resolved.resolution,
                 CodexResolution::Answered {
                     by: ResolutionActor::Phone,
-                    decision: Some(decision)
+                    decision: Some(decision),
+                    answered_on: Some(AnsweredOn::Iphone)
                 },
                 "{run}"
             );
