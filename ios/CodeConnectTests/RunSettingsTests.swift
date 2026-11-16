@@ -39,7 +39,7 @@ final class RunSettingsTests: XCTestCase {
             return XCTFail("a live hosted run with menus is hostedLive")
         }
         XCTAssertEqual(s.models.map(\.value), ["default", "sonnet"])
-        XCTAssertEqual(s.modes.map(\.value), ["default", "acceptEdits", "plan"])
+        XCTAssertEqual(s.modes.map(\.value), ["default", "acceptEdits", "plan", "bypassPermissions"])
         // Selection: the daemon's `selected_model` ("sonnet") for the model; the mode and effort facts
         // ("plan", "high") match their menu values directly.
         XCTAssertEqual(s.selectedModel?.value, "sonnet")
@@ -105,7 +105,7 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(
             SettingOutcome.of(setting: .mode, label: "Plan", result: try result("refused_bypass")),
             SettingOutcome(
-                text: "That permission mode isn't offered in this session; nothing was changed.",
+                text: "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.",
                 tone: .warning))
         XCTAssertEqual(
             SettingOutcome.of(setting: .mode, label: "Plan", result: try result("indeterminate")),

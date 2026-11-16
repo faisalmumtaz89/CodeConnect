@@ -646,11 +646,15 @@ pub struct MenuModel {
     pub efforts: Vec<String>,
 }
 
-/// One permission mode of a run's menu.
+/// One permission mode of a run's menu. `confirm` (minor 40) marks the mode that asks nothing
+/// (Claude's `bypassPermissions`): an app raises its confirmation before it sends it, and sends
+/// [`crate::ws::ClientMessage::SetMode`] with `confirmed`, without which the daemon refuses it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuMode {
     pub value: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
 }
 
 /// Which kind of event said what the model is.

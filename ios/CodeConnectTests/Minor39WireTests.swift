@@ -40,8 +40,8 @@ final class Minor39WireTests: XCTestCase {
         XCTAssertEqual(menus.models.map(\.value), ["default", "sonnet"])
         XCTAssertEqual(menus.models.map(\.label), ["Default (recommended)", "Sonnet"])
         XCTAssertEqual(menus.models.first?.efforts, ["low", "medium", "high", "xhigh", "max"])
-        XCTAssertEqual(menus.modes.map(\.value), ["default", "acceptEdits", "plan"])
-        XCTAssertEqual(menus.modes.map(\.label), ["Ask before edits", "Accept edits", "Plan"])
+        XCTAssertEqual(menus.modes.map(\.value), ["default", "acceptEdits", "plan", "bypassPermissions"])
+        XCTAssertEqual(menus.modes.map(\.label), ["Ask before edits", "Accept edits", "Plan", "Bypass permissions"])
         XCTAssertEqual(menus.selectedModel, "sonnet", "the daemon states the chosen model (minor 39)")
         XCTAssertEqual(s.effort?.value, "high")
         XCTAssertEqual(s.model?.value, "sonnet (claude-sonnet-5-5)")
@@ -66,7 +66,7 @@ final class Minor39WireTests: XCTestCase {
             ("indeterminate", "mode-3",
                 .indeterminate(reason: "Claude didn't answer, so the change may or may not have been made.")),
             ("refused_bypass", "mode-2",
-                .refused(reason: "That permission mode isn't offered in this session; nothing was changed.")),
+                .refused(reason: "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.")),
             ("refused_partial", "model-2",
                 .refused(reason: "The model was changed; the effort was not: Invalid effort level")),
         ]

@@ -1119,12 +1119,15 @@ const SETTING_WAIT: Duration = Duration::from_secs(10);
 /// Why a run other than a Claude run CodeConnect started takes no settings from an app.
 pub(crate) const NOT_FROM_THE_APP: &str = "This session's settings can't be changed from the app.";
 
-/// The permission modes an app may choose for such a run, with the names it shows. Never
-/// `bypassPermissions`, which the host's run cannot take, nor claude's other modes.
-const MODES: [(&str, &str); 3] = [
-    ("default", "Ask before edits"),
-    ("acceptEdits", "Accept edits"),
-    ("plan", "Plan"),
+/// The permission modes an app may choose for such a run, with the names it shows, and
+/// whether the mode asks nothing and so needs the person's confirmation in the app
+/// (decisions 214 and 215): `bypassPermissions`, which every hosted claude can take, since
+/// its host starts it with the SDK's guard for it set. Not claude's other modes.
+const MODES: [(&str, &str, bool); 4] = [
+    ("default", "Ask before edits", false),
+    ("acceptEdits", "Accept edits", false),
+    ("plan", "Plan", false),
+    ("bypassPermissions", "Bypass permissions", true),
 ];
 
 /// An app's change of a hosted run's settings.
@@ -1134,8 +1137,8 @@ pub(crate) enum Setting {
         model: Option<String>,
         effort: Option<String>,
     },
-    /// A permission mode.
-    Mode(String),
+    /// A permission mode, and whether the person confirmed it in the app.
+    Mode { mode: String, confirmed: bool },
 }
 
 /// A hosted run's menus, from its start's answer `models` (each as claude gives it): each
@@ -1170,9 +1173,10 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
             .collect(),
         modes: MODES
             .iter()
-            .map(|(value, label)| MenuMode {
+            .map(|(value, label, confirm)| MenuMode {
                 value: value.to_string(),
                 label: label.to_string(),
+                confirm: *confirm,
             })
             .collect(),
         selected_model: None,
@@ -1240,8 +1244,9 @@ enum Told {
 }
 
 /// An app's change of the hosted Claude run `uid`'s settings. Checked first, with nothing
-/// sent when it fails: a change naming nothing, a mode not in [`MODES`] (so
-/// `bypassPermissions` never reaches the host), a run not hosted here or not live, a model
+/// sent when it fails: a change naming nothing, a mode not in [`MODES`], a mode that asks
+/// nothing without the person's confirmation (so a bare `set_mode` from any client never
+/// switches it on), a run not hosted here or not live, a model
 /// not in the run's menus, an effort none of its models takes. Then each part goes to the
 /// host as its own line, the model before the effort, and waits for claude to take it: a
 /// part refused ends the change with claude's reason, saying so when the model was changed
@@ -1252,25 +1257,33 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
     let refused = |reason: &str| SettingResult::Refused {
         reason: reason.to_string(),
     };
-    let parts: Vec<(Option<String>, Option<String>, Option<String>)> = match setting {
-        Setting::Model {
-            model: None,
-            effort: None,
-        } => return refused("Choose a model or an effort; nothing was changed."),
-        Setting::Model { model, effort } => model
-            .map(|model| (Some(model), None, None))
-            .into_iter()
-            .chain(effort.map(|effort| (None, Some(effort), None)))
-            .collect(),
-        Setting::Mode(mode) => {
-            if !MODES.iter().any(|(value, _)| *value == mode) {
-                return refused(
-                    "That permission mode isn't offered in this session; nothing was changed.",
-                );
+    let parts: Vec<(Option<String>, Option<String>, Option<String>)> =
+        match setting {
+            Setting::Model {
+                model: None,
+                effort: None,
+            } => return refused("Choose a model or an effort; nothing was changed."),
+            Setting::Model { model, effort } => model
+                .map(|model| (Some(model), None, None))
+                .into_iter()
+                .chain(effort.map(|effort| (None, Some(effort), None)))
+                .collect(),
+            Setting::Mode { mode, confirmed } => {
+                match MODES.iter().find(|(value, _, _)| *value == mode) {
+                    None => return refused(
+                        "That permission mode isn't offered in this session; nothing was changed.",
+                    ),
+                    Some((_, label, true)) if !confirmed => {
+                        return refused(&format!(
+                            "Turning on {label} needs your confirmation in the app; nothing was \
+                         changed."
+                        ))
+                    }
+                    Some(_) => {}
+                }
+                vec![(None, None, Some(mode))]
             }
-            vec![(None, None, Some(mode))]
-        }
-    };
+        };
     match daemon.db.hosted_link(uid.to_string()).await {
         Ok(Some(linked)) if linked.lifecycle == Lifecycle::Live => {}
         Ok(Some(_)) => return refused("This session isn't running, so nothing was changed."),
@@ -7679,10 +7692,11 @@ mod tests {
         }
     }
 
-    /// **B8 part 2 S2: a setting is checked before anything reaches the host.** A change
-    /// naming nothing, a model or an effort the run's menus do not list, and a mode not among
-    /// the three, `bypassPermissions` above all, are refused with nothing sent; so is any
-    /// change to a run not running, and to a Claude run in a terminal.
+    /// **B8 part 2 S2, and 215 G1: a setting is checked before anything reaches the host.** A
+    /// change naming nothing, a model or an effort the run's menus do not list, a mode not
+    /// among the four, and `bypassPermissions` without the person's confirmation are refused
+    /// with nothing sent; so is any change to a run not running, and to a Claude run in a
+    /// terminal.
     #[tokio::test]
     async fn a_setting_is_checked_before_anything_reaches_the_host() {
         let rig = rig();
@@ -7702,11 +7716,11 @@ mod tests {
                 "Claude doesn't offer that effort in this session; nothing was changed.",
             ),
             (
-                Setting::Mode("bypassPermissions".into()),
-                "That permission mode isn't offered in this session; nothing was changed.",
+                Setting::Mode { mode: "bypassPermissions".into(), confirmed: false },
+                "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.",
             ),
             (
-                Setting::Mode("dontAsk".into()),
+                Setting::Mode { mode: "dontAsk".into(), confirmed: false },
                 "That permission mode isn't offered in this session; nothing was changed.",
             ),
         ] {
@@ -7717,7 +7731,13 @@ mod tests {
         assert_eq!(
             refusal(
                 rig.daemon
-                    .set_setting(&uid, Setting::Mode("plan".into()))
+                    .set_setting(
+                        &uid,
+                        Setting::Mode {
+                            mode: "plan".into(),
+                            confirmed: false
+                        }
+                    )
                     .await
             ),
             "This session isn't running, so nothing was changed."
@@ -7726,11 +7746,118 @@ mod tests {
         assert_eq!(
             refusal(
                 rig.daemon
-                    .set_setting(&tmux, Setting::Mode("plan".into()))
+                    .set_setting(
+                        &tmux,
+                        Setting::Mode {
+                            mode: "plan".into(),
+                            confirmed: false
+                        }
+                    )
                     .await
             ),
             NOT_FROM_THE_APP
         );
+        stop(&played.dir);
+    }
+
+    /// **215 G2: Bypass permissions, confirmed in the app, reaches the host.** With the
+    /// person's confirmation the host reads `set_mode bypassPermissions`, and the app is told
+    /// what claude answered: applied.
+    #[tokio::test]
+    async fn bypass_permissions_confirmed_in_the_app_reaches_the_host() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (result, line) = tokio::join!(
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true
+                }
+            ),
+            host_answers_setting(&mut played, 3, "done", None)
+        );
+        assert_eq!(
+            line,
+            ToHost::SetMode {
+                uuid: String::new(),
+                mode: "bypassPermissions".into()
+            }
+        );
+        assert_eq!(
+            result,
+            SettingResult::Applied {
+                applies: Applies::Now
+            }
+        );
+        stop(&played.dir);
+    }
+
+    /// **215 G6: a confirmed Bypass permissions lasts as long as its process, and no start
+    /// names a mode.** Across a ccd restart the host and its claude carry on as the same
+    /// process: the restarted daemon reads the run's mode from the store, as claude reported
+    /// it, and sends the host no `set_mode`. A start, the line ccd keeps to send again, names
+    /// no mode, so a claude ccd starts, sends a kept start to, or relaunches begins in the
+    /// person's own default, never in a mode confirmed for another process.
+    #[tokio::test]
+    async fn a_confirmed_bypass_lasts_across_a_restart_and_no_start_names_a_mode() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (result, _) = tokio::join!(
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true
+                }
+            ),
+            host_answers_setting(&mut played, 3, "done", None)
+        );
+        assert!(
+            matches!(result, SettingResult::Applied { .. }),
+            "{result:?}"
+        );
+        // claude's own report of the mode, as it writes one after `setPermissionMode`.
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "system", "subtype": "status", "status": null,
+                "permissionMode": "bypassPermissions",
+                "uuid": "9d1f0000-0000-4000-8000-000000000071",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let (restarted, mut lines, _write) = restarted(&rig, &played.dir).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        assert_eq!(
+            next(&mut lines).await,
+            None,
+            "the restarted daemon names no mode"
+        );
+        assert_eq!(
+            summary(&restarted, &uid)
+                .await
+                .permission_mode
+                .map(|fact| fact.value),
+            Some("bypassPermissions".to_string())
+        );
+        let kept = rig
+            .daemon
+            .db
+            .hosted_link(uid.clone())
+            .await
+            .unwrap()
+            .and_then(|linked| linked.start)
+            .expect("the run's kept start");
+        match serde_json::from_str::<ToHost>(&kept).unwrap() {
+            ToHost::Start { options, .. } => {
+                assert_eq!(options.permission_mode, None, "the kept start names a mode")
+            }
+            other => panic!("the kept start is {other:?}"),
+        }
         stop(&played.dir);
     }
 
@@ -7759,7 +7886,13 @@ mod tests {
         );
         turn_begins(&mut played, 4, "9d1f0000-0000-4000-8000-000000000041").await;
         let (running, line) = tokio::join!(
-            rig.daemon.set_setting(&uid, Setting::Mode("plan".into())),
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "plan".into(),
+                    confirmed: false
+                }
+            ),
             host_answers_setting(&mut played, 5, "done", None)
         );
         assert_eq!(
@@ -7881,7 +8014,13 @@ mod tests {
         assert_eq!(
             refusal(
                 down.daemon
-                    .set_setting(&detached, Setting::Mode("plan".into()))
+                    .set_setting(
+                        &detached,
+                        Setting::Mode {
+                            mode: "plan".into(),
+                            confirmed: false
+                        }
+                    )
                     .await
             ),
             "The computer lost its connection to this session, so nothing was changed."
@@ -7921,13 +8060,15 @@ mod tests {
                     },
                 ],
                 modes: [
-                    ("default", "Ask before edits"),
-                    ("acceptEdits", "Accept edits"),
-                    ("plan", "Plan"),
+                    ("default", "Ask before edits", false),
+                    ("acceptEdits", "Accept edits", false),
+                    ("plan", "Plan", false),
+                    ("bypassPermissions", "Bypass permissions", true),
                 ]
-                .map(|(value, label)| MenuMode {
+                .map(|(value, label, confirm)| MenuMode {
                     value: value.into(),
                     label: label.into(),
+                    confirm,
                 })
                 .to_vec(),
                 selected_model: None,
@@ -8061,9 +8202,148 @@ mod tests {
         .unwrap();
     }
 
+    /// **Decisions 215 and 214: the mode that asks nothing, as the apps are sent it (minor
+    /// 40).** `fixtures/claude/minor-40-wire.json` is the apps' pin: the run's menu modes with
+    /// `bypassPermissions` alone marked `confirm`, its `set_mode` sent bare (no `confirmed` on
+    /// the wire) and refused, and sent `confirmed` and applied; and a run that starts in the
+    /// person's own Bypass permissions, its mode fact saying so from its first turn, so the
+    /// apps explain it. Gate one reads the committed file; gate two re-derives it and requires
+    /// the same JSON.
+    #[tokio::test]
+    async fn the_minor_40_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-40-wire.json");
+        let committed: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("the fixture must be JSON");
+        let modes: Vec<MenuMode> = serde_json::from_value(committed["menus_modes"].clone())
+            .expect("menu modes the apps decode");
+        assert_eq!(
+            modes
+                .iter()
+                .filter(|mode| mode.confirm)
+                .map(|mode| mode.value.as_str())
+                .collect::<Vec<_>>(),
+            ["bypassPermissions"],
+            "only the mode that asks nothing needs the confirmation"
+        );
+        assert_eq!(
+            committed["set_mode_bare_request"].get("confirmed"),
+            None,
+            "left out when false"
+        );
+        assert_eq!(committed["set_mode_confirmed_request"]["confirmed"], true);
+        assert_eq!(
+            committed["session_hosted_started_in_bypass"]["permission_mode"]["value"],
+            "bypassPermissions",
+            "a run that starts in the person's own Bypass permissions says so from its first turn"
+        );
+        assert_eq!(
+            derived_minor_40_wire().await,
+            committed,
+            "the committed minor 40 wire fixture no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_40_wire_fixture, then copy it over any copy under ios/ \
+             or the Kit"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-40-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_40_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_40_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-40-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The frames of the mode that asks nothing, from a run on a stand-in host: the run's menu
+    /// modes; `set_mode bypassPermissions` sent bare and its refusal, with nothing reaching the
+    /// host; then sent `confirmed`, the host's `set_mode`, and the answer.
+    async fn derived_minor_40_wire() -> serde_json::Value {
+        let rig = rig();
+        let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let modes = summary(&rig.daemon, &uid)
+            .await
+            .menus
+            .expect("the run's menus")
+            .modes;
+        let bypass = |confirmed| Setting::Mode {
+            mode: "bypassPermissions".into(),
+            confirmed,
+        };
+        let bare = rig.daemon.set_setting(&uid, bypass(false)).await;
+        let (confirmed, line) = tokio::join!(
+            rig.daemon.set_setting(&uid, bypass(true)),
+            host_answers_setting(&mut played, 3, "done", None)
+        );
+        assert_eq!(
+            line,
+            ToHost::SetMode {
+                uuid: String::new(),
+                mode: "bypassPermissions".into()
+            },
+            "the bare one sent nothing, so the host's first line is the confirmed one"
+        );
+        stop(&played.dir);
+        let answer = |request_id: &str, result: SettingResult| {
+            serde_json::to_value(protocol::ws::ServerMessage::SettingResult {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let request = |request_id: &str, confirmed: bool| {
+            serde_json::to_value(protocol::ws::ClientMessage::SetMode {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                mode: "bypassPermissions".into(),
+                confirmed,
+            })
+            .unwrap()
+        };
+        // A start whose claude reports Bypass permissions at its first init, as claude does
+        // for a person whose own settings default to it: the run's mode says so from then on.
+        let in_bypass = self::rig();
+        let mut begun = live_run(&in_bypass).await;
+        sdk(
+            &mut begun.write,
+            3,
+            serde_json::json!({"type": "system", "subtype": "init",
+                "uuid": "9d1f0000-0000-4000-8000-000000000081",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "model": "claude-sonnet-5-5", "permissionMode": "bypassPermissions"}),
+        )
+        .await;
+        assert_eq!(next(&mut begun.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let started_in_bypass = pinned_summary(
+            &summary(&in_bypass.daemon, &begun.uid).await,
+            &begun.uid,
+            fixed,
+            &in_bypass.root,
+        );
+        stop(&begun.dir);
+        serde_json::json!({
+            "menus_modes": modes,
+            "set_mode_bare_request": request("mode-1", false),
+            "refused_unconfirmed": answer("mode-1", bare),
+            "set_mode_confirmed_request": request("mode-2", true),
+            "applied_confirmed": answer("mode-2", confirmed),
+            "session_hosted_started_in_bypass": started_in_bypass,
+        })
+    }
+
     /// The frames of a hosted run's settings and each answer ccd gives, from a run on a
     /// stand-in host: a model applied while idle, a mode while a turn runs, an effort, a mode
-    /// refused (`bypassPermissions`), a model taken with its effort refused, and a change
+    /// refused (`bypassPermissions` without the person's confirmation), a model taken with its
+    /// effort refused, and a change
     /// whose link ended before its answer; the effort's `model_set` notice; the capabilities
     /// a paired phone is offered; and the fleet's summaries an app decides from, pinned as
     /// minor 37's are: the run still starting (no menus yet), the run with its menus, the
@@ -8113,7 +8393,13 @@ mod tests {
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
         turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000051").await;
         let (next_turn, _) = tokio::join!(
-            rig.daemon.set_setting(&uid, Setting::Mode("plan".into())),
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "plan".into(),
+                    confirmed: false
+                }
+            ),
             host_answers_setting(&mut played, 6, "done", None)
         );
         sdk(
@@ -8131,7 +8417,13 @@ mod tests {
         );
         let bypass = rig
             .daemon
-            .set_setting(&uid, Setting::Mode("bypassPermissions".into()))
+            .set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: false,
+                },
+            )
             .await;
         let (partial, _) = tokio::join!(
             rig.daemon
@@ -8176,8 +8468,13 @@ mod tests {
         );
         let dir = played.dir.clone();
         let (lost, _) = tokio::join!(
-            rig.daemon
-                .set_setting(&uid, Setting::Mode("acceptEdits".into())),
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "acceptEdits".into(),
+                    confirmed: false
+                }
+            ),
             async move {
                 let mut played = played;
                 assert!(matches!(
@@ -8215,6 +8512,7 @@ mod tests {
                 session_id: fixed.into(),
                 request_id: "mode-1".into(),
                 mode: "plan".into(),
+                confirmed: false,
             }),
             "applied_now": answer("model-1", now),
             "applied_next_turn": answer("mode-1", next_turn),
@@ -9320,12 +9618,26 @@ mod tests {
     /// in a folder of its own, `name`, under `CODECONNECT_TEST_RIG_DIR`, as G6's run is:
     /// the rig, the run's uid and its host's pid.
     async fn real_claude_run(name: &str, prompt: &str) -> (Rig, String, i32) {
+        real_claude_run_in(name, prompt, None).await
+    }
+
+    /// [`real_claude_run`], with `project_settings`, when given, written as the run's folder's
+    /// own `.claude/settings.json` and the folder trusted, so claude reads them.
+    async fn real_claude_run_in(
+        name: &str,
+        prompt: &str,
+        project_settings: Option<serde_json::Value>,
+    ) -> (Rig, String, i32) {
         let var =
             |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
         let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
         let claude = PathBuf::from(var("CODECONNECT_TEST_REAL_CLAUDE"));
         let root = PathBuf::from(var("CODECONNECT_TEST_RIG_DIR")).join(name);
         std::fs::create_dir(&root).unwrap();
+        if let Some(settings) = &project_settings {
+            std::fs::create_dir(root.join(".claude")).unwrap();
+            std::fs::write(root.join(".claude/settings.json"), settings.to_string()).unwrap();
+        }
         let mut environment: HashMap<OsString, OsString> = [
             "HOME",
             "USER",
@@ -9354,7 +9666,11 @@ mod tests {
                 prompt,
                 model: None,
                 worktree: None,
-                trust: Trust::NotTrusted,
+                trust: if project_settings.is_some() {
+                    Trust::Trusted
+                } else {
+                    Trust::NotTrusted
+                },
                 claude_path: claude.to_str().unwrap(),
                 host_bin: &host,
                 codeconnect: &codeconnect,
@@ -9367,6 +9683,160 @@ mod tests {
             .unwrap()
             .host_pid;
         (rig, uid, host_pid)
+    }
+
+    /// **215 G4 and G4b: Bypass permissions on a real claude, confirmed from the app**
+    /// (app-qa's rig, two prompts). Printed (`G4:`, `G4b:`): the run's mode at its start, which
+    /// is the person's own default since no start names a mode; prompt 1 asks for a command that
+    /// writes, so a card is open, and the app's confirmed switch is sent while it is: its answer,
+    /// and what claude then does with the open card (still open, or how ccd closed it) and the
+    /// mode claude reports. The card, if still open, is denied; prompt 2 asks for a second
+    /// command that writes, and whether claude asks for it or runs it. Then End run, as G2.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_takes_bypass_permissions_confirmed_from_the_app() {
+        let write = |name: &str| {
+            format!(
+                "Use the Bash tool to run exactly one command, then say done. The command, once: echo g4 > {name}"
+            )
+        };
+        let (rig, uid, host_pid) = real_claude_run("g4", &write("g4-first.txt")).await;
+        let mode = |session: protocol::event::SessionSummary| {
+            session.permission_mode.map(|fact| fact.value)
+        };
+        let card = first_card(&rig, &uid).await;
+        let at_start = mode(summary(&rig.daemon, &uid).await);
+        let switched = rig
+            .daemon
+            .set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true,
+                },
+            )
+            .await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let open = cards(&rig.daemon, &uid).await.1;
+        let still_open = card
+            .as_ref()
+            .is_some_and(|(request_id, _)| open.contains(request_id));
+        let closed = card.as_ref().and_then(|(request_id, _)| {
+            stored(&rig, &uid)
+                .into_iter()
+                .find(|event| event["source_event_id"] == format!("resolved:{request_id}"))
+                .map(|event| event["payload"]["detail"].clone())
+        });
+        let first_written = rig.root.join("g4-first.txt").exists();
+        println!(
+            "G4: mode at start {at_start:?}; a card {}; the confirmed switch {switched:?}; mode after {:?}",
+            card.is_some(),
+            mode(summary(&rig.daemon, &uid).await)
+        );
+        println!(
+            "G4b: 10 s after the switch the card is open {still_open}; closed with {closed:?}; g4-first.txt written {first_written}"
+        );
+        if let (true, Some((request_id, hash))) = (still_open, card.as_ref()) {
+            let denied = rig
+                .daemon
+                .answer(
+                    request_id,
+                    hash,
+                    AnswerDecision::Deny,
+                    Some(&uid),
+                    AnsweredOn::Iphone,
+                )
+                .await;
+            println!("G4b: the open card denied {denied:?}");
+        }
+        let ends = |rig: &Rig| {
+            stored(rig, &uid)
+                .iter()
+                .filter(|event| event["kind"] == "turn_complete")
+                .count()
+        };
+        for _ in 0..120 {
+            if ends(&rig) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let asked_before = stored(&rig, &uid)
+            .iter()
+            .filter(|event| event["kind"] == "approval_request")
+            .count();
+        let sent = send_as_app(&rig.daemon, &uid, "g4-second", &write("g4-second.txt")).await;
+        for _ in 0..180 {
+            if ends(&rig) >= 2 || rig.root.join("g4-second.txt").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let asked = stored(&rig, &uid)
+            .iter()
+            .filter(|event| event["kind"] == "approval_request")
+            .count()
+            - asked_before;
+        println!(
+            "G4: prompt 2 {sent:?}; cards asked for it {asked}; g4-second.txt written {}; mode {:?}",
+            rig.root.join("g4-second.txt").exists(),
+            mode(summary(&rig.daemon, &uid).await)
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("G4: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
+    /// **215 G4's veto: a claude whose settings disable Bypass permissions refuses the switch,
+    /// and its reason reaches the app** (app-qa's rig, one prompt). The run's folder is trusted
+    /// and its own settings say `permissions.disableBypassPermissionsMode: "disable"`; after a
+    /// turn that writes nothing, the app's confirmed switch is answered with claude's refusal.
+    /// Printed (`G4V:`): the answer and the mode after. Then End run, as G2.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_that_disables_bypass_refuses_it_with_its_reason() {
+        let prompt =
+            "Use the Bash tool to run exactly one command, then say done. The command, once: echo g4v";
+        let veto = serde_json::json!({"permissions": {"disableBypassPermissionsMode": "disable"}});
+        let (rig, uid, host_pid) = real_claude_run_in("g4veto", prompt, Some(veto)).await;
+        for _ in 0..180 {
+            if stored(&rig, &uid)
+                .iter()
+                .any(|event| event["kind"] == "turn_complete")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let switched = rig
+            .daemon
+            .set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true,
+                },
+            )
+            .await;
+        println!(
+            "G4V: the confirmed switch {switched:?}; mode after {:?}",
+            summary(&rig.daemon, &uid)
+                .await
+                .permission_mode
+                .map(|fact| fact.value)
+        );
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
+        println!("G4V: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
     }
 
     /// The run `uid`'s first card, once claude has asked: its request id and the hash an
@@ -10003,7 +10473,13 @@ mod tests {
             .await;
         let mode = rig
             .daemon
-            .set_setting(&uid, Setting::Mode("plan".into()))
+            .set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "plan".into(),
+                    confirmed: false,
+                },
+            )
             .await;
         tokio::time::sleep(Duration::from_secs(3)).await;
         let session = summary(&rig.daemon, &uid).await;

@@ -38,11 +38,12 @@ const argvOf = (log: any[]) => log.find((event) => event.argv)!.argv as string[]
 const stdinOf = (log: any[]) => log.filter((event) => event.stdin).map((event) => event.stdin);
 const noUnexpected = (log: any[]) => expect(log.filter((event) => event.unexpected)).toStrictEqual([]);
 
-test("a trusted folder's options reach claude: no mode when none is named, the worktree, the mail server, the echo, and the SDK's own setting sources", async () => {
+test("a trusted folder's options reach claude: no mode when none is named, the SDK's guard for Bypass permissions, the worktree, the mail server, the echo, and the SDK's own setting sources", async () => {
   const { start, stub } = await run(trustedStart);
   const argv = argvOf(stub());
   expect(start.options.permission_mode).toBeUndefined();
   expect(argv.filter((arg) => arg.startsWith('--permission-mode'))).toStrictEqual([]);
+  expect(argv).toContain('--allow-dangerously-skip-permissions');
   expect(argv[argv.indexOf('--worktree') + 1]).toBe(start.options.worktree);
   expect(argv).toContain('--replay-user-messages');
   const mcp = argv[argv.indexOf('--mcp-config') + 1]!;
@@ -60,6 +61,8 @@ test("a folder not trusted reads only the person's settings and only CodeConnect
   expect(argv).toContain(`--resume=${start.options.resume}`);
   expect(argv).toContain(`--model=${start.options.model}`);
   expect(argv).toContain(`--permission-mode=${start.options.permission_mode}`);
+  expect(argv.filter((arg) => arg.startsWith('--permission-mode'))).toHaveLength(1);
+  expect(argv).toContain('--allow-dangerously-skip-permissions');
   expect(argv).not.toContain('--worktree');
 }, 10_000);
 

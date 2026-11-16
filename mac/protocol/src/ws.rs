@@ -239,6 +239,10 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
         mode: String,
+        /// The person confirmed the mode in the app (minor 40), as a mode whose menu entry is
+        /// `confirm` requires; refused without it, nothing sent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirmed: bool,
     },
     /// "Prove the doorbell rings." Sends one real APNs notification to **this
     /// connection's own device**, so the whole chain — stored token, provider
@@ -2377,9 +2381,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 39,
             "a Claude run's settings from an app (`set_model`, `set_mode`, `menus`) are minor 39"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 40,
+            "the mode that asks nothing behind a confirmation (`confirm`, `confirmed`) is minor 40"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 39);
+        assert_eq!(crate::PROTOCOL_MINOR, 40);
     }
 
     /// **The tags, pinned on this side too.**
