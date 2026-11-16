@@ -2032,7 +2032,7 @@ fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str, foreground: bool
                         // before letting the caller out of `spawn()`. The seam is
                         // establishing its own precondition, not asserting anything.
                         let until = Instant::now() + Duration::from_secs(5);
-                        while child_image(pid).is_some() && Instant::now() < until {
+                        while crate::service::child_image(pid).is_some() && Instant::now() < until {
                             std::thread::sleep(Duration::from_millis(2));
                         }
                     }
@@ -2111,28 +2111,6 @@ fn take_kill_after_go_fault() -> bool {
     KILL_AFTER_GO.with(|armed| armed.replace(false))
 }
 
-/// The child's own image, or `None` if it has no image to report (it is gone).
-#[cfg(target_os = "macos")]
-pub(crate) fn child_image(pid: i32) -> Option<std::path::PathBuf> {
-    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    // SAFETY: `buf` is exactly the size this call documents and outlives it.
-    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-    if n <= 0 {
-        return None;
-    }
-    buf.truncate(n as usize);
-    Some(std::path::PathBuf::from(std::ffi::OsString::from(
-        String::from_utf8(buf).ok()?,
-    )))
-}
-
-/// The child's own image, or `None` if it has no image to report: the kernel's
-/// `/proc/<pid>/exe` link, which a dead or zombie child no longer has.
-#[cfg(target_os = "linux")]
-pub(crate) fn child_image(pid: i32) -> Option<std::path::PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-}
-
 /// Whether two image paths name the **same file**, not merely the same spelling.
 ///
 /// The discriminator below asks "is the child still running MY image?", and it used
@@ -2190,7 +2168,7 @@ fn prove_past_execve(
         );
     }
     let ours = std::env::current_exe().context("reading this host's own image path")?;
-    let Some(theirs) = child_image(identity.pid) else {
+    let Some(theirs) = crate::service::child_image(identity.pid) else {
         bail!(
             "refusing to confirm {role}'s exec: the child (pid {}) reports no image",
             identity.pid

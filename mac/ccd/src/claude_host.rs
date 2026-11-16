@@ -53,7 +53,7 @@ use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use crate::codex_link::InterruptReport;
+use crate::codex_host::InterruptReport;
 use crate::state::Daemon;
 use crate::store::{
     AnswerClaim, HostedCommands, HostedRun, MutationClaimRow, RunNotes, SessionRow, TextClaim,
@@ -1738,7 +1738,7 @@ pub(crate) async fn interrupt(
     match claim {
         Ok(MutationClaim::Claimed) => {}
         Ok(MutationClaim::Applied { outcome, .. }) => {
-            return crate::codex_link::replayed_interrupt_report(&outcome, turn_id)
+            return crate::codex_host::replayed_interrupt_report(&outcome, turn_id)
         }
         Ok(MutationClaim::Indeterminate { .. }) => {
             return InterruptReport::Unknown(says::INTERRUPT_ALREADY_SENT_UNKNOWN.into())

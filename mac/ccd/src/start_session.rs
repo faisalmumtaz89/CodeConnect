@@ -1203,7 +1203,7 @@ async fn login_path_hits(
     .await
     .filter(|output| output.status.success())
     .and_then(|output| last_line(&output.stdout))
-    .map(|path| protocol::tmux::hits_on(OsStr::new(&path), Some(home), name))
+    .map(|path| protocol::claude_bin::hits_on(OsStr::new(&path), Some(home), name))
     .unwrap_or_default()
 }
 

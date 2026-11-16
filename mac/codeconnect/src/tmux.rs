@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use protocol::proc::{run_deadlined, RunOutcome};
-pub use protocol::tmux::{search_path, SessionPresence};
+pub use protocol::tmux::SessionPresence;
 
 /// How long a non-interactive tmux client may take before it is killed.
 ///
