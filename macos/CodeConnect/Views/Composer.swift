@@ -36,6 +36,8 @@ private struct Composer: View {
     @State private var compacting = false
     @State private var instructions = ""
     @State private var clearing = false
+    /// A mode the run's menu marks `confirm`, chosen and waiting on its confirmation.
+    @State private var confirmingMode: MenuMode?
     /// The draft that opened the list, the dialog or the confirmation: a command that lands consumes it, if it is
     /// still the draft.
     @State private var opener: String?
@@ -114,7 +116,25 @@ private struct Composer: View {
         } message: {
             Text(ClearConfirmation.message)
         }
+        // Kit's words for the run's agent; Keep Asking and Esc send nothing, and the mode stays as it was.
+        .alert(
+            modeWords.title,
+            isPresented: Binding(get: { confirmingMode != nil }, set: { if !$0 { confirmingMode = nil } }),
+            presenting: confirmingMode
+        ) { mode in
+            Button(modeWords.confirm, role: .destructive) {
+                takeOpener()
+                Task { _ = await model.setMode(for: key, modeValue: mode.value, confirmed: true) }
+            }
+            .accessibilityIdentifier("session.composer.mode.confirm")
+            Button(modeWords.cancel, role: .cancel) {}
+                .accessibilityIdentifier("session.composer.mode.cancel")
+        } message: { _ in
+            Text(modeWords.message)
+        }
     }
+
+    private var modeWords: ModeConfirmation.Words { ModeConfirmation.words(for: summary?.agent ?? .claude) }
 
     // MARK: The box
 
@@ -157,10 +177,12 @@ private struct Composer: View {
                         HostedSettingsButton(
                             model: model, key: key, settings: settings,
                             help: blocked ?? "Model, effort, mode, compact and clear", open: $commandsOpen,
-                            chose: takeOpener, compact: { compact(prefill: "") }, clear: {
+                            chose: takeOpener, compact: { compact(prefill: "") },
+                            clear: {
                                 opener = nil
                                 clearing = true
-                            })
+                            },
+                            confirmMode: { confirmingMode = $0 })
                         .disabled(blocked != nil || busy)
                     }
                 }

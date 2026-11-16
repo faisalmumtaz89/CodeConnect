@@ -3,10 +3,11 @@ import SwiftUI
 
 /// A Claude run started from the app: the model button and its close-on-click list, built from the run's own menus
 /// (Kit's `HostedSettings`). The Model rows carry the agent's own detail lines, the Effort rows are the selected model's
-/// efforts, and the Mode rows have the agent's own labels; the checks follow the run's facts, never a guess between a
-/// click and its answer. While one of its calls is in flight the list is disabled and a small spinner stands in the
-/// chevron's place; what became of the call is the reply box's note line. Its last rows are the reply box's own:
-/// Compact… opens its compact form, and Clear… its confirmation.
+/// efforts, and the Mode rows have the agent's own labels; a mode the menu marks `confirm` (one that lets the agent work
+/// without asking) ends in "…" and asks first, in the reply box's confirmation. The checks follow the run's facts, never
+/// a guess between a click and its answer. While one of its calls is in flight the list is disabled and a small spinner
+/// stands in the chevron's place; what became of the call is the reply box's note line. Its last rows are the reply
+/// box's own: Compact… opens its compact form, and Clear… its confirmation.
 struct HostedSettingsButton: View {
     let model: AppModel
     let key: String
@@ -18,6 +19,8 @@ struct HostedSettingsButton: View {
     let chose: () -> Void
     let compact: () -> Void
     let clear: () -> Void
+    /// A mode the menu marks `confirm` was chosen: nothing is sent until the reply box's confirmation is.
+    let confirmMode: (MenuMode) -> Void
 
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
 
@@ -83,9 +86,13 @@ struct HostedSettingsButton: View {
             divider
             header("Mode")
             ForEach(settings.modes, id: \.value) { mode in
-                row(mode.label, detail: nil, marked: mode == settings.selectedMode,
-                    id: "session.composer.mode.\(mode.value)") {
-                    _ = await model.setMode(for: key, modeValue: mode.value)
+                row(mode.confirm ? "\(mode.label)…" : mode.label, detail: nil, marked: mode == settings.selectedMode,
+                    id: "session.composer.mode.\(mode.value)", asksFirst: mode.confirm) {
+                    if mode.confirm {
+                        confirmMode(mode)
+                    } else {
+                        _ = await model.setMode(for: key, modeValue: mode.value)
+                    }
                 }
             }
             divider
@@ -128,13 +135,15 @@ struct HostedSettingsButton: View {
         Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
     }
 
-    /// One choice: the list closes and Kit sends it, one call at a time. The checked one is the run's fact already.
+    /// One choice: the list closes and Kit sends it, one call at a time; one that asks first answers the draft that
+    /// opened the list only once it is confirmed. The checked one is the run's fact already.
     private func row(
-        _ title: String, detail: String?, marked: Bool, id: String, set: @escaping () async -> Void
+        _ title: String, detail: String?, marked: Bool, id: String, asksFirst: Bool = false,
+        set: @escaping () async -> Void
     ) -> some View {
         Button {
             open = false
-            chose()
+            if !asksFirst { chose() }
             Task { await set() }
         } label: {
             rowLabel(title, detail: detail, marked: marked)
