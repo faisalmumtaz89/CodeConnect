@@ -192,12 +192,15 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
             }
         }
         (Some("result"), _) => {
-            // `num_turns` 0 is a command's own turn (/compact, /clear, /effort), which
-            // otherwise ends exactly like the agent's.
+            // A command's own turn (/compact, /clear, /effort) names its command in
+            // `local_command`; claude's other ends, an agent turn's among them, carry none.
             mapped.events.push(event(
                 EventKind::TurnComplete,
                 0,
-                pick(message, &["subtype", "is_error", "num_turns"]),
+                pick(
+                    message,
+                    &["subtype", "is_error", "num_turns", "local_command"],
+                ),
             ));
             mapped.events.push(event(
                 EventKind::Usage,
@@ -382,6 +385,31 @@ mod tests {
         .map(|(kind, count)| (kind.to_string(), count))
         .collect();
         assert_eq!(counts, expected);
+    }
+
+    /// The recorded session's three commands' own turns (`/compact`, `/effort low`,
+    /// `/clear`) end naming their command, and none of its other 14 ends names one.
+    #[test]
+    fn a_command_s_own_turn_ends_naming_its_command() {
+        let named: Vec<(Option<String>, Value)> = mapped()
+            .0
+            .into_iter()
+            .filter(|event| event.kind == EventKind::TurnComplete)
+            .map(|event| {
+                let command = event.payload["local_command"].as_str().map(str::to_string);
+                (command, event.payload["num_turns"].clone())
+            })
+            .collect();
+        let commands: Vec<&str> = named
+            .iter()
+            .filter_map(|(command, _)| command.as_deref())
+            .collect();
+        assert_eq!(commands, ["compact", "effort", "clear"]);
+        assert!(named
+            .iter()
+            .filter(|(command, _)| command.is_some())
+            .all(|(_, turns)| *turns == 0));
+        assert_eq!(named.len(), 17);
     }
 
     /// Every event has its own id, so the store keeps each, and mapping the same

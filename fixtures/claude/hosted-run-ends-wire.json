@@ -1,0 +1,40 @@
+{
+  "session_end_exited": {
+    "kind": "session_end",
+    "payload": {
+      "exit_code": 1
+    },
+    "seq": 3,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7E0DS000",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7E0DS000",
+    "source": "daemon",
+    "source_event_id": "exit:01K1B3XQ8ZC0DE5FGH7E0DS000:4242",
+    "ts": "2026-11-16T00:00:00.000Z"
+  },
+  "session_end_signalled": {
+    "kind": "session_end",
+    "payload": {
+      "exit_code": null,
+      "signal": "SIGKILL"
+    },
+    "seq": 3,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7E0DS000",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7E0DS000",
+    "source": "daemon",
+    "source_event_id": "exit:01K1B3XQ8ZC0DE5FGH7E0DS000:4242",
+    "ts": "2026-11-16T00:00:00.000Z"
+  },
+  "session_end_stopped": {
+    "kind": "session_end",
+    "payload": {
+      "exit_code": null,
+      "reason": "Stopped"
+    },
+    "seq": 3,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7E0DS000",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7E0DS000",
+    "source": "daemon",
+    "source_event_id": "exit:01K1B3XQ8ZC0DE5FGH7E0DS000:4242",
+    "ts": "2026-11-16T00:00:00.000Z"
+  }
+}

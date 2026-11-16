@@ -786,7 +786,7 @@ async fn link(
                     }
                 };
                 // The person's first words, filed as the run goes live.
-                let words = vec![person_row(&uid, &start_uuid, &start_prompt, None)];
+                let words = vec![person_row(&uid, &start_uuid, &start_prompt, None, None)];
                 match daemon
                     .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words)
                     .await
@@ -1944,16 +1944,21 @@ pub(crate) async fn wake(daemon: &Daemon, uid: &str, text: &str) -> bool {
 }
 
 /// The person's words `text`, sent as the message `uuid` (the start's or a later
-/// send's), as the run's event. A Codex run's later sends file the same row.
+/// send's), as the run's event, naming the `command` claude reads them as, if any
+/// ([`sent_command`]). A Codex run's later sends file the same row.
 pub(crate) fn person_row(
     uid: &str,
     uuid: &str,
     text: &str,
     request_id: Option<&str>,
+    command: Option<&str>,
 ) -> PendingEvent {
     let mut payload = serde_json::json!({ "text": text });
     if let Some(request_id) = request_id {
         payload["request_id"] = request_id.into();
+    }
+    if let Some(command) = command {
+        payload["command"] = command.into();
     }
     PendingEvent::new(
         &SessionKey::new(uid, uid),
@@ -1962,6 +1967,18 @@ pub(crate) fn person_row(
         Source::Daemon,
     )
     .with_source_event_id(format!("say:{uuid}"))
+}
+
+/// The command `text` is to claude: its first word `/<name>` when `<name>` is one of the
+/// run's commands as claude last reported them (`commands`, kept from the start's
+/// initialize answer and each `commands_changed`), with or without an argument. Any other
+/// text, one that merely starts with a slash among it, is a message.
+fn sent_command<'a>(text: &'a str, commands: &[serde_json::Value]) -> Option<&'a str> {
+    let name = text.split_whitespace().next()?.strip_prefix('/')?;
+    commands
+        .iter()
+        .any(|command| command.get("name").and_then(serde_json::Value::as_str) == Some(name))
+        .then_some(name)
 }
 
 /// The host's outcome for a message ccd sent it (`say`): the send it names, found by its
@@ -1992,7 +2009,19 @@ async fn apply_send_outcome(
         .find(|(request_id, _)| send_uuid(uid, request_id) == uuid)
     {
         Some((request_id, text)) => {
-            let row = taken.then(|| person_row(uid, uuid, &text, Some(&request_id)));
+            let row = if taken {
+                let commands = daemon
+                    .db
+                    .hosted_commands(uid.to_string())
+                    .await
+                    .map_err(|err| format!("{err:#}"))?
+                    .and_then(|kept| kept.commands)
+                    .unwrap_or_default();
+                let command = sent_command(&text, &commands);
+                Some(person_row(uid, uuid, &text, Some(&request_id), command))
+            } else {
+                None
+            };
             match daemon
                 .commit_host_send(uid, host, seq, &request_id, row)
                 .await
@@ -5260,9 +5289,10 @@ mod tests {
     const REGENERATE_HOSTED_CLEAR: &str =
         "cargo test -p ccd --bin ccd -- --ignored regenerate_the_hosted_clear_fixture";
 
-    /// **Decision 212 G2**: `/clear` sent from the app as its Clear dialog sends it, then what
-    /// the recorded session's claude emitted for it (its lines 133-136: the reset, the new
-    /// session's init and the clear's own end) played on a live run as its host relays them.
+    /// **Decision 212 G2**: claude's command list as the recorded session's claude last
+    /// reported it before its clear (its line 125), `/clear` sent from the app as its Clear
+    /// dialog sends it, then what that claude emitted for it (its lines 133-136: the reset, the
+    /// new session's init and the clear's own end) played on a live run as its host relays them.
     /// Checked after: the clear's own end leaves the run idle for the mail rule, the run's
     /// session is claude's new one, and its model and mode facts read on. Returned: the run's
     /// fleet summary and its events, as the wire delivers them to an app, the run's uid written
@@ -5272,13 +5302,15 @@ mod tests {
         let rig = rig();
         let mut played = live_run(&rig).await;
         let uid = played.uid.clone();
+        sdk(&mut played.write, 3, capture()[124].clone()).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
         let (result, (say, text)) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-clear", "/clear"),
-            host_takes(&mut played, 3, "done")
+            host_takes(&mut played, 4, "done")
         );
         assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
         assert_eq!(text, "/clear");
-        for (seq, message) in (4u64..).zip(capture().into_iter().skip(132).take(4)) {
+        for (seq, message) in (5u64..).zip(capture().into_iter().skip(132).take(4)) {
             sdk(&mut played.write, seq, message).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
         }
@@ -5331,8 +5363,9 @@ mod tests {
     /// **Decision 212: a hosted run's `/clear` reaches the apps as claude makes it, and this
     /// file is what this build sends for it.** `fixtures/claude/hosted-clear-wire.json` is the
     /// apps' pin for drawing a clear on such a run: the person's words, their `/clear` last,
-    /// one "Conversation cleared" notice, then the cleared conversation's start (`source:
-    /// "clear"`) and the clear's own end, and the run's session claude's new one. Gate one reads the committed bytes; gate two re-derives the file and
+    /// naming the command, one "Conversation cleared" notice, then the cleared conversation's
+    /// start (`source: "clear"`) and the clear's own end, naming it too, and the run's session
+    /// claude's new one. Gate one reads the committed bytes; gate two re-derives the file and
     /// requires the same bytes.
     #[tokio::test]
     async fn the_hosted_clear_fixture_is_what_this_build_emits() {
@@ -5368,6 +5401,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["fix the tests", "/clear"],
             "the person's words before the clear, their /clear last, are kept above it"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::UserMessage && event.seq < cleared[0].seq)
+                .map(|event| event.payload.get("command").cloned())
+                .collect::<Vec<_>>(),
+            [None, Some(serde_json::json!("clear"))],
+            "the person's /clear names the command claude reads it as; their prompt names none"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::TurnComplete)
+                .map(|event| event.payload["local_command"].clone())
+                .collect::<Vec<_>>(),
+            [serde_json::json!("clear")],
+            "the clear's own end names its command"
         );
         assert_eq!(
             events
@@ -5410,6 +5461,145 @@ mod tests {
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// The run's uid in `fixtures/claude/hosted-run-ends-wire.json`, written in place of the
+    /// one ccd minted.
+    const ENDS_UID: &str = "01K1B3XQ8ZC0DE5FGH7E0DS000";
+    /// The host's pid an end's id names, written in place of the stand-in's.
+    const ENDS_PID: &str = "4242";
+    const HOSTED_RUN_ENDS: &str =
+        include_str!("../../../fixtures/claude/hosted-run-ends-wire.json");
+    const REGENERATE_HOSTED_RUN_ENDS: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_hosted_run_ends_fixture";
+
+    /// **How a Claude run CodeConnect started ends, as the apps are sent it, and this file is
+    /// what this build sends.** `fixtures/claude/hosted-run-ends-wire.json` is the apps' pin
+    /// for each end a live run's host reports: End run's ("Stopped", with no exit code for an
+    /// app to read as a failure), claude's own exit with its code, and claude killed by a
+    /// signal, which has no code. Gate one reads the committed bytes; gate two re-derives the
+    /// file and requires the same bytes.
+    #[tokio::test]
+    async fn the_hosted_run_ends_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(HOSTED_RUN_ENDS).expect("the fixture must be JSON");
+        let end = |key: &str| -> protocol::event::Event {
+            serde_json::from_value(committed[key].clone()).expect("an Event the apps decode")
+        };
+        for (key, payload) in [
+            (
+                "session_end_stopped",
+                serde_json::json!({"exit_code": null, "reason": "Stopped"}),
+            ),
+            ("session_end_exited", serde_json::json!({"exit_code": 1})),
+            (
+                "session_end_signalled",
+                serde_json::json!({"exit_code": null, "signal": "SIGKILL"}),
+            ),
+        ] {
+            assert_eq!(end(key).kind, EventKind::SessionEnd, "{key}");
+            assert_eq!(end(key).payload, payload, "{key}");
+        }
+        let derived = hosted_run_ends().await;
+        assert_eq!(
+            derived, committed,
+            "the committed hosted run ends no longer match what this build emits. \
+             Regenerate them: {REGENERATE_HOSTED_RUN_ENDS}"
+        );
+        assert_eq!(
+            HOSTED_RUN_ENDS,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate them: {REGENERATE_HOSTED_RUN_ENDS}"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/hosted-run-ends-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_hosted_run_ends_fixture() {
+        let wire = serde_json::to_string_pretty(&hosted_run_ends().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/hosted-run-ends-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// Each end of a live run on a stand-in host, its one `SessionEnd` as the wire delivers it
+    /// to an app: asked to end, then claude's exit (code 1, as claude stopped mid-turn ends);
+    /// claude's own exit, code 1; and claude killed by SIGKILL. The run's uid is written
+    /// [`ENDS_UID`], the host's pid in the end's id [`ENDS_PID`], and the clock read
+    /// [`CLEAR_AT`].
+    async fn hosted_run_ends() -> serde_json::Value {
+        let mut ends = serde_json::Map::new();
+        for (key, asked_to_end, exited) in [
+            (
+                "session_end_stopped",
+                true,
+                serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+            ),
+            (
+                "session_end_exited",
+                false,
+                serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+            ),
+            (
+                "session_end_signalled",
+                false,
+                serde_json::json!({"type": "exited", "seq": 3, "signal": "SIGKILL"}),
+            ),
+        ] {
+            let rig = rig();
+            let mut played = live_run(&rig).await;
+            let uid = played.uid.clone();
+            if asked_to_end {
+                assert_eq!(rig.daemon.stop_run(&uid).await, StopRunResult::Stopping);
+                assert!(matches!(
+                    next(&mut played.lines).await,
+                    Some(ToHost::Stop { .. })
+                ));
+            }
+            say(&mut played.write, exited).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+            assert_eq!(kept(&rig, &uid).0, "exited", "{key}");
+            let events = rig
+                .daemon
+                .db
+                .events_after(uid.clone(), 0, 10_000)
+                .await
+                .unwrap();
+            stop(&played.dir);
+            let ended: Vec<_> = events
+                .iter()
+                .filter(|event| event.kind == EventKind::SessionEnd)
+                .collect();
+            assert_eq!(ended.len(), 1, "{key}: one end");
+            let rendered = serde_json::to_string(ended[0])
+                .unwrap()
+                .replace(&uid, ENDS_UID);
+            let mut end: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            let id = end["source_event_id"].as_str().unwrap_or_default();
+            assert!(
+                id.strip_prefix(&format!("exit:{ENDS_UID}:"))
+                    .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())),
+                "{key}: the end's id names the launch's pid, and is {id}"
+            );
+            end["source_event_id"] = format!("exit:{ENDS_UID}:{ENDS_PID}").into();
+            let ts = &mut end["ts"];
+            assert!(
+                ts.as_str()
+                    .and_then(protocol::time::unix_ms_from_rfc3339)
+                    .is_some(),
+                "ts was expected to be a clock read, and is {ts}"
+            );
+            *ts = CLEAR_AT.into();
+            ends.insert(key.into(), end);
+        }
+        serde_json::Value::Object(ends)
     }
 
     /// **B5 G2: retries.** The same request asked again while its first send waits for
@@ -7458,6 +7648,27 @@ mod tests {
         let restarted = daemon_on(&rig.root);
         restarted.recover().await;
         assert_eq!(restarted.command_catalog(&uid).await, changed);
+    }
+
+    /// A message is a command when its first word names one of claude's commands, an
+    /// argument after it or not, a refused screen's (`effort`) among them; a path, a word
+    /// claude has no command for, and a name without its slash are messages.
+    #[test]
+    fn a_message_is_a_command_only_when_claude_has_that_command() {
+        let changed = commands_changed();
+        let commands = changed["commands"].as_array().unwrap();
+        for (text, command) in [
+            ("/clear", Some("clear")),
+            ("/effort low", Some("effort")),
+            ("/compact keep the plan", Some("compact")),
+            ("/tmp/x is broken", None),
+            ("/nosuch", None),
+            ("clear", None),
+            ("", None),
+        ] {
+            assert_eq!(sent_command(text, commands), command, "{text:?}");
+        }
+        assert_eq!(sent_command("/clear", &[]), None, "no list, no command");
     }
 
     #[tokio::test]

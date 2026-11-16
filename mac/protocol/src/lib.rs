@@ -783,6 +783,11 @@ pub const PROTOCOL_MISMATCH: &str =
 ///       - [`ws::ClientMessage::SetMode`]'s `confirmed` (left out when false). A mode marked
 ///         `confirm` is refused without it, nothing sent; every other mode is as before. A
 ///         daemon below 40 lists no such mode and refuses `bypassPermissions` as not offered.
+///       - On a Claude run CodeConnect started, a `turn_complete`'s `local_command`, the
+///         command whose own turn it ends (`/clear`, `/compact`, `/effort low`), claude's
+///         own field, and the person's `user_message`'s `command`, the one of claude's
+///         commands its first word names (`/effort low` is `effort`). Each is left out
+///         otherwise, an agent turn's end and a plain message as before.
 ///   * `41` — **A Codex card's answer says which kind of device sent it.**
 ///
 ///     Additive:
