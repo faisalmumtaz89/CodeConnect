@@ -3186,6 +3186,12 @@ public final class AppModel {
         if summary.isCodex, !summary.pending.isEmpty || cardShown {
             return "Answer the card first. Your draft will stay here."
         }
+        // A Codex run still starting has no link yet, so the link-based reason would read "no live
+        // link" — a fault for what is ordinary start-up. Say it is starting, greying the composer as
+        // Claude's starting run does, until the run is live.
+        if summary.isCodex, summary.lifecycle == .starting {
+            return "Codex is still starting."
+        }
         return CodexProse.composeUnavailable(
             agent: summary.agent,
             daemonUnderstandsCompose: profile.composesToCodex,
