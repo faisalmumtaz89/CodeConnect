@@ -797,7 +797,15 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         [`ws::AnswerOutcome::answered_on`] has said for Claude's since 34. A daemon
 ///         below 41 sends none, nor does any daemon for an answer a restart settled, and a
 ///         client reads that as before.
-pub const PROTOCOL_MINOR: u32 = 41;
+///   * `42` — **The next message relaunches a run whose agent ended on its own.**
+///
+///     Additive:
+///       - [`event::SessionSummary`]'s `relaunchable` (left out when false): a run CodeConnect
+///         started, of either agent, that has `exited` with its end reading "Stopped: its process
+///         ended", so a message to it relaunches it and continues the conversation. Never a run
+///         End run ended or a start that failed. A daemon below 42 sends no such field and keeps
+///         every ended Claude run ended.
+pub const PROTOCOL_MINOR: u32 = 42;
 
 #[cfg(test)]
 mod ledger_tests {

@@ -105,6 +105,7 @@
     "lifecycle": "exited",
     "link": "detached",
     "project_label": "cc-rig",
+    "relaunchable": true,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "tmux_session": "",

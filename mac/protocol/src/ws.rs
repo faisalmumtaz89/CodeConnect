@@ -2397,9 +2397,13 @@ mod tests {
             "which kind of device answered a Codex card (`answered_on` on its resolution) is \
              minor 41"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 42,
+            "a summary saying the next message relaunches the run (`relaunchable`) is minor 42"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 41);
+        assert_eq!(crate::PROTOCOL_MINOR, 42);
     }
 
     /// **The tags, pinned on this side too.**

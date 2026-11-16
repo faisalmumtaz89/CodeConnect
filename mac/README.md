@@ -1011,7 +1011,8 @@ terminal run's is: a `user_message` whose content is claude's `<local-command-st
 It is stored with the run's history, account figures included when the command prints them, as
 `/usage` does.
 A live run ends when claude does: its `exited` is filed with the run's cursor in one
-transaction, the run `exited` and its `SessionEnd` carrying the exit code and any signal. It
+transaction, the run `exited` and its `SessionEnd` carrying the exit code, any signal, and
+the reason "Stopped: its process ended", since nobody stopped it. It
 also ends when its host is gone, seen when the run's link ends or by the liveness tick. ccd
 then sends SIGTERM to the host's process group, and SIGKILL 5 s later only while members
 remain, each under a warrant: the same boot, and the host's pid free or still its own. The
@@ -1031,6 +1032,23 @@ A command's own turn ends naming it too, with claude's own `local_command` on th
 tools is running reaches Claude with that tool's result; one sent at any other time in a
 turn runs as Claude's next turn. A retry with the same request id is answered from its
 first send, so nothing is sent twice.
+A run whose claude ended without anyone stopping it (its end reads "Stopped: its process
+ended", after a crash or a Mac restart alike) is relaunched by the person's next message,
+never at ccd's start; its summary says so (`relaunchable`, minor 42). A run End run ended, a
+start that failed, and a run claude never named a session for stay ended ("This session isn't
+running, so nothing was sent."). Before anything is launched, the run's old host must be gone
+and its process group empty, unless it was recorded before this Mac last started ("This
+session is still ending; nothing was sent. Try again in a moment."), and a start's own checks
+must pass. The run then reads `starting`, so a second message meanwhile is refused, and a new
+host in the run's folder resumes claude's session in the folder claude ran in, with the
+message as its first words: the run's model as its menu marks it chosen, the folder answer it
+started with (lowered if the folder has since been answered not trusted), and no mode, so the
+new claude starts in the person's own default; its first init says `source: "resume"`. Done,
+the run is `live` and the message `sent`; claude's refusal leaves the run `exited` and still
+relaunchable, with claude's reason; a launch that fails first puts it back `exited`, nothing
+sent. With no answer within 15 s, inside the apps' 20 s wait, the message reads
+indeterminate and the relaunch goes on. The effort chosen for the old process is not carried
+over.
 For such a run the Model and Effort screens are refused, as a sheet's typed confirmation or
 typed alone (`/model`, `/effort`) ("Changing the model isn't available for this session
 yet.", the same for the effort: the sheets set them with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude

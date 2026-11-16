@@ -1,0 +1,199 @@
+{
+  "session_hosted_relaunchable": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 4,
+    "lifecycle": "exited",
+    "link": "attached",
+    "model": {
+      "at": "2026-11-15T09:00:00.000Z",
+      "seq": 3,
+      "source": "session_start",
+      "value": "claude-opus-5-5"
+    },
+    "permission_mode": {
+      "seq": 3,
+      "value": "default"
+    },
+    "project_label": "cc-rig",
+    "relaunchable": true,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_relaunched": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-rig",
+    "last_seq": 7,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Bypass permissions",
+          "value": "bypassPermissions"
+        }
+      ],
+      "selected_model": "default"
+    },
+    "model": {
+      "at": "2026-11-15T09:00:00.000Z",
+      "seq": 7,
+      "source": "session_start",
+      "value": "claude-opus-5-5"
+    },
+    "permission_mode": {
+      "seq": 7,
+      "value": "default"
+    },
+    "project_label": "cc-rig",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_relaunched_events": [
+    {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 1,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "daemon",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "fix the tests"
+      },
+      "seq": 2,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "daemon",
+      "source_event_id": "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "item_id": "6c709817-3f36-490c-ae21-95df6cb4d9e5",
+      "kind": "session_start",
+      "payload": {
+        "model": "claude-opus-5-5",
+        "permissionMode": "default",
+        "source": "startup"
+      },
+      "seq": 3,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "sdk",
+      "source_event_id": "6c709817-3f36-490c-ae21-95df6cb4d9e5/session_start/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "6c709817-3f36-490c-ae21-95df6cb4d9e5"
+    },
+    {
+      "kind": "session_end",
+      "payload": {
+        "exit_code": 1,
+        "reason": "Stopped: its process ended"
+      },
+      "seq": 4,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "daemon",
+      "source_event_id": "exit:01K1B3XQ8ZC0DE5FGH7RE1A0CH:4242",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 5,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "daemon",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "request_id": "r-again",
+        "text": "carry on"
+      },
+      "seq": 6,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "daemon",
+      "source_event_id": "say:9d3e5b7a-1c2f-4a6e-8b0d-3f5a7c9e1b2d",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "item_id": "9d1f0000-0000-4000-8000-0000000002a1",
+      "kind": "session_start",
+      "payload": {
+        "model": "claude-opus-5-5",
+        "permissionMode": "default",
+        "source": "resume"
+      },
+      "seq": 7,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+      "source": "sdk",
+      "source_event_id": "9d1f0000-0000-4000-8000-0000000002a1/session_start/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "9d1f0000-0000-4000-8000-0000000002a1"
+    }
+  ]
+}

@@ -750,6 +750,53 @@ fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCo
         .optional()?)
 }
 
+/// What a message's relaunch of an ended hosted Claude run starts from ([`Store::claude_relaunch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeRelaunch {
+    /// The run's kept `start` line: its folder answer, its model and its mail server.
+    pub start: String,
+    /// The session claude named, which the relaunch resumes.
+    pub claude_session_id: String,
+    /// The folder claude ran in, as its init named it.
+    pub cwd: String,
+}
+
+/// The hosted Claude run `session_uid` when the person's next message relaunches it (decision
+/// 210): it is `exited`, the last end it filed reads "Stopped: its process ended"
+/// ([`crate::claude_host::PROCESS_ENDED`]), so its claude ended without ccd stopping it, and
+/// claude named its session, which `--resume` needs. A recorded host is not required: one an
+/// earlier relaunch never recorded left no claude. A run ended by End run ("Stopped") or a start
+/// that failed is not one.
+fn claude_relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<ClaudeRelaunch>> {
+    let (table, _) = session_tables_for(&AgentKind::Claude);
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT h.start, s.claude_session_id, s.cwd
+                   FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
+                  WHERE h.session_uid = ?1 AND s.lifecycle = ?2 AND h.start IS NOT NULL
+                    AND s.claude_session_id IS NOT NULL
+                    AND (SELECT json_extract(payload, '$.reason') FROM events
+                          WHERE session_uid = ?1 AND kind = ?3
+                          ORDER BY seq DESC LIMIT 1) = ?4"
+            ),
+            params![
+                session_uid,
+                lifecycle_str(Lifecycle::Exited),
+                EventKind::SessionEnd.as_str(),
+                crate::claude_host::PROCESS_ENDED
+            ],
+            |row| {
+                Ok(ClaudeRelaunch {
+                    start: row.get(0)?,
+                    claude_session_id: row.get(1)?,
+                    cwd: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 fn hosted_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostedRun> {
     Ok(HostedRun {
         session_uid: row.get(0)?,
@@ -2784,11 +2831,14 @@ impl Store {
     /// transaction: the cursor, as [`Store::commit_cursor`] advances it, with the
     /// SDK's initialize answer (`initialize`, as JSON) on a done start, whose
     /// commands are then claude's list as last reported; then the
-    /// run's lifecycle, `starting` to `lifecycle` (`Live` or `Failed`), only while it
-    /// is `starting`, so a run already ended keeps its end; and, when that made it
-    /// `live`, `events` (the person's first words). `None`, with nothing written,
-    /// when the cursor does not move, and then the caller must not acknowledge `seq`
-    /// (H3); otherwise the events newly stored.
+    /// run's lifecycle, `starting` to `lifecycle` (`Live` or `Failed`; `Exited` for a
+    /// relaunch claude refused), only while it is `starting`, so a run already ended keeps
+    /// its end; and, when that made it `live`, `events` (the person's first words). A
+    /// relaunch's start is the person's message `send`: its claim is settled `sent` with
+    /// the run live, or released when the relaunch was refused. `None`, with nothing
+    /// written, when the cursor does not move, and then the caller must not acknowledge
+    /// `seq` (H3); otherwise the events newly stored.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_outcome(
         &self,
         session_uid: &str,
@@ -2797,6 +2847,7 @@ impl Store {
         lifecycle: Lifecycle,
         initialize: Option<&str>,
         events: &[PendingEvent],
+        send: Option<&str>,
     ) -> Result<Option<Vec<Event>>> {
         let seq = i64::try_from(seq).context("a host sequence number past i64")?;
         let now = protocol::time::now_rfc3339();
@@ -2843,6 +2894,16 @@ impl Store {
             for event in events {
                 filed.extend(append_in_tx(&tx, event)?);
             }
+        }
+        if let (1, Some(request_id)) = (moved, send) {
+            let settle = if lifecycle == Lifecycle::Live {
+                "UPDATE text_mutations SET status = 'sent', settled_at = ?3
+                  WHERE session_uid = ?1 AND request_id = ?2 AND status = 'applying'"
+            } else {
+                "DELETE FROM text_mutations
+                  WHERE session_uid = ?1 AND request_id = ?2 AND status = 'applying' AND ?3 IS NOT NULL"
+            };
+            tx.execute(settle, params![session_uid, request_id, now])?;
         }
         tx.commit()?;
         Ok(Some(filed))
@@ -3365,10 +3426,56 @@ impl Store {
         Ok(rows)
     }
 
-    /// Whether the hosted Codex run `session_uid` is one the person's next message relaunches
-    /// ([`relaunchable_in`]): what the fleet reports `bound_not_started` for.
+    /// Whether the hosted run `session_uid`, of either agent, is one the person's next message
+    /// relaunches ([`relaunchable_in`] for Codex, [`claude_relaunchable_in`] for Claude; a uid is
+    /// in one table only): what the fleet reports `relaunchable` for, and a Codex run's
+    /// `bound_not_started`.
     pub fn relaunchable(&self, session_uid: &str) -> Result<bool> {
-        Ok(relaunchable_in(&self.read(), session_uid)?.is_some())
+        let conn = self.read();
+        Ok(relaunchable_in(&conn, session_uid)?.is_some()
+            || claude_relaunchable_in(&conn, session_uid)?.is_some())
+    }
+
+    /// The hosted Claude run `session_uid` as a message relaunches it, when it is one to
+    /// relaunch ([`claude_relaunchable_in`]); `None` otherwise.
+    pub fn claude_relaunch(&self, session_uid: &str) -> Result<Option<ClaudeRelaunch>> {
+        claude_relaunchable_in(&self.read(), session_uid)
+    }
+
+    /// Begin a message's relaunch of the hosted Claude run `session_uid` (decision 210), in one
+    /// transaction: only while it is one to relaunch ([`claude_relaunchable_in`]), the run moves
+    /// `exited` → `starting`; its recorded host and boot are cleared, as a first start's row
+    /// stands before its spawn, so the watch never reads the old host as this launch's; its
+    /// cursor goes back to 0, since a new host numbers its messages from 1; and its start line
+    /// becomes `start`, which a restarted ccd sends again. Whether it moved: `false`, with nothing
+    /// written, when it is no longer one to relaunch (a second message met it `starting`).
+    pub fn begin_claude_relaunch(&self, session_uid: &str, start: &str) -> Result<bool> {
+        let (table, _) = session_tables_for(&AgentKind::Claude);
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if claude_relaunchable_in(&tx, session_uid)?.is_none() {
+            return Ok(false);
+        }
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET lifecycle = ?2, updated_at = ?3
+                  WHERE session_uid = ?1 AND lifecycle = ?4"
+            ),
+            params![
+                session_uid,
+                lifecycle_str(Lifecycle::Starting),
+                protocol::time::now_rfc3339(),
+                lifecycle_str(Lifecycle::Exited)
+            ],
+        )?;
+        tx.execute(
+            "UPDATE run_hosts SET host_pid = NULL, host_start_sec = NULL, host_start_usec = NULL,
+                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2
+              WHERE session_uid = ?1",
+            params![session_uid, start],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Begin a message's relaunch of the hosted Codex run `session_uid` (P3 R4), in one
@@ -3435,51 +3542,57 @@ impl Store {
         Ok(moved == 1)
     }
 
-    /// A relaunch that did not reach its link, put back in one transaction: the run `exited`
-    /// from `starting`, or from `failed` when the watch failed it for the relaunch's own
-    /// `launched` app-server, still the recorded one; and its old app-server `old` recorded
-    /// again unless the relaunch recorded its own, so the next message's warrant reads the
-    /// launch that ran last. Whether the run moved back.
+    /// A relaunch of either agent that did not reach its link, put back in one transaction: the
+    /// run `exited` from `starting`, or from `failed` when the watch failed it for the
+    /// relaunch's own `launched` host, still the recorded one; and its old host `old`, when it
+    /// had one, recorded again unless the relaunch recorded its own, so the next message's
+    /// warrant reads the launch that ran last. Whether the run moved back.
     pub fn undo_relaunch(
         &self,
         session_uid: &str,
-        old: &WatchedHost,
+        old: Option<&WatchedHost>,
         launched: Option<&ProcessIdentity>,
     ) -> Result<bool> {
-        let (table, _) = session_tables_for(&AgentKind::Codex);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let failed_by_its_launch = match launched {
             Some(host) => recorded_host_is(&tx, session_uid, host)?,
             None => false,
         };
-        tx.execute(
-            "UPDATE run_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4,
-                                  boot_sec = ?5, boot_usec = ?6
-              WHERE session_uid = ?1 AND host_pid IS NULL",
-            params![
-                session_uid,
-                old.host.pid,
-                old.host.birth.start_sec,
-                old.host.birth.start_usec,
-                old.boot.map(|boot| boot.boot_sec),
-                old.boot.map(|boot| boot.boot_usec)
-            ],
-        )?;
-        let moved = tx.execute(
-            &format!(
-                "UPDATE {table} SET lifecycle = ?2, updated_at = ?3
-                  WHERE session_uid = ?1 AND (lifecycle = ?4 OR (?5 AND lifecycle = ?6))"
-            ),
-            params![
-                session_uid,
-                lifecycle_str(Lifecycle::Exited),
-                protocol::time::now_rfc3339(),
-                lifecycle_str(Lifecycle::Starting),
-                failed_by_its_launch,
-                lifecycle_str(Lifecycle::Failed)
-            ],
-        )?;
+        if let Some(old) = old {
+            tx.execute(
+                "UPDATE run_hosts SET host_pid = ?2, host_start_sec = ?3, host_start_usec = ?4,
+                                      boot_sec = ?5, boot_usec = ?6
+                  WHERE session_uid = ?1 AND host_pid IS NULL",
+                params![
+                    session_uid,
+                    old.host.pid,
+                    old.host.birth.start_sec,
+                    old.host.birth.start_usec,
+                    old.boot.map(|boot| boot.boot_sec),
+                    old.boot.map(|boot| boot.boot_usec)
+                ],
+            )?;
+        }
+        let now = protocol::time::now_rfc3339();
+        let mut moved = 0;
+        // A uid is in one table only.
+        for table in SESSION_TABLES {
+            moved += tx.execute(
+                &format!(
+                    "UPDATE {table} SET lifecycle = ?2, updated_at = ?3
+                      WHERE session_uid = ?1 AND (lifecycle = ?4 OR (?5 AND lifecycle = ?6))"
+                ),
+                params![
+                    session_uid,
+                    lifecycle_str(Lifecycle::Exited),
+                    now,
+                    lifecycle_str(Lifecycle::Starting),
+                    failed_by_its_launch,
+                    lifecycle_str(Lifecycle::Failed)
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(moved == 1)
     }

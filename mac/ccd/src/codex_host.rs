@@ -2004,7 +2004,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
             let launched = launched.map(|(leader, _)| leader);
             if let Err(err) = daemon
                 .db
-                .undo_relaunch(uid.to_string(), run.host, launched)
+                .undo_relaunch(uid.to_string(), Some(run.host), launched)
                 .await
             {
                 crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
@@ -7281,7 +7281,7 @@ mod tests {
             tokio::time::sleep(POLL).await;
         }
         assert!(db
-            .undo_relaunch(uid.clone(), old, Some(dying))
+            .undo_relaunch(uid.clone(), Some(old), Some(dying))
             .await
             .unwrap());
         watch.await.unwrap();
@@ -7302,7 +7302,7 @@ mod tests {
             "the watch's own write"
         );
         assert!(db
-            .undo_relaunch(uid.clone(), old, Some(dead))
+            .undo_relaunch(uid.clone(), Some(old), Some(dead))
             .await
             .unwrap());
         assert_eq!(lifecycle().await, Lifecycle::Exited);

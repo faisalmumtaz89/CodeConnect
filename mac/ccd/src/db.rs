@@ -349,10 +349,23 @@ impl Db {
     pub async fn undo_relaunch(
         &self,
         session_uid: String,
-        old: crate::store::WatchedHost,
+        old: Option<crate::store::WatchedHost>,
         launched: Option<protocol::proc_identity::ProcessIdentity>,
     ) -> Result<bool> {
-        self.run(move |store| store.undo_relaunch(&session_uid, &old, launched.as_ref()))
+        self.run(move |store| store.undo_relaunch(&session_uid, old.as_ref(), launched.as_ref()))
+            .await
+    }
+
+    pub async fn claude_relaunch(
+        &self,
+        session_uid: String,
+    ) -> Result<Option<crate::store::ClaudeRelaunch>> {
+        self.run(move |store| store.claude_relaunch(&session_uid))
+            .await
+    }
+
+    pub async fn begin_claude_relaunch(&self, session_uid: String, start: String) -> Result<bool> {
+        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start))
             .await
     }
 
@@ -382,6 +395,7 @@ impl Db {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn commit_outcome(
         &self,
         session_uid: String,
@@ -390,6 +404,7 @@ impl Db {
         lifecycle: Lifecycle,
         initialize: Option<String>,
         events: Vec<PendingEvent>,
+        send: Option<String>,
     ) -> Result<Option<Vec<Event>>> {
         self.run(move |store| {
             store.commit_outcome(
@@ -399,6 +414,7 @@ impl Db {
                 lifecycle,
                 initialize.as_deref(),
                 &events,
+                send.as_deref(),
             )
         })
         .await
