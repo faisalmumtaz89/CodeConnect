@@ -8915,8 +8915,8 @@ mod tests {
     }
 
     /// **B8 part 2 S5: a hosted run's menus are its start's answer's.** Each model's value,
-    /// name, description and efforts, and the three modes with their names, never
-    /// `bypassPermissions`; a tmux run has none.
+    /// name, description and efforts, and the four modes with their names, the one that asks
+    /// nothing (`bypassPermissions`) marked `confirm`; a tmux run has none.
     #[tokio::test]
     async fn a_hosted_runs_menus_are_its_starts_answers() {
         let rig = rig();
