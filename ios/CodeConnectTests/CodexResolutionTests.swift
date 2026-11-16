@@ -103,7 +103,7 @@ final class CodexResolutionTests: XCTestCase {
                 body: #""status":"answered","by":"local""#),
         ])
         let card = try XCTUnwrap(approval(in: timeline))
-        XCTAssertEqual(card.codexResolution, .answered(by: .local, decision: nil))
+        XCTAssertEqual(card.codexResolution, .answered(by: .local, decision: nil, answeredOn: nil))
         XCTAssertFalse(card.isPending, "an answered card is not still waiting on a human")
         XCTAssertFalse(
             DecisionCard.actionBarAvailable(
@@ -298,7 +298,7 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertEqual(resolved.codexResolvedRequestID, card.requestID)
         XCTAssertEqual(
             resolved.codexResolution,
-            .answered(by: .phone, decision: .optionId("accept")))
+            .answered(by: .phone, decision: .optionId("accept"), answeredOn: nil))
 
         // ---- and the two together, through the real builder ----------------
         let timeline = TimelineBuilder.build([request, resolved])

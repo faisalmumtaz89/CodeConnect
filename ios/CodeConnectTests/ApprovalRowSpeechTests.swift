@@ -260,7 +260,7 @@ final class ApprovalRowSpeechTests: XCTestCase {
         XCTAssertNil(ended.outcome)
         XCTAssertEqual(
             try XCTUnwrap(ended.codexResolution, "the wire's ending is on the row"),
-            .answered(by: .phone, decision: .optionId("accept")))
+            .answered(by: .phone, decision: .optionId("accept"), answeredOn: nil))
         XCTAssertEqual(
             spokenRow(ended),
             "Answered from a phone. Codex has the answer. "

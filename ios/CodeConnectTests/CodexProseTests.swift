@@ -23,8 +23,8 @@ final class CodexProseTests: XCTestCase {
 
     private var allEndings: [CodexResolution] {
         [
-            .answered(by: .phone, decision: .optionId("accept")),
-            .answered(by: .local, decision: nil),
+            .answered(by: .phone, decision: .optionId("accept"), answeredOn: nil),
+            .answered(by: .local, decision: nil, answeredOn: nil),
             .cleared(cause: .turnAborted),
             .cleared(cause: .turnCompleted),
             .cleared(cause: .superseded),
@@ -71,13 +71,13 @@ final class CodexProseTests: XCTestCase {
     /// may name a choice, and the copy has to say it does not know rather than
     /// leaving a blank the reader fills in themselves.
     func testAnsweredByLocalWithNoDecisionNeverNamesAChoice() {
-        let banner = CodexProse.resolution(.answered(by: .local, decision: nil))
+        let banner = CodexProse.resolution(.answered(by: .local, decision: nil, answeredOn: nil))
         for word in ["accept", "cancel", "Allowed", "Denied", "approved"] {
             XCTAssertFalse(
                 banner.message.lowercased().contains(word.lowercased()),
                 "\(word) must not appear: \(banner.message)")
         }
-        let chosen = CodexProse.whatWasChosen(.answered(by: .local, decision: nil))
+        let chosen = CodexProse.whatWasChosen(.answered(by: .local, decision: nil, answeredOn: nil))
         XCTAssertTrue(chosen.hasPrefix("Not known"), chosen)
     }
 
@@ -85,7 +85,7 @@ final class CodexProseTests: XCTestCase {
     /// thing the daemon validated, and the only spelling that is certainly right.
     func testAPhoneAnswerNamesTheOptionItSent() {
         let chosen = CodexProse.whatWasChosen(
-            .answered(by: .phone, decision: .optionId("acceptWithExecpolicyAmendment")))
+            .answered(by: .phone, decision: .optionId("acceptWithExecpolicyAmendment"), answeredOn: nil))
         XCTAssertTrue(chosen.contains("acceptWithExecpolicyAmendment"), chosen)
     }
 

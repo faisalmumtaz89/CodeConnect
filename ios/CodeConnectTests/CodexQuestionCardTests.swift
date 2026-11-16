@@ -138,6 +138,32 @@ final class CodexQuestionCardTests: XCTestCase {
         XCTAssertTrue(onPhone.message.contains("from the phone"), onPhone.message)
     }
 
+    /// The companion to the above (answered_on, minor 41): a Mac answer is the same
+    /// resolution with `answered_on` set to "mac", derived here by changing that one
+    /// value. Either device reading it is told the Mac sent the answer — the resolver
+    /// is named, not the reader. Must-fail: a read that ignores `answered_on` says a phone.
+    func testAMacAnsweredCodexCardNamesTheMacOnEitherView() throws {
+        let frames = try XCTUnwrap(try wire()["answered"]?["frames"]?.arrayValue, "answered.frames")
+        let eventJSON = try XCTUnwrap(
+            frames.lazy.compactMap { frame -> String? in
+                guard let event = frame["event"],
+                    (try? event.decoded(Event.self))?.kind == .approvalResolved
+                else { return nil }
+                return event.canonicalJSONString
+            }.first, "the answered scenario's resolution frame")
+        let macJSON = eventJSON.replacingOccurrences(
+            of: #""answered_on":"iphone""#, with: #""answered_on":"mac""#)
+        XCTAssertNotEqual(macJSON, eventJSON, "the fixture answers on an iPhone, derived here to a Mac")
+        let macEvent = try JSONDecoder().decode(Event.self, from: Data(macJSON.utf8))
+        let status = codexStatus(codex: try XCTUnwrap(macEvent.codexResolution))
+        for host in [HostDevice.iPhone, HostDevice.mac] {
+            let banner = try XCTUnwrap(status.banner(on: host, agent: .codex))
+            XCTAssertTrue(
+                banner.message.contains("from a Mac"),
+                "read on \(host.noun): a Mac answer names the Mac — \(banner.message)")
+        }
+    }
+
     func testADeclinedCodexCardDoesNotNameTheViewer() throws {
         let status = codexStatus(codex: try resolution("declined"))
         for host in [HostDevice.mac, HostDevice.iPhone] {

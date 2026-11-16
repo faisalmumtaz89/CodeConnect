@@ -3158,7 +3158,7 @@ public final class AppModel {
 
     /// What decides whether a message may leave — the truth summary (`summary(for:)`) for the pending
     /// ref, and the shown card for `cardShown`, which the submit path's `rebuildNow` makes current first.
-    private func composeBlocked(for key: String) -> String? {
+    public func composeBlocked(for key: String) -> String? {
         guard let summary = summary(for: key) else { return "This run is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
@@ -3327,6 +3327,45 @@ public final class AppModel {
         } catch {
             controls.composeNotSent(error.localizedDescription)
             return nil
+        }
+    }
+
+    /// **A message to a Codex run from a `send(text:to:)` caller that owns its own outcome** — the diff
+    /// comment, a denial reason — reached here instead of the Claude `send_text` path the daemon refuses by
+    /// name. Unlike `composeToCodex`, which drives the composer's one note, this returns a `ComposeAttempt`
+    /// for the caller's own banner and keeps the diff comment's own retry: the request id is the compose
+    /// hash of the words, so a re-send of the same words is recognised by the daemon and replayed, never
+    /// typed twice. A refusal comes back in the app's own words, never ccd's raw sentence.
+    private func composeComment(text: String, to key: String) async -> ComposeAttempt {
+        guard let summary = summary(for: key) else { return .failed("This run is not in the fleet.") }
+        states[key]?.rebuildNow()
+        if let blocked = composeBlocked(for: key) { return .refused(blocked) }
+        if let blocked = ComposeDraft(text: text).blockedReason { return .refused(blocked) }
+        guard let reference = Self.sessionReference(summary) else { return .refused(Self.noUidSentence) }
+        let hash = CodexHash.compose(sessionRef: reference, text: text)
+        do {
+            let result = try await connection.compose(
+                session: reference, requestID: "say-" + hash, text: text, payloadHash: hash)
+            states[key]?.codexTurnsChanged()
+            return Self.commentAttempt(for: result, matched: runLabel(for: key).project)
+        } catch let refusal as DaemonConnection.CodexRefusal {
+            return .refused(Self.sentence(for: refusal, verb: "carry this comment"))
+        } catch ConnectionError.sentButUnanswered {
+            return .indeterminate(Self.sentNoAnswerSentence)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    /// A Codex compose outcome in the diff comment's banner vocabulary. A duplicate is as final as sent —
+    /// the same words were recognised and replayed, not carried twice.
+    private static func commentAttempt(for result: ComposeResult, matched: String) -> ComposeAttempt {
+        switch result {
+        case .started, .steered: return .sent(matched: matched)
+        case .duplicate(let turnID, _): return .alreadyApplied(appliedAt: turnID)
+        case .rejected(let reason): return .refused(reason)
+        case .indeterminate(let reason): return .indeterminate(reason)
+        case .unknown(let status): return .indeterminate(status)
         }
     }
 
@@ -3642,6 +3681,12 @@ public final class AppModel {
     /// *now* — and typing into the wrong agent's TTY is not a mistake that can
     /// be taken back.
     public func send(text: String, to key: String, submit: Bool = true) async -> ComposeAttempt {
+        // A Codex run has no Claude slash vocabulary and refuses `send_text` by name; a message to it — a
+        // diff comment, or any other caller here — goes through the Codex compose path instead, its outcome
+        // in the caller's own banner and any refusal in the app's own words, never ccd's raw sentence.
+        if summary(for: key)?.isCodex == true {
+            return await composeComment(text: text, to: key)
+        }
         // The policy stands between EVERY caller and the wire — the composer,
         // a denial reason, a diff comment. A deny reason that happens to
         // start with `/config` would otherwise recreate the measured Mac

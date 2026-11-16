@@ -43,7 +43,7 @@ final class ProvenanceWordingTests: XCTestCase {
     /// Codex's `resolved_by: phone` names a paired phone too.
     func testACodexPhoneAnswerDoesNotClaimThisPhone() {
         XCTAssertEqual(
-            CodexProse.resolution(.answered(by: .phone, decision: nil)).title, "Answered from a phone")
+            CodexProse.resolution(.answered(by: .phone, decision: nil, answeredOn: nil)).title, "Answered from a phone")
     }
 
     func testTheCardsBannerUsesTheSameWords() throws {
