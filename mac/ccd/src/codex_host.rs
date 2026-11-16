@@ -2326,10 +2326,19 @@ async fn attach(
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
         .ok_or("the login shell ended as it started")?;
-    let leader = ProcessIdentity {
-        pid,
-        birth: read_birth_identity(pid).ok_or("could not read the app-server's start time")?,
+    // A codex that ended at once is an unreaped child here, and macOS gives no start time for
+    // one: what it said is the start's failure.
+    let Some(birth) = read_birth_identity(pid) else {
+        crate::start_session::give_up_if_ended(
+            dir,
+            since,
+            child,
+            deadline,
+            "Codex's app-server did not listen",
+        )?;
+        return Err("could not read the app-server's start time".into());
     };
+    let leader = ProcessIdentity { pid, birth };
     let boot = protocol::proc_identity::boot_identity();
     *launched = Some((leader, boot));
     daemon
@@ -3088,6 +3097,52 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.lifecycle, Lifecycle::Failed);
+    }
+
+    /// **A codex that has ended before its start time is read fails the start with what it
+    /// said last**: an ended child is not yet reaped then, and macOS gives no start time for
+    /// one.
+    #[tokio::test]
+    async fn a_codex_ended_before_its_start_time_is_read_fails_with_its_last_line() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-gone", "thr-gone", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        let since = std::fs::metadata(dir.join("host.log")).unwrap().len();
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "read _; echo 'error: unexpected argument' >> host.log; exit 2",
+            ])
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        let launched_as = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while protocol::proc_identity::liveness(&launched_as)
+            != protocol::proc_identity::Liveness::Gone
+        {
+            assert!(Instant::now() < deadline, "the stand-in did not end");
+            tokio::time::sleep(POLL).await;
+        }
+        let mut launched = None;
+        let failed = attach(
+            &rig.daemon,
+            &uid,
+            &dir,
+            since,
+            &mut child,
+            Instant::now() + Duration::from_secs(20),
+            &mut launched,
+        )
+        .await;
+        assert_eq!(failed.err().as_deref(), Some("error: unexpected argument"));
     }
 
     /// A start left as a ccd that dies mid-start leaves it: abandoned once its app-server's
