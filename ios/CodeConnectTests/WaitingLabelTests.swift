@@ -106,7 +106,7 @@ final class WaitingLabelTests: XCTestCase {
         let found = try spoken(
             QuestionRow(
                 approval: approval, questions: questions, risk: .low, answersQuestions: true,
-                linkReason: nil, onOpen: {}))
+                linkReason: nil, agent: .claude, resolvesCodexCards: true, onOpen: {}))
         XCTAssertTrue(found.contains { $0.hasSuffix(". waiting 1 minute.") }, "\(found)")
     }
 

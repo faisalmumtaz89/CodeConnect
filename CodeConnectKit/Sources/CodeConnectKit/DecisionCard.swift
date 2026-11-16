@@ -123,14 +123,24 @@ public enum DecisionCard {
 
     /// **The question this card asks, when the phone can show it as asked.**
     ///
-    /// Claude's `AskUserQuestion`, on a card whose structured `tool_input`
-    /// reproduces the hashed text — the questions drawn are then provably the
-    /// ones the daemon sent. Anything less falls back to the approval layout,
-    /// read-only (`answerSurface`), showing the hashed text through `displaySafe`.
+    /// A question card — Claude's `AskUserQuestion`, or Codex's `request_user_input` —
+    /// on a card whose structured `tool_input` reproduces the hashed text, so the
+    /// questions drawn are provably the ones the daemon sent. Anything less falls back
+    /// to the approval layout, read-only (`answerSurface`), showing the hashed text
+    /// through `displaySafe`. The agent and the tool name must match: a Codex run never
+    /// turns a Claude card into one, nor the reverse, and a missing or unsupported
+    /// agent is never a question card.
     public static func questionCard(card: ApprovalCard, agent: AgentKind?) -> QuestionCard? {
-        guard agent == .claude, card.verification.hashMatchesDisplayText,
+        guard let agent, card.verification.hashMatchesDisplayText,
             card.verification.renderMatchesDisplayText
         else { return nil }
+        let expected: String
+        switch agent {
+        case .claude: expected = QuestionCard.toolName
+        case .codex: expected = QuestionCard.codexToolName
+        case .unsupported: return nil
+        }
+        guard card.toolName == expected else { return nil }
         return QuestionCard(card: card)
     }
 

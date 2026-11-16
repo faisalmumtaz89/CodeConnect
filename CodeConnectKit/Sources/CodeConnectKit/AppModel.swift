@@ -3486,7 +3486,7 @@ public final class AppModel {
         if let mismatch = Self.decisionMismatch(
             decision: decision, agent: agent,
             resolvesCodexCards: daemonProfile.resolvesCodexCards,
-            isQuestion: item.card.toolName == QuestionCard.toolName,
+            isQuestion: QuestionCard.isQuestionToolName(item.card.toolName),
             answersQuestions: daemonProfile.answersQuestions,
             answersApprovalsByHook: daemonProfile.answersApprovalsByHook)
         {
@@ -3568,8 +3568,16 @@ public final class AppModel {
             // cannot be retired must not be answered from here, by any vocabulary.
             return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
                 + "so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
-        case (.codex, .allow), (.codex, .deny), (.codex, .option),
-            (.codex, .text), (.codex, .answers), (.codex, .decline):
+        case (.codex, .answers), (.codex, .decline):
+            // A Codex question card is answered with the question family, exactly as
+            // a Claude one is; an approval card is not, and says so. `resolvesCodexCards`
+            // is already guaranteed — the `!resolvesCodexCards` case above caught its absence.
+            guard isQuestion else {
+                return "A Codex card is answered by naming one of the options it offered, "
+                    + "so nothing was sent."
+            }
+            return nil
+        case (.codex, .allow), (.codex, .deny), (.codex, .option), (.codex, .text):
             return "A Codex card is answered by naming one of the options it offered, "
                 + "so nothing was sent."
         case (.claude, .optionId("acceptForSession")):

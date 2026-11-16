@@ -1340,7 +1340,7 @@ struct DecisionCardView: View {
             return DecisionCard.unsupportedAgentReason(raw)
         case .claude:
             return DecisionCard.claudeUnanswerableReason(
-                isQuestion: approval.card.toolName == QuestionCard.toolName,
+                isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
                 linkReason: model.actionsBlockedReason, hold: hold)
         }

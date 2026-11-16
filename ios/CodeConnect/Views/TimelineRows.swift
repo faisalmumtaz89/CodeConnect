@@ -54,7 +54,8 @@ struct TimelineRow: View {
                 QuestionRow(
                     approval: approval, questions: questions,
                     risk: approval.assessment(profile: profile).effective,
-                    answersQuestions: profile.knownAnswersQuestions, linkReason: linkReason
+                    answersQuestions: profile.knownAnswersQuestions, linkReason: linkReason,
+                    agent: agent, resolvesCodexCards: profile.resolvesCodexCards
                 ) { onOpenApproval(approval) }
             } else {
                 ApprovalRow(
@@ -857,6 +858,10 @@ struct QuestionRow: View {
     let risk: RiskClass
     let answersQuestions: Bool?
     let linkReason: String?
+    /// The run's agent and whether the daemon retires its cards — a Codex
+    /// question's recorded answer is read under a different rule than a Claude one.
+    let agent: AgentKind?
+    let resolvesCodexCards: Bool
     let onOpen: () -> Void
 
     /// See `ApprovalRow.lastTick`: the same clock, for the same two ages.
@@ -872,7 +877,9 @@ struct QuestionRow: View {
     }
 
     private var status: QuestionCardStatus {
-        .recorded(approval, answersQuestions: answersQuestions, linkReason: linkReason)
+        .recorded(
+            approval, answersQuestions: answersQuestions, linkReason: linkReason,
+            resolvesCodexCards: resolvesCodexCards, agent: agent)
     }
 
     private var title: String {

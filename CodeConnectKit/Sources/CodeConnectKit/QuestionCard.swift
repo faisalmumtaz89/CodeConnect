@@ -14,6 +14,23 @@ import Foundation
 /// (`mac/ccd/src/question.rs`). Nothing is typed, and this card has no Allow.
 public struct QuestionCard: Sendable, Hashable {
     public static let toolName = "AskUserQuestion"
+    /// Codex's question tool. A `request_user_input` card carries the same
+    /// `{questions:[…]}` shape, so the same parser reads it; `DecisionCard.questionCard`
+    /// pairs it with a Codex run and `AskUserQuestion` with a Claude one.
+    public static let codexToolName = "request_user_input"
+    /// Whether a card's tool name is a question card's — Claude's or Codex's. The
+    /// one place the two are checked, so a new agent's question tool is added once.
+    public static func isQuestionToolName(_ name: String) -> Bool {
+        name == toolName || name == codexToolName
+    }
+
+    /// The card's heading in the words both apps read — "<Agent> asks" for one
+    /// question, "<Agent> asks N questions" for more. The one place the attribution
+    /// is composed, so the Mac reads this rather than writing "Claude asks" itself.
+    public static func heading(agent: AgentKind?, count: Int) -> String {
+        let who = agent?.displayName ?? "Claude"
+        return count == 1 ? "\(who) asks" : "\(who) asks \(count) questions"
+    }
 
     public struct Option: Sendable, Hashable {
         public let label: String
@@ -46,7 +63,7 @@ public struct QuestionCard: Sendable, Hashable {
     /// Nil for any other card, and for a question whose shape this build cannot
     /// read — which is then shown read-only, never guessed at.
     public init?(card: ApprovalCard) {
-        guard card.toolName == Self.toolName,
+        guard Self.isQuestionToolName(card.toolName),
             let list = card.toolInput["questions"]?.arrayValue, !list.isEmpty
         else { return nil }
         var questions: [Question] = []
@@ -207,8 +224,15 @@ public enum QuestionCardStatus: Sendable, Hashable {
     /// no reason to give it is as it is once the hold ended.
     public static func resolve(
         outcome: AnswerOutcome?, attempt: AnswerAttempt?, isBacked: Bool,
-        hold: QuestionHold?, answersQuestions: Bool?, linkReason: String?
+        hold: QuestionHold?, answersQuestions: Bool?, linkReason: String?,
+        codex: CodexResolution? = nil, resolvesCodexCards: Bool = true, agent: AgentKind? = nil
     ) -> QuestionCardStatus {
+        // A Codex card's authoritative ending is its own resolution, not an
+        // `AnswerOutcome`. Like a Claude outcome it is a recorded ending, so it
+        // outranks this phone's own optimistic attempt — a `.sentUnconfirmed` send
+        // whose ack was lost — and it lets an app that did not answer show what
+        // was answered.
+        if let codex { return endedByCodex(codex) }
         switch attempt {
         case .applied(let outcome), .indeterminate(let outcome), .duplicate(let outcome, _):
             return ended(by: outcome)
@@ -227,6 +251,14 @@ public enum QuestionCardStatus: Sendable, Hashable {
         }
         if let outcome { return ended(by: outcome) }
         guard isBacked else { return .unavailable }
+        // **A Codex question has no hold.** It is answerable for exactly as long as
+        // the daemon can retire it — `resolvesCodexCards`, the same capability the
+        // Codex approval card is answered under — over the same live-backing guard
+        // above. No hook, no `answersQuestions`.
+        if agent == .codex {
+            guard resolvesCodexCards else { return linkReason.map(Self.unreachable) ?? .answerAtMac }
+            return .answerable
+        }
         guard let answersQuestions else { return linkReason.map(Self.unreachable) ?? .answerAtMac }
         guard answersQuestions else { return .macTooOld }
         switch hold {
@@ -242,11 +274,13 @@ public enum QuestionCardStatus: Sendable, Hashable {
     /// is consulted, because the row states what was recorded and the card owns
     /// what this phone is in the middle of sending.
     public static func recorded(
-        _ approval: ApprovalItem, answersQuestions: Bool?, linkReason: String?
+        _ approval: ApprovalItem, answersQuestions: Bool?, linkReason: String?,
+        resolvesCodexCards: Bool = true, agent: AgentKind? = nil
     ) -> QuestionCardStatus {
         resolve(
             outcome: approval.outcome, attempt: nil, isBacked: true,
-            hold: approval.questionHold, answersQuestions: answersQuestions, linkReason: linkReason)
+            hold: approval.questionHold, answersQuestions: answersQuestions, linkReason: linkReason,
+            codex: approval.codexResolution, resolvesCodexCards: resolvesCodexCards, agent: agent)
     }
 
     /// The one line a timeline row says about where the question stands, in the
@@ -280,20 +314,40 @@ public enum QuestionCardStatus: Sendable, Hashable {
         }
     }
 
+    /// A Codex card's end, read from its own resolution: the phone's answers or
+    /// decline show as themselves, the Mac's answer is its own, a write the daemon
+    /// could not confirm is unconfirmed, and everything else is closed.
+    private static func endedByCodex(_ resolution: CodexResolution) -> QuestionCardStatus {
+        switch resolution {
+        case .answered(let by, let decision):
+            switch (by, decision) {
+            case (.phone, .some(.answers(let answers))): return .answeredOnPhone(answers, from: nil)
+            case (.phone, .some(.decline)): return .declined
+            case (.local, _): return .answeredAtMac
+            default: return .closed
+            }
+        case .unknown: return .unconfirmed
+        case .cleared, .timeout, .unrecognisedStatus: return .closed
+        }
+    }
+
     /// The banner a card in this status carries, or nil when it needs none.
     public var banner: (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
         banner(on: .current)
     }
 
     /// The banner in the words of `host`: an answer names the device that sent it, not the one reading.
-    func banner(on host: HostDevice) -> (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
+    public func banner(on host: HostDevice, agent: AgentKind? = nil) -> (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
+        // The agent that asked — "Codex" on a Codex card — defaulting to Claude for
+        // a caller that has not said, and for every Claude card.
+        let who = agent?.displayName ?? "Claude"
         switch self {
         case .answerable:
             return nil
         case .askingAtMac:
             return (
                 "Asking at \(host.computer("the computer"))",
-                "Claude is asking this at \(host.computer("the computer")), so it can only be answered there.",
+                "\(who) is asking this at \(host.computer("the computer")), so it can only be answered there.",
                 .info, "desktop"
             )
         case .answerAtMac:
@@ -306,7 +360,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .macTooOld:
             return (
                 "Answer at \(host.computer("the computer"))",
-                "\(host.computer("This computer"))'s CodeConnect is too old to answer Claude's questions from the "
+                "\(host.computer("This computer"))'s CodeConnect is too old to answer \(who)'s questions from the "
                     + "\(host.noun). Answer it at \(host.computer("the computer")), or update it to answer here.",
                 .warning, "desktop"
             )
@@ -316,7 +370,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
             let sender = AnswerOutcome.answeringDevice(device, on: host) ?? "the \(host.noun)"
             return (
                 "Answered",
-                "Claude has the answers sent from \(sender).",
+                "\(who) has the answers sent from \(sender).",
                 .success,
                 "check-circle-fill"
             )
@@ -335,7 +389,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .unconfirmed:
             return (
                 "Unconfirmed",
-                "\(host.computer("The computer")) took this answer but could not confirm Claude received it. "
+                "\(host.computer("The computer")) took this answer but could not confirm \(who) received it. "
                     + "Check \(host.computer("the computer")).",
                 .warning, "question"
             )
