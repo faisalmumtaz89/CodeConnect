@@ -55,10 +55,9 @@ Once your iPhone uses one of your computers, every other computer running CodeCo
 
 ## Use
 
-In a new terminal, from your project's folder, start the agent through CodeConnect:
+Start an agent from the CodeConnect app: choose this computer, the project and the agent. For Codex, `codeconnect codex` in a new terminal in your project's folder starts it there through CodeConnect too:
 
 ```sh
-codeconnect claude     # Claude Code; every argument is passed on to claude
 codeconnect codex      # Codex
 ```
 
@@ -85,7 +84,7 @@ To uninstall, follow [Uninstalling](site/support.md#uninstalling): on a Mac with
 ```
 iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon on your computer
                                                   ▲
-                    codeconnect claude / codex ───┘   (the session runs in a private tmux)
+                             codeconnect codex ───┘   (the session runs in a private tmux)
 ```
 
 `codeconnect` runs the agent in a private tmux server, so the session outlives the tab, and shows it in your terminal unchanged. The daemon, `ccd`, logs every session's events. Claude Code reports to it through its hooks, and Codex through a broker in front of Codex's own app server; approval requests come only through those channels, never from the screen. Your answer goes back the same way rather than being typed into the prompt, and if the daemon cannot be reached the prompt stays at your keyboard. More in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -94,7 +93,6 @@ iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon 
 
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
-- When `codeconnect claude` or `codeconnect codex` starts a session, CodeConnect asks GitHub for a newer release at most once a day; `"update_check": false` in `~/.codeconnect/config.json` turns that off. Where the Mac app installed CodeConnect, the app keeps it up to date and this check is never made.
 - Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user; any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, asked once (`codeconnect mail-trust`); it is guidance to the agent, and its own permission mode still governs what it may do.
 - A paired phone can type into your sessions. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 

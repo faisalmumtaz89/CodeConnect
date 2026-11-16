@@ -1,13 +1,12 @@
 //! `codeconnect` — the CodeConnect shim.
 //!
-//! `codeconnect claude [args…]` hosts a real `claude` inside the private tmux server and
+//! `codeconnect codex [args…]` hosts a real `codex` inside the private tmux server and
 //! then **execs** the tmux client, so the terminal tab is showing the session
 //! itself rather than a wrapper around it. Nothing is proxied, no PTY is
-//! allocated, and every keystroke goes straight to Claude's TTY.
+//! allocated, and every keystroke goes straight to the agent's TTY.
 //!
-//! What the shim adds happens entirely at spawn time: a generated `--settings`
-//! that installs the hooks, the environment fixes that keep transcripts alive,
-//! and a detached supervisor that connects out to `ccd`.
+//! What the shim adds happens entirely at spawn time: the environment fixes that
+//! keep transcripts alive, and a detached supervisor that connects out to `ccd`.
 
 mod attach;
 mod caller_env;
@@ -40,9 +39,6 @@ mod tmux;
 mod update_check;
 mod update_install;
 mod update_release;
-
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use protocol::config::Config;
@@ -118,14 +114,6 @@ fn main() -> Result<()> {
 
     match command {
         // Hidden: run by the daemon for a session the phone starts.
-        "claude" if no_attach::requested(rest) => {
-            no_attach::run(protocol::agent::AgentKind::Claude, rest)
-        }
-        "claude" => {
-            ask_about_mail(!claude_asks_help_or_version(rest));
-            ask_about_folders(!claude_asks_help_or_version(rest));
-            start_claude(rest)
-        }
         "codex" if no_attach::requested(rest) => {
             no_attach::run(protocol::agent::AgentKind::Codex, rest)
         }
@@ -144,7 +132,7 @@ fn main() -> Result<()> {
         "revoke" => pair::revoke(rest),
         "unblock" => pair::unblock(rest),
         "daemon" => service::command(rest),
-        // Hidden: spawned by `codeconnect claude`, never typed by a human.
+        // Hidden: never typed by a human.
         "supervise" => supervise(rest),
         // Hidden: the inert exec gate. Spawned by a launch actor to bring a
         // child up inertly; it either execs its target on GO or _exits without
@@ -176,9 +164,6 @@ fn main() -> Result<()> {
         // Hidden: the MCP server a hosted agent messages other agents with, started
         // by the agent itself. Machinery, never typed by a human.
         "mcp" => mcp::run(rest),
-        // Hidden: the detached update checker `codeconnect claude` spawns.
-        // Not in --help on purpose — it is machinery, not a command.
-        "__update-check" => update_check::run_checker(),
         "update" => {
             no_arguments(rest, "codeconnect update").and_then(|()| update_check::run_update())
         }
@@ -244,14 +229,6 @@ fn ask_about_folders(starts_a_session: bool) {
     let _ = starts_a_session;
 }
 
-/// Whether `codeconnect claude <args>` asks Claude Code only for its help or its
-/// version (`-h`, `--help`, `-v`, `--version`, before any `--`).
-fn claude_asks_help_or_version(args: &[String]) -> bool {
-    args.iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "-v" | "--version"))
-}
-
 /// The banner, as text rather than as a side effect.
 ///
 /// Split out so it can be held to the same bar as the retirement notice. This
@@ -264,7 +241,6 @@ fn usage_text() -> &'static str {
     "\
 codeconnect — host coding agents your iPhone can see and answer
 
-  codeconnect claude [args…]      start Claude Code here, as a session your phone sees
   codeconnect codex [args…]       start Codex here, as a session your phone sees
   codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
   codeconnect ls                  list running sessions (works with the daemon down)
@@ -330,8 +306,8 @@ const RETIRED_EXIT_CODE: i32 = 1;
 /// `codeconnect revoke iPhone --ssh` would revoke the device's token outright
 /// while its author believed they were removing a key.
 ///
-/// The flag is looked for only under those two commands. `codeconnect claude`'s
-/// arguments belong to `claude` and `codeconnect supervise`'s to the
+/// The flag is looked for only under those two commands. `codeconnect codex`'s
+/// arguments belong to `codex` and `codeconnect supervise`'s to the
 /// supervisor; a scan that reached either would let this dispatch swallow an
 /// argument meant for another program.
 fn retired_command(command: &str, args: &[String]) -> Option<RetiredCommand> {
@@ -499,249 +475,19 @@ fn explain_retired(retired: RetiredCommand) -> ! {
     std::process::exit(RETIRED_EXIT_CODE);
 }
 
-/// The agent-varying pieces of a launch: the resolved binary, the exact argv and
-/// env the tmux session runs. Built by an agent-specific planner so the pieces
-/// that differ between agents live in one place. The `claude` planner reproduces
-/// byte-for-byte what shipped — proven by the launcher test and the fixture
-/// replay — and it is the only planner today; another agent's launch path lands
-/// with that agent, not before.
-struct AgentLaunchPlan {
-    /// The resolved agent binary, passed on to the supervisor.
-    binary: PathBuf,
-    /// argv[0] is the binary; the rest is agent flags plus the caller's passthrough.
-    argv: Vec<String>,
-    env: Vec<(String, String)>,
-    /// The session's private directory, where the settings document lives.
-    session_dir: PathBuf,
-}
-
-/// The exact argv and env a Claude session runs — a **pure** function, so the
-/// byte-identical guarantee is testable without touching the filesystem or tmux.
-/// Any change here changes what `claude` itself sees; the launcher test pins it.
-///
-/// `--mcp-config` comes first because it takes several values: placed after the
-/// passthrough it would take the person's prompt as a config file, and before
-/// `--settings` that flag ends it.
-fn claude_argv_and_env(
-    binary: &std::path::Path,
-    mcp_config_path: &std::path::Path,
-    settings_path: &std::path::Path,
-    session_id: &str,
-    session_uid: &str,
-    passthrough: &[String],
-) -> (Vec<String>, Vec<(String, String)>) {
-    let mut argv = vec![
-        binary.to_string_lossy().to_string(),
-        "--mcp-config".to_string(),
-        mcp_config_path.to_string_lossy().to_string(),
-        "--settings".to_string(),
-        settings_path.to_string_lossy().to_string(),
-    ];
-    argv.extend(passthrough.iter().cloned());
-
-    // Spawn hygiene, measured rather than assumed:
-    //   * FORCE_SESSION_PERSIST — without it an inherited CHILD_SESSION makes
-    //     Claude write no transcript at all, silently.
-    //   * CODECONNECT_SESSION / _UID — the run's identity for its hooks and its
-    //     `codeconnect mcp`, the only one they take: the generated settings also
-    //     pass it as flags, but a passthrough copied from an earlier run carries
-    //     that run's.
-    // CLAUDE_CODE_CHILD_SESSION is unset inside the session by the `sh -c`
-    // wrapper in tmux::new_session, because the pane carries the caller's
-    // environment, which may hold it.
-    let env = vec![
-        (
-            "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
-            "1".to_string(),
-        ),
-        (protocol::ENV_SESSION.to_string(), session_id.to_string()),
-        (
-            protocol::ENV_SESSION_UID.to_string(),
-            session_uid.to_string(),
-        ),
-    ];
-    (argv, env)
-}
-
-/// Plan a Claude launch around an **already-resolved** binary: write the
-/// control-plane settings document and assemble the byte-identical argv/env. The
-/// binary is resolved separately and first (see `start_agent`), so a missing
-/// binary fails before any session state exists — the pre-seam ordering.
-fn plan_claude_launch(
-    config: &Config,
-    binary: &std::path::Path,
-    session_id: &str,
-    session_uid: &str,
-    passthrough: &[String],
-) -> Result<AgentLaunchPlan> {
-    let settings = settings::write_for_session(session_id, session_uid, config)?;
-    let (argv, env) = claude_argv_and_env(
-        binary,
-        &settings.mcp_path,
-        &settings.path,
-        session_id,
-        session_uid,
-        passthrough,
-    );
-    let session_dir = settings
-        .path
-        .parent()
-        .context("the settings document has a directory")?
-        .to_path_buf();
-    Ok(AgentLaunchPlan {
-        binary: binary.to_path_buf(),
-        argv,
-        env,
-        session_dir,
-    })
-}
-
-fn start_claude(passthrough: &[String]) -> Result<()> {
-    start_agent(protocol::agent::AgentKind::Claude, passthrough, false).map(|_| ())
-}
-
-/// `codeconnect claude --no-attach`: the session a terminal start creates, left
-/// running unshown (see [`no_attach`]).
-fn start_detached(passthrough: &[String]) -> Result<no_attach::Started> {
-    start_agent(protocol::agent::AgentKind::Claude, passthrough, true)
-}
-
-/// Launch an agent session: mint the identity, plan the agent-varying pieces,
-/// create the tmux session, and hand ownership to the supervisor. Everything
-/// outside the plan — the identity, the tmux session, the advisories, the
-/// attach — is agent-agnostic; the plan is where an agent differs. Only Claude
-/// has a planner today; any other agent is refused before anything is spawned.
-///
-/// `detached` creates the same session without showing it: at
-/// [`no_attach::SIZE`], with no early-output copy (nothing attaches here to stop
-/// it), and returning once the supervisor runs.
-fn start_agent(
-    agent: protocol::agent::AgentKind,
-    passthrough: &[String],
-    detached: bool,
-) -> Result<no_attach::Started> {
-    let config = Config::load();
-
-    // **Binary first.** Resolving the agent's executable is the first thing that
-    // can fail, and it must fail before a tmux name is taken or a session
-    // identity minted — exactly as the pre-seam launcher did, so a missing
-    // binary surfaces the same way it always has. This is the agent-varying
-    // binary-resolution step; a non-Claude agent is refused here, before any
-    // state exists.
-    let binary = match &agent {
-        protocol::agent::AgentKind::Claude if detached => {
-            resolve_claude_bin(&config).map_err(no_attach::agent_missing)?
-        }
-        protocol::agent::AgentKind::Claude => resolve_claude_bin(&config)?,
-        other => bail!("{} sessions cannot be launched yet", other.as_str()),
-    };
-
-    let cwd = std::env::current_dir().context("reading the current directory")?;
-    let cwd = cwd.to_string_lossy().to_string();
-
-    // A session is shown in a terminal. With none to show it in — a script, a pipe,
-    // `ssh` without `-t` — there is nothing to host into, and the agent runs as it
-    // would run directly, rather than as a session nothing can show.
-    if !detached && !crate::attach::Terminal::available() {
-        use std::os::unix::process::CommandExt;
-        let err = Command::new(&binary).args(passthrough).exec();
-        return Err(err).with_context(|| format!("running {}", binary.display()));
-    }
-    #[cfg(target_os = "macos")]
-    update_check::ensure_tmux()?;
-    // Held from here, before the name claim, so a Ctrl+Z cannot stop this launch
-    // while it holds the claim every other launch is waiting on.
-    let _held = crate::attach::hold_signal_keys();
-    let (session_id, name_claim) = tmux::claim_session_name()?;
-    // Minted here, once, before anything else knows the session exists. The
-    // tmux name is reused as soon as this session exits; this is not, and it is
-    // what the event log, the tail cursor and the answers ledger are keyed by.
-    let session_uid = protocol::uid::new().context("minting a session uid")?;
-
-    let plan = match &agent {
-        protocol::agent::AgentKind::Claude => {
-            plan_claude_launch(&config, &binary, &session_id, &session_uid, passthrough)?
-        }
-        // Unreachable: a non-Claude agent already bailed at binary resolution.
-        other => bail!("{} sessions cannot be launched yet", other.as_str()),
-    };
-
-    // What the agent prints before the attach paints it, kept in case it ends
-    // first — see [`early_output`].
-    let early = if detached {
-        None
-    } else {
-        Some(early_output::EarlyOutput::create(&plan.session_dir)?)
-    };
-    let copy = early
-        .as_ref()
-        .map(|early| early.pipe_command())
-        .transpose()?;
-    let size = if detached {
-        Some(no_attach::SIZE)
-    } else {
-        tmux::terminal_size()
-    };
-    let launched = tmux::new_session(
-        protocol::TMUX_SOCKET_NAME,
-        &session_id,
-        &cwd,
-        &plan.env,
-        &plan.argv,
-        &plan.session_dir,
-        size,
-        config.tmux_status,
-        config.tmux_history_limit,
-        copy.as_deref(),
-    )
-    .with_context(|| format!("creating tmux session {session_id}"))?;
-    drop(name_claim);
-
-    spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary, &launched)?;
-    let started = no_attach::Started {
-        uid: session_uid,
-        session_name: session_id,
-    };
-    let Some(early) = early else {
-        return Ok(started);
-    };
-
-    // After the session and supervisor exist, before the attach: Claude is
-    // already running while the advisories are read.
-    advise_before_attach(&config);
-
-    // **Nothing is printed here.** Anything printed would be product output on a
-    // command whose whole promise is that the session is unchanged.
-    // `codeconnect --help` carries `attach`, which is where a durable answer
-    // belongs.
-    tmux::attach_launched(&launched, early)?;
-    Ok(started)
-}
-
-/// The launch advisories, then the once-a-day update check: what
-/// `codeconnect claude` and `codeconnect codex` both do just before they
-/// attach. One hold however many notes apply. The hold delays only when the
-/// session is shown, never what it does: a Claude session is already running
-/// while this is read, and a Codex session starts right after it (see
-/// `codex::launch`).
+/// The launch advisory: what `codeconnect codex` does just before it attaches.
+/// The hold delays only when the session is shown, never what it does: a Codex
+/// session starts right after it (see `codex::launch`).
 fn advise_before_attach(config: &Config) {
     use std::io::IsTerminal;
-    // Styling answers for stderr — this envelope's stream — and the whole
-    // group shares one decision. Reachability first: a phone that cannot
-    // connect at all outranks a version it would fetch.
+    // Styling answers for stderr, this envelope's stream.
     let style = update_check::style_for_stream(std::io::stderr().is_terminal());
     let reachability = phone_unreachable_note(
         crate::pair::configured_ws_bind(config),
         config.tailscale_bin(),
         style,
     );
-    // One update slot: the release advisory, behind the `update_check`
-    // switch. `codeconnect update` is what resolves it.
-    let update = config
-        .update_check
-        .then(|| update_check::select_update_note(update_check::cached_advisory(), style))
-        .flatten();
-    if let Some(group) = advisory_envelope(reachability, update) {
+    if let Some(group) = advisory_envelope(reachability) {
         eprint!("{group}");
         // The hold exists for a reader: only a real person at a real
         // terminal gets one, and it is a countdown — not a spinner,
@@ -759,12 +505,6 @@ fn advise_before_attach(config: &Config) {
                 std::time::Instant::now,
             );
         }
-    }
-    // Fire-and-forget, after the notices so its spawn cost cannot delay
-    // them. The network belongs entirely to the detached child, so the
-    // attach that follows proceeds without waiting on it.
-    if config.update_check {
-        update_check::spawn_checker_if_due();
     }
 }
 
@@ -1101,16 +841,11 @@ fn phone_note(
     }
 }
 
-/// The advisory group as one write: a leading blank line, the advisories —
-/// reachability always first — separated by exactly two blank lines, and a
-/// trailing blank line before whatever follows. `None` when there is
-/// nothing to say, so a healthy launch writes nothing at all.
-fn advisory_envelope(reachability: Option<String>, update: Option<String>) -> Option<String> {
-    let notes: Vec<String> = [reachability, update].into_iter().flatten().collect();
-    if notes.is_empty() {
-        return None;
-    }
-    Some(format!("\n{}\n\n", notes.join("\n\n\n")))
+/// The reachability note as one write: a leading blank line, the note, and a
+/// trailing blank line before whatever follows. `None` when there is nothing to
+/// say, so a healthy launch writes nothing at all.
+fn advisory_envelope(reachability: Option<String>) -> Option<String> {
+    reachability.map(|note| format!("\n{note}\n\n"))
 }
 
 /// Whether the reading hold may run: a real person at a real terminal on
@@ -1135,72 +870,6 @@ fn asciify(text: &str) -> String {
         .replace('\u{2192}', "->")
         .replace('\u{b7}', ":")
         .replace('\u{2026}', "...")
-}
-
-/// Launch the supervisor so it outlives this process *and* the terminal tab.
-///
-/// `process_group(0)` puts it in its own process group, so the SIGHUP/SIGINT
-/// that reach the tab's foreground group never reach it. When `codeconnect` attaches
-/// the terminal and that client later dies, the supervisor is reparented to
-/// launchd and keeps running. This is the standard daemonisation shape, and it
-/// is reachable from safe Rust.
-fn spawn_supervisor(
-    session_id: &str,
-    session_uid: &str,
-    cwd: &str,
-    claude_bin: &std::path::Path,
-    launched: &tmux::Launched,
-) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let current = std::env::current_exe().context("locating the codeconnect binary")?;
-    // Named by uid, not by tmux name: the name is reused, and two runs sharing
-    // one supervisor log makes the file useless exactly when it is needed.
-    let log_path = protocol::logs_dir().join(format!("supervisor-{session_id}-{session_uid}.out"));
-    std::fs::create_dir_all(protocol::logs_dir())?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("opening {}", log_path.display()))?;
-
-    let mut command = Command::new(current);
-    command
-        .arg("supervise")
-        .arg("--session")
-        .arg(session_id)
-        .arg("--session-uid")
-        .arg(session_uid)
-        .arg("--tmux-session")
-        .arg(session_id)
-        .arg("--cwd")
-        .arg(cwd)
-        .arg("--claude-bin")
-        .arg(claude_bin)
-        .arg("--tmux-session-id")
-        .arg(&launched.pin.session_id)
-        .arg("--server-pid")
-        .arg(launched.pin.server_pid.to_string())
-        .arg("--server-start-time")
-        .arg(launched.pin.server_start_time.to_string())
-        .arg("--session-created")
-        .arg(launched.pin.session_created.to_string());
-    match launched.pin.server_birth {
-        Some(birth) => command
-            .arg("--server-birth")
-            .arg(format!("{}.{}", birth.start_sec, birth.start_usec)),
-        None => command.arg("--server-exited"),
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .process_group(0);
-
-    command
-        .spawn()
-        .with_context(|| format!("spawning the supervisor for {session_id}"))?;
-    Ok(())
 }
 
 fn supervise(args: &[String]) -> Result<()> {
@@ -1377,203 +1046,9 @@ fn token(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Find the `claude` the caller's shell would run, never `codeconnect` itself: the
-/// first runnable of [`protocol::claude_bin::candidates`], from this process's `PATH`.
-fn resolve_claude_bin(config: &Config) -> Result<PathBuf> {
-    let candidates = protocol::claude_bin::candidates(
-        config.claude_bin.as_deref(),
-        std::env::var_os("CODECONNECT_CLAUDE_BIN").map(PathBuf::from),
-        &protocol::home_dir(),
-        protocol::tmux::path_hits("claude"),
-    );
-    let current = std::env::current_exe().ok();
-    match protocol::claude_bin::first_runnable(candidates, current.as_deref()) {
-        Some(claude) => Ok(claude),
-        None => bail!(
-            "could not find the claude binary: install Claude Code \
-             (https://code.claude.com/docs/en/setup), or set claude_bin in \
-             ~/.codeconnect/config.json"
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **Asking for Claude Code's help or version is not a session**, so it never
-    /// stops at the mail question: `codeconnect claude --version` in a
-    /// terminal once did, and waited for an answer.
-    #[test]
-    fn only_a_session_start_asks_about_mail() {
-        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-        for asks in [
-            &["--version"][..],
-            &["-v"],
-            &["--help"],
-            &["-h"],
-            &["--model", "x", "-h"],
-        ] {
-            assert!(claude_asks_help_or_version(&args(asks)), "{asks:?}");
-        }
-        for starts in [
-            &[][..],
-            &["fix the tests"],
-            &["--model", "opus"],
-            &["--", "--version"],
-        ] {
-            assert!(!claude_asks_help_or_version(&args(starts)), "{starts:?}");
-        }
-    }
-
-    /// **The launcher byte-identical gate.** The agent-parameterised launcher
-    /// must leave the `claude` argv and env exactly as they shipped. This pins
-    /// the pure builder both planners flow through, so a refactor that reorders a
-    /// flag, drops an env var, or slips an agent-specific argument into the Claude
-    /// path fails here rather than in a session that behaves subtly differently.
-    #[test]
-    fn the_claude_argv_and_env_are_byte_identical() {
-        let (argv, env) = claude_argv_and_env(
-            std::path::Path::new("/usr/local/bin/claude"),
-            std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/mcp.json"),
-            std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/settings.json"),
-            "cc-1",
-            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-            &[
-                "--resume".to_string(),
-                "--permission-mode".to_string(),
-                "default".to_string(),
-            ],
-        );
-        assert_eq!(
-            argv,
-            vec![
-                "/usr/local/bin/claude",
-                "--mcp-config",
-                "/home/u/.codeconnect/sessions/cc-1-UID/mcp.json",
-                "--settings",
-                "/home/u/.codeconnect/sessions/cc-1-UID/settings.json",
-                "--resume",
-                "--permission-mode",
-                "default",
-            ]
-        );
-        assert_eq!(
-            env,
-            vec![
-                (
-                    "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
-                    "1".to_string()
-                ),
-                ("CODECONNECT_SESSION".to_string(), "cc-1".to_string()),
-                (
-                    "CODECONNECT_SESSION_UID".to_string(),
-                    "01K1B3XQ8ZC0DE5FGH7JKMNPQR".to_string()
-                ),
-            ]
-        );
-        // The passthrough is appended verbatim, in order, after the settings flag
-        // — never merged, deduplicated or reordered.
-        let (bare, _) = claude_argv_and_env(
-            std::path::Path::new("claude"),
-            std::path::Path::new("/m.json"),
-            std::path::Path::new("/s.json"),
-            "cc-2",
-            "UID",
-            &[],
-        );
-        assert_eq!(
-            bare,
-            vec!["claude", "--mcp-config", "/m.json", "--settings", "/s.json"]
-        );
-    }
-
-    /// **A prompt in the passthrough stays the prompt.** `--mcp-config` takes several
-    /// values, so a flag must end it before the passthrough begins; the prompt is the
-    /// first word after the settings document, and nothing after `--mcp-config`'s one
-    /// file is anything but another flag.
-    #[test]
-    fn a_prompt_in_the_passthrough_is_never_taken_as_an_mcp_config() {
-        let (argv, _) = claude_argv_and_env(
-            std::path::Path::new("claude"),
-            std::path::Path::new("/m.json"),
-            std::path::Path::new("/s.json"),
-            "cc-1",
-            "UID",
-            &["review the diff".to_string()],
-        );
-        let mcp = argv.iter().position(|a| a == "--mcp-config").unwrap();
-        assert!(argv[mcp + 2].starts_with("--"), "{argv:?}");
-        assert_eq!(argv.last().unwrap(), "review the diff");
-        assert!(mcp < argv.iter().position(|a| a == "review the diff").unwrap());
-    }
-
-    /// Whether a bare command name resolves on this machine's `PATH`.
-    ///
-    /// Used to skip the two environment assertions below on a machine that has
-    /// no `claude` — a CI runner. They are not weakened: on any machine that
-    /// *has* it, both still run and still assert. Skipping on the strict
-    /// condition "the tool is absent" is the difference between a test that
-    /// cannot run here and a test that quietly stopped running everywhere.
-    fn on_path(name: &str) -> bool {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
-            .unwrap_or(false)
-    }
-
-    #[test]
-    fn resolves_the_real_claude_on_this_machine() {
-        if !on_path("claude") {
-            eprintln!("skipped: no `claude` on PATH — nothing to resolve");
-            return;
-        }
-        let path = resolve_claude_bin(&Config::default()).expect("claude must be installed");
-        assert!(path.is_file());
-        assert!(
-            !path.ends_with("codeconnect"),
-            "must never resolve to the shim itself: {}",
-            path.display()
-        );
-    }
-
-    #[test]
-    fn resolves_the_claude_the_shell_would_run_on_this_machine() {
-        if !on_path("claude") || std::env::var_os("CODECONNECT_CLAUDE_BIN").is_some() {
-            eprintln!("skipped: no `claude` on PATH, or an override names another");
-            return;
-        }
-        assert_eq!(
-            Some(&resolve_claude_bin(&Config::default()).expect("claude must be installed")),
-            protocol::tmux::path_hits("claude").first(),
-            "a session runs the claude typing `claude` runs"
-        );
-    }
-
-    #[test]
-    fn config_override_wins() {
-        let config = Config {
-            claude_bin: Some("/bin/echo".into()),
-            ..Config::default()
-        };
-        assert_eq!(
-            resolve_claude_bin(&config).unwrap(),
-            PathBuf::from("/bin/echo")
-        );
-    }
-
-    #[test]
-    fn a_missing_override_falls_through_rather_than_failing() {
-        if !on_path("claude") {
-            eprintln!("skipped: no `claude` on PATH — nothing to fall through to");
-            return;
-        }
-        let config = Config {
-            claude_bin: Some("/nonexistent/claude".into()),
-            ..Config::default()
-        };
-        let path = resolve_claude_bin(&config).expect("must fall back");
-        assert!(path.is_file());
-    }
 
     /// An argv as the dispatch receives it, so a test reads like the command
     /// a person typed.
@@ -1624,7 +1099,7 @@ mod tests {
 
     /// The diversion is surgical: every command that still exists runs, and a
     /// passthrough command's arguments belong to the program they are passed
-    /// to — `claude` owns its own flags, whatever they are spelled.
+    /// to — `codex` owns its own flags, whatever they are spelled.
     #[test]
     fn the_commands_that_still_exist_are_never_diverted() {
         for (command, words) in [
@@ -1634,7 +1109,6 @@ mod tests {
             ("token", argv(&[])),
             ("update", argv(&[])),
             ("help", argv(&[])),
-            ("claude", argv(&["--ssh"])),
             ("supervise", argv(&["--session", "cc1", "--ssh"])),
         ] {
             assert_eq!(
@@ -1805,27 +1279,17 @@ mod tests {
     /// ("connect Tailscale" / "set up Tailscale") so the two screens the same
     /// person is looking at never disagree — and each state names *its* fix,
     /// The envelope, exactly: nothing at all when there is nothing to say;
-    /// a leading blank line; reachability before the update; exactly two
-    /// blank lines between advisories; one trailing blank line.
+    /// a leading blank line; one trailing blank line.
     #[test]
     fn the_advisory_envelope_spaces_and_orders_exactly() {
         assert_eq!(
-            advisory_envelope(None, None),
+            advisory_envelope(None),
             None,
             "healthy launches write nothing"
         );
         assert_eq!(
-            advisory_envelope(Some("REACH".into()), None).as_deref(),
+            advisory_envelope(Some("REACH".into())).as_deref(),
             Some("\nREACH\n\n")
-        );
-        assert_eq!(
-            advisory_envelope(None, Some("UPDATE".into())).as_deref(),
-            Some("\nUPDATE\n\n")
-        );
-        assert_eq!(
-            advisory_envelope(Some("REACH".into()), Some("UPDATE".into())).as_deref(),
-            Some("\nREACH\n\n\nUPDATE\n\n"),
-            "reachability first; exactly two blank lines between; one hold-worthy group"
         );
     }
 
@@ -2261,7 +1725,6 @@ mod tests {
     /// scoping test below fails the moment an arm is added without a decision
     /// about whether the flag scan reaches it.
     const LIVE_COMMANDS: &[&str] = &[
-        "claude",
         "codex",
         "attach",
         "ls",
@@ -2273,7 +1736,6 @@ mod tests {
         "revoke",
         "daemon",
         "supervise",
-        "__update-check",
         "update",
         "install-staged",
         "--version",
@@ -2286,7 +1748,7 @@ mod tests {
 
     /// The scan reaches exactly two command words and no others.
     ///
-    /// `--ssh` under `claude` is `claude`'s, and under `supervise` is the
+    /// `--ssh` under `codex` is `codex`'s, and under `supervise` is the
     /// supervisor's. Widening the scan by a single arm would let this dispatch
     /// eat an argument meant for another program — so the scoping is asserted
     /// against the whole dispatch table, not against a sample of it.
@@ -2303,7 +1765,7 @@ mod tests {
         // including one that names the flag inside a prompt.
         assert_eq!(
             retired_command(
-                "claude",
+                "codex",
                 &argv(&[
                     "--model",
                     "opus",
@@ -2313,7 +1775,7 @@ mod tests {
                 ]),
             ),
             None,
-            "claude owns every one of its own arguments"
+            "codex owns every one of its own arguments"
         );
         assert_eq!(
             retired_command("supervise", &argv(&["--session", "cc1", "--cwd", "--ssh"])),

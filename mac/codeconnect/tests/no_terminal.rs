@@ -1,6 +1,5 @@
-//! `codeconnect claude` and `codeconnect codex` with no terminal to show a session
-//! in — run from a script, a pipe or `ssh host command` — run the agent as it runs
-//! directly. Whether a launch hosts anything is only visible from outside the
+//! `codeconnect codex` with no terminal to show a session in — run from a script, a
+//! pipe or `ssh host command` — runs the agent as it runs directly. Whether a launch hosts anything is only visible from outside the
 //! binary, with its terminal taken away one way at a time, which is why this runs
 //! the built binary.
 
@@ -12,8 +11,6 @@ use std::process::{Command, Stdio};
 
 /// How the launch is denied its terminal, if it is.
 enum Missing {
-    /// Nothing: a usable terminal, so the launch hosts a session.
-    Nothing,
     /// Keys and output on a terminal, but none controlling: `/dev/tty` cannot be
     /// opened, so there is no size to show a session at.
     Controlling,
@@ -64,7 +61,7 @@ fn launch(home: &Path, missing: Missing, args: &[&str]) -> (Option<i32>, String)
     let controlling = !matches!(missing, Missing::Controlling);
     match missing {
         Missing::Input => command.stdin(Stdio::null()),
-        Missing::Nothing | Missing::Controlling | Missing::Output => {
+        Missing::Controlling | Missing::Output => {
             command.stdin(Stdio::from(secondary.try_clone().unwrap()))
         }
     };
@@ -118,61 +115,6 @@ fn launch(home: &Path, missing: Missing, args: &[&str]) -> (Option<i32>, String)
     (run.status.code(), printed)
 }
 
-#[test]
-fn with_no_terminal_to_show_a_session_claude_runs_as_it_runs_directly() {
-    // Short and under `/tmp`: tmux's socket lives in `TMUX_TMPDIR`, a unix socket
-    // path must fit `sun_path`, and macOS's temp dir is long enough to overflow it.
-    let home = std::path::PathBuf::from(format!(
-        "/tmp/cc-noterm-{}",
-        protocol::uid::new().expect("a unique test directory")
-    ));
-    std::fs::create_dir_all(home.join("cc")).unwrap();
-    let claude = home.join("claude");
-    std::fs::write(&claude, "#!/bin/sh\necho \"STAND-IN $*\"\nexit 3\n").unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(
-        home.join("cc/config.json"),
-        format!(r#"{{"claude_bin": {:?}, "update_check": false}}"#, claude),
-    )
-    .unwrap();
-
-    let mut verdicts = Vec::new();
-    for (name, missing) in [
-        ("no controlling terminal", Missing::Controlling),
-        ("input not a terminal", Missing::Input),
-        ("output not a terminal", Missing::Output),
-    ] {
-        let (status, printed) = launch(&home, missing, &["claude", "--version"]);
-        let hosted = home.join("cc/sessions").exists();
-        verdicts.push((name, status, printed, hosted));
-    }
-    // And with nothing missing it hosts — where there is a tmux to host on — so
-    // the three above are about the terminal and not about a launch that could
-    // never host: claude is handed its `--mcp-config` and `--settings`, and the command
-    // exits 0.
-    let control = protocol::tmux::tmux_bin().map(|_| {
-        let (status, printed) = launch(&home, Missing::Nothing, &["claude", "--version"]);
-        (status, printed, home.join("cc/sessions").exists())
-    });
-    std::fs::remove_dir_all(&home).unwrap();
-    if let Some((status, printed, hosted)) = control {
-        assert!(hosted, "a usable terminal hosted nothing: {printed}");
-        assert_eq!(status, Some(0), "{printed}");
-        assert!(printed.contains("STAND-IN --mcp-config "), "{printed}");
-        assert!(printed.contains("/mcp.json --settings "), "{printed}");
-    }
-    for (name, status, printed, hosted) in verdicts {
-        // Claude's own status and exactly its argv: a hosted run exits 0 and hands
-        // claude its `--settings`.
-        assert_eq!(status, Some(3), "{name}: {printed}");
-        assert_eq!(printed, "STAND-IN --version\n", "{name}");
-        assert!(
-            !hosted,
-            "{name}: a session was created that nothing could show"
-        );
-    }
-}
-
 /// The same for `codeconnect codex`, whose launch otherwise takes only the
 /// interactive session: with no terminal, any codex command runs as codex runs it,
 /// `login status` among them, with codex's own output and exit status.
@@ -188,7 +130,7 @@ fn with_no_terminal_to_show_a_session_codex_runs_as_it_runs_directly() {
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         home.join("cc/config.json"),
-        format!(r#"{{"codex_bin": {:?}, "update_check": false}}"#, codex),
+        format!(r#"{{"codex_bin": {:?}}}"#, codex),
     )
     .unwrap();
 

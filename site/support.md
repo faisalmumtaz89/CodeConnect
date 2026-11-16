@@ -21,7 +21,7 @@ The installer downloads the latest release, verifies its signature before instal
 3. Pairing your iPhone: it shows a QR code to scan with the CodeConnect Remote app, then waits for Return (`codeconnect pair` makes a new one).
 4. Signing in Claude Code and Codex: each one that is installed but signed out runs its own sign-in. Ctrl-C skips one.
 
-On a Mac it never uses sudo; on Linux it uses sudo only for `tailscale up --qr` and, where systemd refuses it to you, `loginctl enable-linger`. Tailscale is the default, not a requirement: to use your local network instead, answer `n` to that question and see "Is Tailscale required?" below. Stopped partway, the same command picks up where it left off. Then, in a new terminal in your project's folder, `codeconnect claude` starts Claude Code there through CodeConnect. For Codex: `codeconnect codex`.
+On a Mac it never uses sudo; on Linux it uses sudo only for `tailscale up --qr` and, where systemd refuses it to you, `loginctl enable-linger`. Tailscale is the default, not a requirement: to use your local network instead, answer `n` to that question and see "Is Tailscale required?" below. Stopped partway, the same command picks up where it left off. Then start an agent from the CodeConnect app: choose this computer, the project and the agent. For Codex, `codeconnect codex` in a new terminal in your project's folder starts it there through CodeConnect too.
 
 Your phone now shows every session started this way. When an agent asks for permission, the prompt appears on your phone; answering it there has the same effect as answering at the computer.
 
@@ -35,7 +35,7 @@ Run the same command as your own user, not as root. On a machine where you have 
 
 ## Updating
 
-`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces all three binaries and CodeConnect's tmux in one step — a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect claude` and `codeconnect codex` mention at launch when a newer release exists, and `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
+`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces all three binaries and CodeConnect's tmux in one step — a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
 
 The iPhone app updates from the App Store. When the app and a computer cannot understand each other, the app says which one to update: "Update CodeConnect on the computer" (run `codeconnect update` there) or "Update CodeConnect on this iPhone". This page describes CodeConnect 0.17.1, installer 1.7.7 and the iPhone app 1.1.16.
 
@@ -51,8 +51,8 @@ The iPhone app updates from the App Store. When the app and a computer cannot un
 
 - **`codeconnect: command not found`** — `~/.codeconnect/bin` is not on your `PATH`. Open a new terminal if you let the installer add it; otherwise, for the current terminal: `export PATH="$HOME/.codeconnect/bin:$PATH"`. To add it for good, rerun the installer as `curl -fsSL https://codeconnect.sh | sh -s -- --path-yes`, or add that line to your shell's startup file yourself.
 - **Phone shows "Offline", "link stale" or no sessions** — confirm the Mac and phone can reach each other (Tailscale, or your own private network, connected on both), and that the daemon is running: `codeconnect daemon status`.
-- **Approval prompt not appearing on the phone** — approvals only surface for sessions started through the wrapper (e.g. `codeconnect claude`), not for agents launched directly.
-- **`codeconnect claude` says tmux is not found** — CodeConnect's own tmux is missing, which happens only on a Mac first set up by an older release, and the session could not fetch it (usually no network). Run `codeconnect update` to install it, then rerun.
+- **Approval prompt not appearing on the phone** — approvals only surface for sessions started through the wrapper (e.g. `codeconnect codex`), not for agents launched directly.
+- **`codeconnect codex` says tmux is not found** — CodeConnect's own tmux is missing, which happens only on a Mac first set up by an older release, and the session could not fetch it (usually no network). Run `codeconnect update` to install it, then rerun.
 - **`codeconnect pair` says a paired phone could never reach the daemon** — the message says why. Most often the daemon found no Tailscale address and no `ws_bind` is set: Tailscale is not set up or not connected on this Mac. Set up or connect Tailscale, or set `ws_bind` as below, then run `codeconnect daemon restart` (on Linux without systemd, restart it as "On Linux" says) and `codeconnect pair` again.
 - **`codeconnect pair` says no phone can pair with this daemon** — the daemon refuses every connection on the address it is bound to. The message says why and what to change; then run `codeconnect daemon restart` (on Linux without systemd, restart it as "On Linux" says).
 - **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. To type it instead, tap "Enter the address and code instead" under "Scan pairing code" ("Pair by hand" on a device with no camera) and type the address and code it prints.

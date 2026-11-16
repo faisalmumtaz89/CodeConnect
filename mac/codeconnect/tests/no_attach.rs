@@ -1,4 +1,4 @@
-//! `codeconnect claude|codex --no-attach`, run with no terminal at
+//! `codeconnect codex --no-attach`, run with no terminal at
 //! all, stdin from nowhere, the outcome in the file `CODECONNECT_LAUNCH_RESULT`
 //! names. It hosts the session a terminal start hosts, at 120x40, with the model
 //! it was given and the first prompt after `--` exactly as given; a missing agent or
@@ -31,23 +31,6 @@ impl Rig {
             root,
             started: Default::default(),
         }
-    }
-
-    /// A claude that writes its arguments, `TERM` and whether it saw the result
-    /// variable, then stays up as a session's agent does.
-    fn claude(&self) -> PathBuf {
-        let claude = self.root.join("claude");
-        std::fs::write(
-            &claude,
-            format!(
-                "#!/bin/sh\nprintf '%s\\000' \"$@\" > {seen}/argv\n\
-                 printf '%s|%s' \"$TERM\" \"${{{ENV_LAUNCH_RESULT}+set}}\" > {seen}/env\nexec sleep 30\n",
-                seen = self.root.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        claude
     }
 
     /// A codex that answers `--version`, serves an app-server socket, and as the
@@ -84,7 +67,7 @@ while True:
     fn config(&self, agent: &str, binary: &Path) {
         std::fs::write(
             self.root.join("cc/config.json"),
-            format!(r#"{{"{agent}_bin": {binary:?}, "update_check": false}}"#),
+            format!(r#"{{"{agent}_bin": {binary:?}}}"#),
         )
         .unwrap();
     }
@@ -122,7 +105,7 @@ while True:
         }
         let run = command
             .output()
-            .expect("running codeconnect claude --no-attach");
+            .expect("running codeconnect codex --no-attach");
         let printed = String::from_utf8_lossy(&run.stdout).into_owned()
             + &String::from_utf8_lossy(&run.stderr);
         let result = LaunchResult::read_from(&result).ok();
@@ -187,95 +170,6 @@ impl Drop for Rig {
 }
 
 #[test]
-fn with_no_terminal_it_hosts_the_session_and_says_which() {
-    if protocol::tmux::tmux_bin().is_none() {
-        return;
-    }
-    let rig = Rig::new();
-    let claude = rig.claude();
-    rig.config("claude", &claude);
-    let prompt = "-p fix \"it\" 'now'; $(touch pwned) `id`\nsecond line;";
-
-    let (status, printed, result) = rig.launch("claude", &["--no-attach", "--", prompt]);
-
-    assert_eq!(status, Some(0), "{printed}");
-    let Some(LaunchResult::Started {
-        uid,
-        session_name,
-        agent,
-    }) = result
-    else {
-        panic!("no started result: {result:?} {printed}");
-    };
-    assert_eq!(session_name, "cc-1");
-    assert_eq!(agent, protocol::agent::AgentKind::Claude);
-    assert!(protocol::uid::is_well_formed(&uid), "{uid}");
-    let argv = rig.seen("argv");
-    let argv: Vec<&[u8]> = argv.split(|&byte| byte == 0).collect();
-    assert_eq!(argv[0], b"--mcp-config", "{argv:?}");
-    assert_eq!(argv[2], b"--settings");
-    assert_eq!(
-        &argv[4..],
-        [&b"--"[..], prompt.as_bytes(), b""],
-        "the prompt, exactly"
-    );
-    assert_eq!(rig.seen("env"), b"xterm-256color|");
-    assert!(!rig.root.join("project/pwned").exists());
-    // Nobody saw the mail question, so it is neither asked nor answered here.
-    assert!(!rig.root.join("cc/mail-trust").exists());
-    assert_eq!(
-        rig.tmux(&[
-            "display-message",
-            "-p",
-            "-t",
-            "=cc-1:",
-            "#{window_width}x#{window_height} #{session_attached} #{CODECONNECT_SESSION_UID}"
-        ]),
-        format!("120x40 0 {uid}")
-    );
-}
-
-#[test]
-fn a_missing_claude_or_a_refused_argument_is_said_and_hosts_nothing() {
-    let rig = Rig::new();
-    rig.config("claude", &rig.root.join("no-claude-here"));
-    let (status, printed, result) = rig.launch("claude", &["--no-attach"]);
-    assert_ne!(status, Some(0), "{printed}");
-    assert!(
-        matches!(
-            &result,
-            Some(LaunchResult::Failed { error: protocol::ws::StartFailure::AgentMissing, detail })
-                if detail.contains("could not find the claude binary")
-        ),
-        "{result:?}"
-    );
-
-    let claude = rig.claude();
-    rig.config("claude", &claude);
-    for args in [
-        &["--no-attach", "--model", "x"][..],
-        &["--no-attach", "prompt"],
-    ] {
-        let (status, printed, result) = rig.launch("claude", args);
-        assert_ne!(status, Some(0), "{args:?}: {printed}");
-        assert!(
-            matches!(
-                &result,
-                Some(LaunchResult::Failed {
-                    error: protocol::ws::StartFailure::LaunchFailed,
-                    ..
-                })
-            ),
-            "{args:?}: {result:?}"
-        );
-    }
-    assert!(
-        !rig.root.join("cc/sessions").exists(),
-        "a session was created"
-    );
-}
-
-#[test]
 fn codex_with_no_terminal_hosts_the_session_and_says_which() {
     if protocol::tmux::tmux_bin().is_none() {
         return;
@@ -330,39 +224,6 @@ fn handed(rig: &Rig, skip: usize) -> Vec<String> {
         .collect();
     assert_eq!(argv.pop().as_deref(), Some(""), "{argv:?}");
     argv.split_off(skip)
-}
-
-/// **A picked model reaches Claude Code as one argument**, `--model=<model>`, before
-/// a new worktree's name and the prompt, in the order the daemon sends them.
-#[test]
-fn a_model_reaches_claude_as_one_argument() {
-    if protocol::tmux::tmux_bin().is_none() {
-        return;
-    }
-    let rig = Rig::new();
-    let claude = rig.claude();
-    rig.config("claude", &claude);
-    for args in [
-        &["--model=haiku"][..],
-        &["--model=haiku", "--", "fix the tests"],
-        &[
-            "--model=claude-fable-5-1[1m]",
-            "--worktree=fix-login",
-            "--",
-            "-p it",
-        ],
-    ] {
-        let _ = std::fs::remove_file(rig.root.join("argv"));
-        let launch: Vec<&str> = ["--no-attach"].iter().chain(args).copied().collect();
-        let (status, printed, result) = rig.launch("claude", &launch);
-        assert_eq!(status, Some(0), "{args:?}: {printed}");
-        assert!(
-            matches!(result, Some(LaunchResult::Started { .. })),
-            "{args:?}: {result:?}"
-        );
-        // After CodeConnect's own `--mcp-config <file> --settings <file>`.
-        assert_eq!(handed(&rig, 4), args, "{args:?}");
-    }
 }
 
 /// **A picked model reaches Codex as one argument**, through the launcher's Codex

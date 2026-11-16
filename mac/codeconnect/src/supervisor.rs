@@ -1243,7 +1243,7 @@ fn recover_composer_with(
     // that is the same `Escape` this pass already sends — but only under
     // `mode-keys emacs`, where Escape is bound to `cancel`. Measured on tmux
     // 3.7b: under `mode-keys vi` — which tmux picks by itself when `$EDITOR`
-    // or `$VISUAL` looks like vi, and which [`tmux::render_server_conf`] does
+    // or `$VISUAL` looks like vi, and which CodeConnect does
     // not pin — Escape is `clear-selection`, the pane stays in the mode, and
     // this pass runs out its window and reports the composer lost.
     //

@@ -1355,19 +1355,21 @@ struct SessionDetailView: View {
                 // Resume happens at the Mac by design: the phone starting
                 // processes on your machine is a different product, and the
                 // daemon spawns nothing today.
-                if let resumeID, !resumeID.isEmpty {
+                if let resumeID, !resumeID.isEmpty, let cwd = summary?.cwd, !cwd.isEmpty {
                     VStack(alignment: .leading, spacing: CC.rhythm.text) {
                         Text("Pick this conversation up at the computer")
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.secondary)
-                        // Quoted, because this is a command a person copies
-                        // and runs. The id is whatever a hook reported —
-                        // decoded as an unrestricted string, never validated
-                        // — and a space in it would silently resume the
-                        // wrong thing while anything shell-special would run
-                        // as syntax. Quoting costs nothing on the UUID this
-                        // is in practice.
-                        CCMonoBlock("codeconnect claude --resume \(Shell.quoted(resumeID))")
+                        // Quoted, because this is a command a person copies and
+                        // runs. The folder and the id are whatever the run and a
+                        // hook reported — decoded as unrestricted strings, never
+                        // validated — and a space would silently cd or resume the
+                        // wrong thing while anything shell-special would run as
+                        // syntax. Quoting costs nothing on the path and UUID this
+                        // is in practice. `cd` first because Claude Code keeps a
+                        // session's record under its project folder, so `--resume`
+                        // is run from there.
+                        CCMonoBlock("cd \(Shell.quoted(cwd)) && claude --resume \(Shell.quoted(resumeID))")
                     }
                 }
                 // Stated here rather than left to be inferred from an empty

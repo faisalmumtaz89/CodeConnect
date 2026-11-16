@@ -1,5 +1,5 @@
-//! `codeconnect claude|codex --no-attach [--model=<model>] [--worktree=<name>] [-- <prompt>]`: start
-//! the session a terminal start would, without showing it.
+//! `codeconnect codex --no-attach [--model=<model>] [--worktree=<name>] [-- <prompt>]`: start the
+//! session a terminal start would, without showing it.
 //!
 //! There is no terminal to take a size or a `TERM` from, so the session starts at
 //! [`SIZE`] until a terminal attaches (the phone's, or `codeconnect attach` on the
@@ -43,7 +43,6 @@ pub fn run(agent: AgentKind, args: &[String]) -> Result<()> {
         std::env::set_var("TERM", DEFAULT_TERM);
     }
     let started = agent_args(&args[1..]).and_then(|passthrough| match &agent {
-        AgentKind::Claude => crate::start_detached(&passthrough),
         AgentKind::Codex => crate::codex::start(&passthrough, true),
         other => bail!("{} sessions cannot be started this way", other.as_str()),
     });
@@ -80,7 +79,7 @@ fn agent_args(args: &[String]) -> Result<Vec<String>> {
         [] => None,
         [dashes, prompt] if dashes == "--" => Some(prompt),
         _ => bail!(
-            "usage: codeconnect claude|codex {FLAG} [--model=<model>] [--worktree=<name>] \
+            "usage: codeconnect codex {FLAG} [--model=<model>] [--worktree=<name>] \
              [-- <prompt>]"
         ),
     };
