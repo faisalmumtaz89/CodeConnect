@@ -51,9 +51,6 @@ tokio = { version = "1", features = [
 ] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-# The General_Category of a character, for one decision: whether Claude's question
-# dialog shows a label exactly as written. Tables only, no dependencies.
-unicode-general-category = "1.1"
 
 # TLS for `wss://`. rustls rather than native-tls: `tailscale cert` writes PEM,
 # which rustls loads directly, whereas Security.framework wants a PKCS#12
@@ -79,10 +76,6 @@ ring = "0.17"
 # chain, so the system roots are exactly right and vendoring a root set would be
 # a second thing to keep current.
 rustls-native-certs = "0.8"
-
-# FSEvents for the transcript tailer. `default-features = false` drops
-# crossbeam-channel; notify's callback feeds a tokio channel directly.
-notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 
 # QR rendering for `codeconnect pair`. `default-features = false` drops the `image`
 # renderer and leaves the crate with no transitive dependencies at all.

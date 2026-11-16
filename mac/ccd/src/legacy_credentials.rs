@@ -226,7 +226,7 @@ pub fn purge_authorized_keys() -> usize {
 /// Every other caller is inside an async task — a revocation arrives on the IPC
 /// socket — and a runtime worker parked on `~/.ssh` is a worker not carrying the
 /// sessions, terminals and pushes it shares that thread with. Handing file work
-/// to the blocking pool is what `db`, `logrotate` and `tailer` already do.
+/// to the blocking pool is what `db` and `logrotate` already do.
 ///
 /// A sweep that panicked is reported and survived, for the same reason a sweep
 /// that failed is: the caller is withdrawing access, and this file is the part

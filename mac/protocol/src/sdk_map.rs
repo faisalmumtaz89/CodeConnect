@@ -1,7 +1,7 @@
 //! Claude Agent SDK messages as CodeConnect events.
 //!
 //! One event per SDK message that has a row (a result files two: the turn's end and
-//! its usage), as the transcript tailer files one per transcript line, so an app
+//! its usage), as an earlier build's transcript tailer filed one per transcript line, so an app
 //! reads an SDK event as it reads a transcript line: an assistant
 //! message is one `agent_message` whose content blocks carry its text, thinking and
 //! tool calls. A payload keeps only the fields a reader uses, never the whole

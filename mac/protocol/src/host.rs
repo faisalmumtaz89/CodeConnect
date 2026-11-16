@@ -225,6 +225,10 @@ pub struct PermissionRequest {
     pub options: Value,
 }
 
+/// The tool whose permission request is a question to the person, not a
+/// permission. Matched by name only: its options are never inspected to decide.
+pub const ASK_USER_QUESTION: &str = "AskUserQuestion";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeStatus {

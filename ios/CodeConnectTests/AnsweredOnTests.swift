@@ -7,8 +7,9 @@ import XCTest
 /// daemon records (`fixtures/claude/minor-34-wire.json`, emitted by the daemon).
 final class AnsweredOnTests: XCTestCase {
 
-    /// The outcome a daemon recorded under `key` in `resource`: `minor-34-wire`, or `approvals-before-34-wire`, which
-    /// an older daemon wrote before answers named their device.
+    /// The outcome a daemon recorded under `key` in `resource`: `minor-34-wire`; `answers-hook-34-wire`, which a
+    /// daemon from minor 34 until the hook path went wrote for an answer handed to Claude's hook; or
+    /// `approvals-before-34-wire`, which an older daemon wrote before answers named their device.
     private func outcome(_ key: String, in resource: String = "minor-34-wire") throws -> AnswerOutcome {
         let url = try XCTUnwrap(
             Bundle(for: type(of: self)).url(forResource: resource, withExtension: "json"))
@@ -19,18 +20,45 @@ final class AnsweredOnTests: XCTestCase {
         return try JSONDecoder().decode(AnswerOutcome.self, from: payload)
     }
 
-    /// Each kind of device's answer reads as its own, and both as sent to Claude.
+    /// Each kind of device's answer reads as its own, and both as applied: the agent host says when an answer reached
+    /// Claude.
     func testAnAnswerSaysWhichKindOfDeviceSentIt() throws {
         let iPhone = try outcome("answered_on_iphone")
         XCTAssertEqual(iPhone.answeredOn, .iphone)
         XCTAssertEqual(iPhone.resolvedBy, .phone)
-        XCTAssertTrue(iPhone.wasSentToClaude)
+        XCTAssertFalse(iPhone.indeterminate)
 
         let mac = try outcome("answered_on_mac")
         XCTAssertEqual(mac.answeredOn, .mac)
         XCTAssertEqual(mac.resolvedBy, .phone)
-        XCTAssertEqual(mac.detail, AnswerOutcome.sentToClaude)
+        XCTAssertFalse(mac.indeterminate)
+    }
+
+    /// An answer handed to Claude's hook, as a stored history still holds it (`answers-hook-34-wire`, frozen): sent to
+    /// Claude, never confirmed, with the same detail whichever device sent it, so a card names the device from
+    /// `answered_on`.
+    func testAHookPathAnswerIsSentToClaudeFromTheDeviceThatSentIt() throws {
+        let iPhone = try outcome("answered_on_iphone", in: "answers-hook-34-wire")
+        let mac = try outcome("answered_on_mac", in: "answers-hook-34-wire")
+        XCTAssertEqual(iPhone.answeredOn, .iphone)
+        XCTAssertEqual(mac.answeredOn, .mac)
+        XCTAssertTrue(iPhone.wasSentToClaude)
         XCTAssertTrue(mac.wasSentToClaude)
+        XCTAssertEqual(mac.detail, AnswerOutcome.sentToClaude)
+        XCTAssertEqual(iPhone.detail, mac.detail, "the detail cannot tell them apart")
+
+        XCTAssertEqual(
+            DecisionCard.resultBanner(for: .indeterminate(mac), on: .mac).message,
+            "Allowed · Sent to Claude from a Mac")
+        XCTAssertEqual(
+            DecisionCard.resultBanner(for: .indeterminate(iPhone), on: .iPhone).message,
+            "Allowed · Sent to Claude from a phone")
+        let now = try XCTUnwrap(mac.resolvedDate).addingTimeInterval(30)
+        XCTAssertEqual(
+            DecisionCard.alreadyResolvedBanner(for: iPhone, now: now, on: .mac).message,
+            "Allowed · Sent to Claude from an iPhone · \(Format.ago(since: iPhone.resolvedDate, now: now))")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: mac), "Sent to Claude from a Mac")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: iPhone), "Sent to Claude from a phone")
     }
 
     /// An answer from an older daemon names no device, and a kind this build does
@@ -56,7 +84,6 @@ final class AnsweredOnTests: XCTestCase {
         let iPhone = try outcome("answered_on_iphone"), mac = try outcome("answered_on_mac")
         let older = try outcome("answered_allow", in: "approvals-before-34-wire")
         XCTAssertNil(older.answeredOn)
-        XCTAssertEqual(iPhone.detail, mac.detail, "the detail cannot tell them apart")
         func said(_ outcome: AnswerOutcome) -> [String] {
             [HostDevice.iPhone, .mac].flatMap { host in
                 [outcome.sentToClaudeLine(on: host), outcome.provenance(on: host)]
@@ -73,19 +100,13 @@ final class AnsweredOnTests: XCTestCase {
                 "Sent to Claude from a phone", "from a phone", "Sent to Claude from a paired device",
                 "from a paired device",
             ])
-        XCTAssertEqual(
-            DecisionCard.resultBanner(for: .indeterminate(mac), on: .mac).message,
-            "Allowed · Sent to Claude from a Mac")
-        XCTAssertEqual(
-            DecisionCard.resultBanner(for: .indeterminate(iPhone), on: .iPhone).message,
-            "Allowed · Sent to Claude from a phone")
         let now = try XCTUnwrap(mac.resolvedDate).addingTimeInterval(30)
         XCTAssertEqual(
             DecisionCard.alreadyResolvedBanner(for: iPhone, now: now, on: .mac).message,
-            "Allowed · Sent to Claude from an iPhone · \(Format.ago(since: iPhone.resolvedDate, now: now))")
+            "Allowed from an iPhone · \(Format.ago(since: iPhone.resolvedDate, now: now))")
 
-        XCTAssertEqual(ApprovalRow.resolutionText(for: mac), "Sent to Claude from a Mac")
-        XCTAssertEqual(ApprovalRow.resolutionText(for: iPhone), "Sent to Claude from a phone")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: mac), "Allowed from a Mac")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: iPhone), "Allowed from a phone")
 
         func answered(_ device: AnsweredOn?, on host: HostDevice) -> String? {
             QuestionCardStatus.answeredOnPhone([], from: device).banner(on: host)?.message

@@ -18,11 +18,9 @@
 //!     original outcome rather than a rejection. The durable claim is what makes
 //!     a daemon killed mid-handoff able to say "I do not know whether that
 //!     landed" instead of sending it a second time.
-//!   * **Card identity.** A Claude card is answered only through the
-//!     `PermissionRequest` hook Claude holds for its own call, joined to that
-//!     call's `tool_use_id` by its `PreToolUse`. Nothing is ever typed into a
-//!     permission prompt: which prompt is on screen says nothing about which
-//!     call a card is for. A card no hook is held for is answered at the Mac.
+//!   * **Card identity.** A Claude card is a hosted run's permission request,
+//!     answered only through that run's agent host, by the request's
+//!     `tool_use_id`.
 //!
 //! **Identity.** Every map here is keyed by `session_uid`, never by the tmux
 //! name. The name is reused by the next session, so keying by it meant a new run
@@ -39,22 +37,18 @@ use protocol::event::{
     Event, EventKind, Lifecycle, Link, PendingEvent, PendingRef, SessionKey, SessionSummary, Source,
 };
 use protocol::hash::{approval_payload_hash, approval_payload_text, sha256_hex};
-use protocol::hook::{Decision, HookDecision, HookEventName, HookInput};
-use protocol::ipc::{
-    DaemonFrame, HookPost, PromptPresence, RegisterSession, SupervisorRequest, SupervisorResult,
-};
+use protocol::ipc::RegisterSession;
 use protocol::pairing::DeviceSummary;
 use protocol::ws::{
     AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, AnsweredOn, ApprovalCard,
     QuestionHold, ResolvedBy, SendTextResult,
 };
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, Mutex};
 
 use crate::apns::{PushHint, PushSender};
 use crate::db::Db;
 use crate::store::{
-    AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
-    PrunedSession, SessionRow, Store,
+    AnswerClaim, DeviceLookup, DeviceRow, PairingConsume, PrunedSession, SessionRow, Store,
 };
 use protocol::config::Config;
 
@@ -66,18 +60,6 @@ const BROADCAST_CAPACITY: usize = 1024;
 /// handful of messages in a lifetime, and a connection that somehow lags off
 /// this ring still has the per-message and keepalive lookups underneath it.
 const REVOCATION_CAPACITY: usize = 64;
-
-/// Consecutive pane captures without the prompt before an approval is called
-/// locally resolved. Two, not one: a capture can land during a redraw, and a
-/// single blank frame is not evidence that a human answered.
-const LOCAL_RESOLVE_MISSES: u32 = 2;
-
-/// The supervisor feature level whose session settings give the
-/// `PermissionRequest` hook the longest timeout, about 24.8 days. In a session
-/// it launched, Claude ending a held question's hook means the question is
-/// gone; in an older one it can also be the old two-minute timeout, with the
-/// question still up.
-const SUPERVISOR_MINOR_QUESTION_TIMEOUT: u32 = 21;
 
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
@@ -292,14 +274,6 @@ pub struct Daemon {
     /// rather than queue behind itself. That is the whole bound on how much
     /// work this can be doing at once: one sweep, and one child inside it.
     liveness_sweep: Mutex<()>,
-    /// Tells the tailer which transcripts to follow, and when to let one go.
-    ///
-    /// It carried only the first half until a run's *end* became something the
-    /// daemon could establish on its own. A tailer that is never told a session
-    /// finished keeps polling its transcript and holding a watch on its working
-    /// directory for the life of the process, which on a machine with a
-    /// history is hundreds of files nobody will ever write to again.
-    transcript_tx: mpsc::UnboundedSender<crate::tailer::TailCommand>,
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
@@ -579,21 +553,16 @@ struct Inner {
     /// describe the same registration" a property of the type rather than a habit
     /// two call sites happen to share.
     registration_incarnations: HashMap<String, Incarnation>,
-    /// **How many times this session's ROW has been written**, by any of its three
+    /// **How many times this session's ROW has been written**, by any of its
     /// production writers.
     ///
     /// The epoch above answers "whose session is this", and that is not the same
-    /// question as "is the row still the row I read". Two traces separate them, and
-    /// both defeat an epoch-only guard:
+    /// question as "is the row still the row I read". A registration stakes its
+    /// epoch one await BEFORE its row write, so an observer can snapshot the *new*
+    /// epoch and then read the *old* row — the two compare equal at the commit and
+    /// the stale read wins, which defeats an epoch-only guard.
     ///
-    ///   * a registration stakes its epoch one await BEFORE its row write, so an
-    ///     observer can snapshot the *new* epoch and then read the *old* row — the
-    ///     two compare equal at the commit and the stale read wins;
-    ///   * [`Daemon::ensure_session`] writes `Lifecycle::Live` without staking
-    ///     anything at all, so a hook can revive a row after it was read and the
-    ///     epoch will not have moved.
-    ///
-    /// A count is enough to see both: it is bumped by each writer *under the same
+    /// A count is enough to see it: it is bumped by each writer *under the same
     /// per-uid [`Daemon::registration_gate`] that writer already holds*, so a
     /// reader that captured it before its row read and compares it under the gate
     /// learns exactly one thing — whether anything wrote this row in between. It
@@ -627,18 +596,6 @@ struct Inner {
     /// winner's ledger write before it can be told the original outcome, and the
     /// wait spans an await (handing the answer over).
     answer_locks: HashMap<ApprovalId, Arc<Mutex<()>>>,
-    /// [`correlation_key`] -> the calls with that key whose `PreToolUse` has
-    /// arrived.
-    ///
-    /// PermissionRequest carries no `tool_use_id`, but the PreToolUse that fires
-    /// microseconds earlier does. A request joins the one call with its key that
-    /// is still open, or, when its call's result was filed before the request
-    /// was read, the one call there is. With two candidates nothing says which
-    /// one is asking, and it joins neither.
-    tool_use_ids: HashMap<String, Vec<KeyedCall>>,
-    /// Per run: how many main-conversation Stop hooks have arrived. A question
-    /// whose `PreToolUse` saw fewer was asked in a turn that has since ended.
-    main_turn_ends: HashMap<String, u64>,
     last_seen_ms: HashMap<String, i64>,
     /// Per run: its model and permission mode as of the newest event that
     /// decided each, for the session list. Rebuilt from the log by
@@ -1399,9 +1356,6 @@ impl Inner {
 }
 
 pub struct SupervisorHandle {
-    tx: mpsc::Sender<DaemonFrame>,
-    inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
-    next_id: Arc<std::sync::atomic::AtomicU64>,
     /// The agent executable a Codex run was launched with (`agent_bin`): the
     /// `codex` its wake is queued through, so the CLI matches its app-server.
     agent_bin: Option<String>,
@@ -1409,10 +1363,6 @@ pub struct SupervisorHandle {
     /// registers again under the same uid, so "remove the entry for this uid" is
     /// not the same question as "remove *my* entry".
     epoch: u64,
-    /// What this supervisor can honour. A supervisor from an in-place upgrade
-    /// reports 0 and silently ignores the prompt fingerprint, so the daemon
-    /// refuses to actuate a permission prompt through it.
-    protocol_minor: u32,
     /// The Codex thread **generation** (visit) this handle was registered at, if
     /// any. `None` for Claude, whose sessions have no generations. It is the
     /// high-water mark the adoption guard compares against, so a stale supervisor
@@ -1428,30 +1378,6 @@ pub struct SupervisorHandle {
     /// same statement as the row, restores exactly this quantity across a
     /// restart, and the adoption guard reads the higher of the two.
     codex_generation: Option<u64>,
-}
-
-/// Owns one entry in a supervisor's in-flight map for as long as the request is
-/// outstanding.
-///
-/// The map used to be pruned only by an arriving response, so a request that
-/// timed out, was refused by a full queue, or belonged to a supervisor that went
-/// away left its `oneshot::Sender` behind permanently. A supervisor lives as
-/// long as its session, so that is an unbounded leak on the *stall* path — the
-/// one that fires exactly when the daemon is already under stress. Tying removal
-/// to a `Drop` makes it correct on every exit path rather than on the ones
-/// somebody remembered to write.
-struct InflightSlot {
-    id: String,
-    inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
-}
-
-impl Drop for InflightSlot {
-    fn drop(&mut self) {
-        self.inflight
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&self.id);
-    }
 }
 
 /// **A supervisor process, as it identified itself at launch.**
@@ -1489,48 +1415,6 @@ impl Incarnation {
 pub struct Registration {
     pub session: SessionKey,
     epoch: u64,
-}
-
-/// Why a supervisor round-trip produced no result.
-///
-/// The distinction is the difference between "you may try again" and "never try
-/// this again", so it is a type rather than a message somebody has to parse.
-#[derive(Debug)]
-enum SupervisorFailure {
-    /// The request never reached a supervisor. Nothing can have happened.
-    NotSent(String),
-    /// It was sent and never answered. It may have acted.
-    Unanswered(String),
-}
-
-impl std::fmt::Display for SupervisorFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SupervisorFailure::NotSent(reason) | SupervisorFailure::Unanswered(reason) => {
-                f.write_str(reason)
-            }
-        }
-    }
-}
-
-impl std::error::Error for SupervisorFailure {}
-
-/// What an attempt to hand a decision over actually did.
-///
-/// Three outcomes, not two. A caller that only has success and failure cannot
-/// tell "nothing was handed over" from "it was handed over and never seen to
-/// land" — and those demand opposite recoveries: one may be retried, the other
-/// must never be.
-enum Actuation {
-    Applied {
-        via: AnswerPath,
-        detail: Option<String>,
-    },
-    /// Declined before anything was handed over. Nothing was sent.
-    Refused(String),
-    /// Handed over with no confirmation, and none is coming. Treated as "it may
-    /// have been taken".
-    Unknown(String),
 }
 
 /// Takes a Codex raise's card back out of `pending` unless the raise disarms it
@@ -1588,24 +1472,13 @@ impl Drop for CardTakeBack {
 struct PendingApproval {
     card: ApprovalCard,
     session: SessionKey,
-    created_ms: i64,
     /// Which Codex raise put this card here, so that raise's take-back removes
     /// only its own card ([`CardTakeBack`]). Unique per raise; 0 on a card no
     /// Codex raise inserted.
     raise: u64,
-    /// The held hook: the only way this card's answer reaches its call. Set
-    /// only while Claude is waiting on it.
-    responder: Option<oneshot::Sender<HookDecision>>,
     claimed: bool,
-    /// Consecutive pane captures in which the permission prompt was absent.
-    local_misses: u32,
-    /// The call's own result arrived for this request id: it ran, which only
-    /// happens if somebody approved it, or with `rejected` Claude rejected it.
-    /// Positive evidence, unlike an absent prompt, and it carries the decision
-    /// with it. The call is over, so nothing is handed to its hook any more.
+    /// The call's own result arrived for this request id: the call is over.
     tool_ran: bool,
-    /// The result that ended the call was Claude's rejection of it.
-    rejected: bool,
     /// What the run this card came from is called.
     ///
     /// **Captured with the card, not looked up when a doorbell rings.** A
@@ -1615,39 +1488,17 @@ struct PendingApproval {
     /// answered or another run can block, so the name and the number stop
     /// describing the same moment.
     project_label: String,
-    /// Which agent this card belongs to.
-    ///
-    /// **Captured with the card, for the same reason the label is.** The
-    /// Claude-only paths — the pane reader, the local resolver, the sweeps —
-    /// ask it from the same locked snapshot they act on, not from a database
-    /// read taken after the lock was released.
+    /// Which agent this card belongs to, captured with the card for the same
+    /// reason the label is.
     agent: protocol::agent::AgentKind,
     /// Asked by a background agent rather than the main conversation.
     fork: bool,
     /// Asked by the agent host of a run started from an app: answered through the
-    /// run's host link, never a hook, a pane or a dialog at the Mac.
+    /// run's host link.
     link: bool,
-    /// Set on an `AskUserQuestion` card, and only there.
-    question: Option<QuestionState>,
+    /// An `AskUserQuestion` card.
+    question: bool,
 }
-
-/// What the daemon knows about a question card beyond the card itself.
-#[derive(Default)]
-struct QuestionState {
-    /// What the phone's answer is waiting on once it is in Claude's hands: the
-    /// `PostToolUse` for this request, whose `tool_input` says whose answer
-    /// Claude ran with.
-    confirm: Option<oneshot::Sender<serde_json::Value>>,
-}
-
-/// How long a phone answer waits for the `PostToolUse` that says Claude ran
-/// with it. Measured at ~35 ms on 2.1.286; the margin is for a loaded Mac.
-const QUESTION_CONFIRM: Duration = Duration::from_secs(5);
-
-/// How long a phone decline waits for a `PostToolUse` that would say the Mac
-/// answered first. A decline produces none of its own, and nothing says Claude
-/// took it.
-const QUESTION_DECLINE_SETTLE: Duration = Duration::from_secs(2);
 
 /// The run tmux says is holding a name, when it named one at all.
 ///
@@ -1667,82 +1518,13 @@ fn holder(sighting: &crate::liveness::Sighting) -> Option<String> {
 #[derive(Debug, Clone)]
 struct CardKey(String);
 
-/// Whether Claude Code handed this transcript line to the agent as a prompt,
-/// by its own stamp: `promptSource` is on exactly the lines it submits — typed,
-/// queued, an accepted suggestion, an SDK prompt, and `"system"` for a
-/// background report, a scheduled prompt, another session's message or the
-/// continuation after a usage limit (census of the owner's transcripts,
-/// 2.1.195–2.1.304, with a recorded 2.1.305 scheduled prompt in
-/// `fixtures/transcript/scheduled-prompt-2.1.305.jsonl`). Or by `turnOrigin`
-/// alone: a built-in command that asks the model (`/plan`, `/goal`, 2.1.308)
-/// stamps only that, and so does an automatic compaction summary written
-/// inside a running turn (194 of the 204 such lines in the owner's
-/// transcripts, 2.1.278–2.1.303) — the run has moved on either way. The same
-/// rule as the phone's `Event.startsTurn`. Not a line recorded without being
-/// handed over (`queueTranscriptOnly`), and not a background agent's own line
-/// (`isSidechain`), which is not a turn of the run, as with the tailer's turn
-/// ends.
-fn delivers_prompt(pending: &PendingEvent) -> bool {
-    let line = &pending.payload;
-    pending.kind == EventKind::UserMessage
-        && line["queueTranscriptOnly"] != true
-        && line["isSidechain"] != true
-        && (line["promptSource"]
-            .as_str()
-            .is_some_and(|source| !source.is_empty())
-            || line["turnOrigin"].is_string())
-}
-
-/// **When a turn of the run last started and ended in this batch**, by the
-/// transcript's own clock, for the mail wake rule: a turn runs while its newest
-/// start is later than its newest end. A start is a line that hands Claude a prompt
-/// ([`delivers_prompt`]) or a queued one taken off Claude's queue, which is written
-/// ahead of the end of the turn it follows and stamped after it. An end is every
-/// line the tailer reads as a turn's end.
-fn turn_marks(pendings: &[PendingEvent]) -> (Option<i64>, Option<i64>) {
-    let at = |pending: &PendingEvent| {
-        pending.payload["timestamp"]
-            .as_str()
-            .and_then(protocol::time::unix_ms_from_rfc3339)
-    };
-    let dequeued = |pending: &PendingEvent| {
-        matches!(&pending.kind, EventKind::Other(kind) if kind == "transcript_queue-operation")
-            && pending.payload["operation"] == "dequeue"
-    };
-    let started = pendings
-        .iter()
-        .filter(|pending| delivers_prompt(pending) || dequeued(pending))
-        .filter_map(at)
-        .max();
-    let ended = pendings
-        .iter()
-        .filter(|pending| pending.kind == EventKind::TurnComplete)
-        .filter_map(at)
-        .max();
-    (started, ended)
-}
-
-/// Whether this card's dialog is drawn on the run's pane while it waits: every
-/// card not held for the phone, and a main-conversation approval held for it,
-/// which Claude draws at the same time. Not a held question, whose hook says
-/// when it ends, nor a held background agent's card, which Claude draws only
-/// once its hook returns.
-fn dialog_on_the_pane(entry: &PendingApproval) -> bool {
-    entry.card.question_hold != Some(QuestionHold::Held)
-        || (!entry.fork && entry.question.is_none())
-}
-
 /// Whether the card a decision push announces is still there to be answered.
 ///
 /// **Asked when the push is about to ring, not when it was admitted.** A card
-/// can be answered at the keyboard, or resolved by the tool simply running, and any of those can happen inside the dispatch grace — or, after a
+/// can be answered, or its call can run, inside the dispatch grace — or, after a
 /// restart, in the instant between reading the card and taking the gate. Ringing
-/// then would send someone to a decision list with nothing in it.
-///
-/// A card whose call has run is answered, though its entry stays until it is
-/// retired: a question answered at the Mac is marked by its `PostToolUse` and
-/// left in place (`note_question_ran`), so a ring held while its owner sat at
-/// the Mac would otherwise announce a question they had already answered.
+/// then would send someone to a decision list with nothing in it. A card whose
+/// call has run is answered, though its entry stays until it is retired.
 fn card_is_open(inner: &Inner, session_uid: &str, key: &CardKey) -> bool {
     the_card(inner, session_uid, key).is_some_and(|entry| !entry.tool_ran)
 }
@@ -1751,25 +1533,13 @@ fn the_card<'a>(inner: &'a Inner, session_uid: &str, key: &CardKey) -> Option<&'
     inner.pending.get(&(session_uid.to_string(), key.0.clone()))
 }
 
-/// Whether Claude still holds this card's hook, and with it the only way an
-/// answer reaches the call.
-fn hook_is_held(entry: &PendingApproval) -> bool {
-    entry.card.question_hold == Some(QuestionHold::Held) && entry.responder.is_some()
-}
-
 /// Whether an answer from the phone can reach this card now: a Codex card's
-/// through its link, a hosted run's card through its host's link, any other
-/// card's only through the hook Claude holds for its call ([`hook_decision`]
-/// refuses the rest). Not once the call has run, and not while an answer is
-/// already on its way. A card no hook is held for — one restored after a
-/// restart, or released to the computer — is answered at the computer, and a
-/// doorbell for it would open onto nothing to answer.
+/// through its link, a hosted run's card through its host's link. Not once the
+/// call has run, and not while an answer is already on its way.
 fn phone_can_answer(entry: &PendingApproval) -> bool {
     !entry.tool_ran
         && !entry.claimed
-        && (matches!(entry.agent, protocol::agent::AgentKind::Codex)
-            || entry.link
-            || hook_is_held(entry))
+        && (matches!(entry.agent, protocol::agent::AgentKind::Codex) || entry.link)
 }
 
 /// The decisions a doorbell may speak of, read under one lock: how many cards
@@ -1807,7 +1577,7 @@ impl Waiting {
             },
             // A Claude question carries its question state; a Codex one is a card of Codex's
             // own question tool.
-            question: matches!(open.as_slice(), [entry] if entry.question.is_some()
+            question: matches!(open.as_slice(), [entry] if entry.question
                 || entry.card.tool_name == crate::codex_approval::QUESTION_TOOL_NAME),
         }
     }
@@ -1819,7 +1589,6 @@ impl Daemon {
         store: Arc<Store>,
         push: Arc<dyn PushSender>,
         endpoint: Endpoint,
-        transcript_tx: mpsc::UnboundedSender<crate::tailer::TailCommand>,
     ) -> Arc<Daemon> {
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (revocations_tx, _) = broadcast::channel(REVOCATION_CAPACITY);
@@ -1848,7 +1617,6 @@ impl Daemon {
             test_tailnet: std::sync::Mutex::new(None),
             actuation_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
-            transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
@@ -1905,12 +1673,6 @@ impl Daemon {
     /// [`Daemon::send_text`] and [`Daemon::answer`]. This is that refusal, in one
     /// place, so the two read as one decision rather than two coincidences.
     ///
-    /// **The `PermissionRequest` hook was the third caller and is no longer one.**
-    /// Its table split, so the ledger argument stopped applying to it; it still
-    /// refuses a Codex run, for the different and narrower reason written at that
-    /// gate. A refusal that outlived its justification and kept quoting it would
-    /// be the most misleading kind of comment there is.
-    ///
     /// The phase that splits the remaining tables per agent is what deletes this
     /// method and its two call sites.
     ///
@@ -1944,8 +1706,7 @@ impl Daemon {
     /// in that window would have the read admit a row the write then lands on as
     /// Codex, which is exactly the isolation this method claims. It cannot: a uid
     /// does not leave Claude ([`Daemon::register_supervisor`]'s transition
-    /// refusal), `ensure_session` preserves an existing row's agent, and those two
-    /// are the only production writers of the column. The other direction —
+    /// refusal). The other direction —
     /// Codex → Claude — is admitted and harmless here: it can only turn a refusal
     /// into an admission of a row that is genuinely Claude by the time it is
     /// written.
@@ -1960,10 +1721,9 @@ impl Daemon {
     /// 1. **Open approval cards.** A card is a durable fact in the log and a
     ///    live question on somebody's phone; after a restart the daemon used to
     ///    answer "unknown or already-resolved request" to a tap on a card that
-    ///    was still on screen. Recovered cards come back unheld: the hooks that
-    ///    held them were the old process's connections, so none can be answered
-    ///    from the phone, and the call's own result or the local sweep closes
-    ///    them.
+    ///    was still on screen. A hosted run's card is answered again once its host
+    ///    re-attaches ([`Daemon::host_cards_reconcile`]), and an engine Codex run's
+    ///    once Codex asks for it again.
     /// 2. **Mutations that were claimed but never settled.** A claim with no
     ///    outcome means the daemon died between claiming and recording. That is
     ///    recorded as a terminal *indeterminate* result, and never retried.
@@ -1986,7 +1746,7 @@ impl Daemon {
                 if settled > 0 {
                     crate::log_warn!(
                         "recovery: {settled} answer(s) were claimed but never settled; recording \
-                         them as indeterminate rather than typing again"
+                         them as indeterminate rather than sending again"
                     );
                 }
             }
@@ -2007,7 +1767,7 @@ impl Daemon {
             Ok(0) => {}
             Ok(count) => crate::log_warn!(
                 "recovery: {count} send_text mutation(s) were in flight and their outcome is \
-                 unknown; a retry will be told so rather than typing again"
+                 unknown; a retry will be told so rather than sending again"
             ),
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
         }
@@ -2056,8 +1816,6 @@ impl Daemon {
 
                 let mut inner = self.inner.lock().await;
                 let mut restored = 0usize;
-                // Held cards whose hooks died with the previous process.
-                let mut unheld = Vec::new();
                 for row in rows {
                     let Ok(card) = serde_json::from_str::<ApprovalCard>(&row.card) else {
                         crate::log_error!(
@@ -2078,14 +1836,7 @@ impl Daemon {
                     // A Codex run started on the engine has a hosted row too, for its
                     // app-server; its cards are Codex cards, never an agent host's.
                     let link = agent.is_claude() && hosted.contains(&row.session_uid);
-                    // The hook that held it was this process's connection, and
-                    // it is gone: Claude has it at the Mac now. A host's card is
-                    // still the host's.
-                    if card.question_hold == Some(QuestionHold::Held) && !link {
-                        unheld.push((row.session_uid.clone(), row.request_id.clone()));
-                    }
-                    let question = (card.tool_name == protocol::hook::ASK_USER_QUESTION)
-                        .then(QuestionState::default);
+                    let question = card.tool_name == protocol::host::ASK_USER_QUESTION;
                     if ended.contains(&row.session_uid) {
                         of_ended_runs.push((
                             SessionKey::new(&row.session_uid, &row.session_id),
@@ -2102,16 +1853,11 @@ impl Daemon {
                                 .cloned()
                                 .unwrap_or_default(),
                             agent,
-                            created_ms: row.created_ms,
                             raise: 0,
-                            responder: None,
                             claimed: false,
-                            local_misses: 0,
                             tool_ran: false,
-                            rejected: false,
-                            // Not recorded with the card: no hook is held across a
-                            // restart, and a host's card has its `fork` from the
-                            // host's `state` when its link is back.
+                            // Not recorded with the card: a host's card has its
+                            // `fork` from the host's `state` when its link is back.
                             fork: false,
                             link,
                             question,
@@ -2120,14 +1866,10 @@ impl Daemon {
                     restored += 1;
                 }
                 drop(inner);
-                for (uid, request_id) in unheld {
-                    self.set_question_hold(&(uid, request_id), QuestionHold::Ended)
-                        .await;
-                }
                 crate::log_info!(
-                    "recovery: {restored} approval card(s) restored; a hook's card cannot be \
-                     answered from the phone, because no hook is held for it, and an engine \
-                     Codex run's can be once Codex asks for it again"
+                    "recovery: {restored} approval card(s) restored; a hosted run's can be \
+                     answered once its host is back, and an engine Codex run's once Codex asks \
+                     for it again"
                 );
                 true
             }
@@ -2232,10 +1974,11 @@ impl Daemon {
         let session = SessionKey::new(&claim.session_uid, &claim.session_id);
         let decision =
             serde_json::from_str::<AnswerDecision>(&claim.decision).unwrap_or(AnswerDecision::Deny);
-        // Whatever this build claims goes back through the card's hook, if it
-        // was sent at all: nothing is typed. Answers and a decline are claimed
-        // for nothing else; anything else needs its card, and a card with no
-        // hold was filed by an older daemon, which typed approvals.
+        // A claim on a run this build does not host was left by an earlier
+        // build, whose answers went back through the card's hook, if sent at
+        // all: nothing was typed. Answers and a decline are claimed for nothing
+        // else; anything else needs its card, and a card with no hold was filed
+        // by an older daemon still, which typed approvals.
         let through_hook = matches!(
             decision,
             AnswerDecision::Answers { .. } | AnswerDecision::Decline
@@ -2770,7 +2513,7 @@ impl Daemon {
         }
         let gate = self.publish_gate(session_uid).await;
         let events = {
-            // Held across the commit and the broadcast, as in `ingest_scan`.
+            // Held across the commit and the broadcast, as in `ingest`.
             let _ordered = gate.lock().await;
             let Some(events) = self
                 .db
@@ -2813,171 +2556,6 @@ impl Daemon {
         {
             self.refresh_tree(session_uid);
         }
-    }
-
-    /// Persist a transcript batch **and** its cursor in one transaction, then
-    /// publish what committed.
-    ///
-    /// The only batch ingest there is, and it always carries a cursor. A batch
-    /// path without one would be a second way to consume transcript lines, and
-    /// the invariant here is that consuming lines and recording that they were
-    /// consumed cannot be two separate writes: a crash between them skips those
-    /// lines permanently, because the cursor already claims they are done.
-    pub async fn ingest_scan(
-        self: &Arc<Self>,
-        session_uid: &str,
-        pendings: Vec<PendingEvent>,
-        cursor: crate::store::TailCursor,
-    ) -> Result<usize> {
-        let mut pendings = pendings;
-        // Read before truncation, which can drop a long result's body whole.
-        let ended: Vec<(String, bool)> = pendings
-            .iter()
-            .filter(|pending| pending.kind == EventKind::ToolResult)
-            .flat_map(|pending| ended_calls(&pending.payload))
-            .collect();
-        // Likewise which lines hand over a prompt: before truncation can
-        // replace a long one.
-        let prompts: HashSet<String> = pendings
-            .iter()
-            .filter(|pending| delivers_prompt(pending))
-            .filter_map(|pending| pending.source_event_id.clone())
-            .collect();
-        let (started_ms, ended_ms) = turn_marks(&pendings);
-        for pending in &mut pendings {
-            self.truncate_payload(pending);
-        }
-
-        let gate = self.publish_gate(session_uid).await;
-        let events = {
-            // The gate is a `tokio::sync::Mutex` and is held *across* the
-            // commit's await, which is what keeps "the order events were
-            // assigned" and "the order they were published" the same sentence
-            // now that the commit happens on a blocking thread. Moving the work
-            // off the runtime does not move the ordering.
-            let _ordered = gate.lock().await;
-            let events = self
-                .db
-                .append_batch_with_cursor(session_uid.to_string(), pendings, cursor)
-                .await?;
-            // Published only after the commit, and only inside the gate: a
-            // subscriber can never be shown a fact the log would lose on the
-            // next `kill -9`, nor one that arrives before its predecessor.
-            for event in &events {
-                let _ = self.events_tx.send(event.clone());
-            }
-            events
-        };
-
-        if !events.is_empty() {
-            let mut inner = self.inner.lock().await;
-            let facts = inner
-                .session_facts
-                .entry(session_uid.to_string())
-                .or_default();
-            for event in &events {
-                facts.observe(event);
-            }
-            inner
-                .last_seen_ms
-                .insert(session_uid.to_string(), protocol::time::now_unix_ms());
-        }
-        if events
-            .iter()
-            .any(|event| event.kind == EventKind::TurnComplete)
-        {
-            self.refresh_tree(session_uid);
-        }
-        // **A prompt filed for the first time is the run moving** — the only
-        // word of a prompt typed at the Mac, since no hook fires for one. Only
-        // a line this scan newly filed counts: a transcript read again (a
-        // cursor that fails its check rescans from zero) files nothing new and
-        // says nothing new. A conversation this run has not read before, resumed
-        // inside it, is read into the run's log from its start, and its prompts
-        // count on purpose: the conversation changed. A new prompt read later than the end of the
-        // turn it began ends that turn's own ring, which needs the tailer's lag
-        // to outlast the turn: at most 32.4 ms measured with fsevents, and the
-        // polling floor is `tail_poll_ms` (250 ms by default, at most 10 s),
-        // against a shortest recorded first turn of 1.375 s (151 of them).
-        if events.iter().any(|event| {
-            event
-                .source_event_id
-                .as_ref()
-                .is_some_and(|id| prompts.contains(id))
-        }) {
-            self.push_gate.note_progress(session_uid);
-        }
-        for (tool_use_id, rejected) in ended {
-            self.call_ended(session_uid, &tool_use_id, rejected).await;
-        }
-        // Marks only from lines written while this run lives: a conversation resumed
-        // into it is read from its start, and its old turns are not the run's.
-        let since = match started_ms.or(ended_ms) {
-            Some(_) => match self.db.get_session(session_uid.to_string()).await {
-                Ok(Some(row)) => protocol::time::unix_ms_from_rfc3339(&row.created_at),
-                _ => None,
-            },
-            None => None,
-        };
-        let lived = |ms: &i64| since.is_none_or(|since| *ms >= since);
-        let (started_ms, ended_ms) = (started_ms.filter(lived), ended_ms.filter(lived));
-        if started_ms.is_some() || ended_ms.is_some() {
-            if let Err(err) = self
-                .db
-                .mail_turn_marks(session_uid.to_string(), started_ms, ended_ms)
-                .await
-            {
-                crate::log_error!("mail for {session_uid}: could not record a turn: {err:#}");
-            }
-            if ended_ms.is_some() {
-                self.wake_if_due(session_uid).await;
-            }
-        }
-        Ok(events.len())
-    }
-
-    /// A call's own result is in the transcript: it ran, or Claude rejected it.
-    /// An ordinary card still open for it is over. Its hook is let go, an answer
-    /// claimed but not yet handed over finds nothing to hand (step 5 of
-    /// [`Daemon::answer`]), and the card closes as answered at the Mac. This is
-    /// what closes a card even when Claude does not end its hook.
-    async fn call_ended(&self, session_uid: &str, tool_use_id: &str, rejected: bool) {
-        let id: ApprovalId = (session_uid.to_string(), tool_use_id.to_string());
-        let session = {
-            let mut inner = self.inner.lock().await;
-            let Some(entry) = inner.pending.get_mut(&id) else {
-                // No card yet: the call is remembered as over, with its result,
-                // so a request for it read later is not held for the phone.
-                for call in inner.tool_use_ids.values_mut().flatten() {
-                    if call.tool_use_id == tool_use_id {
-                        call.ended = true;
-                        call.rejected = rejected;
-                    }
-                }
-                return;
-            };
-            if entry.question.is_some() {
-                return;
-            }
-            entry.rejected = rejected && !entry.tool_ran;
-            entry.tool_ran = true;
-            entry.responder = None;
-            entry.session.clone()
-        };
-        let (decision, detail) = if rejected {
-            (AnswerDecision::Deny, CALL_REJECTED)
-        } else {
-            (AnswerDecision::Allow, CALL_RAN)
-        };
-        self.resolve_without_phone(
-            tool_use_id,
-            &session,
-            decision,
-            ResolvedBy::Local,
-            detail,
-            false,
-        )
-        .await;
     }
 
     /// Cap a single payload so one enormous tool response cannot bloat the log
@@ -3070,599 +2648,8 @@ impl Daemon {
         Some(prompt)
     }
 
-    /// The hook path. Returns what cc-hook should print.
-    pub async fn handle_hook(self: &Arc<Self>, post: HookPost) -> HookDecision {
-        self.handle_hook_held(post, &mut std::future::pending())
-            .await
-    }
-
-    /// [`Daemon::handle_hook`], for a hook posted on a connection the caller
-    /// watches: `gone` resolves when the hook's connection closes, which for a
-    /// held question means Claude ended the hook.
-    pub async fn handle_hook_held(
-        self: &Arc<Self>,
-        post: HookPost,
-        gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin),
-    ) -> HookDecision {
-        match self.handle_hook_inner(post, gone).await {
-            Ok(decision) => decision,
-            Err(err) => {
-                crate::log_error!("hook ingest failed: {err:#}");
-                // Our failure must never look like a denial.
-                HookDecision::passthrough()
-            }
-        }
-    }
-
-    async fn handle_hook_inner(
-        self: &Arc<Self>,
-        post: HookPost,
-        gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin),
-    ) -> Result<HookDecision> {
-        let input: HookInput = serde_json::from_value(post.payload.clone()).unwrap_or_default();
-        let event_name = HookEventName::parse(&post.event);
-
-        // A question's tool ran: settled before anything is written, so a slow
-        // database cannot let the end of the turn, written later, close the
-        // question as declined while this waits to be written.
-        let question_ran = event_name == HookEventName::PostToolUse
-            && input.tool_name.as_deref() == Some(protocol::hook::ASK_USER_QUESTION);
-        if question_ran {
-            if let Some(uid) = post.session_uid.as_deref() {
-                self.note_question_ran(uid, &input).await;
-            }
-        }
-
-        let Some(session) = self
-            .ensure_session(&post.session_id, post.session_uid.as_deref(), &input)
-            .await?
-        else {
-            // Deleted while the hook was in flight; there is nothing to file it
-            // under and nothing to decide. Claude proceeds as if unobserved.
-            return Ok(HookDecision::passthrough());
-        };
-
-        if event_name == HookEventName::Stop && main_thread(&post.payload) {
-            *self
-                .inner
-                .lock()
-                .await
-                .main_turn_ends
-                .entry(session.uid.clone())
-                .or_default() += 1;
-            self.main_thread_moved(&session).await;
-            crate::mail::turn_ended(self, &session.uid);
-        }
-
-        // The person's prompt is never filed: this hook only reminds Claude of mail
-        // waiting for it.
-        if event_name == HookEventName::UserPromptSubmit {
-            return Ok(
-                match crate::mail::prompt_submitted(self, &session.uid).await {
-                    Some(nudge) => HookDecision::prompt_context(nudge),
-                    None => HookDecision::passthrough(),
-                },
-            );
-        }
-
-        match &event_name {
-            HookEventName::PreToolUse => {
-                // A tool is about to run: the run demonstrably moved, so a
-                // later quiet state is a new fact the doorbell may announce.
-                self.push_gate.note_progress(&session.uid);
-                if let (Some(tool_use_id), Some(key)) = (
-                    input.tool_use_id.clone(),
-                    correlation_key(&session.uid, &input),
-                ) {
-                    let mut inner = self.inner.lock().await;
-                    // Bounded: a long session would otherwise accumulate one
-                    // entry per tool call for the whole run.
-                    if inner.tool_use_ids.len() > 512 {
-                        inner.tool_use_ids.clear();
-                    }
-                    let turn_ends = inner
-                        .main_turn_ends
-                        .get(&session.uid)
-                        .copied()
-                        .unwrap_or_default();
-                    let calls = inner.tool_use_ids.entry(key).or_default();
-                    if !calls.iter().any(|call| call.tool_use_id == tool_use_id) {
-                        calls.push(KeyedCall {
-                            tool_use_id,
-                            turn_ends,
-                            ended: false,
-                            rejected: false,
-                        });
-                    }
-                }
-                self.ingest(hook_event(&session, &event_name, &post.payload, &input))
-                    .await?;
-            }
-            HookEventName::PermissionRequest => {
-                return self
-                    .handle_permission_request(&session, &post, &input, gone)
-                    .await;
-            }
-            HookEventName::Notification => {
-                let filed = self
-                    .ingest(
-                        self.notification_event(&session, &post.payload, &input)
-                            .await,
-                    )
-                    .await?;
-                // Pushed only if the fact was actually filed. `None` here means
-                // the session was deleted between `ensure_session` and this
-                // write — a notification for a run the user just removed must
-                // not ring their phone and open onto nothing.
-                if let Some(event) = filed.as_ref() {
-                    self.maybe_push(&session, &input, event).await;
-                }
-            }
-            HookEventName::Stop => {
-                // A finished turn is progress too — the next wait is news.
-                self.push_gate.note_progress(&session.uid);
-                // The turn's end is filed by the tailer from the transcript,
-                // which Claude writes after the turn's last reply; this hook
-                // arrives before that reply is on disk. Filed here only for a
-                // run whose transcript has never existed (Claude's session
-                // persistence off), so the end of its turns is not lost. A file
-                // the tailer has read is only ever missing in passing.
-                let absent = input
-                    .transcript_path
-                    .as_deref()
-                    .is_none_or(|path| !std::path::Path::new(path).exists());
-                if absent && self.db.load_cursor(session.uid.clone()).await?.is_none() {
-                    self.ingest(hook_event(&session, &event_name, &post.payload, &input))
-                        .await?;
-                }
-            }
-            _ => {
-                self.ingest(hook_event(&session, &event_name, &post.payload, &input))
-                    .await?;
-                // Checked again after the write: a question registered while
-                // this hook waited on it is found now.
-                if question_ran {
-                    self.note_question_ran(&session.uid, &input).await;
-                }
-            }
-        }
-
-        // A gate event we do not specifically handle still must not hang.
-        Ok(HookDecision::passthrough())
-    }
-
-    async fn handle_permission_request(
-        self: &Arc<Self>,
-        session: &SessionKey,
-        post: &HookPost,
-        input: &HookInput,
-        gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin),
-    ) -> Result<HookDecision> {
-        // **Refused before the card is built, let alone written**, and this is
-        // the one of the three [`Daemon::shared_ledgers_admit`] refusals that
-        // does NOT lift with the approval observer.
-        //
-        // The refusal was scaffolding for the shared `pending_approvals` table,
-        // and that table is now split: a Codex card goes to
-        // `codex_pending_approvals`, which a rolled-back v0.6.0 daemon has never
-        // heard of. But this path is not the Codex producer. It is the **Claude
-        // hook**, and a `PermissionRequest` posted against a Codex uid is not a
-        // Codex approval arriving by another road — it is a hook this daemon
-        // deliberately does not install for Codex, so a post carrying one means
-        // the uid is wrong or the payload is somebody else's. Carding it would
-        // mint a Claude-shaped card with a Claude `tool_use_id` for a run whose
-        // real approvals arrive as typed app-server requests, and then two cards
-        // would answer for one question. The real producer is
-        // [`Daemon::raise_codex_approval`], reached from the link's approval
-        // observer, and it writes the scoped table directly.
-        //
-        // So the gate stays and the *reason* changed. It is stated against the
-        // agent rather than against the ledger, because the ledger argument is
-        // the one that expired.
-        //
-        // Passthrough, not a denial, and for the same reason the deleted-session
-        // arm above passes through: this daemon is declining to *observe* the
-        // request, and an observer's refusal must never be mistaken for the
-        // human's answer. Nothing else on this path is reached.
-        match self.db.get_session(session.uid.clone()).await? {
-            Some(row) if !row.agent.is_claude() => {
-                crate::log_info!(
-                    "dropping a PermissionRequest for {}: it is a {} session, whose approvals \
-                     reach this daemon as app-server requests on its control link, not as \
-                     Claude hooks",
-                    session.uid,
-                    row.agent.as_str()
-                );
-                return Ok(HookDecision::passthrough());
-            }
-            // Absent means the row was deleted between `ensure_session` and here.
-            // There is no non-Claude run to protect and no agent to read; the
-            // existing session-existence guards inside the writers below refuse
-            // it on their own, exactly as they did before this gate.
-            _ => {}
-        }
-
-        let tool_name = input.tool_name.clone().unwrap_or_else(|| "unknown".into());
-        let tool_input = input.tool_input.clone().unwrap_or(serde_json::Value::Null);
-        let display_text = approval_payload_text(&tool_name, &tool_input);
-        let payload_hash = approval_payload_hash(&tool_name, &tool_input);
-
-        let joined_to = {
-            let inner = self.inner.lock().await;
-            correlation_key(&session.uid, input)
-                .and_then(|key| joined_call(inner.tool_use_ids.get(&key)?))
-                .cloned()
-        };
-        let turn_ends = joined_to.as_ref().map(|call| call.turn_ends);
-        // The call's result is already in: it was answered at the Mac.
-        let ended = joined_to
-            .as_ref()
-            .and_then(|call| call.ended.then_some(call.rejected));
-        let request_id = joined_to.map(|call| call.tool_use_id);
-        // Joined to its `tool_use_id`, the id the call's own result names. Without
-        // it, nothing ties this request to one call.
-        let joined = request_id.is_some();
-
-        // Fall back to a deterministic id derived from the exact request, so a
-        // build that never emits `tool_use_id` still gets stable idempotency.
-        let request_id = request_id.unwrap_or_else(|| {
-            format!(
-                "pr-{}-{}",
-                input.prompt_id.as_deref().unwrap_or("noprompt"),
-                &payload_hash[..16]
-            )
-        });
-
-        // Computed here rather than on the phone: the classification must be
-        // identical for every client, and a phone parsing shell syntax to
-        // decide how alarming to look is a second implementation to keep in
-        // step. It is a rendering hint, never a gate.
-        let risk = protocol::risk::classify(&tool_name, &tool_input);
-
-        // A card is held for the phone only when its answer can reach exactly its
-        // own call: this cc-hook waits and reports its own end, the request is
-        // joined to one call, and the phone's answer would be the keyboard's.
-        // Otherwise it is shown and answered at the Mac.
-        let question = tool_name == protocol::hook::ASK_USER_QUESTION;
-        let fork = !main_thread(&post.payload);
-        let holdable = post.wait
-            && joined
-            && if question {
-                post.holds_questions && crate::question::answerable(&tool_input)
-            } else {
-                post.holds_approvals
-                    && ended.is_none()
-                    && !ANSWERED_ONLY_AT_THE_MAC.contains(&tool_name.as_str())
-            };
-        // A background agent's card is held only while nobody is at the Mac,
-        // because holding it hides its dialog there. An idle time that cannot
-        // be read counts as someone there.
-        let hold = if !holdable
-            || (fork && crate::presence::at_the_mac(crate::presence::QUESTION_IDLE).unwrap_or(true))
-        {
-            QuestionHold::AtMac
-        } else {
-            QuestionHold::Held
-        };
-
-        let mut card = ApprovalCard {
-            request_id: request_id.clone(),
-            payload_hash: payload_hash.clone(),
-            tool_name,
-            tool_input,
-            display_text,
-            permission_suggestions: input.permission_suggestions.clone(),
-            prompt_id: input.prompt_id.clone(),
-            permission_mode: input.permission_mode.clone(),
-            risk: Some(risk.clone()),
-            // Decides nothing for a Claude card.
-            generation: 0,
-            // Whether an older phone's Allow can answer it: a held approval.
-            // Such a phone reads no hold, and a question takes no Allow.
-            identity_bound: !question && hold == QuestionHold::Held,
-            question_hold: Some(hold),
-            allow_for_session: false,
-        };
-
-        let mut payload = serde_json::json!({ "card": card, "hook": post.payload });
-        // Held only if the card reaches the phone whole. Past the payload limit
-        // the event is replaced by a preview no phone can answer, and holding
-        // the card would leave it answerable nowhere it can be read.
-        let encoded = payload.to_string().len();
-        if card.question_hold == Some(QuestionHold::Held) && encoded > self.config.max_payload_bytes
-        {
-            crate::log_info!(
-                "{request_id} goes to this computer: its card would be {encoded} bytes against a {}-byte \
-                 payload limit, which the phone could not read",
-                self.config.max_payload_bytes
-            );
-            card.question_hold = Some(QuestionHold::AtMac);
-            card.identity_bound = false;
-            payload = serde_json::json!({ "card": card, "hook": post.payload });
-        }
-        let held = card.question_hold == Some(QuestionHold::Held);
-        let hidden = held && fork;
-        let pending = PendingEvent::new(session, EventKind::ApprovalRequest, payload, Source::Hook)
-            .with_source_event_id(format!("perm:{request_id}"));
-
-        let (responder_tx, responder_rx) = if held {
-            let (tx, rx) = oneshot::channel::<HookDecision>();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-
-        let created_ms = protocol::time::now_unix_ms();
-        let label = self.effective_project_label(&session.uid).await;
-        // Read here, beside the label, and for the same reason: it is needed
-        // under a lock that admits no awaits. Read rather than assumed Claude —
-        // this path is Claude's today, but a card that lied about its agent
-        // would misdirect every doorbell that counts it, and the value is one
-        // row read away.
-        let agent = self
-            .db
-            .get_session(session.uid.clone())
-            .await
-            .ok()
-            .flatten()
-            .map(|row| row.agent)
-            .unwrap_or(protocol::agent::AgentKind::Claude);
-
-        // Registered before the card is written, so the answer at the Mac, the
-        // tool's result or the end of the turn, arriving while the write waits,
-        // finds the request it is about. A request already registered is a
-        // replay, and keeps its entry.
-        let id: ApprovalId = (session.uid.clone(), request_id.clone());
-        let registered = {
-            let mut inner = self.inner.lock().await;
-            match inner.pending.entry(id.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => false,
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(PendingApproval {
-                        card: card.clone(),
-                        session: session.clone(),
-                        project_label: label.clone(),
-                        agent,
-                        created_ms,
-                        raise: 0,
-                        responder: responder_tx,
-                        claimed: false,
-                        local_misses: 0,
-                        tool_ran: false,
-                        rejected: false,
-                        fork,
-                        link: false,
-                        question: question.then(QuestionState::default),
-                    });
-                    true
-                }
-            }
-        };
-
-        // A duplicate is a *replay*, not a re-ask. Ignoring this result and
-        // inserting anyway meant a hook redelivered after the card had already
-        // been answered put a phantom block back on the session — one nothing
-        // would ever resolve, because its answer was already in the ledger.
-        //
-        // A replay leaves through here having changed nothing that lasts: the
-        // entry it registered is taken back, and no generation moves and no
-        // neighbour is superseded. An answer reaching that entry meanwhile is
-        // answered from the ledger first.
-        let ingested = self.ingest(pending).await;
-        if registered && !matches!(ingested, Ok(Some(_))) {
-            self.inner.lock().await.pending.remove(&id);
-        }
-        let Some(approval_event) = ingested? else {
-            crate::log_debug!(
-                "duplicate PermissionRequest for {request_id} in {}; state left alone",
-                session.name
-            );
-            return Ok(HookDecision::ask(SHOWN_ON_THE_PHONE));
-        };
-        // A result filed before this request was registered went by without
-        // finding it, and is read back from the log, from the call's own
-        // `PreToolUse` on. One filed later finds the entry when its hook checks
-        // again after its own write. A read that fails finds nothing, and the
-        // request is handled as if nothing had been filed.
-        if let Ok(Some(asked)) = self
-            .db
-            .hook_event_seq(session.uid.clone(), format!("pre:{request_id}"))
-            .await
-        {
-            for event in self
-                .db
-                .events_after(session.uid.clone(), asked, 1000)
-                .await
-                .unwrap_or_default()
-            {
-                if event.kind == EventKind::ToolResult
-                    && event.item_id.as_deref() == Some(&request_id)
-                {
-                    note_tool_result(&mut *self.inner.lock().await, &event);
-                    if question {
-                        let ran = serde_json::from_value(event.payload).unwrap_or_default();
-                        self.note_question_ran(&session.uid, &ran).await;
-                    }
-                }
-            }
-        }
-        // Likewise the end of the turn: a main-conversation Stop hook that
-        // arrived after this question's `PreToolUse` and before its
-        // registration found nothing to close.
-        if question && !fork {
-            let ended = self
-                .inner
-                .lock()
-                .await
-                .main_turn_ends
-                .get(&session.uid)
-                .copied()
-                .unwrap_or_default();
-            if turn_ends.is_some_and(|asked| ended > asked) {
-                self.main_thread_moved(session).await;
-            }
-        }
-        // A call whose result was filed before this request was read closes
-        // from that result.
-        if let Some(rejected) = ended {
-            self.call_ended(&session.uid, &request_id, rejected).await;
-        }
-        // Resolved while its card was being written — the turn ended over a
-        // question already answered at the Mac — so there is nothing to hold.
-        if !self.inner.lock().await.pending.contains_key(&id) {
-            return Ok(HookDecision::passthrough());
-        }
-
-        if !self.persist_pending(session, &card, created_ms).await {
-            // The session was deleted between this hook arriving and the card
-            // being filed. The row, its events and its tombstone all exist;
-            // keeping the in-memory approval would leave the daemon holding
-            // live state for a run nobody can see. Retire it and answer the
-            // hook locally.
-            let mut inner = self.inner.lock().await;
-            inner
-                .pending
-                .remove(&(session.uid.clone(), request_id.clone()));
-            drop(inner);
-            crate::log_info!(
-                "dropping approval {} for {}: the session was deleted while it was in flight",
-                request_id,
-                session.name
-            );
-            return Ok(HookDecision::ask(
-                "CodeConnect: this session was removed from the fleet; answer at the keyboard",
-            ));
-        }
-
-        // One ring per decision, keyed by its card — not by the prompt, which
-        // Claude Code (2.1.308, recorded) shares between every call of a turn.
-        // The `permission_prompt` notification that follows this hook finds
-        // this card open under its prompt and stays silent, and a *replayed*
-        // request (dedup above) never gets this far. Devices that receive the
-        // card on a live socket are excluded at dispatch.
-        // **A decision supersedes a notice about it.** A `permission_prompt`
-        // can arrive first and ring as "waiting for your input"; when the card
-        // itself lands moments later, that earlier ring is describing the same
-        // moment in weaker words. Recording the run's progress kills it inside
-        // its dispatch grace, so one notification goes out — the actionable
-        // one. Without that, both survive, and APNs stores exactly one per
-        // device without saying which, so the reader could be left holding the
-        // wrong one.
-        if let Some(ticket) =
-            self.push_gate
-                .admit_decision(&session.uid, &request_id, input.prompt_id.as_deref())
-        {
-            // **No tool name and no risk class.** The tool says what an agent is
-            // doing to anyone who can read the payload, and the class is a
-            // judgement the card itself states — with the matched pattern beside
-            // it, which a lock screen has no room for and Apple has no business
-            // holding. What rings is composed from the open decisions when it
-            // goes (`dispatch_push`).
-            self.dispatch_push(
-                session.uid.clone(),
-                approval_event.seq,
-                ticket,
-                // A pending decision outlives other tools' progress; only the
-                // session's death, or the card being answered, cancels it.
-                false,
-                Some(CardKey(request_id.clone())),
-            );
-        }
-
-        // Not held: Claude shows it at the Mac, and the card on the phone is
-        // read-only. This `ask` renders nothing for a PermissionRequest; it is the
-        // semantically correct answer, and it costs nothing.
-        let Some(rx) = responder_rx else {
-            return Ok(HookDecision::ask(SHOWN_ON_THE_PHONE));
-        };
-
-        // Held until the phone answers, the call's result arrives (it was
-        // answered at the Mac), someone comes back to a background agent's hidden
-        // card, or Claude ends the hook. No timer of ours: the card lasts as long
-        // as Claude's own hook timeout.
-        Ok(tokio::select! {
-            answered = rx => answered.unwrap_or_else(|_| HookDecision::passthrough()),
-            () = &mut *gone => {
-                self.hook_ended(&id).await;
-                HookDecision::passthrough()
-            }
-            () = self.someone_returns(&id), if hidden => HookDecision::passthrough(),
-        })
-    }
-
-    /// Resolves once someone is at the Mac again and the hidden card is theirs:
-    /// its hook then returns with no decision and Claude draws its dialog there.
-    /// A phone answer already in flight is left to finish; first answer wins.
-    async fn someone_returns(&self, id: &ApprovalId) {
-        loop {
-            tokio::time::sleep(crate::presence::POLL).await;
-            if !crate::presence::at_the_mac(crate::presence::QUESTION_IDLE).unwrap_or(true) {
-                continue;
-            }
-            // Kept until the hold is recorded, so the hook's own channel stays
-            // open and only this resolves the wait.
-            let responder = match self.inner.lock().await.pending.get_mut(id) {
-                Some(entry) if !entry.claimed => entry.responder.take(),
-                _ => None,
-            };
-            if let Some(_responder) = responder {
-                crate::log_info!("{} released to this computer: someone is at it", id.1);
-                self.set_question_hold(id, QuestionHold::AtMac).await;
-                return;
-            }
-        }
-    }
-
-    /// Claude ended the hook holding this card, so the phone can no longer
-    /// answer it. For a question from a session whose hook timeout is the
-    /// longest (about 24.8 days), that means the question itself is gone —
-    /// Escape or the session ending. From an older session it may be the old
-    /// two-minute timeout, after which the question is still on the Mac. An
-    /// approval's card says nothing about how it ended: the call's own result
-    /// closes it ([`Daemon::call_ended`]).
-    async fn hook_ended(&self, id: &ApprovalId) {
-        let Some((session, question)) = self
-            .inner
-            .lock()
-            .await
-            .pending
-            .get(id)
-            .map(|entry| (entry.session.clone(), entry.question.is_some()))
-        else {
-            return;
-        };
-        let current_settings = question
-            && self
-                .supervisor_minor(&session.uid)
-                .await
-                .is_some_and(|minor| minor >= SUPERVISOR_MINOR_QUESTION_TIMEOUT);
-        // A phone answer that claims the card meanwhile, up to the moment this
-        // takes it, makes it back off.
-        if current_settings {
-            self.resolve_without_phone(
-                &id.1,
-                &session,
-                AnswerDecision::Decline,
-                ResolvedBy::Local,
-                "the question was closed at the computer (Escape or the session ending) before \
-                 it was answered from a paired device",
-                true,
-            )
-            .await;
-        }
-        // Not closed: an older session's question may still be on the Mac, or a
-        // phone answer claimed the card first and will find the hook gone.
-        // Either way the phone can no longer answer it.
-        if self.inner.lock().await.pending.contains_key(id) {
-            self.set_question_hold(id, QuestionHold::Ended).await;
-        }
-    }
-
-    /// The run that asked this card has ended, so nobody is left to answer it.
-    /// A held hook is let go, which ends its connection whatever process it runs
-    /// under (a shell prefix that does not `exec`, or one orphaned before it read
-    /// its parent), and the card closes. An answer already in flight on it
-    /// finishes first.
+    /// The run that asked this card has ended, so nobody is left to answer it, and
+    /// the card closes. An answer already in flight on it finishes first.
     ///
     /// Either agent's card: a Codex card is retired in its own store, the way the
     /// frames that settle it retire it, as a turn that went away.
@@ -3671,14 +2658,7 @@ impl Daemon {
         let gate = self.answer_gate(&id).await;
         let _serialised = gate.lock().await;
         let (claude, question, link) = match self.inner.lock().await.pending.get_mut(&id) {
-            Some(entry) => {
-                entry.responder = None;
-                (
-                    entry.agent.is_claude(),
-                    entry.question.is_some(),
-                    entry.link,
-                )
-            }
+            Some(entry) => (entry.agent.is_claude(), entry.question, entry.link),
             None => return,
         };
         // A hosted run's card was its host's: nobody answered it, and nothing was
@@ -3713,166 +2693,6 @@ impl Daemon {
             true,
         )
         .await;
-    }
-
-    /// The main conversation went on while one of its questions was held, so
-    /// the question is no longer at the Mac although Claude neither ran the
-    /// tool nor ended the hook ("Chat about this" does that). Only the end of the
-    /// turn is proof the question is gone. A tool asked for in the same message
-    /// as the question fires its `PreToolUse` and `PermissionRequest` at the
-    /// same moment as the question's (measured on 2.1.286), its dialog waiting
-    /// behind the question's, and either can reach the daemon after the
-    /// question. Let the hook go and close the card.
-    async fn main_thread_moved(&self, session: &SessionKey) {
-        let gone: Vec<(ApprovalId, oneshot::Sender<HookDecision>)> = {
-            let mut inner = self.inner.lock().await;
-            inner
-                .pending
-                .iter_mut()
-                .filter(|(id, entry)| {
-                    id.0 == session.uid && !entry.claimed && !entry.fork && entry.question.is_some()
-                })
-                .filter_map(|(id, entry)| Some((id.clone(), entry.responder.take()?)))
-                .collect()
-        };
-        for (id, responder) in gone {
-            let _ = responder.send(HookDecision::passthrough());
-            self.resolve_without_phone(
-                &id.1,
-                session,
-                AnswerDecision::Decline,
-                ResolvedBy::Local,
-                "the question was closed at the computer before it was answered from a paired \
-                 device",
-                true,
-            )
-            .await;
-        }
-    }
-
-    /// Record and announce a change in whether the phone can answer a question.
-    async fn set_question_hold(&self, id: &ApprovalId, hold: QuestionHold) {
-        let (session, card, created_ms) = {
-            let mut inner = self.inner.lock().await;
-            let Some(entry) = inner.pending.get_mut(id) else {
-                return;
-            };
-            entry.card.question_hold = Some(hold);
-            (entry.session.clone(), entry.card.clone(), entry.created_ms)
-        };
-        self.persist_pending(&session, &card, created_ms).await;
-        let event = PendingEvent::new(
-            &session,
-            EventKind::Other("question_hold".into()),
-            serde_json::json!({ "request_id": id.1, "question_hold": hold }),
-            Source::Daemon,
-        )
-        .with_source_event_id(format!("hold:{}:{}", id.1, hold.as_str()));
-        if let Err(err) = self.ingest(event).await {
-            crate::log_error!("could not record the question hold for {}: {err:#}", id.1);
-        }
-    }
-
-    /// A question's tool ran. Whoever answered it, Claude now has its answer:
-    /// a phone answer waiting on this learns which one it was, and a hook still
-    /// held because the Mac answered first is let go.
-    async fn note_question_ran(&self, session_uid: &str, input: &HookInput) {
-        let Some(tool_use_id) = input.tool_use_id.clone() else {
-            return;
-        };
-        let ran_with = input.tool_input.clone().unwrap_or(serde_json::Value::Null);
-        let mut inner = self.inner.lock().await;
-        let Some(entry) = inner
-            .pending
-            .get_mut(&(session_uid.to_string(), tool_use_id))
-        else {
-            return;
-        };
-        let Some(question) = entry.question.as_mut() else {
-            return;
-        };
-        entry.tool_ran = true;
-        if let Some(confirm) = question.confirm.take() {
-            let _ = confirm.send(ran_with);
-        } else if let Some(responder) = entry.responder.take() {
-            let _ = responder.send(HookDecision::passthrough());
-        }
-    }
-
-    /// Persist the card so a restart still knows the agent is waiting.
-    ///
-    /// Best-effort by design: failing to write the projection must not stop the
-    /// card reaching the phone, because the durable *fact* is already in the
-    /// event log and the projection is only there to save rebuilding it.
-    /// False when the write was refused because the session no longer exists —
-    /// deleted while the hook was in flight. The caller must retire the
-    /// in-memory entry it just made, or the daemon holds an approval for a run
-    /// with no row until the expiry sweep finds it.
-    async fn persist_pending(
-        &self,
-        session: &SessionKey,
-        card: &ApprovalCard,
-        created_ms: i64,
-    ) -> bool {
-        let Ok(encoded) = serde_json::to_string(card) else {
-            crate::log_error!("could not encode the card for {}", card.request_id);
-            return true;
-        };
-        match self
-            .db
-            .upsert_pending_approval(PendingApprovalRow {
-                session_uid: session.uid.clone(),
-                session_id: session.name.clone(),
-                request_id: card.request_id.clone(),
-                card: encoded,
-                generation: card.generation,
-                created_ms,
-            })
-            .await
-        {
-            Ok(written) => written,
-            Err(err) => {
-                crate::log_error!(
-                    "could not persist the pending card for {}: {err:#}",
-                    card.request_id
-                );
-                // An I/O failure is not evidence the session is gone; the
-                // in-memory half stays and recovery is the expiry sweep's job,
-                // exactly as before this returned anything.
-                true
-            }
-        }
-    }
-
-    async fn notification_event(
-        &self,
-        session: &SessionKey,
-        raw: &serde_json::Value,
-        input: &HookInput,
-    ) -> PendingEvent {
-        let mut payload = raw.clone();
-        // Snapshot the pane exactly when Claude says a prompt is up, so the
-        // phone can render the real options. A snapshot, never a parse.
-        if input.notification_type.as_deref() == Some("permission_prompt") {
-            if let Ok(SupervisorResult::Snapshot { text }) = self
-                .supervisor_request(
-                    &session.uid,
-                    SupervisorRequest::Capture {
-                        lines: 60,
-                        // Scrollback kept: this snapshot is for the phone to
-                        // *render*, and context is what makes it readable.
-                        // Nothing decides anything from it.
-                        visible_only: false,
-                    },
-                )
-                .await
-            {
-                if let Some(map) = payload.as_object_mut() {
-                    map.insert("_codeconnect_pane".into(), serde_json::Value::String(text));
-                }
-            }
-        }
-        PendingEvent::new(session, EventKind::Notification, payload, Source::Hook)
     }
 
     /// Ring the phones that have not seen `trigger_seq`, after a short grace.
@@ -3912,10 +2732,8 @@ impl Daemon {
     /// waits, reading the idle time every [`crate::presence::POLL`], and rings the
     /// first time the Mac has been left that long. While it waits it asks once a
     /// second whether it still matters — the ticket, the card, both in memory —
-    /// and ends if not; before it goes it asks everything, the database and
-    /// the screen under a decision's dialog included ([`Daemon::answered_at_the_mac`],
-    /// with presence asked again after that read), so what rings is still true
-    /// when it rings. The hold lives in this task alone, as the gate lives in
+    /// and ends if not; before it goes it asks everything, the database
+    /// included, so what rings is still true when it rings. The hold lives in this task alone, as the gate lives in
     /// memory alone: a daemon restart drops a held ring.
     ///
     /// The cadence is measured, not guessed: process CPU, release build, someone
@@ -3974,12 +2792,6 @@ impl Daemon {
     /// measured at, and both scale with the answer rather than with anything this
     /// daemon controls — which is the same honest bound the recovery writes have, and
     /// has the same honest remedy if an answer ever arrives large enough to matter.
-    ///
-    /// **A decision answered at the Mac whose command still runs is counted.**
-    /// Claude Code keeps that approval's hook alive until the call's result, so
-    /// its card stays open, and another run's doorbell counts it as waiting until
-    /// then. Accepted: it errs toward telling, as holding rather than dropping a
-    /// ring for an owner who came back does.
     fn dispatch_push(
         self: &Arc<Self>,
         session_uid: String,
@@ -4035,26 +2847,10 @@ impl Daemon {
                     tokio::time::sleep(crate::presence::POLL).await;
                     continue;
                 }
-                // What the screen says about a decision's dialog, read now. The
-                // read can take a sweep period, so the owner back by then holds
-                // the ring again.
-                if let Some(key) = &needs_card {
-                    if daemon.answered_at_the_mac(&session_uid, key).await {
-                        crate::log_debug!(
-                            "push for {} dropped: its card was answered at this computer",
-                            session_uid
-                        );
-                        return;
-                    }
-                    if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
-                        continue;
-                    }
-                }
                 // **The run still has to exist.** The ticket catches a session
                 // evicted *after* this push was admitted, but not one evicted
-                // just before: a hook already past `ensure_session` goes on to
-                // admit, and mints its ticket against the epoch the eviction had
-                // already bumped. Asked here, the question has one answer for
+                // just before: an admission already under way mints its ticket
+                // against the epoch the eviction had already bumped. Asked here, the question has one answer for
                 // both — a doorbell for a run nobody can open is never rung.
                 //
                 // A database that will not answer is not an answer: the push goes
@@ -4140,92 +2936,9 @@ impl Daemon {
         });
     }
 
-    async fn maybe_push(
-        self: &Arc<Self>,
-        session: &SessionKey,
-        input: &HookInput,
-        trigger: &Event,
-    ) {
-        let kind = input.notification_type.as_deref().unwrap_or("");
-        // Two gates before any ring — see `crate::push_gate`. The ambient
-        // classes collapse Claude's repeating "still waiting" hooks into one
-        // occasion per state change; `permission_prompt` is the notification
-        // twin of a `PermissionRequest` that already rang, matched to the card
-        // it is about through the prompt it shares with it.
-        //
-        // **An occasion, not a subject.** A run going idle or finishing rings
-        // only if, when the doorbell goes, a decision the phone can answer is
-        // open somewhere — and then it is about that decision
-        // (`dispatch_push`). A card whose own doorbell was held while the
-        // owner was at the computer or looking at the app is often first told
-        // this way.
-        let admitted = match kind {
-            "agent_needs_input" | "idle_prompt" => self
-                .push_gate
-                .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
-                .map(|t| (t, None)),
-            "agent_completed" => self
-                .push_gate
-                .admit_ambient(&session.uid, crate::push_gate::Ambient::Done)
-                .map(|t| (t, None)),
-            "permission_prompt" => {
-                // **Which gate depends on whether there is a card**, and the
-                // question and the answer are one operation — see
-                // `PushGate::admit_notice`. Read apart, this notice and the
-                // `PermissionRequest` for the same prompt can each conclude the
-                // other has not happened yet and both ring.
-                //
-                // Which cards are open under its prompt is the daemon's own
-                // state, so it is read before the gate is entered; the gate is
-                // what decides and records, under one guard, in one step.
-                let cards = match input.prompt_id.as_deref() {
-                    Some(prompt) => self.open_cards_of_prompt(&session.uid, prompt).await,
-                    None => Vec::new(),
-                };
-                self.push_gate
-                    .admit_notice(&session.uid, input.prompt_id.as_deref(), &cards)
-                    .map(|(ticket, notice)| match notice {
-                        crate::push_gate::Notice::Decision(card) => (ticket, Some(CardKey(card))),
-                        crate::push_gate::Notice::Waiting => (ticket, None),
-                    })
-            }
-            _ => None,
-        };
-        // The ticket is minted inside the admission's own critical section:
-        // progress landing anywhere after it — even before the dispatch task
-        // spawns — reads as a moved epoch and kills the push.
-        let Some((ticket, card)) = admitted else {
-            return;
-        };
-        // **The doorbell carries no agent text.** `input.message` is the
-        // agent's own sentence and routinely names files and commands; an APNs
-        // payload passes through Apple, and the documented design is that
-        // nothing an agent wrote ever does. What it says is composed from the
-        // open decisions alone, when it rings.
-        self.dispatch_push(
-            session.uid.clone(),
-            trigger.seq,
-            ticket,
-            // **A decision outlives other tools' progress wherever it was
-            // admitted**, exactly as it does on the `PermissionRequest` path;
-            // only the session's death cancels it. A `permission_prompt` whose
-            // card is already filed is admitted here as that same decision, and
-            // the `note_progress` the request records moments later would
-            // otherwise cancel it — while the request's own admission found the
-            // prompt key taken and stayed silent. Two silences, and a reader
-            // never told there is a card waiting.
-            card.is_none(),
-            // A notice that turned out to be a decision announces a specific
-            // card, and has to still mean it when it rings.
-            card,
-        );
-    }
-
     /// **A Codex turn is running, which is the run demonstrably moving.**
     ///
-    /// Codex's analogue of Claude's `Stop`/`PreToolUse` progress: the hooks Claude
-    /// records movement from do not exist here, so the movement has to be read off
-    /// the wire.
+    /// The movement is read off the wire.
     ///
     /// **What it buys is the cancellation, not a notification.** A turn ending
     /// admits a quiet-state doorbell that then waits out its dispatch grace; if the
@@ -4308,15 +3021,12 @@ impl Daemon {
     ///   * the card goes to `codex_pending_approvals`, because a rolled-back
     ///     v0.6.0 daemon enumerates and deletes rows in the shared table without
     ///     ever walking a session row (see `Store::create_schema`);
-    ///   * `agent` is Codex on the card, so the Claude-only paths — the pane
-    ///     reader, the local resolver, the sweeps — leave it alone;
+    ///   * `agent` is Codex on the card;
     ///   * there is no responder and no prompt fingerprint. Nothing is blocked
     ///     on this daemon's answer — the human at the TUI is being asked — and
     ///     there is no pane this daemon can type into, which is why
     ///     `identity_bound` is false and stays false;
-    ///   * the row and the event are **one commit**. Claude's card is a
-    ///     projection of a fact a hook is still blocking on, so losing it to a
-    ///     restart loses nothing a restart had not already lost. A Codex card
+    ///   * the row and the event are **one commit**. A Codex card
     ///     has no responder and nothing waiting: durability is the entire thing
     ///     it is for, and a half-written one is either a fact with no card or a
     ///     card with no fact. See [`crate::store::Store::raise_codex_pending_approval`].
@@ -4428,20 +3138,13 @@ impl Daemon {
             session: session.clone(),
             project_label: label.clone(),
             agent: protocol::agent::AgentKind::Codex,
-            created_ms,
             raise,
-            // No hook is held open on a Codex approval: the app-server
-            // asked the TUI, not this daemon, and nothing here is
-            // blocking on an answer to hand back.
-            responder: None,
             claimed: false,
-            local_misses: 0,
             tool_ran: false,
-            rejected: false,
             // No Claude agent asked it.
             fork: false,
             link: false,
-            question: None,
+            question: false,
         };
 
         // **One commit boundary, and nothing is exposed before it holds.**
@@ -4575,10 +3278,7 @@ impl Daemon {
         // The doorbell hangs off the FILED event, and only a first sighting
         // files one. A re-delivery after a reconnect is not a second question.
         if let Some(event) = approval_event {
-            if let Some(ticket) = self
-                .push_gate
-                .admit_decision(&session.uid, &request_id, None)
-            {
+            if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &request_id) {
                 self.dispatch_push(
                     session.uid.clone(),
                     event.seq,
@@ -4800,8 +3500,7 @@ impl Daemon {
 
     /// **A Codex turn this daemon watched finish, as an occasion to ring.**
     ///
-    /// Codex's analogue of Claude's `agent_completed` notification, and the only
-    /// completion signal it has: the design refuses Codex's `notify` hook and its
+    /// The only completion signal Codex has: the design refuses Codex's `notify` hook and its
     /// `PermissionRequest` hook precisely so that `turn/completed` is the one thing
     /// that means a turn ended. So the same gate, the same ticket, the same
     /// dispatch — and, like every doorbell, it rings only if a decision the phone
@@ -4851,13 +3550,6 @@ impl Daemon {
     /// nothing rings: the run is working again, so there is no completion left to
     /// announce. See [`Daemon::note_codex_turn_running`].
     ///
-    /// **This is the Claude path's behaviour, not a Codex divergence, and it was
-    /// measured rather than assumed.** Claude's `Stop` hook records the same
-    /// progress its `agent_completed` notification is admitted beside, so two
-    /// Claude turns 100 ms apart ring once as well; with the notification alone and
-    /// no `Stop` between them, the `Done` latch collapses them to one ring too. All
-    /// three shapes were run against the real hook path and all three rang once.
-    ///
     /// Which is the right answer for the thing this is: a doorbell whose whole
     /// content is a few words and a count. Two rings 300 ms apart about the same
     /// open decisions are one fact told twice to somebody whose phone is on a
@@ -4895,9 +3587,8 @@ impl Daemon {
     /// row. A card left holding the old name would put one name on a lock
     /// screen and another on the list behind it.
     ///
-    /// Called by every writer of a session's `cwd`: an ordinary hook, and a
-    /// supervisor registering or reconnecting. One of them relabelling and the
-    /// other not is how the two names come apart again.
+    /// Called by the writer of a session's `cwd`: a supervisor registering or
+    /// reconnecting.
     async fn relabel_open_cards(&self, session_uid: &str, cwd: &str) {
         let label = crate::project_label::project_label(cwd);
         let mut inner = self.inner.lock().await;
@@ -4908,27 +3599,7 @@ impl Daemon {
         }
     }
 
-    /// The cards still open under one prompt — a notice that names only the
-    /// prompt is about one of them. Claude Code (2.1.308, recorded) asks every
-    /// call of a turn under the turn's `prompt_id`, one after another.
-    async fn open_cards_of_prompt(&self, session_uid: &str, prompt_id: &str) -> Vec<String> {
-        let inner = self.inner.lock().await;
-        let mut cards: Vec<String> = inner
-            .pending
-            .iter()
-            .filter(|((uid, _), entry)| {
-                uid == session_uid
-                    && !entry.tool_ran
-                    && entry.card.prompt_id.as_deref() == Some(prompt_id)
-            })
-            .map(|((_, request_id), _)| request_id.clone())
-            .collect();
-        cards.sort();
-        cards
-    }
-
-    /// What the fleet would call this run, from the cwd the daemon has
-    /// persisted rather than from whatever the current hook happened to carry.
+    /// What the fleet would call this run, from the cwd the daemon has persisted.
     async fn effective_project_label(&self, session_uid: &str) -> String {
         match self.db.get_session(session_uid.to_string()).await {
             Ok(Some(row)) => crate::project_label::project_label(&row.cwd),
@@ -4945,200 +3616,7 @@ impl Daemon {
         }
     }
 
-    /// Work out which run this hook belongs to, adopting it if it is new, and
-    /// learn its transcript path / Claude uuid along the way.
-    ///
-    /// Three cases, in decreasing order of confidence:
-    ///
-    /// 1. **The hook carries a uid.** `codeconnect claude` minted it at spawn and passed
-    ///    it into the generated settings, so this is exact.
-    /// 2. **No uid, but a live run answers to the name.** A session started
-    ///    before this daemon was upgraded posts from a settings file that
-    ///    predates the flag; continuing its existing identity is what keeps the
-    ///    in-place upgrade seamless.
-    /// 3. **No uid and no live run.** Either a session CodeConnect never
-    ///    launched (`claude:<uuid>`) or a name whose previous holder has exited.
-    ///    A fresh identity is minted — an exited run must never gain new events,
-    ///    which is the whole point.
-    ///
-    /// `Ok(None)` when the run was deleted while this hook was in flight: the
-    /// hook is dropped, and that is the expected outcome rather than an error.
-    async fn ensure_session(
-        &self,
-        session_id: &str,
-        session_uid: Option<&str>,
-        input: &HookInput,
-    ) -> Result<Option<SessionKey>> {
-        let now = protocol::time::now_rfc3339();
-        let existing = self.lookup_run(session_id, session_uid).await?;
-        let uid = match (&existing, session_uid) {
-            (Some(row), _) => row.session_uid.clone(),
-            (None, Some(uid)) if protocol::uid::is_well_formed(uid) => uid.to_string(),
-            (None, _) => {
-                // A name the user removed stays removed: an adopted run's hooks
-                // carry no uid, so without this check the next hook after a
-                // deletion would mint a fresh identity and put the row straight
-                // back. A SessionStart is the one exception — a resume
-                // announcing itself is a request to observe again, so it clears
-                // the record and re-adopts.
-                if self.db.name_is_tombstoned(session_id.to_string()).await? {
-                    if input.event_name() == HookEventName::SessionStart {
-                        self.db.clear_name_tombstone(session_id.to_string()).await?;
-                        crate::log_info!(
-                            "re-adopting {session_id}: a new session announced itself"
-                        );
-                    } else {
-                        crate::log_info!(
-                            "dropping a hook for {session_id}: the run was removed and nothing new has started"
-                        );
-                        return Ok(None);
-                    }
-                }
-                let uid = protocol::uid::new()?;
-                crate::log_info!("adopting session {session_id} as {uid}");
-                uid
-            }
-        };
-
-        // **From here the write is serialized against this session's registrations.**
-        //
-        // The row has exactly three production writers: this one,
-        // [`Daemon::register_supervisor`], and [`Daemon::mark_exited`] — which writes
-        // only `lifecycle`, and holds this same gate for it, because an
-        // end established before a registration completed would otherwise be recorded
-        // over the run that registration installed. All three count their write into
-        // [`Inner::row_writes`] under this gate, which is what lets a
-        // reader that looked at the row earlier find out that it has since moved.
-        // The two that write the identity
-        // columns are this one and the registration, and they are what the rest of
-        // this comment is about. Unguarded, they compose into a lost agent:
-        // a hook reads a Claude row, a Codex registration accepts — row, relabel,
-        // publish, link — and the hook then writes the agent it read back over the
-        // one the registration just set, because `agent` is the one identity column
-        // the upsert takes from `excluded` rather than COALESCE-ing. The row says
-        // Claude while a Codex link holds the session, which is precisely the pair
-        // [`Daemon::resolve_codex_inbound`] promises never to return. A resolver
-        // holding the registration gate against registrations alone was guarding one
-        // of the two writers and claiming both.
-        //
-        // **Per session, and only against acceptance.** This is the hot hook path —
-        // every hook every run posts arrives here — so it takes this uid's gate and no
-        // other: a hook waits out an acceptance for its OWN session, which is the wait
-        // that makes its write correct, and never one anywhere else in the fleet.
-        // Measured at 38µs against a 327µs hook (a re-read at 37µs, the uncontended
-        // gate at 2µs) on this machine.
-        //
-        // The row is read twice for the reason the resolver reads it twice: the first
-        // read answers WHICH run this hook belongs to — a hook that carries no uid
-        // names a tmux session, and that resolves to whichever run is live — so there
-        // is no gate to take until something has been read. The only thing it
-        // contributes to the write is the identity it resolved — `uid`, the conflict
-        // key, which is what the gate below is keyed by. Every mutable field the row
-        // carries forward comes from the guarded read, which shadows it.
-        let gate = self.registration_gate(&uid).await;
-        let _coherent = gate.lock().await;
-        let existing = self.db.get_session(uid.clone()).await?;
-
-        // **An adopted run gets no tmux location, because it has none we know
-        // of.** `claude:` is the prefix cc-hook mints for a session CodeConnect
-        // did not launch; recording `codeconnect`/`<name>` for one — a server
-        // and a name nothing ever created — is how the liveness sweep came to
-        // read tmux's inevitable "no such session" as proof of death for runs
-        // that were alive, marked them Exited, and let the phone delete them.
-        // Empty is the honest answer: the daemon cannot say where, or whether,
-        // this process runs. Hosted recreations — a `cc-*` name, or an exact
-        // uid after a crash — keep the real location.
-        let adopted = session_id.starts_with("claude:");
-        let row = SessionRow {
-            session_uid: uid.clone(),
-            session_id: session_id.to_string(),
-            tmux_session: existing
-                .as_ref()
-                .map(|r| r.tmux_session.clone())
-                .unwrap_or_else(|| {
-                    if adopted {
-                        String::new()
-                    } else {
-                        session_id.to_string()
-                    }
-                }),
-            tmux_socket: existing
-                .as_ref()
-                .map(|r| r.tmux_socket.clone())
-                .unwrap_or_else(|| {
-                    if adopted {
-                        String::new()
-                    } else {
-                        protocol::TMUX_SOCKET_NAME.to_string()
-                    }
-                }),
-            cwd: input
-                .cwd
-                .clone()
-                .or_else(|| existing.as_ref().map(|r| r.cwd.clone()))
-                .unwrap_or_default(),
-            claude_session_id: input.session_id.clone(),
-            transcript_path: input.transcript_path.clone(),
-            lifecycle: Lifecycle::Live,
-            created_at: existing
-                .as_ref()
-                .map(|r| r.created_at.clone())
-                .unwrap_or_else(|| now.clone()),
-            updated_at: now,
-            // A hook-driven upsert never changes which agent a run is: it
-            // preserves an existing row's agent (a Codex row is never demoted to
-            // Claude by a stray hook) and defaults a brand-new one to Claude,
-            // which every hook-adopted run is. Codex identity is COALESCE-kept by
-            // the upsert, so `None` here does not blank it.
-            //
-            // **`agent` is not**: the upsert writes `excluded.agent` outright, so
-            // this preservation is entirely the read above — which is why that read
-            // is inside the gate.
-            agent: existing
-                .as_ref()
-                .map(|r| r.agent.clone())
-                .unwrap_or_default(),
-            codex_thread_id: None,
-            codex_socket: None,
-        };
-        if self.db.upsert_session(row.clone()).await? == crate::store::SessionUpsert::Tombstoned {
-            // The uid was deliberately deleted while this hook was in flight.
-            // Nothing was written, so nothing may be set up either — no tail,
-            // no key to file the event under. Dropping the hook is the honest
-            // outcome — the user removed this run, and it stays removed — and
-            // it is an expected outcome, not a failure, so it is reported as
-            // one: `None`, logged at info, never an error.
-            crate::log_info!(
-                "session {uid} was deleted; dropping the hook that raced the deletion"
-            );
-            return Ok(None);
-        }
-        // **Counted, under the gate this write is already holding**.
-        // This writer moves `lifecycle` to `Live` without staking any registration
-        // epoch, so it is invisible to a guard that watches only who owns the
-        // session — and an end established against the row as it was before this
-        // hook would otherwise commit straight over the liveness it just recorded.
-        // See [`Inner::row_writes`].
-        self.inner.lock().await.note_row_write(&uid);
-
-        self.relabel_open_cards(&uid, &row.cwd).await;
-
-        if let Some(path) = &input.transcript_path {
-            let already = existing
-                .as_ref()
-                .and_then(|r| r.transcript_path.clone())
-                .is_some_and(|known| &known == path);
-            if !already {
-                let _ = self.transcript_tx.send(crate::tailer::TailCommand::Follow {
-                    session_uid: uid.clone(),
-                    path: path.clone(),
-                });
-            }
-        }
-        Ok(Some(SessionKey::new(uid, session_id)))
-    }
-
-    /// The row a hook or a registration should continue, if there is one.
+    /// The row a registration should continue, if there is one.
     ///
     /// An **exited** run is deliberately not continued when only a name is
     /// offered: `cc-1` having ended and `cc-1` having restarted look identical
@@ -5346,10 +3824,8 @@ impl Daemon {
     ///
     /// # What makes this a different function rather than a branch
     ///
-    /// Claude's path types into a pane, and everything it does is shaped by that:
-    /// it holds a hook responder, it fingerprints the prompt it expects to find, and
-    /// it cannot tell a keyboard answer from its own except by watching the pane.
-    /// None of that applies here. The answer is a JSON-RPC response written on the
+    /// A Claude card is answered through its run's agent host
+    /// ([`crate::claude_host::answer`]). Here the answer is a JSON-RPC response written on the
     /// link's own socket, the app-server actuates it, and which of the two answers
     /// won is a fact the broker reports rather than one this daemon infers.
     ///
@@ -7001,395 +5477,30 @@ impl Daemon {
         }
 
         // A hosted run's card is answered through its agent host, and its claim is
-        // settled by the host's outcome, never by the rule below.
-        if let Ok(Some(_)) = self.db.hosted_link(session_uid.clone()).await {
-            return crate::claude_host::answer(
-                self,
-                &session_uid,
-                request_id,
-                payload_hash,
-                decision,
-                answered_on,
-            )
-            .await;
-        }
-
-        // **An option on a hook's card — refused before any claim.** No Claude hook
-        // decision carries an `option_id`, so it is refused here, after the ledger
-        // (a retry of an answered card replays its outcome) and before every claim:
-        // it takes no responder, releases no held hook, writes no durable
-        // answer_claim, removes no card and appends no resolution. A hosted run's
-        // card took its branch above, where only the option the card offers is taken.
-        if matches!(decision, AnswerDecision::OptionId { .. }) {
-            return AnswerResult::Rejected {
-                reason: "an option_id answer is for a Codex session; this is a Claude session, \
-                         so nothing was typed"
-                    .into(),
-            };
-        }
-
-        // 2. A claim with no terminal outcome means a previous attempt was cut
-        //    off between claiming and recording. Startup recovery normally turns
-        //    those into terminal indeterminate outcomes; reaching one here means
-        //    that did not happen, and the rule is the same either way — never
-        //    send again an answer whose fate is unknown.
-        match self
-            .db
-            .answer_claim(session_uid.clone(), request_id.to_string())
-            .await
-        {
-            Ok(Some(claim)) => {
-                crate::log_warn!(
-                    "{} carries an unsettled claim from {}; refusing to send it again",
-                    logged_request_id(request_id),
-                    claim.started_at
-                );
-                self.settle_indeterminate(&claim, None, None).await;
-                self.inner.lock().await.pending.remove(&id);
-                return match self
-                    .db
-                    .get_answer(session_uid.clone(), request_id.to_string())
-                    .await
-                {
-                    Ok(Some((stored_hash, outcome))) => AnswerResult::Duplicate {
-                        outcome,
-                        stale_payload_hash: stored_hash != payload_hash,
-                    },
-                    _ => AnswerResult::Rejected {
-                        reason: "a previous attempt to apply this answer was interrupted and \
-                                 whether it reached the agent is unknown; it will not be sent \
-                                 again. Answer at the computer."
-                            .into(),
-                    },
-                };
-            }
-            Ok(None) => {}
-            Err(err) => {
-                crate::log_error!("claim read failed: {err:#}");
-                return AnswerResult::Rejected {
-                    reason: "ledger unavailable".into(),
-                };
-            }
-        }
-
-        // 3. Claim in memory so a local resolution racing us backs off, having
-        //    decided what this card's hook is handed.
-        let (session, card, hook) = {
-            let mut inner = self.inner.lock().await;
-            let Some(entry) = inner.pending.get_mut(&id) else {
-                return AnswerResult::Rejected {
-                    reason: "unknown or already-resolved request".into(),
-                };
-            };
-            if entry.card.payload_hash != payload_hash {
-                return AnswerResult::Rejected {
-                    reason: "stale payload_hash: the card you answered is out of date".into(),
-                };
-            }
-            // A card is answered through the hook Claude holds for its own call,
-            // or not at all: nothing is ever typed, so every decision its hook
-            // cannot carry is refused here, before anything is claimed.
-            let hook = match hook_decision(entry, &decision, answered_on) {
-                Ok(hook) => hook,
-                Err(reason) => return AnswerResult::Rejected { reason },
-            };
-            entry.claimed = true;
-            (entry.session.clone(), entry.card.clone(), hook)
-        };
-
-        #[cfg(test)]
-        answer_latch::claimed(&session_uid).await;
-
-        // 4. Claim it durably, before anything is handed over. Without this a
-        //    daemon killed mid-handoff comes back with no record that anything
-        //    was ever attempted, and the next tap sends the answer a second time.
-        let claim = AnswerClaim {
-            session_uid: session.uid.clone(),
-            session_id: session.name.clone(),
-            request_id: request_id.to_string(),
-            payload_hash: card.payload_hash.clone(),
-            decision: serde_json::to_string(&decision).unwrap_or_default(),
-            started_at: protocol::time::now_rfc3339(),
-        };
-        if let Err(err) = self.db.claim_answer(claim.clone()).await {
-            crate::log_error!(
-                "could not claim {} durably: {err:#}",
-                logged_request_id(request_id)
-            );
-            // Nothing was handed over: a held hook is still this card's for the
-            // next answer, unless the call ended meanwhile, which let it go.
-            if let Some(entry) = self.inner.lock().await.pending.get_mut(&id) {
-                entry.claimed = false;
-            }
-            return AnswerResult::Rejected {
-                reason: "could not record that this answer is being applied; nothing was sent"
-                    .into(),
-            };
-        }
-
-        // 5. Hand over. The hook is taken only now, under the lock: a call whose
-        //    result arrived while the claim was being written is over, its hook
-        //    already let go, and nothing is handed to it.
-        let handoff = {
-            let mut inner = self.inner.lock().await;
-            match inner.pending.get_mut(&id) {
-                Some(entry) => {
-                    let confirm = entry.question.as_mut().map(|question| {
-                        let (confirm_tx, confirm_rx) = oneshot::channel();
-                        question.confirm = Some(confirm_tx);
-                        confirm_rx
-                    });
-                    Some((entry.responder.take(), confirm))
-                }
-                _ => None,
-            }
-        };
-        // An approval's answer is only ever known to have been sent: Claude
-        // takes the first answer and may not use this one. A question's is
-        // confirmed by the answer Claude ran with.
-        let only_sent = matches!(handoff, Some((_, None)));
-        let actuation = match handoff {
-            None => Actuation::Refused(ANSWERED_AT_MAC.into()),
-            Some((responder, Some(confirm))) => {
-                Self::apply_question(responder, hook, confirm).await
-            }
-            Some((responder, None)) => Self::apply_approval(responder, hook),
-        };
-        let (applied_via, detail) = match actuation {
-            Actuation::Applied { via, detail } => (via, detail),
-            // Nothing was handed over. The claim is released, and the card is
-            // answerable again if its hook is still held.
-            Actuation::Refused(reason) => {
-                let _ = self
-                    .db
-                    .release_answer_claim(session.uid.clone(), request_id.to_string())
-                    .await;
-                let mut inner = self.inner.lock().await;
-                if let Some(entry) = inner.pending.get_mut(&id) {
-                    entry.claimed = false;
-                }
-                return AnswerResult::Rejected { reason };
-            }
-            // Handed over and never seen to land: Claude may have taken it and
-            // may not, and nothing later can settle it. Releasing the claim
-            // would let the next tap send it a second time — so the claim
-            // becomes a terminal *indeterminate* outcome instead, exactly as a
-            // restart would have recorded it.
-            Actuation::Unknown(reason) => {
-                crate::log_error!(
-                    "{request_id}: Claude never confirmed the answer ({reason}); recording it as \
-                     indeterminate rather than allowing a retry"
-                );
-                self.settle_indeterminate(
-                    &claim,
-                    Some((AnswerPath::HookReturn, reason.as_str())),
-                    Some(answered_on),
+        // settled by the host's outcome. No other Claude card takes an answer.
+        match self.db.hosted_link(session_uid.clone()).await {
+            Ok(Some(_)) => {
+                crate::claude_host::answer(
+                    self,
+                    &session_uid,
+                    request_id,
+                    payload_hash,
+                    decision,
+                    answered_on,
                 )
-                .await;
-                self.inner.lock().await.pending.remove(&id);
-                return match self
-                    .db
-                    .get_answer(session.uid.clone(), request_id.to_string())
-                    .await
-                {
-                    Ok(Some((stored_hash, outcome))) => AnswerResult::Duplicate {
-                        outcome,
-                        stale_payload_hash: stored_hash != payload_hash,
-                    },
-                    _ => AnswerResult::Rejected {
-                        reason: format!(
-                            "{reason}; whether it reached the agent is unknown and it will not \
-                             be sent again. Check the computer."
-                        ),
-                    },
-                };
+                .await
             }
-        };
-
-        // 6. Record the terminal outcome, which also clears the claim.
-        let mut outcome = AnswerOutcome {
-            request_id: request_id.to_string(),
-            session_id: session.name.clone(),
-            decision: decision.clone(),
-            resolved_by: ResolvedBy::Phone,
-            answered_on: Some(answered_on),
-            applied_via,
-            resolved_at: protocol::time::now_rfc3339(),
-            detail,
-            inferred: false,
-            indeterminate: only_sent,
-        };
-        let result =
-            match self
-                .store
-                .record_answer(&session.uid, request_id, &card.payload_hash, &outcome)
-            {
-                Ok(LedgerWrite::Recorded) => AnswerResult::Applied {
-                    outcome: outcome.clone(),
-                },
-                Ok(LedgerWrite::Existing {
-                    outcome: original,
-                    payload_hash: stored_hash,
-                }) => AnswerResult::Duplicate {
-                    outcome: original,
-                    stale_payload_hash: stored_hash != payload_hash,
-                },
-                Err(err) => {
-                    // The decision has already been handed to the call's hook, so
-                    // the phone is told so. What is *not* true is that it was
-                    // recorded — and the claim row surviving is what stops a
-                    // retry sending it again.
-                    crate::log_error!("ledger write failed after the handoff: {err:#}");
-                    outcome.detail = Some(format!(
-                        "{} (sent, but the durable record could not be written; a retry will \
-                         be refused rather than sent again)",
-                        outcome
-                            .detail
-                            .as_deref()
-                            .unwrap_or("returned through its hook")
-                    ));
-                    AnswerResult::Applied {
-                        outcome: outcome.clone(),
-                    }
+            Ok(None) => AnswerResult::Rejected {
+                reason: "Only a run CodeConnect started takes answers; nothing was sent.".into(),
+            },
+            Err(err) => {
+                crate::log_error!(
+                    "answer for {session_uid}: could not read its host link: {err:#}"
+                );
+                AnswerResult::Rejected {
+                    reason: "This computer could not read the session; nothing was sent.".into(),
                 }
-            };
-
-        // Dropped unconditionally, including on that ledger failure.
-        //
-        // With no ledger row, a later tap has nothing to be told it duplicates —
-        // but the durable claim is still there, so it is told "interrupted,
-        // outcome unknown" rather than being applied a second time.
-        {
-            let mut inner = self.inner.lock().await;
-            inner.pending.remove(&id);
-            end_call(&mut inner, request_id);
-        }
-        let _ = self
-            .db
-            .delete_pending_approval(session.uid.clone(), request_id.to_string())
-            .await;
-        let resolved = PendingEvent::new(
-            &session,
-            EventKind::ApprovalResolved,
-            serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null),
-            Source::Daemon,
-        )
-        .with_source_event_id(format!("resolved:{request_id}"));
-        if let Err(err) = self.ingest(resolved).await {
-            crate::log_error!("failed to record resolution: {err:#}");
-        }
-        result
-    }
-
-    /// Hand an approval's decision to the hook Claude holds for its call.
-    ///
-    /// Claude takes the first answer, the Mac's or this one, and a decision it
-    /// takes runs or refuses exactly this call; whether it took this one is
-    /// not observed. A hook already gone means Claude stopped waiting first,
-    /// and nothing was sent.
-    fn apply_approval(
-        responder: Option<oneshot::Sender<HookDecision>>,
-        hook: HookDecision,
-    ) -> Actuation {
-        let Some(responder) = responder else {
-            return Actuation::Refused(NOT_HELD.into());
-        };
-        if responder.send(hook).is_err() {
-            return Actuation::Refused(
-                "Claude stopped waiting for this answer before it was sent; nothing was sent. \
-                 Answer at the computer."
-                    .into(),
-            );
-        }
-        Actuation::Applied {
-            via: AnswerPath::HookReturn,
-            detail: Some(SENT_TO_CLAUDE.into()),
-        }
-    }
-
-    /// Hand a question's answer to the hook Claude holds for it, and learn
-    /// whether Claude ran with it.
-    ///
-    /// Claude takes the first complete answer and discards the other, so the
-    /// hook accepting ours proves nothing: the `PostToolUse` that follows says
-    /// whose answer it was. An answer confirmed is applied; one contradicted was
-    /// beaten by the Mac and is refused, nothing having changed. A decline has no
-    /// `PostToolUse` of its own and Claude reports none: one that arrives says
-    /// the Mac answered first, and without one whether Claude took the decline
-    /// is not known.
-    async fn apply_question(
-        responder: Option<oneshot::Sender<HookDecision>>,
-        hook: HookDecision,
-        confirm: oneshot::Receiver<serde_json::Value>,
-    ) -> Actuation {
-        let answered_at_mac = "this question was answered at the computer first, so this answer \
-                               was not used";
-        let Some(responder) = responder else {
-            return Actuation::Refused(NOT_HELD.into());
-        };
-        let sent = hook.updated_input.clone();
-        if responder.send(hook).is_err() {
-            return Actuation::Refused(
-                "Claude stopped waiting for this answer before it was sent; nothing was sent. \
-                 Answer at the computer."
-                    .into(),
-            );
-        }
-        let applied = Actuation::Applied {
-            via: AnswerPath::HookReturn,
-            // Content, not who typed it: the same answer chosen at the Mac first
-            // would confirm the same way.
-            detail: Some(
-                "Claude ran with exactly this answer, returned through its question hook".into(),
-            ),
-        };
-        match sent {
-            Some(sent) => match tokio::time::timeout(QUESTION_CONFIRM, confirm).await {
-                Ok(Ok(ran_with)) if crate::question::same_answer(&sent, &ran_with) => applied,
-                Ok(Ok(_)) => Actuation::Refused(answered_at_mac.into()),
-                _ => Actuation::Unknown(
-                    "Claude was handed the answer but never said which answer it ran with".into(),
-                ),
-            },
-            None => match tokio::time::timeout(QUESTION_DECLINE_SETTLE, confirm).await {
-                Ok(Ok(_)) => Actuation::Refused(answered_at_mac.into()),
-                _ => Actuation::Unknown(
-                    "Claude was handed the decline and does not say when it takes one".into(),
-                ),
-            },
-        }
-    }
-
-    /// What the supervisor for this run can honour, or `None` if there is none.
-    ///
-    /// A supervisor accepts fields it does not know and drops them, so a newer
-    /// request sent to an older one would look honoured and not be. That is a
-    /// different problem from having no supervisor at all, and the two get
-    /// different answers.
-    async fn supervisor_minor(&self, session_uid: &str) -> Option<u32> {
-        self.inner
-            .lock()
-            .await
-            .supervisors
-            .get(session_uid)
-            .map(|handle| handle.protocol_minor)
-    }
-
-    /// Resolve configured needle overrides into the request itself, so the
-    /// supervisor stays dumb and the operator can fix a broken presence check
-    /// (Claude's TUI copy is the most churn-prone thing we depend on) by
-    /// editing one config file instead of shipping a release.
-    fn with_needle_overrides(&self, presence: PromptPresence) -> PromptPresence {
-        let overrides = match presence {
-            PromptPresence::InputBox => self.config.input_box_needles(),
-            PromptPresence::PermissionPrompt => self.config.permission_prompt_needles(),
-            PromptPresence::AnyOf { .. } => return presence,
-        };
-        match overrides {
-            Some(needles) => PromptPresence::AnyOf {
-                needles: needles.to_vec(),
-            },
-            None => presence,
+            }
         }
     }
 
@@ -7426,8 +5537,8 @@ impl Daemon {
             Ok(row) if !self.shared_ledgers_admit(&row.agent) => {
                 return SendTextResult::Refused {
                     reason: format!(
-                        "{} is a {} session and this daemon only types into Claude sessions; \
-                         nothing was typed",
+                        "{} is a {} session and this daemon only sends messages to Claude \
+                         sessions; nothing was sent",
                         row.session_uid,
                         row.agent.as_str()
                     ),
@@ -7537,38 +5648,6 @@ impl Daemon {
         }
     }
 
-    /// A snapshot for the daemon to *decide* from: the visible pane and nothing
-    /// else.
-    ///
-    /// Every presence and identity check goes through here. A prompt that has
-    /// scrolled out of view is history, and history must never authorise a
-    /// keystroke: the answer to a question a human answered ten minutes ago
-    /// would otherwise be typed into whatever is on screen now.
-    async fn capture_visible(&self, session_uid: &str) -> Result<String> {
-        self.capture_pane(session_uid, 0, true).await
-    }
-
-    async fn capture_pane(
-        &self,
-        session_uid: &str,
-        lines: u32,
-        visible_only: bool,
-    ) -> Result<String> {
-        match self
-            .supervisor_request(
-                session_uid,
-                SupervisorRequest::Capture {
-                    lines,
-                    visible_only,
-                },
-            )
-            .await?
-        {
-            SupervisorResult::Snapshot { text } => Ok(text),
-            other => Err(anyhow!("unexpected supervisor result: {other:?}")),
-        }
-    }
-
     // ----------------------------------------------------------- supervisors
 
     /// Register (or re-register) a session's supervisor.
@@ -7579,8 +5658,6 @@ impl Daemon {
     pub async fn register_supervisor(
         self: &Arc<Self>,
         info: RegisterSession,
-        tx: mpsc::Sender<DaemonFrame>,
-        inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
     ) -> Result<Registration> {
         let now = protocol::time::now_rfc3339();
         let existing = self
@@ -7617,7 +5694,7 @@ impl Daemon {
         // at all. What follows this gate is therefore live for Codex rather than
         // dead code: the control-link fact is read off the frame, the generation
         // is compared against the standing high-water, the row is routed to
-        // `codex_sessions` by `upsert_session`, and a link is spawned. What did
+        // `codex_sessions` by `upsert_session_at_generation`, and a link is spawned. What did
         // NOT open with it is the four shared ledgers — see
         // [`Daemon::shared_ledgers_admit`], which is deliberately no longer
         // defined in terms of this list.
@@ -7635,7 +5712,7 @@ impl Daemon {
         //
         // The store deliberately *moves* a row between `sessions` and
         // `codex_sessions` when a re-registration disagrees with where the row
-        // lives ([`crate::store::Store::upsert_session`]), and says in as many
+        // lives ([`crate::store::Store::upsert_session_at_generation`]), and says in as many
         // words that whether a run may change agents at all is registration
         // adoption's question, not storage's. This is that question, answered in
         // the one direction where the answer is forced.
@@ -7657,13 +5734,12 @@ impl Daemon {
         // agent, and the counting query would be the only reader of four tables
         // nothing else asks about by uid.
         //
-        // **This is also what closes the three producers' check/write windows.**
-        // `send_text`, the `PermissionRequest` hook and `answer` each read the row's
-        // agent and write their ledger row later — 0, 7 and 5 awaits later
-        // respectively — without holding the registration gate. The write they are
-        // protecting is only wrong if the row can become Codex in between, and after
-        // this it cannot: `ensure_session` preserves an existing row's agent, and
-        // `register_supervisor` is the only other production writer of the column.
+        // **This is also what closes the producers' check/write windows.**
+        // `send_text` and `answer` each read the row's agent and write their ledger
+        // row later — 0 and 5 awaits later respectively — without holding the
+        // registration gate. The write they are protecting is only wrong if the row
+        // can become Codex in between, and after this it cannot: `register_supervisor`
+        // is the only production writer that rewrites the column.
         // Revalidating under the gate would defend a premise that can no longer
         // change; making the premise immutable is the smaller statement and the
         // stronger one. `a_claude_uid_never_becomes_codex` is what keeps it true.
@@ -7745,7 +5821,7 @@ impl Daemon {
         // repaired by anything downstream: the registration frame is the row's single
         // writer, and the relabel is a fire-once edit. The ordering does not even need
         // the two futures to interleave at an await to go wrong, because
-        // `Db::upsert_session` hands the write to the blocking pool: two registrations
+        // `Db::upsert_session_at_generation` hands the write to the blocking pool: two registrations
         // that call it in order can still reach SQLite's one writer in the other order.
         //
         // **Taken above the generation refusal AND above the agent transition, not
@@ -7791,7 +5867,7 @@ impl Daemon {
         // concurrent registration belongs under the gate that orders them.
         //
         // **`created_at` below reads the same snapshot and does NOT need this** —
-        // measured, not assumed. `Store::upsert_session`'s `ON CONFLICT DO UPDATE`
+        // measured, not assumed. `Store::upsert_session_at_generation`'s `ON CONFLICT DO UPDATE`
         // deliberately omits `created_at`, so the column is written on insert only
         // and a stale fallback there reaches no row that already has one. The
         // shadowed read makes it moot rather than fixing it.
@@ -8148,12 +6224,12 @@ impl Daemon {
         // the column in its parameter list, so there is no second write and no
         // window to crash in. `None` for Claude — guarded above, where a Claude
         // frame carrying a generation is refused outright — and `COALESCE` in
-        // the statement means every other writer of this row (hook, heartbeat,
-        // tailer) leaves the high-water alone rather than blanking it.
+        // the statement means a write that passes `None` leaves the high-water
+        // alone rather than blanking it.
         // An exit replay repeats the registration its supervisor sent at launch,
-        // so it is never news about where the run is: a row a hook has since moved
-        // (`claude --worktree` moves into its worktree) keeps that folder. A run
-        // that lived and ended while `ccd` was down has no row, and takes it.
+        // so it is never news about where the run is: a row whose folder has since
+        // moved (`claude --worktree` moves into its worktree) keeps that folder. A
+        // run that lived and ended while `ccd` was down has no row, and takes it.
         let cwd = match &existing {
             Some(row) if info.exit_replay && !row.cwd.is_empty() => row.cwd.clone(),
             _ => info.cwd.clone(),
@@ -8297,11 +6373,7 @@ impl Daemon {
             inner.supervisors.insert(
                 session.uid.clone(),
                 SupervisorHandle {
-                    tx,
-                    inflight,
-                    next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                     epoch,
-                    protocol_minor: info.protocol_minor,
                     agent_bin: info.agent_bin.clone(),
                     codex_generation: info.codex_generation,
                 },
@@ -8809,7 +6881,7 @@ impl Daemon {
                     .and_then(|owners| owners.get(&row.session_uid).copied()),
             },
             // **Not a claim about the row.** What a supervisor witnessed is its own
-            // process ending, which no later write to the row makes untrue — a hook
+            // process ending, which no later write to the row makes untrue — a write
             // from the dying run landing between the lookup and the commit is the
             // corpse twitching, not a reason to leave the row `Live`. The sweep's
             // evidence is the opposite kind and carries the opposite answer; see
@@ -8900,7 +6972,7 @@ impl Daemon {
     /// [`Inner::registration_epochs`] is a tombstone, so a disconnect
     /// leaves the epoch behind and a real exit report is not refused for having
     /// arrived after its own socket closed. An absent entry means nothing has ever
-    /// registered for this uid, which is the ordinary shape of a hook-adopted run.
+    /// registered for this uid.
     ///
     /// **The row rule is separate, and only one caller has evidence of that kind.**
     /// A sweep proves a *row's* tmux location empty, so a row written since it
@@ -8982,19 +7054,10 @@ impl Daemon {
         true
     }
 
-    /// What follows a run's recorded end, its `SessionEnd` already in the log: its tail
-    /// stopped and its cards closed. `commit` is the run's registration gate, held since
-    /// the end was recorded; it is released before the cards close.
+    /// What follows a run's recorded end, its `SessionEnd` already in the log: its
+    /// cards closed. `commit` is the run's registration gate, held since the end was
+    /// recorded; it is released before the cards close.
     async fn after_the_end(&self, session: &SessionKey, commit: tokio::sync::OwnedMutexGuard<()>) {
-        // Sent *after* the event, so the order on the wire is the order things
-        // happened: everything the tailer has already read is in the log ahead
-        // of the end, and its own final read lands after it. A run that has
-        // ended writes nothing more, and a tail nobody stops is a `stat` per
-        // poll — plus a filesystem watch on a working directory that is usually
-        // deleted — for the rest of the daemon's life.
-        let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
-            session_uid: session.uid.clone(),
-        });
         // Nobody is left to answer this run's cards, whichever agent asked them.
         // They are read under the gate the end was recorded under, and closed
         // after it is released: an answer in flight on one finishes first, and a
@@ -9060,82 +7123,6 @@ impl Daemon {
         self.inner.lock().await.note_row_write(session_uid);
         self.after_the_end(&session, commit).await;
         Ok(true)
-    }
-
-    /// Ask the supervisor for something, and be precise about failure.
-    ///
-    /// The two failure kinds are not a nicety. A request that never left this
-    /// process cannot have typed anything; one that was sent and never answered
-    /// might have. Only the first may be retried, and a caller handed a single
-    /// opaque error has no way to tell which it is holding.
-    async fn supervisor_request(
-        &self,
-        session_uid: &str,
-        request: SupervisorRequest,
-    ) -> std::result::Result<SupervisorResult, SupervisorFailure> {
-        let (slot, tx, rx) = {
-            let inner = self.inner.lock().await;
-            let Some(handle) = inner.supervisors.get(session_uid) else {
-                return Err(SupervisorFailure::NotSent(format!(
-                    "no supervisor attached for {session_uid}"
-                )));
-            };
-            let id = handle
-                .next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .to_string();
-            let (response_tx, response_rx) = oneshot::channel();
-            handle
-                .inflight
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(id.clone(), response_tx);
-            // From here on the entry is owned by a guard, so every exit path
-            // below — refused send, timeout, dropped channel, or a panic —
-            // removes it. It used to be removed only by a *reply*, which meant
-            // every timed-out request left a `oneshot::Sender` in the map
-            // forever: one entry per abandoned capture, on a supervisor that
-            // lives as long as its session, growing without any bound and with
-            // nothing that would ever collect it.
-            let slot = InflightSlot {
-                id,
-                inflight: Arc::clone(&handle.inflight),
-            };
-            (slot, handle.tx.clone(), response_rx)
-        };
-
-        // `try_send` rather than an await: the queue is bounded now, and
-        // blocking the answer path on a supervisor that has stopped reading is
-        // exactly the stall this is meant to avoid. Both refusals — full and
-        // closed — mean the frame never left this process, which is precisely
-        // what `NotSent` promises its caller.
-        if let Err(err) = tx.try_send(DaemonFrame::SupervisorRequest {
-            id: slot.id.clone(),
-            request,
-        }) {
-            return Err(SupervisorFailure::NotSent(match err {
-                mpsc::error::TrySendError::Full(_) => {
-                    format!("the supervisor for {session_uid} is not reading its requests")
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    format!("supervisor for {session_uid} is gone")
-                }
-            }));
-        }
-
-        match tokio::time::timeout(Duration::from_millis(self.config.supervisor_timeout_ms), rx)
-            .await
-        {
-            Ok(Ok(result)) => Ok(result),
-            // Both of these are "it was sent and we never heard back". The
-            // supervisor may have acted before it stopped answering.
-            Ok(Err(_)) => Err(SupervisorFailure::Unanswered(
-                "the supervisor dropped the request".into(),
-            )),
-            Err(_) => Err(SupervisorFailure::Unanswered(
-                "the supervisor did not answer in time".into(),
-            )),
-        }
     }
 
     // ---------------------------------------------- the inbound resolver
@@ -9458,16 +7445,8 @@ impl Daemon {
     /// is genuinely in flight rather than being told the fleet is unreadable.
     ///
     /// **The gate is held by every writer of the row, not only by registrations.**
-    /// There are three: `register_supervisor`, [`Daemon::ensure_session`],
-    /// the hook path, which reads the row and writes it back — and `agent` is the one
-    /// identity column the upsert takes from `excluded` rather than COALESCE-ing, so an
-    /// unguarded hook could restore a Claude agent over a Codex registration and leave
-    /// exactly the pair this function promises not to return. A gate that stopped at
-    /// registrations would be guarding one writer and claiming both, which is a claim
-    /// this function is not entitled to make.
-    ///
-    /// The third is [`Daemon::mark_exited`], reached from a supervisor's exit report
-    /// and from the liveness sweep. It writes only `lifecycle`, so it can
+    /// There are two: `register_supervisor`, and [`Daemon::mark_exited`], reached from a
+    /// supervisor's exit report and from the liveness sweep. It writes only `lifecycle`, so it can
     /// never assemble the torn identity pair above — but it takes this gate too, and
     /// for a reason of its own: it commits an end established at an earlier moment,
     /// and a registration completing in between makes the row somebody else's. The
@@ -10246,7 +8225,7 @@ impl Daemon {
     /// A permission request from the agent host of the hosted run `uid`, message `seq`
     /// from the host `host`: today's card, held for the apps and answered only through
     /// the host. Its `approval_request` event and its row are committed with the
-    /// cursor, then it rings as a hook card does. A request whose card could not
+    /// cursor, then it rings. A request whose card could not
     /// reach an app whole is refused at once instead: the host is answered deny,
     /// claude reads why, and no card is raised. `false` when the cursor did not move.
     pub(crate) async fn host_card_asked(
@@ -10264,8 +8243,8 @@ impl Daemon {
         .then(|| option("suggestions").cloned())
         .flatten();
         let fork = option("agentID").is_some();
-        // A question takes answers, never an allow, as a hook's question card does.
-        let question = request.tool_name == protocol::hook::ASK_USER_QUESTION;
+        // A question takes answers, never an allow.
+        let question = request.tool_name == protocol::host::ASK_USER_QUESTION;
         let allow_for_session = !question && session_rules(suggestions.as_ref()).is_some();
         let card = ApprovalCard {
             request_id: request_id.clone(),
@@ -10320,16 +8299,12 @@ impl Daemon {
                         session: session.clone(),
                         project_label: label,
                         agent: protocol::agent::AgentKind::Claude,
-                        created_ms,
                         raise: 0,
-                        responder: None,
                         claimed: false,
-                        local_misses: 0,
                         tool_ran: false,
-                        rejected: false,
                         fork,
                         link: true,
-                        question: question.then(QuestionState::default),
+                        question,
                     });
                     true
                 }
@@ -10364,7 +8339,7 @@ impl Daemon {
         };
         // A replayed request files nothing and rings nothing.
         if let Some(event) = filed.first() {
-            if let Some(ticket) = self.push_gate.admit_decision(uid, &request_id, None) {
+            if let Some(ticket) = self.push_gate.admit_decision(uid, &request_id) {
                 self.dispatch_push(
                     uid.to_string(),
                     event.seq,
@@ -10869,10 +8844,7 @@ impl Daemon {
         // row I read" are two questions and the epoch answers only the first.** A
         // registration stakes its epoch one await BEFORE its row write, so a sweep
         // can hold the new epoch and the old row at once and find them agreeing at
-        // the commit; and `ensure_session` writes `Lifecycle::Live` without staking
-        // an epoch at all, so a hook can revive a row invisibly to an owner check.
-        // The write count moves with the row in both cases. See
-        // [`Inner::row_writes`].
+        // the commit. The write count moves with the row. See [`Inner::row_writes`].
         //
         // One snapshot for the sweep rather than one read per commit: a read at the
         // commit is the answer *after* the window, which is the one answer that
@@ -10905,9 +8877,9 @@ impl Daemon {
             if row.lifecycle == Lifecycle::Exited {
                 continue;
             }
-            // A run with no recorded location was adopted, not spawned: the
-            // hooks arrived but nothing here put it in tmux, so tmux cannot
-            // testify about it — probing a fabricated name is how live adopted
+            // A run with no recorded location was never put in tmux here — a
+            // hosted run, or one an earlier build adopted from its hooks — so tmux
+            // cannot testify about it — probing a fabricated name is how live adopted
             // runs used to be "proven" dead and deleted. Skipped before the
             // counters so `examined`/`unknown` and the per-sweep warn line stay
             // truthful rather than naming these rows forever.
@@ -11138,14 +9110,6 @@ impl Daemon {
                 // Nothing left to ring about, and stale latches must not leak
                 // onto a future run.
                 self.push_gate.evict_session(session_uid);
-                // A live unhosted run may still have a transcript tail; its
-                // cursor died with the rows, so an unstopped tail would re-read
-                // the file from byte zero every poll, forever, into a guard
-                // that drops every batch. Harmless no-op for hosted rows, whose
-                // tails stopped at `mark_exited`.
-                let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
-                    session_uid: session_uid.to_string(),
-                });
                 protocol::ws::DeleteSessionResult::Deleted { events }
             }
             // The store's word for it, carried through rather than flattened.
@@ -11211,281 +9175,7 @@ impl Daemon {
         Ok(removed)
     }
 
-    /// Expire approvals nobody answered, so `blocked_on` reflects reality: a
-    /// Claude approval no hook holds, older than `max_age_ms`.
-    ///
-    /// **Age speaks only for a card nobody can see.** One whose run's screen
-    /// shows a permission prompt is still waiting at the computer, however old
-    /// it is, and stays: the prompt leaving the screen, the call's own result or
-    /// the run ending closes it. A screen that cannot be read, or that shows no
-    /// prompt, says nothing, and age closes that card.
-    pub async fn expire_stale_approvals(&self, max_age_ms: i64) {
-        let now = protocol::time::now_unix_ms();
-        let expired: Vec<(String, SessionKey)> = {
-            let inner = self.inner.lock().await;
-            inner
-                .pending
-                .iter()
-                .filter(|(_, p)| {
-                    // **Claude's cards only**, the same filter the pane sweep already
-                    // applies and for a sharper reason. `resolve_without_phone` writes
-                    // the shared `answers`, reports `AnswerPath::SendKeys` and deletes
-                    // from the shared `pending_approvals` — three of the four tables a
-                    // rolled-back v0.6.0 daemon rewrites globally — so a Codex card
-                    // passing through here is the rollback leak the agent split exists
-                    // to prevent, and the outcome it files is a keyboard timeout for a
-                    // question no keyboard was ever shown.
-                    //
-                    // There is no Codex sweep to put in its place, and the absence is
-                    // the measurement rather than an omission: the app-server holds a
-                    // `serverRequest` open until something answers it, so a Codex
-                    // approval does not go stale. The frames that settle it are what
-                    // retire the card.
-                    p.agent.is_claude()
-                        && !p.claimed
-                        && now - p.created_ms > max_age_ms
-                        // A question waits as long as Claude does, held or at
-                        // the Mac, and so does any card held for the phone: age
-                        // says nothing about whether it is still open, and only
-                        // its own ending may close its card.
-                        && p.question.is_none()
-                        && p.card.question_hold != Some(QuestionHold::Held)
-                })
-                .map(|((_, request_id), p)| (request_id.clone(), p.session.clone()))
-                .collect()
-        };
-        for (request_id, session) in expired {
-            // Read outside the lock, as the pane sweep reads it.
-            if matches!(self.capture_visible(&session.uid).await,
-                Ok(ref pane) if self.read_screen(pane) == Some(false))
-            {
-                continue;
-            }
-            self.resolve_without_phone(
-                &request_id,
-                &session,
-                AnswerDecision::Deny,
-                ResolvedBy::Timeout,
-                "expired without an answer; local operator owns it",
-                // The daemon never observed an answer, and says so.
-                true,
-            )
-            .await;
-        }
-    }
-
-    // ------------------------------------------------- local resolution
-
-    /// Notice approvals that were answered at the Mac's keyboard.
-    ///
-    /// Two signals, in decreasing order of confidence:
-    ///
-    /// 1. **A tool result arrived** for the request. The call ran, so it was
-    ///    approved. That is an observation, and the decision it implies is a
-    ///    fact rather than a guess.
-    /// 2. **The prompt left the pane and the composer came back.** All this
-    ///    proves is that the prompt was dismissed — not what was chosen — so the
-    ///    recorded decision is marked `inferred` and the phone is expected to
-    ///    render "answered at the keyboard" from `resolved_by`, not to present
-    ///    the decision as fact.
-    ///
-    /// Getting this wrong in the *other* direction is the expensive mistake:
-    /// resolving an approval the human has not answered would make the card
-    /// vanish from the phone while the Mac still waits. Everything defensive
-    /// here exists for that one failure — the grace period, the two consecutive
-    /// observations, requiring the composer's return rather than accepting the
-    /// prompt's absence, and treating an unreadable pane as no evidence at all.
-    pub async fn sweep_local_resolutions(&self) {
-        if !self.config.local_resolve {
-            return;
-        }
-        let now = protocol::time::now_unix_ms();
-        let grace = self.config.local_resolve_grace_ms as i64;
-
-        // Snapshot first: capturing a pane is a subprocess round-trip and must
-        // not happen with the state lock held.
-        //
-        // **Claude's cards only, and that is now a filter rather than a fact.**
-        // Every line of this sweep is about a *Claude* prompt: it searches the
-        // pane for Claude's permission box and Claude's composer, it binds a
-        // Claude prompt fingerprint, and it resolves through
-        // [`Daemon::resolve_without_phone`], which writes `answers` — one of the
-        // tables a rolled-back v0.6.0 daemon rewrites globally — and deletes
-        // from `pending_approvals`, which is not where a Codex card lives.
-        //
-        // Until the approval observer there were no Codex cards in `pending`, so
-        // the whole sweep was Claude-only by construction and needed no filter.
-        // There are now, and run against one the sweep would do three wrong
-        // things at once: read a Codex TUI pane for a Claude prompt, leak a
-        // Codex row into `answers`, and delete nothing from
-        // `codex_pending_approvals` — leaving the card on the phone with the only
-        // thing that could retire it already gone from memory. A Codex card is
-        // retired by the frames that actually settle it, on the link.
-        //
-        // A question held for the phone is not judged from the pane at all: its
-        // hook says when it ends, and a background agent's is not on the pane.
-        let candidates: Vec<(String, SessionKey, bool, i64, bool, bool)> = {
-            let inner = self.inner.lock().await;
-            inner
-                .pending
-                .iter()
-                .filter(|(_, p)| !p.claimed && p.agent.is_claude())
-                .filter(|(_, p)| p.tool_ran || p.card.question_hold != Some(QuestionHold::Held))
-                .map(|((_, request_id), p)| {
-                    (
-                        request_id.clone(),
-                        p.session.clone(),
-                        p.tool_ran,
-                        p.created_ms,
-                        p.question.is_some(),
-                        p.rejected,
-                    )
-                })
-                .collect()
-        };
-        if candidates.is_empty() {
-            return;
-        }
-
-        // The tool ran: resolve immediately, no pane reading required.
-        for (request_id, session, _, _, question, rejected) in
-            candidates.iter().filter(|(_, _, ran, _, _, _)| *ran)
-        {
-            let (decision, detail) = if *question {
-                (
-                    AnswerDecision::Answers {
-                        answers: Vec::new(),
-                    },
-                    "the question was answered at the computer",
-                )
-            } else if *rejected {
-                (AnswerDecision::Deny, CALL_REJECTED)
-            } else {
-                (AnswerDecision::Allow, CALL_RAN)
-            };
-            self.resolve_without_phone(
-                request_id,
-                session,
-                decision,
-                ResolvedBy::Local,
-                detail,
-                false,
-            )
-            .await;
-        }
-
-        // One capture per run, however many approvals are outstanding on it.
-        let mut sessions: Vec<SessionKey> = candidates
-            .iter()
-            .filter(|(_, _, tool_ran, created, _, _)| !tool_ran && now - created > grace)
-            .map(|(_, session, _, _, _, _)| session.clone())
-            .collect();
-        sessions.sort_by(|a, b| a.uid.cmp(&b.uid));
-        sessions.dedup_by(|a, b| a.uid == b.uid);
-
-        for session in sessions {
-            // Visible pane only. With scrollback, a permission prompt answered
-            // ten minutes ago is still "on screen" as far as a needle search is
-            // concerned — which would freeze this detector permanently *and*, on
-            // the answer path, authorise typing into whatever replaced it.
-            let Ok(pane) = self.capture_visible(&session.uid).await else {
-                // No supervisor, or capture failed. We cannot see the screen,
-                // so we know nothing — which is not the same as "the prompt is
-                // gone", and must not be treated as it.
-                continue;
-            };
-            // Positive evidence only — see `read_screen`.
-            let answered_locally = self.read_screen(&pane) == Some(true);
-
-            let resolved: Vec<String> = {
-                let mut inner = self.inner.lock().await;
-                let mut resolved = Vec::new();
-                for ((uid, request_id), entry) in inner.pending.iter_mut() {
-                    if uid != &session.uid
-                        || entry.claimed
-                        || entry.tool_ran
-                        || now - entry.created_ms <= grace
-                        || entry.card.question_hold == Some(QuestionHold::Held)
-                    {
-                        continue;
-                    }
-                    if answered_locally {
-                        entry.local_misses += 1;
-                        if entry.local_misses >= LOCAL_RESOLVE_MISSES {
-                            resolved.push(request_id.clone());
-                        }
-                    } else {
-                        entry.local_misses = 0;
-                    }
-                }
-                resolved
-            };
-
-            for request_id in resolved {
-                self.resolve_without_phone(
-                    &request_id,
-                    &session,
-                    AnswerDecision::Deny,
-                    ResolvedBy::Local,
-                    "the prompt left the screen without CodeConnect typing into it; \
-                     answered at the keyboard, outcome not observed",
-                    true,
-                )
-                .await;
-            }
-        }
-    }
-
-    /// What a pane says about a permission dialog: `Some(false)` it is on the
-    /// screen, `Some(true)` it is gone and the composer is back — answered —
-    /// and `None` neither, which says nothing either way.
-    ///
-    /// Positive evidence, not merely absence. "The permission prompt is gone"
-    /// is also true when the operator switched tmux windows, when the pane is
-    /// mid-redraw, or when a long tool is still running — and resolving on any
-    /// of those would clear a card the human has not answered, which is the one
-    /// failure this must not have. "The prompt is gone *and* the composer is
-    /// accepting input again" only happens after the prompt was dismissed.
-    fn read_screen(&self, pane: &str) -> Option<bool> {
-        if self
-            .with_needle_overrides(PromptPresence::PermissionPrompt)
-            .find_match(pane, None)
-            .is_some()
-        {
-            return Some(false);
-        }
-        self.with_needle_overrides(PromptPresence::InputBox)
-            .find_match(pane, None)
-            .map(|_| true)
-    }
-
-    /// Whether the Mac answered this card, by its run's screen, read once when
-    /// its doorbell would ring. Claude Code 2.1.308, recorded, leaves the
-    /// `PermissionRequest` hook running after "Yes" at the Mac and writes
-    /// nothing until the call's result, minutes later for a long command: the
-    /// screen is the only word of the answer until then. Read when the ring
-    /// would go, never earlier — a dialog read as answered (another pane looked
-    /// at, a transient) and then back on the screen is still a decision. The
-    /// read is allowed one sweep period; a screen showing neither the dialog
-    /// nor the composer (the detailed transcript view), or none in that time,
-    /// is no answer, and the doorbell rings — unsure, the owner hears about it.
-    async fn answered_at_the_mac(&self, session_uid: &str, key: &CardKey) -> bool {
-        // A hosted run's card has no dialog and no pane: it is answered only
-        // through its host.
-        let on_the_pane =
-            the_card(&*self.inner.lock().await, session_uid, key).is_some_and(|entry| {
-                entry.agent.is_claude() && !entry.link && dialog_on_the_pane(entry)
-            });
-        if !on_the_pane {
-            return false;
-        }
-        let sweep = Duration::from_millis(self.config.local_resolve_poll_ms);
-        let Ok(Ok(pane)) = tokio::time::timeout(sweep, self.capture_visible(session_uid)).await
-        else {
-            return false;
-        };
-        self.read_screen(&pane) == Some(true)
-    }
+    // ------------------------------------------- resolution without the phone
 
     /// Retire an approval that the phone did not answer.
     ///
@@ -11505,18 +9195,14 @@ impl Daemon {
         // resolution, so a phone answer racing this either finds the entry (and
         // wins) or finds the ledger (and is a well-formed duplicate).
         //
-        // A *claimed* entry is left alone: the phone is mid-injection, and its
-        // answer is the better record. If that injection then fails the entry is
-        // unclaimed again and the next sweep picks it up.
+        // A *claimed* entry is left alone: the phone's answer is in flight, and
+        // it is the better record.
         let id: ApprovalId = (session.uid.clone(), request_id.to_string());
         let taken = {
             let mut inner = self.inner.lock().await;
             match inner.pending.get(&id) {
                 Some(entry) if entry.claimed => false,
-                Some(_) => {
-                    end_call(&mut inner, request_id);
-                    inner.pending.remove(&id).is_some()
-                }
+                Some(_) => inner.pending.remove(&id).is_some(),
                 None => false,
             }
         };
@@ -12066,14 +9752,6 @@ const QUESTION_NEEDS_CARD: &str = "Claude is asking you a question. Answer it at
 /// Why a question decision cannot answer an ordinary card.
 const NOT_A_QUESTION: &str = "this answers a question, and this card is not one; nothing was sent";
 
-/// How a card closes when its call's own result says the Mac answered it.
-const CALL_RAN: &str = "the tool ran, so it was approved at the computer";
-/// What an answer to an approval from a paired device is recorded as: sent, not
-/// confirmed. Every app reads an answer as sent by exactly this sentence
-/// (CodeConnectKit's `AnswerOutcome.sentToClaude`), so it is the same whichever
-/// device sent it; `answered_on` says which.
-const SENT_TO_CLAUDE: &str = "Sent to Claude from a phone";
-const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the computer";
 /// How a card closes when the run that asked it ends first.
 const RUN_ENDED: &str = "the session ended before anyone answered";
 
@@ -12107,9 +9785,8 @@ fn host_card_closure(session: &SessionKey, request_id: &str, detail: &str) -> Pe
     .with_source_event_id(format!("resolved:{request_id}"))
 }
 
-/// The host's decision for an answer to a hosted run's card, as [`hook_decision`]
-/// gives a hook's: allow; a deny, which also ends the main conversation's turn; or a
-/// deny with the person's reason. A question takes only its answers, which go back
+/// The host's decision for an answer to a hosted run's card: allow; a deny, which
+/// also ends the main conversation's turn; or a deny with the person's reason. A question takes only its answers, which go back
 /// as its input, or a decline, a deny that ends the main conversation's turn as a
 /// deny does. A card that offers "Allow for this session" also takes that option: an
 /// allow carrying claude's own allow rules for the request, made the session's.
@@ -12118,7 +9795,7 @@ fn host_decision(
     decision: &AnswerDecision,
     answered_on: AnsweredOn,
 ) -> std::result::Result<protocol::host::Decision, String> {
-    if entry.question.is_some() {
+    if entry.question {
         return match decision {
             AnswerDecision::Answers { answers } => {
                 crate::question::host_updated_input(&entry.card.tool_input, answers)
@@ -12174,27 +9851,6 @@ fn host_decision(
     }
 }
 
-/// Why a claimed answer was not handed over: its call ended first.
-const ANSWERED_AT_MAC: &str =
-    "this was answered at the computer before this answer could be handed over; nothing was sent";
-
-/// Why a card cannot be answered from the phone right now.
-const NOT_HELD: &str = "this card is not being held for the phone (Claude is showing it at the \
-                        computer); answer it there. Nothing was sent.";
-
-/// What the hook says when it does not hold a card: Claude shows it at the Mac.
-const SHOWN_ON_THE_PHONE: &str = "CodeConnect: shown on your phone; answer it here";
-
-/// Tools Claude asks about through `PermissionRequest` but takes no hook allow
-/// for (`requiresUserInteraction`, read from 2.1.290's bundle): only their own
-/// dialog answers them. `ExitPlanMode` takes an allow with its input, and
-/// `AskUserQuestion` is a question card. An MCP tool can declare the same, and
-/// nothing in its request says so.
-const ANSWERED_ONLY_AT_THE_MAC: [&str; 2] = ["ShowOnboardingRolePicker", "OfferChromeSetup"];
-
-/// The tool whose allow Claude takes only with the input it runs with.
-const EXIT_PLAN_MODE: &str = "ExitPlanMode";
-
 /// What a background agent is told when its call is denied, in Claude 2.1.290's
 /// own words for an Escape at that agent's dialog.
 const BACKGROUND_DENIAL: &str = "Permission for this tool use was denied. The tool use was \
@@ -12209,114 +9865,14 @@ const DENIAL_WITH_REASON: &str = "The user doesn't want to proceed with this too
                                   was NOT written to the file). To tell you how to proceed, the \
                                   user said:\n";
 
-/// The source a card's `approval_request` event is filed under: Claude's by its
-/// hook, Codex's and a hosted run's by this daemon with the card's row.
+/// The source a card's `approval_request` event is filed under: a hosted run's and
+/// Codex's by this daemon with the card's row; a card an earlier build filed for a run
+/// it did not host, by its hook.
 fn request_event_source(entry: &PendingApproval) -> Source {
     if entry.link || matches!(entry.agent, protocol::agent::AgentKind::Codex) {
         Source::Daemon
     } else {
         Source::Hook
-    }
-}
-
-/// A hook from the main conversation rather than a background agent.
-fn main_thread(payload: &serde_json::Value) -> bool {
-    payload
-        .get("agent_id")
-        .is_none_or(serde_json::Value::is_null)
-}
-
-/// What this card's held hook is handed for a decision, decided before
-/// anything is claimed. Anything its hook cannot carry is refused: nothing is
-/// ever typed.
-fn hook_decision(
-    entry: &PendingApproval,
-    decision: &AnswerDecision,
-    answered_on: AnsweredOn,
-) -> Result<HookDecision, String> {
-    let held = hook_is_held(entry);
-    if entry.question.is_some() {
-        return question_hook_decision(entry, decision, held, answered_on);
-    }
-    match decision {
-        AnswerDecision::Answers { .. } | AnswerDecision::Decline => {
-            return Err(NOT_A_QUESTION.into())
-        }
-        _ if entry.tool_ran => {
-            return Err("this call was already answered at the computer; nothing was sent".into())
-        }
-        _ if !held => return Err(NOT_HELD.into()),
-        _ => {}
-    }
-    match decision {
-        // The first option of Claude's dialog is its plain yes.
-        AnswerDecision::Allow | AnswerDecision::Option { index: 1 } => Ok(HookDecision {
-            decision: Decision::Allow,
-            updated_input: (entry.card.tool_name == EXIT_PLAN_MODE)
-                .then(|| entry.card.tool_input.clone()),
-            ..HookDecision::passthrough()
-        }),
-        // The main conversation's turn stops, as Escape at the dialog does; a
-        // background agent's call is denied without an interrupt.
-        AnswerDecision::Deny => Ok(HookDecision {
-            decision: Decision::Deny,
-            reason: Some(BACKGROUND_DENIAL.into()),
-            interrupt: !entry.fork,
-            ..HookDecision::passthrough()
-        }),
-        // A denial with a reason goes to the agent that asked.
-        AnswerDecision::Text { text } => Ok(HookDecision {
-            decision: Decision::Deny,
-            reason: Some(format!("{DENIAL_WITH_REASON}{text}")),
-            ..HookDecision::passthrough()
-        }),
-        _ => Err(
-            "the phone can allow or deny this card; any other choice is made at the computer. \
-             Nothing was sent."
-                .into(),
-        ),
-    }
-}
-
-/// What a decision does to a question card. A question takes only answers and a
-/// decline; anything else would pick answers nobody chose.
-fn question_hook_decision(
-    entry: &PendingApproval,
-    decision: &AnswerDecision,
-    held: bool,
-    answered_on: AnsweredOn,
-) -> Result<HookDecision, String> {
-    match decision {
-        AnswerDecision::Allow
-        | AnswerDecision::Option { .. }
-        | AnswerDecision::Text { .. }
-        | AnswerDecision::OptionId { .. } => return Err(QUESTION_NEEDS_CARD.into()),
-        _ if entry.tool_ran => {
-            return Err(
-                "this question was already answered at the computer; nothing was sent".into(),
-            )
-        }
-        _ => {}
-    }
-    match decision {
-        _ if !held => Err(NOT_HELD.into()),
-        AnswerDecision::Answers { answers } => {
-            crate::question::updated_input(&entry.card.tool_input, answers)
-                .map(|input| HookDecision {
-                    decision: Decision::Allow,
-                    updated_input: Some(input),
-                    ..HookDecision::passthrough()
-                })
-                .map_err(|reason| format!("{reason}. Nothing was sent."))
-        }
-        // The main conversation's question is denied with an interrupt, as Escape
-        // at its dialog does; a background agent's is denied without one.
-        _ => Ok(HookDecision {
-            interrupt: !entry.fork,
-            decision: Decision::Deny,
-            reason: Some(declined_from(answered_on).into()),
-            ..HookDecision::passthrough()
-        }),
     }
 }
 
@@ -12350,12 +9906,8 @@ fn declined_from(answered_on: AnsweredOn) -> &'static str {
     }
 }
 
-/// Mark the approval a tool result belongs to, if any.
-///
-/// PostToolUse carries the `tool_use_id` that *is* the approval's request id
-/// (the correlation established at PreToolUse), so this is an exact join rather
-/// than a heuristic. The resolution itself is left to the sweeper: doing it here
-/// would mean re-entering `ingest` from inside `ingest`.
+/// Mark the approval a tool result belongs to, if any: the result's item id *is*
+/// the approval's request id, so this is an exact join rather than a heuristic.
 fn note_tool_result(inner: &mut Inner, event: &Event) {
     if event.kind != EventKind::ToolResult {
         return;
@@ -12366,62 +9918,6 @@ fn note_tool_result(inner: &mut Inner, event: &Event) {
     let id: ApprovalId = (event.session_uid.clone(), item_id.clone());
     if let Some(entry) = inner.pending.get_mut(&id) {
         entry.tool_ran = true;
-        // Answered at the Mac first: its hook is let go. A question's is let go
-        // by `note_question_ran`, which also tells a phone answer whose it was.
-        if entry.question.is_none() {
-            entry.responder = None;
-        }
-    }
-    end_call(inner, item_id);
-}
-
-/// One call under a [`correlation_key`]: its `tool_use_id`, the run's
-/// [`Inner::main_turn_ends`] when its `PreToolUse` arrived, whether it is
-/// over, and whether its result was Claude's rejection of it.
-#[derive(Clone)]
-struct KeyedCall {
-    tool_use_id: String,
-    turn_ends: u64,
-    ended: bool,
-    rejected: bool,
-}
-
-/// The call a `PermissionRequest` with these candidates belongs to: the one
-/// still open, or, when none is, the one whose result came first. None when
-/// two could be asking.
-fn joined_call(calls: &[KeyedCall]) -> Option<&KeyedCall> {
-    let mut open = calls.iter().filter(|call| !call.ended);
-    match (open.next(), open.next(), calls) {
-        (Some(call), None, _) => Some(call),
-        (None, None, [call]) => Some(call),
-        _ => None,
-    }
-}
-
-/// The calls a transcript tool-result line ends, each with whether Claude
-/// rejected it (`toolDenialKind`) rather than ran it.
-fn ended_calls(line: &serde_json::Value) -> Vec<(String, bool)> {
-    let rejected = line
-        .get("toolDenialKind")
-        .and_then(serde_json::Value::as_str)
-        .is_some();
-    line.pointer("/message/content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("tool_result"))
-        .filter_map(|item| item.get("tool_use_id")?.as_str())
-        .map(|id| (id.to_string(), rejected))
-        .collect()
-}
-
-/// A call is over: a later call with its key no longer has to be told apart
-/// from it.
-fn end_call(inner: &mut Inner, tool_use_id: &str) {
-    for call in inner.tool_use_ids.values_mut().flatten() {
-        if call.tool_use_id == tool_use_id {
-            call.ended = true;
-        }
     }
 }
 
@@ -12757,58 +10253,6 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// PermissionRequest has no `tool_use_id`; this is the join key back to the
-/// PreToolUse that does.
-///
-/// Scoped by `session_uid`, not by name: two runs called `cc-1` executing the
-/// same command in the same directory produce identical `(tool, input)` hashes,
-/// and correlating across them would hand one run's approval the other's
-/// `tool_use_id`. Scoped by `agent_id` for the same reason: background agents in
-/// one turn share its `prompt_id` and can make the same call at once, and each
-/// answer goes back through its own agent's hook.
-pub(crate) fn correlation_key(session_uid: &str, input: &HookInput) -> Option<String> {
-    let tool_name = input.tool_name.as_deref()?;
-    let tool_input = input.tool_input.as_ref()?;
-    let agent = input
-        .agent_id
-        .as_deref()
-        .map(|agent| format!("|{agent}"))
-        .unwrap_or_default();
-    Some(format!(
-        "{session_uid}|{}|{tool_name}|{}{agent}",
-        input.prompt_id.as_deref().unwrap_or(""),
-        approval_payload_hash(tool_name, tool_input)
-    ))
-}
-
-pub(crate) fn hook_event(
-    session: &SessionKey,
-    event_name: &HookEventName,
-    payload: &serde_json::Value,
-    input: &HookInput,
-) -> PendingEvent {
-    let mut pending = PendingEvent::new(
-        session,
-        event_name.maps_to_event_kind(),
-        payload.clone(),
-        Source::Hook,
-    )
-    .with_turn_id(input.prompt_id.clone())
-    .with_item_id(input.tool_use_id.clone());
-
-    // Only facts with a genuinely unique natural id get one: reusing a
-    // non-unique id would silently drop real events.
-    if let Some(tool_use_id) = &input.tool_use_id {
-        let prefix = match event_name {
-            HookEventName::PreToolUse => "pre",
-            HookEventName::PostToolUse => "post",
-            _ => "tool",
-        };
-        pending = pending.with_source_event_id(format!("{prefix}:{tool_use_id}"));
-    }
-    pending
-}
-
 /// **The ordered seam that makes "past its snapshot" a fact**.
 ///
 /// [`Daemon::register_supervisor`] reads the row for its uid once before any
@@ -12860,47 +10304,6 @@ pub(crate) mod snapshot_latch {
             .cloned();
         if let Some(signal) = armed {
             signal.notify_one();
-        }
-    }
-}
-
-/// **A seam inside [`Daemon::answer`], between the in-memory claim and the
-/// durable one**, so a test can land the Mac's answer in exactly the window
-/// where a phone answer is claimed and not yet handed over. Armed per uid,
-/// like [`snapshot_latch`].
-#[cfg(test)]
-pub(crate) mod answer_latch {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
-
-    use tokio::sync::Notify;
-
-    type Latch = (Arc<Notify>, Arc<Notify>);
-
-    fn table() -> &'static Mutex<HashMap<String, Latch>> {
-        static T: OnceLock<Mutex<HashMap<String, Latch>>> = OnceLock::new();
-        T.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    /// Stop the next answer for `uid` at the seam. Returns (reached, go): the
-    /// answer notifies the first when it arrives and waits on the second.
-    pub(crate) fn arm(uid: &str) -> Latch {
-        let latch = (Arc::new(Notify::new()), Arc::new(Notify::new()));
-        table()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(uid.to_string(), latch.clone());
-        latch
-    }
-
-    pub(crate) async fn claimed(uid: &str) {
-        let armed = table()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(uid);
-        if let Some((reached, go)) = armed {
-            reached.notify_one();
-            go.notified().await;
         }
     }
 }
@@ -13216,10 +10619,6 @@ mod tests {
         FakeHome::new(tag)
     }
 
-    fn input_from(raw: &str) -> HookInput {
-        serde_json::from_str(raw).unwrap()
-    }
-
     // ---------------------------------------------------- daemon harness
 
     /// A daemon with a private database and no supervisors. Everything the
@@ -13251,24 +10650,7 @@ mod tests {
     }
 
     fn daemon_on(store: Arc<Store>, config: Config) -> Arc<Daemon> {
-        let (daemon, rx) = daemon_watching_tails(store, config);
-        // Kept alive: dropping the receiver would make every transcript
-        // registration fail, which is not what most of these tests is about.
-        Box::leak(Box::new(rx));
-        daemon
-    }
-
-    /// The same, keeping the tailer's end of the channel so a test can see what
-    /// the daemon asked it to do.
-    fn daemon_watching_tails(
-        store: Arc<Store>,
-        config: Config,
-    ) -> (
-        Arc<Daemon>,
-        mpsc::UnboundedReceiver<crate::tailer::TailCommand>,
-    ) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let daemon = Daemon::new(
+        Daemon::new(
             config,
             store,
             Arc::new(crate::apns::LoggingPushSender::new()),
@@ -13277,9 +10659,7 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tx,
-        );
-        (daemon, rx)
+        )
     }
 
     const STATIC_TOKEN: &str = "static-token-for-tests";
@@ -14147,33 +11527,24 @@ mod tests {
         uid: Option<&str>,
         protocol_minor: u32,
     ) -> Registration {
-        // Bounded exactly as the ipc server's is, so a test cannot pass on a
-        // queue depth the daemon never has.
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        // Kept alive so the handle looks attached; nothing here sends to it.
-        Box::leak(Box::new(rx));
         daemon
-            .register_supervisor(
-                RegisterSession {
-                    session_id: name.to_string(),
-                    session_uid: uid.map(str::to_string),
-                    tmux_session: name.to_string(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                    cwd: "/tmp".to_string(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(RegisterSession {
+                session_id: name.to_string(),
+                session_uid: uid.map(str::to_string),
+                tmux_session: name.to_string(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                cwd: "/tmp".to_string(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Claude,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: None,
+                codex_generation: None,
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor,
+                exit_replay: false,
+            })
             .await
             .expect("registration must succeed")
     }
@@ -14202,316 +11573,30 @@ mod tests {
         ));
     }
 
-    // ------------------------------------------------------ fake supervisor
-
-    /// Verbatim shape of a live permission prompt on claude 2.1.220. Only the
-    /// command differs between the two.
-    fn permission_pane(command: &str) -> String {
-        format!(
-            " Bash command\n   {command}\n   Run this command\n\n Do you want to proceed?\n \
-             ❯ 1. Yes\n   2. Yes, and always allow\n   3. No\n \
-             Esc to cancel · Tab to amend · ctrl+e to explain"
-        )
+    /// A supervisor registered for `uid` under `name`, attached for as long as the
+    /// test holds the registration.
+    async fn attach(daemon: &Arc<Daemon>, name: &str, uid: &str) -> Registration {
+        register(daemon, name, Some(uid)).await
     }
 
-    /// A live composer with nothing typed into it, captured with
-    /// `tmux capture-pane -p -J` on claude 2.1.232.
-    const COMPOSER_PANE: &str =
-        include_str!("../../../fixtures/panes/composer/manual-shortcuts.txt");
-
-    /// A supervisor that actually answers, over a screen the test controls.
-    ///
-    /// Before typing it checks for the prompt with the same `protocol::ipc`
-    /// prompt-presence function the real supervisor calls, because a harness
-    /// that re-implements the interlock would be testing its own copy of it.
-    /// What it adds is a *split screen*: `scrollback` is only ever returned for
-    /// a capture that did not ask for the visible pane, which is how these
-    /// tests can tell "read the screen" from "read the history".
-    struct FakeSupervisor {
-        visible: Arc<std::sync::Mutex<String>>,
-        typed: Arc<std::sync::Mutex<Vec<String>>>,
-        /// When set, injections are swallowed without a reply — a supervisor
-        /// that typed and then stopped answering, which is indistinguishable
-        /// from one that never typed at all.
-        silent: Arc<std::sync::atomic::AtomicBool>,
-        /// The very map `supervisor_request` inserts into, so a test can assert
-        /// that a request which was never answered left nothing behind.
-        inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
-        /// Held so the daemon keeps seeing this supervisor as attached for as
-        /// long as the test holds the handle.
-        _registration: Registration,
-    }
-
-    impl FakeSupervisor {
-        fn show(&self, pane: &str) {
-            *self.visible.lock().unwrap() = pane.to_string();
-        }
-
-        /// How many requests this supervisor still has outstanding.
-        fn inflight_len(&self) -> usize {
-            self.inflight.lock().unwrap().len()
-        }
-
-        /// Stop answering injections. Nothing here records whether it typed,
-        /// because the daemon cannot know either — that is the whole point.
-        fn go_silent(&self) {
-            self.silent.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-
-        fn typed(&self) -> Vec<String> {
-            self.typed.lock().unwrap().clone()
-        }
-    }
-
-    async fn attach(
-        daemon: &Arc<Daemon>,
-        name: &str,
-        uid: &str,
-        visible: &str,
-        scrollback: &str,
-    ) -> FakeSupervisor {
-        attach_speaking(
-            daemon,
-            name,
-            uid,
-            visible,
-            scrollback,
-            protocol::PROTOCOL_MINOR,
-        )
-        .await
-    }
-
-    async fn attach_speaking(
-        daemon: &Arc<Daemon>,
-        name: &str,
-        uid: &str,
-        visible: &str,
-        scrollback: &str,
-        protocol_minor: u32,
-    ) -> FakeSupervisor {
-        let (tx, mut rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        let inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let visible_cell = Arc::new(std::sync::Mutex::new(visible.to_string()));
-        let typed = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let silent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let history = scrollback.to_string();
-
-        {
-            let inflight = Arc::clone(&inflight);
-            let visible_cell = Arc::clone(&visible_cell);
-            let typed = Arc::clone(&typed);
-            let silent = Arc::clone(&silent);
-            tokio::spawn(async move {
-                while let Some(frame) = rx.recv().await {
-                    let DaemonFrame::SupervisorRequest { id, request } = frame else {
-                        continue;
-                    };
-                    let on_screen = visible_cell.lock().unwrap().clone();
-                    let result = match request {
-                        SupervisorRequest::Ping => SupervisorResult::Pong,
-                        SupervisorRequest::Capture { visible_only, .. } => {
-                            SupervisorResult::Snapshot {
-                                text: if visible_only {
-                                    on_screen
-                                } else {
-                                    format!("{history}\n{on_screen}")
-                                },
-                            }
-                        }
-                        SupervisorRequest::SendText {
-                            text,
-                            require,
-                            expect,
-                            ..
-                        } if silent.load(std::sync::atomic::Ordering::SeqCst) => {
-                            let _ = (text, require, expect);
-                            continue;
-                        }
-                        SupervisorRequest::SendText {
-                            text,
-                            require,
-                            expect,
-                            ..
-                        } => match require.find_match(&on_screen, None) {
-                            None => SupervisorResult::Refused {
-                                reason: "expected prompt not on screen".into(),
-                            },
-                            Some(matched) => {
-                                if expect
-                                    .as_ref()
-                                    .is_some_and(|expect| !expect.still_on_screen(&on_screen))
-                                {
-                                    SupervisorResult::Refused {
-                                        reason: "the prompt on screen is not the one this \
-                                                     answer was created for"
-                                            .into(),
-                                    }
-                                } else {
-                                    typed.lock().unwrap().push(text);
-                                    SupervisorResult::Sent { matched }
-                                }
-                            }
-                        },
-                    };
-                    if let Some(responder) = inflight.lock().unwrap().remove(&id) {
-                        let _ = responder.send(result);
-                    }
-                }
-            });
-        }
-
-        let registration = daemon
-            .register_supervisor(
-                RegisterSession {
-                    session_id: name.to_string(),
-                    session_uid: Some(uid.to_string()),
-                    tmux_session: name.to_string(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                    cwd: "/tmp".to_string(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::clone(&inflight),
-            )
-            .await
-            .expect("registration must succeed");
-
-        FakeSupervisor {
-            visible: visible_cell,
-            typed,
-            silent,
-            inflight,
-            _registration: registration,
-        }
-    }
-
-    /// Raise a structured permission request the way the hook does.
-    async fn raise_prompt(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        prompt_id: &str,
-        command: &str,
-    ) -> String {
-        raise_prompt_in(daemon, "cc-1", uid, prompt_id, command).await
-    }
-
-    /// The same, for a named run — so a test can hold two runs at once.
-    async fn raise_prompt_in(
-        daemon: &Arc<Daemon>,
-        session_id: &str,
-        uid: &str,
-        prompt_id: &str,
-        command: &str,
-    ) -> String {
-        let tool_input = json!({ "command": command });
-        daemon
-            .handle_hook(HookPost {
-                session_id: session_id.into(),
-                session_uid: Some(uid.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/tmp",
-                    "prompt_id": prompt_id,
-                    "tool_name": "Bash",
-                    "tool_input": tool_input,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        format!(
-            "pr-{prompt_id}-{}",
-            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..16]
-        )
-    }
-
-    /// [`raise_prompt`], held for the phone: the call is joined by its
-    /// `PreToolUse` and the hook waits, so the phone can answer the card — the
-    /// only kind of approval a doorbell rings for. Returns the card's request id,
-    /// once it is filed.
-    async fn raise_held_prompt(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        prompt_id: &str,
-        command: &str,
-    ) -> String {
-        raise_held_prompt_in(daemon, "cc-1", uid, prompt_id, command).await
-    }
-
-    /// The same, for a named run.
-    async fn raise_held_prompt_in(
-        daemon: &Arc<Daemon>,
-        session_id: &str,
-        uid: &str,
-        prompt_id: &str,
-        command: &str,
-    ) -> String {
-        let tool_input = json!({ "command": command });
-        let call = format!(
-            "toolu_{prompt_id}_{}",
-            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..12]
-        );
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": prompt_id,
-                "tool_name": "Bash", "tool_input": tool_input,
-            })
-        };
-        let mut before = hook("PreToolUse");
-        before["tool_use_id"] = json!(call);
-        let mut pre = post(uid, before, false);
-        pre.session_id = session_id.into();
-        daemon.handle_hook(pre).await;
-        let mut request = post(uid, hook("PermissionRequest"), true);
-        request.session_id = session_id.into();
-        let held = Arc::clone(daemon);
-        tokio::spawn(async move { held.handle_hook(request).await });
-        for _ in 0..200 {
-            if daemon
-                .inner
-                .lock()
-                .await
-                .pending
-                .contains_key(&(uid.to_string(), call.clone()))
-            {
-                return call;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the held card {call} was never filed");
-    }
-
+    /// A tool call filed on the run `uid`, called `name`.
     async fn tool_call(daemon: &Arc<Daemon>, name: &str, uid: &str, tool_use_id: &str) {
+        let call = PendingEvent::new(
+            &SessionKey::new(uid, name),
+            EventKind::ToolCall,
+            json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi"},
+                "tool_use_id": tool_use_id,
+            }),
+            Source::Daemon,
+        )
+        .with_source_event_id(tool_use_id.to_string());
         daemon
-            .handle_hook(HookPost {
-                session_id: name.into(),
-                session_uid: Some(uid.to_string()),
-                event: "PreToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PreToolUse",
-                    "cwd": "/tmp",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "echo hi"},
-                    "tool_use_id": tool_use_id,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
+            .ingest(call)
+            .await
+            .unwrap()
+            .expect("a new call is filed");
     }
 
     #[tokio::test]
@@ -14723,64 +11808,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hook_without_a_uid_continues_a_live_run_but_never_a_dead_one() {
-        // The in-place upgrade path (a session whose settings file predates the
-        // flag) and the restart path, which must not be the same answer.
-        let daemon = test_daemon();
-        let live = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
-
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: None,
-                event: "PreToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PreToolUse",
-                    "cwd": "/tmp",
-                    "tool_use_id": "toolu_legacy",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        assert_eq!(
-            daemon.store.max_seq(&live.session.uid).unwrap(),
-            2,
-            "a uid-less hook must continue the live run, not fork it"
-        );
-        assert_eq!(daemon.sessions().await.unwrap().len(), 1);
-
-        // Once that run has exited, the same hook is a *new* run: `cc-1` having
-        // ended and `cc-1` having restarted are indistinguishable from a name.
-        daemon
-            .session_exited("cc-1", Some(&live.session.uid), Some(0), None, Some(&live))
-            .await;
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: None,
-                event: "SessionStart".into(),
-                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        let sessions = daemon.sessions().await.unwrap();
-        assert_eq!(sessions.len(), 2, "an exited run must not gain new events");
-        let adopted = sessions
-            .iter()
-            .find(|s| s.session_uid != live.session.uid)
-            .unwrap();
-        assert!(protocol::uid::is_well_formed(&adopted.session_uid));
-        assert_eq!(adopted.last_seq, 1);
-    }
-
-    #[tokio::test]
     async fn an_approval_answered_in_one_run_leaves_the_next_run_s_card_open() {
         // Approval safety, which is why the ledger is keyed per run: the same
-        // `request_id` in a later `cc-1` must be answerable, not reported as an
+        // `request_id` in a later run must be answerable, not reported as an
         // already-applied duplicate of a decision nobody made for it.
         let daemon = test_daemon();
         let first = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
@@ -14814,11 +11844,12 @@ mod tests {
             )
             .await;
 
-        let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
+        let second = "01K1B3XZZZC0DE5FGH7JKMNPQR";
+        hosted_run(&daemon, second, "/tmp");
         assert!(
             daemon
                 .store
-                .get_answer(&second.session.uid, "toolu_shared")
+                .get_answer(second, "toolu_shared")
                 .unwrap()
                 .is_none(),
             "the new run has answered nothing"
@@ -14831,7 +11862,7 @@ mod tests {
                 "toolu_shared",
                 "hash",
                 AnswerDecision::Allow,
-                Some(&second.session.uid),
+                Some(second),
                 protocol::ws::AnsweredOn::Iphone,
             )
             .await;
@@ -14843,1235 +11874,8 @@ mod tests {
         }
     }
 
-    /// Raise a `PermissionRequest` with no correlating PreToolUse, which is the
-    /// normal case on this Claude build — and the one where the request id is
-    /// derived from the command rather than from an agent-side identity.
-    async fn uncorrelated_approval(daemon: &Arc<Daemon>, name: &str, uid: &str) -> String {
-        let tool_input = json!({"command": "git status"});
-        daemon
-            .handle_hook(HookPost {
-                session_id: name.into(),
-                session_uid: Some(uid.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/tmp",
-                    "tool_name": "Bash",
-                    "tool_input": tool_input,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        format!(
-            "pr-noprompt-{}",
-            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..16]
-        )
-    }
-
-    #[tokio::test]
-    async fn an_answer_scoped_only_by_name_is_refused_when_two_runs_share_the_card() {
-        // The collision is real, not theoretical: an uncorrelated approval's
-        // request id is `pr-noprompt-<hash of tool+input>`, so two runs of the
-        // same command produce the same id *and* the same payload hash — which
-        // means the staleness guard downstream would not catch the mix-up
-        // either. Answering the wrong agent's prompt types into the wrong TTY,
-        // so this must refuse rather than pick.
-        let daemon = test_daemon();
-        let first = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
-        let request_id = uncorrelated_approval(&daemon, "cc-1", &first.session.uid).await;
-
-        // A ghost: same name, same command, never observed exiting.
-        let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
-        let same_id = uncorrelated_approval(&daemon, "cc-1", &second.session.uid).await;
-        assert_eq!(request_id, same_id, "the ids must actually collide");
-
-        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
-        match daemon
-            .answer(
-                &request_id,
-                &hash,
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Rejected { reason } => {
-                assert!(reason.contains("more than one run"), "{reason}");
-            }
-            other => panic!("a name must not pick between two open cards: {other:?}"),
-        }
-        // …and the same refusal with no scope at all, which is the case a
-        // protocol-minor-1 client hits.
-        assert!(matches!(
-            daemon
-                .answer(
-                    &request_id,
-                    &hash,
-                    AnswerDecision::Allow,
-                    None,
-                    protocol::ws::AnsweredOn::Iphone
-                )
-                .await,
-            AnswerResult::Rejected { .. }
-        ));
-
-        // Naming the run exactly is always answerable: that is what the uid is
-        // for, and it is the instruction the refusal gives.
-        let outcome = daemon
-            .answer(
-                &request_id,
-                &hash,
-                AnswerDecision::Allow,
-                Some(&second.session.uid),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        assert!(
-            !matches!(&outcome, AnswerResult::Rejected { reason } if reason.contains("more than one")),
-            "a uid is unambiguous by construction: {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_name_scoped_answer_reaches_the_only_run_holding_the_card() {
-        // The other half: scoping by name must keep working when there is no
-        // collision, or every legacy client loses the ability to answer.
-        let daemon = daemon_with(Config {
-            supervisor_timeout_ms: 50,
-            ..Config::default()
-        });
-        let session = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
-        let request_id = uncorrelated_approval(&daemon, "cc-1", &session.session.uid).await;
-        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
-
-        // No supervisor can type, so this cannot be `Applied` — but it must
-        // reach the injection attempt rather than be refused for ambiguity.
-        match daemon
-            .answer(
-                &request_id,
-                &hash,
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Rejected { reason } => {
-                assert!(
-                    !reason.contains("more than one") && !reason.contains("unknown"),
-                    "the card was reachable; it failed at injection: {reason}"
-                );
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        // A name nobody has ever used is still an honest error.
-        assert!(matches!(
-            daemon.answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-9"), protocol::ws::AnsweredOn::Iphone).await,
-            AnswerResult::Rejected { reason } if reason.contains("unknown session")
-        ));
-    }
-
-    #[tokio::test]
-    async fn concurrent_taps_on_one_card_produce_one_outcome_not_a_rejection() {
-        // A duplicate must return the original outcome. Before this was
-        // serialised, a second tap arriving *during* the first one's injection
-        // got `Rejected{already being applied}` — which a phone on a flaky link
-        // renders as a failure for an answer that did apply.
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let held = raise_held(&daemon, uid, "echo hi", "toolu_taps", None).await;
-        let card = "toolu_taps".to_string();
-        let hash = bash_hash("echo hi");
-
-        let mut tasks = Vec::new();
-        for _ in 0..8 {
-            let daemon = Arc::clone(&daemon);
-            let (card, hash) = (card.clone(), hash.clone());
-            tasks.push(tokio::spawn(async move {
-                daemon
-                    .answer(
-                        &card,
-                        &hash,
-                        AnswerDecision::Allow,
-                        Some(TEST_UID),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-            }));
-        }
-        let mut results = Vec::new();
-        for task in tasks {
-            results.push(task.await.unwrap());
-        }
-        assert!(
-            !results.iter().any(|r| matches!(
-                r,
-                AnswerResult::Rejected { reason } if reason.contains("already being applied")
-            )),
-            "a racing duplicate must never be told the answer is in flight: {results:?}"
-        );
-
-        // Exactly one reaches the agent and the rest replay it — the durable
-        // claim is what makes that true even for a tap that lands *during* the
-        // injection, which is the case a ledger check alone cannot catch.
-        let applied: Vec<&AnswerOutcome> = results
-            .iter()
-            .filter_map(|r| match r {
-                AnswerResult::Applied { outcome } => Some(outcome),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            applied.len(),
-            1,
-            "exactly one answer may be handed over: {results:?}"
-        );
-        let duplicates = results
-            .iter()
-            .filter(|r| matches!(r, AnswerResult::Duplicate { .. }))
-            .count();
-        assert_eq!(duplicates, 7, "{results:?}");
-        assert_eq!(
-            returned(held).await.decision,
-            Decision::Allow,
-            "eight taps, one answer handed over"
-        );
-    }
-
-    /// **A Codex-only `option_id` answer is refused EARLY, before any mutation**:
-    /// before the entry is claimed, the held hook's responder taken, or a durable
-    /// answer_claim written. The held hook stays held — not released, not
-    /// advanced to the local `ask` — no answer_claim is written, no resolution is
-    /// appended, the card remains, and a subsequent legitimate `allow` still
-    /// reaches the same held hook.
-    #[tokio::test]
-    async fn an_option_id_answer_is_refused_before_it_claims_or_releases_the_held_hook() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let request_id = "toolu_opt".to_string();
-        let hook = raise_held(&daemon, uid, "git status", &request_id, None).await;
-        let id = (uid.to_string(), request_id.clone());
-        let hash = bash_hash("git status");
-
-        // The Codex-only decision is refused, and touches nothing.
-        assert!(matches!(
-            daemon
-                .answer(
-                    &request_id,
-                    &hash,
-                    AnswerDecision::OptionId {
-                        option_id: "acceptForSession".into()
-                    },
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await,
-            AnswerResult::Rejected { .. }
-        ));
-
-        {
-            let inner = daemon.inner.lock().await;
-            let entry = inner.pending.get(&id).expect("the card must remain");
-            assert!(!entry.claimed, "the entry must not be claimed");
-            assert!(
-                entry.responder.is_some(),
-                "the held hook must NOT be released by a refused option_id"
-            );
-        }
-        assert!(
-            daemon
-                .store
-                .answer_claim(uid, &request_id)
-                .unwrap()
-                .is_none(),
-            "a refused option_id must write no durable answer_claim"
-        );
-        assert!(
-            daemon
-                .store
-                .events_after(uid, 0, 1000)
-                .unwrap()
-                .iter()
-                .all(|e| e.kind != EventKind::ApprovalResolved),
-            "a refused option_id must append no resolution"
-        );
-
-        // A real Claude decision still resolves through the SAME held hook.
-        match daemon
-            .answer(
-                &request_id,
-                &hash,
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Applied { outcome } => {
-                assert_eq!(outcome.applied_via, AnswerPath::HookReturn, "{outcome:?}");
-            }
-            other => panic!("the allow must apply via the held hook; got {other:?}"),
-        }
-        // The held hook unblocked with an allow — proving the responder survived
-        // the refused option_id and was still there for the real answer.
-        let decision = hook.await.unwrap();
-        assert_eq!(
-            decision.decision,
-            protocol::hook::Decision::Allow,
-            "the held hook returned {decision:?}"
-        );
-    }
-
-    /// On a card no hook is held for: an `option_id` answer is refused before
-    /// any claim, writes no durable answer_claim, appends no resolution, and
-    /// leaves the card in place — the same early gate, where there is no
-    /// responder to release.
-    #[tokio::test]
-    async fn an_option_id_answer_on_a_card_not_held_claims_and_resolves_nothing() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        register(&daemon, "cc-1", Some(uid)).await;
-        let request_id = raise_prompt(&daemon, uid, "p1", "git status").await;
-        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
-
-        assert!(matches!(
-            daemon
-                .answer(
-                    &request_id,
-                    &hash,
-                    AnswerDecision::OptionId {
-                        option_id: "accept".into()
-                    },
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await,
-            AnswerResult::Rejected { .. }
-        ));
-        assert!(
-            daemon
-                .store
-                .answer_claim(uid, &request_id)
-                .unwrap()
-                .is_none(),
-            "no durable claim"
-        );
-        assert!(
-            daemon
-                .store
-                .events_after(uid, 0, 1000)
-                .unwrap()
-                .iter()
-                .all(|e| e.kind != EventKind::ApprovalResolved),
-            "no resolution"
-        );
-        assert!(
-            daemon
-                .inner
-                .lock()
-                .await
-                .pending
-                .contains_key(&(uid.to_string(), request_id.clone())),
-            "the card remains"
-        );
-    }
-
-    /// A Bash call raised the way the current cc-hook raises it: its
-    /// `PreToolUse` joins the request to `tool_use_id`, and the request is held
-    /// for the phone unless its card goes to the Mac. `agent` makes it a
-    /// background agent's. Returns the hook once its card is filed.
-    async fn raise_held(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        command: &str,
-        tool_use_id: &str,
-        agent: Option<&str>,
-    ) -> tokio::task::JoinHandle<HookDecision> {
-        let hook = |event: &str| {
-            let mut hook = json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p1",
-                "tool_name": "Bash", "tool_input": {"command": command},
-            });
-            if let Some(agent) = agent {
-                hook["agent_id"] = json!(agent);
-                hook["agent_type"] = json!("fork");
-            }
-            hook
-        };
-        let mut pre = hook("PreToolUse");
-        pre["tool_use_id"] = json!(tool_use_id);
-        daemon.handle_hook(post(uid, pre, false)).await;
-        let held = {
-            let daemon = Arc::clone(daemon);
-            let request = post(uid, hook("PermissionRequest"), true);
-            tokio::spawn(async move { daemon.handle_hook(request).await })
-        };
-        for _ in 0..200 {
-            let filed = daemon
-                .store
-                .list_pending_approvals()
-                .unwrap()
-                .iter()
-                .any(|row| row.session_uid == uid && row.request_id == tool_use_id);
-            if filed || held.is_finished() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        held
-    }
-
     fn bash_hash(command: &str) -> String {
         approval_payload_hash("Bash", &json!({ "command": command }))
-    }
-
-    /// A main-conversation Bash call raised and held for the phone, joined to
-    /// `tool_use_id` by its `PreToolUse`. Returns the held hook.
-    async fn hold_bash(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        tool_use_id: &str,
-    ) -> tokio::task::JoinHandle<HookDecision> {
-        let held = raise_held(daemon, uid, "touch held.txt", tool_use_id, None).await;
-        let id = (uid.to_string(), tool_use_id.to_string());
-        assert!(
-            daemon
-                .inner
-                .lock()
-                .await
-                .pending
-                .get(&id)
-                .is_some_and(|entry| entry.responder.is_some()),
-            "the approval was never held"
-        );
-        held
-    }
-
-    /// The held hook was let go with no decision: Claude's own dialog decides.
-    async fn let_go_undecided(held: tokio::task::JoinHandle<HookDecision>) -> bool {
-        matches!(
-            returned(held).await.decision,
-            Decision::Passthrough | Decision::Ask
-        )
-    }
-
-    fn held_bash_hash() -> String {
-        bash_hash("touch held.txt")
-    }
-
-    /// The transcript line Claude writes once a call's result is in: the call
-    /// ran, or with `toolDenialKind` it was rejected.
-    async fn transcript_result(daemon: &Arc<Daemon>, uid: &str, tool_use_id: &str, rejected: bool) {
-        let mut line = json!({
-            "type": "user", "uuid": format!("u-{tool_use_id}"),
-            "message": {"role": "user", "content": [{
-                "type": "tool_result", "tool_use_id": tool_use_id,
-                "is_error": rejected, "content": "result",
-            }]},
-            "toolUseResult": "result",
-        });
-        if rejected {
-            line["toolDenialKind"] = json!("user-rejected");
-        }
-        let path = std::env::temp_dir().join(format!(
-            "ccd-result-{}-{tool_use_id}.jsonl",
-            std::process::id()
-        ));
-        std::fs::write(&path, format!("{line}\n")).unwrap();
-        let run = SessionKey::new(uid, "cc-1");
-        let scan = crate::tailer::scan_file(&daemon.store, &run, path.to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        daemon
-            .ingest_scan(uid, scan.events, scan.cursor)
-            .await
-            .unwrap();
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    /// A phone answer to an approval is recorded as what the daemon knows: it was
-    /// sent to Claude. Claude takes the first answer and may ignore this one (the
-    /// Mac answered first, an Escape a few ms earlier, an MCP tool only its own
-    /// dialog answers), so it is never recorded as confirmed. The card closes at
-    /// once, whatever then becomes of the call: a background agent's failed
-    /// command reports its result only to the agent's own transcript.
-    #[tokio::test]
-    async fn a_phone_answer_is_recorded_as_sent_to_claude() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let cases = [
-            ("toolu_main_allow", None, AnswerDecision::Allow),
-            ("toolu_main_deny", None, AnswerDecision::Deny),
-            ("toolu_fork_allow", Some("agentA"), AnswerDecision::Allow),
-            ("toolu_fork_deny", Some("agentA"), AnswerDecision::Deny),
-        ];
-        for (id, agent, decision) in cases {
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let command = "touch x; exit 3";
-            let held = raise_held(&daemon, uid, command, id, agent).await;
-            let result = daemon
-                .answer(
-                    id,
-                    &bash_hash(command),
-                    decision.clone(),
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await;
-            let AnswerResult::Applied { outcome } = result else {
-                panic!("{id}: {result:?}");
-            };
-            assert!(outcome.indeterminate, "{id}: {outcome:?}");
-            assert_eq!(
-                outcome.detail.as_deref(),
-                Some("Sent to Claude from a phone"),
-                "{id}"
-            );
-            assert_eq!(outcome.decision, decision, "{id}");
-            returned(held).await;
-            // Closed at once: recorded, retired, and the run no longer blocked.
-            let (_, recorded) = daemon.store.get_answer(uid, id).unwrap().expect("recorded");
-            assert_eq!(recorded, outcome, "{id}");
-            assert!(daemon.inner.lock().await.pending.is_empty(), "{id}");
-            assert!(
-                daemon.sessions().await.unwrap()[0].blocked_on.is_empty(),
-                "{id}"
-            );
-            let events = approval_events(&daemon, uid, EventKind::ApprovalResolved);
-            assert_eq!(events.len(), 1, "{id}");
-        }
-    }
-
-    /// The answer was sent to Claude and its record could not be written: the
-    /// phone is told it was sent, and nothing claims more.
-    #[tokio::test]
-    async fn an_answer_whose_record_cannot_be_written_still_says_only_sent() {
-        let (store, db) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let held = raise_held(&daemon, uid, "touch r.txt", "toolu_unrecorded", None).await;
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER refuse_answers BEFORE INSERT ON answers
-                 BEGIN SELECT RAISE(ABORT, 'the disk is full'); END;",
-            )
-            .unwrap();
-        let result = daemon
-            .answer(
-                "toolu_unrecorded",
-                &bash_hash("touch r.txt"),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        returned(held).await;
-        let AnswerResult::Applied { outcome } = result else {
-            panic!("{result:?}");
-        };
-        let detail = outcome.detail.unwrap_or_default();
-        assert!(outcome.indeterminate, "{detail}");
-        assert!(detail.starts_with(SENT_TO_CLAUDE), "{detail}");
-        assert!(!detail.contains("applied"), "{detail}");
-    }
-
-    /// A call the Mac rejected before its request was read is never answerable
-    /// from the phone. Its result, ingested first from the transcript, is kept
-    /// by the call's own `tool_use_id`; the request is then not held, and its
-    /// card closes as answered at the Mac.
-    #[tokio::test]
-    async fn a_call_rejected_before_its_request_is_read_is_never_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p1",
-                "tool_name": "Bash", "tool_input": {"command": "touch v4.txt"},
-            })
-        };
-        let mut pre = hook("PreToolUse");
-        pre["tool_use_id"] = json!("toolu_v4");
-        daemon.handle_hook(post(uid, pre, false)).await;
-        transcript_result(&daemon, uid, "toolu_v4", true).await;
-
-        let request = post(uid, hook("PermissionRequest"), true);
-        let decision = tokio::time::timeout(Duration::from_secs(2), daemon.handle_hook(request))
-            .await
-            .expect("the request was held for the phone");
-        assert!(
-            matches!(decision.decision, Decision::Passthrough | Decision::Ask),
-            "{decision:?}"
-        );
-        // Published as answered at the Mac, never as held for the phone.
-        let requests = approval_events(&daemon, uid, EventKind::ApprovalRequest);
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].payload["card"]["question_hold"],
-            json!("at_mac"),
-            "{}",
-            requests[0].payload["card"]
-        );
-        let result = daemon
-            .answer(
-                "toolu_v4",
-                &bash_hash("touch v4.txt"),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        assert!(
-            matches!(&result, AnswerResult::Duplicate { outcome, .. }
-                if outcome.decision == AnswerDecision::Deny
-                    && outcome.resolved_by == ResolvedBy::Local),
-            "{result:?}"
-        );
-    }
-
-    /// The Mac rejected the call while its hook was still held. The rejection in
-    /// the transcript lets the hook go and closes the card as answered at the
-    /// Mac, so a later phone tap applies nothing. Claude normally ends the hook
-    /// itself after an Escape (measured on 2.1.290); this is what holds when it
-    /// does not. A Mac "Yes" does not end it at all on 2.1.308 (0 of 28 recorded
-    /// Bash approvals: each hook stayed open until the session ended or the
-    /// recording hook's own 600 s timeout), so the call's result is what closes
-    /// that card too.
-    #[tokio::test]
-    async fn a_rejection_in_the_transcript_ends_a_held_approval() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let held = hold_bash(&daemon, uid, "toolu_rejected").await;
-        transcript_result(&daemon, uid, "toolu_rejected", true).await;
-        assert!(let_go_undecided(held).await);
-        match daemon
-            .answer(
-                "toolu_rejected",
-                &held_bash_hash(),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Duplicate { outcome, .. } => {
-                assert_eq!(outcome.resolved_by, ResolvedBy::Local);
-                assert_eq!(outcome.decision, AnswerDecision::Deny);
-            }
-            other => panic!("the phone answered a rejected call: {other:?}"),
-        }
-    }
-
-    /// The Mac allowed the call and it ran while its hook was still held: the
-    /// call's own result lets the hook go.
-    #[tokio::test]
-    async fn the_calls_result_lets_its_held_hook_go() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let held = hold_bash(&daemon, uid, "toolu_ran").await;
-        let ran = json!({
-            "hook_event_name": "PostToolUse", "cwd": "/tmp", "prompt_id": "p1",
-            "tool_name": "Bash", "tool_input": {"command": "touch held.txt"},
-            "tool_use_id": "toolu_ran", "tool_response": {"stdout": ""},
-        });
-        daemon.handle_hook(post(uid, ran, false)).await;
-        assert!(let_go_undecided(held).await);
-    }
-
-    /// The Mac rejects the call after a phone answer is claimed and before it is
-    /// handed over: nothing is handed to the hook, and the phone is told so.
-    #[tokio::test]
-    async fn a_call_that_ends_while_an_answer_is_claimed_is_handed_nothing() {
-        let daemon = test_daemon();
-        // Its own run: the latch is armed per run, and no other test may reach it.
-        let uid = &protocol::uid::new().unwrap();
-        let held = hold_bash(&daemon, uid, "toolu_raced").await;
-        let (reached, go) = answer_latch::arm(uid);
-        let answer = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                daemon
-                    .answer(
-                        "toolu_raced",
-                        &held_bash_hash(),
-                        AnswerDecision::Allow,
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-            })
-        };
-        reached.notified().await;
-        transcript_result(&daemon, uid, "toolu_raced", true).await;
-        go.notify_one();
-        let result = answer.await.unwrap();
-        assert!(
-            matches!(result, AnswerResult::Rejected { .. }),
-            "{result:?}"
-        );
-        assert!(
-            let_go_undecided(held).await,
-            "the phone's answer reached the hook of a call the Mac rejected"
-        );
-    }
-
-    /// A run that ends while a phone answer has claimed one of its cards waits
-    /// for that answer: it is handed over and recorded as sent, and the card is
-    /// closed once, not left open with its hook gone.
-    #[tokio::test]
-    async fn a_run_that_ends_while_an_answer_is_claimed_lets_the_answer_finish() {
-        let daemon = test_daemon();
-        // Its own run: the latch is armed per run, and no other test may reach it.
-        let uid = &protocol::uid::new().unwrap();
-        seed_session(&daemon, uid, "cc-1", Lifecycle::Live);
-        let held = hold_bash(&daemon, uid, "toolu_ending").await;
-        let (reached, go) = answer_latch::arm(uid);
-        let answer = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                daemon
-                    .answer(
-                        "toolu_ending",
-                        &held_bash_hash(),
-                        AnswerDecision::Allow,
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-            })
-        };
-        reached.notified().await;
-        let ended = {
-            let daemon = Arc::clone(&daemon);
-            let uid = uid.clone();
-            tokio::spawn(async move {
-                daemon
-                    .session_exited("cc-1", Some(&uid), Some(0), None, None)
-                    .await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        go.notify_one();
-        let result = answer.await.unwrap();
-        ended.await.unwrap();
-        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
-        assert_eq!(returned(held).await.decision, Decision::Allow);
-        assert!(daemon.inner.lock().await.pending.is_empty());
-        assert_eq!(
-            approval_events(&daemon, uid, EventKind::ApprovalResolved).len(),
-            1
-        );
-    }
-
-    /// Someone coming back to the Mac does not take a background agent's hook
-    /// from a phone answer that has already claimed it: the claimed answer is
-    /// the one handed over, and the card is not released to the Mac.
-    #[tokio::test]
-    async fn someone_returning_leaves_a_claimed_phone_answer_its_hook() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = test_daemon();
-        // Its own run: the latch is armed per run, and no other test may reach it.
-        let uid = &protocol::uid::new().unwrap();
-        let held = raise_held(&daemon, uid, "touch r.txt", "toolu_returns", Some("agentA")).await;
-        let (reached, go) = answer_latch::arm(uid);
-        let answer = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                daemon
-                    .answer(
-                        "toolu_returns",
-                        &bash_hash("touch r.txt"),
-                        AnswerDecision::Deny,
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-            })
-        };
-        reached.notified().await;
-        crate::presence::set_idle(Some(Duration::ZERO));
-        tokio::time::sleep(crate::presence::POLL * 3).await;
-        go.notify_one();
-        let result = answer.await.unwrap();
-        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
-        assert_eq!(
-            returned(held).await.decision,
-            Decision::Deny,
-            "someone returning took the hook from the phone's claimed answer"
-        );
-    }
-
-    /// Every decision the phone can make on a Claude approval reaches that call's
-    /// own held hook, in the shape Claude takes from its own dialog, and nothing
-    /// is ever typed: allow (and the first option), deny (which stops the main
-    /// conversation's turn, as Escape does), and a denial with a reason (which
-    /// goes to the agent that asked). Any other option is refused before
-    /// anything is claimed, and the hook stays held.
-    #[tokio::test]
-    async fn a_phone_decision_reaches_only_its_own_calls_hook_and_nothing_is_typed() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let supervisor = attach(&daemon, "cc-1", uid, &permission_pane("touch d.txt"), "").await;
-        let cases = [
-            (AnswerDecision::Allow, Decision::Allow, false, None),
-            (
-                AnswerDecision::Option { index: 1 },
-                Decision::Allow,
-                false,
-                None,
-            ),
-            (
-                AnswerDecision::Deny,
-                Decision::Deny,
-                true,
-                Some(BACKGROUND_DENIAL.to_string()),
-            ),
-            (
-                AnswerDecision::Text {
-                    text: "use the other file".into(),
-                },
-                Decision::Deny,
-                false,
-                Some(format!("{DENIAL_WITH_REASON}use the other file")),
-            ),
-        ];
-        for (n, (decision, behaviour, interrupt, reason)) in cases.into_iter().enumerate() {
-            let id = format!("toolu_d{n}");
-            let held = raise_held(&daemon, uid, "touch d.txt", &id, None).await;
-            assert!(
-                !held.is_finished(),
-                "{decision:?}: the card was not held for the phone"
-            );
-            if n == 0 {
-                match daemon
-                    .answer(
-                        &id,
-                        &bash_hash("touch d.txt"),
-                        AnswerDecision::Option { index: 2 },
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-                {
-                    AnswerResult::Rejected { .. } => {}
-                    other => panic!("option 2 must be refused: {other:?}"),
-                }
-                assert!(daemon.store.answer_claim(uid, &id).unwrap().is_none());
-                assert!(!held.is_finished(), "a refused option let the hook go");
-            }
-            let result = daemon
-                .answer(
-                    &id,
-                    &bash_hash("touch d.txt"),
-                    decision.clone(),
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await;
-            assert!(
-                matches!(result, AnswerResult::Applied { ref outcome } if outcome.applied_via == AnswerPath::HookReturn),
-                "{decision:?}: {result:?}"
-            );
-            let handed = returned(held).await;
-            assert_eq!(handed.decision, behaviour, "{decision:?}");
-            assert_eq!(handed.interrupt, interrupt, "{decision:?}");
-            assert_eq!(handed.reason, reason, "{decision:?}");
-            assert!(
-                supervisor.typed().is_empty(),
-                "{decision:?}: typed {:?}",
-                supervisor.typed()
-            );
-        }
-    }
-
-    /// Two background agents' calls queued at the Mac (census rows 1, 7 and 8):
-    /// the phone answers the newer card, and only that agent's hook is handed
-    /// the answer. The older card stays held and answerable, and nothing is
-    /// typed into the dialog the Mac is showing.
-    #[tokio::test]
-    async fn two_background_agents_queued_calls_are_each_answered_through_their_own_hook() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let supervisor = attach(
-            &daemon,
-            "cc-1",
-            uid,
-            &permission_pane("touch fork-was-here.txt"),
-            "",
-        )
-        .await;
-        let older = raise_held(
-            &daemon,
-            uid,
-            "touch fork-was-here.txt",
-            "toolu_older",
-            Some("agentA"),
-        )
-        .await;
-        let newer = raise_held(
-            &daemon,
-            uid,
-            "touch second-fork.txt",
-            "toolu_newer",
-            Some("agentB"),
-        )
-        .await;
-        let result = daemon
-            .answer(
-                "toolu_newer",
-                &bash_hash("touch second-fork.txt"),
-                AnswerDecision::Deny,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
-        let handed = returned(newer).await;
-        assert_eq!(handed.decision, Decision::Deny);
-        assert!(!handed.interrupt, "a background agent is not interrupted");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!older.is_finished(), "the other agent's call was answered");
-        let result = daemon
-            .answer(
-                "toolu_older",
-                &bash_hash("touch fork-was-here.txt"),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
-        assert_eq!(returned(older).await.decision, Decision::Allow);
-        assert!(
-            supervisor.typed().is_empty(),
-            "typed {:?}",
-            supervisor.typed()
-        );
-    }
-
-    /// A card no hook is held for is answered at the Mac: from an older cc-hook,
-    /// from a request joined to no single call, or for a tool whose own dialog
-    /// alone answers it. Every decision is refused before anything is claimed,
-    /// and nothing is typed into the dialog on screen.
-    #[tokio::test]
-    async fn a_card_not_held_for_the_phone_is_answered_at_the_mac_and_nothing_is_typed() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let supervisor = attach(&daemon, "cc-1", uid, &permission_pane("touch old.txt"), "").await;
-        // An older cc-hook: no PreToolUse join and no hold.
-        let card = raise_prompt(&daemon, uid, "p-old", "touch old.txt").await;
-        // A tool Claude answers only at its own dialog.
-        let picker = json!({
-            "hook_event_name": "PermissionRequest", "cwd": "/tmp", "prompt_id": "p-pick",
-            "tool_name": "ShowOnboardingRolePicker", "tool_input": {},
-        });
-        let mut pre = picker.clone();
-        pre["hook_event_name"] = json!("PreToolUse");
-        pre["tool_use_id"] = json!("toolu_picker");
-        daemon.handle_hook(post(uid, pre, false)).await;
-        let returned_at_once = tokio::time::timeout(
-            Duration::from_secs(2),
-            daemon.handle_hook(post(uid, picker, true)),
-        )
-        .await
-        .expect("a tool only its own dialog answers was held");
-        assert_eq!(returned_at_once.decision, Decision::Ask);
-        for (id, hash) in [
-            (card.clone(), bash_hash("touch old.txt")),
-            (
-                "toolu_picker".to_string(),
-                approval_payload_hash("ShowOnboardingRolePicker", &json!({})),
-            ),
-        ] {
-            let hold = daemon
-                .inner
-                .lock()
-                .await
-                .pending
-                .get(&(uid.to_string(), id.clone()))
-                .and_then(|entry| entry.card.question_hold);
-            assert_eq!(hold, Some(QuestionHold::AtMac), "{id}");
-            for decision in [
-                AnswerDecision::Allow,
-                AnswerDecision::Deny,
-                AnswerDecision::Option { index: 1 },
-                AnswerDecision::Text { text: "no".into() },
-            ] {
-                match daemon
-                    .answer(
-                        &id,
-                        &hash,
-                        decision.clone(),
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-                {
-                    AnswerResult::Rejected { reason } => {
-                        assert!(reason.contains("not being held"), "{decision:?}: {reason}")
-                    }
-                    other => panic!("{id} {decision:?} must be refused: {other:?}"),
-                }
-                assert!(daemon.store.answer_claim(uid, &id).unwrap().is_none());
-            }
-        }
-        assert!(
-            supervisor.typed().is_empty(),
-            "typed {:?}",
-            supervisor.typed()
-        );
-    }
-
-    /// A background agent's approval follows presence, as its question does:
-    /// asked while someone is at the Mac it goes there at once; asked with the
-    /// Mac left alone it is held, hidden from the Mac; someone coming back gets
-    /// it within a poll or two, the hook let go with no decision so Claude draws
-    /// the dialog, and the phone can no longer answer it.
-    #[tokio::test]
-    async fn a_background_agent_s_approval_is_held_only_while_the_mac_is_left_alone() {
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let at_mac = raise_held(&daemon, uid, "touch a.txt", "toolu_present", Some("agentA")).await;
-        assert_eq!(returned(at_mac).await.decision, Decision::Ask);
-
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let held = raise_held(&daemon, uid, "touch b.txt", "toolu_away", Some("agentB")).await;
-        tokio::time::sleep(crate::presence::POLL * 3).await;
-        assert!(!held.is_finished(), "held while nobody is back");
-        let hold = |id: &str| {
-            daemon
-                .inner
-                .try_lock()
-                .unwrap()
-                .pending
-                .get(&(uid.to_string(), id.to_string()))
-                .and_then(|entry| entry.card.question_hold)
-        };
-        assert_eq!(hold("toolu_present"), Some(QuestionHold::AtMac));
-        assert_eq!(hold("toolu_away"), Some(QuestionHold::Held));
-
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let back = std::time::Instant::now();
-        assert_eq!(returned(held).await.decision, Decision::Passthrough);
-        assert!(
-            back.elapsed() < crate::presence::POLL * 3,
-            "{:?}",
-            back.elapsed()
-        );
-        assert_eq!(hold("toolu_away"), Some(QuestionHold::AtMac));
-        match daemon
-            .answer(
-                "toolu_away",
-                &bash_hash("touch b.txt"),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Rejected { reason } => assert!(reason.contains("not being held")),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// Claude ended a held approval's hook (Escape at the Mac kills it): the
-    /// phone can no longer answer it, and the card does not claim how it ended
-    /// until the call's own result says. A restart does the same to every held
-    /// card, since the hook was the old process's connection.
-    #[tokio::test]
-    async fn an_approval_whose_hook_ended_or_daemon_restarted_cannot_be_answered() {
-        let store = shared_store();
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        let uid = TEST_UID;
-        let (end_hook, ended) = oneshot::channel::<()>();
-        let mut pre = json!({
-            "hook_event_name": "PreToolUse", "cwd": "/tmp", "prompt_id": "p1",
-            "tool_name": "Bash", "tool_input": {"command": "touch e.txt"},
-            "tool_use_id": "toolu_ended",
-        });
-        daemon.handle_hook(post(uid, pre.clone(), false)).await;
-        pre["hook_event_name"] = json!("PermissionRequest");
-        pre.as_object_mut().unwrap().remove("tool_use_id");
-        let request = post(uid, pre, true);
-        let hook = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let mut gone = Box::pin(async move {
-                    let _ = ended.await;
-                });
-                daemon.handle_hook_held(request, &mut gone).await
-            })
-        };
-        let _second = raise_held(&daemon, uid, "touch f.txt", "toolu_restarted", None).await;
-        drop(end_hook);
-        assert_eq!(returned(hook).await.decision, Decision::Passthrough);
-        let hold = |daemon: &Daemon, id: &str| {
-            daemon
-                .inner
-                .try_lock()
-                .unwrap()
-                .pending
-                .get(&(uid.to_string(), id.to_string()))
-                .and_then(|entry| entry.card.question_hold)
-        };
-        assert_eq!(hold(&daemon, "toolu_ended"), Some(QuestionHold::Ended));
-        assert!(
-            daemon
-                .store
-                .get_answer(uid, "toolu_ended")
-                .unwrap()
-                .is_none(),
-            "closed with no evidence of how"
-        );
-        match daemon
-            .answer(
-                "toolu_ended",
-                &bash_hash("touch e.txt"),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Rejected { reason } => assert!(reason.contains("not being held")),
-            other => panic!("{other:?}"),
-        }
-
-        let restarted = daemon_on(store, Config::default());
-        restarted.recover().await;
-        assert_eq!(
-            hold(&restarted, "toolu_restarted"),
-            Some(QuestionHold::Ended)
-        );
-        match restarted
-            .answer(
-                "toolu_restarted",
-                &bash_hash("touch f.txt"),
-                AnswerDecision::Allow,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Rejected { reason } => assert!(reason.contains("not being held")),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// Claude takes a hook allow for `ExitPlanMode` only with the input it runs
-    /// with (measured on 2.1.290: a bare allow is ignored).
-    #[tokio::test]
-    async fn an_exit_plan_mode_allow_carries_its_input() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let input = json!({"plan": "1. do it"});
-        let mut hook = json!({
-            "hook_event_name": "PreToolUse", "cwd": "/tmp", "prompt_id": "p1",
-            "tool_name": "ExitPlanMode", "tool_input": input, "tool_use_id": "toolu_plan",
-        });
-        daemon.handle_hook(post(uid, hook.clone(), false)).await;
-        hook["hook_event_name"] = json!("PermissionRequest");
-        hook.as_object_mut().unwrap().remove("tool_use_id");
-        let held = {
-            let daemon = Arc::clone(&daemon);
-            let request = post(uid, hook, true);
-            tokio::spawn(async move { daemon.handle_hook(request).await })
-        };
-        let hash = approval_payload_hash("ExitPlanMode", &input);
-        let mut result = None;
-        for _ in 0..200 {
-            match daemon
-                .answer(
-                    "toolu_plan",
-                    &hash,
-                    AnswerDecision::Allow,
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await
-            {
-                AnswerResult::Rejected { reason } if reason.contains("unknown") => {
-                    tokio::time::sleep(Duration::from_millis(10)).await
-                }
-                other => {
-                    result = Some(other);
-                    break;
-                }
-            }
-        }
-        assert!(
-            matches!(result, Some(AnswerResult::Applied { .. })),
-            "{result:?}"
-        );
-        let handed = returned(held).await;
-        assert_eq!(handed.decision, Decision::Allow);
-        assert_eq!(handed.updated_input, Some(input));
-    }
-
-    /// "Always" is chosen at the Mac: an older phone's "always" row, option 2,
-    /// is refused before anything is claimed, and the hook stays held.
-    #[tokio::test]
-    async fn the_phone_grants_no_standing_permission() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let id = "toolu_always";
-        let command = "docker compose up -d";
-        let held = raise_held(&daemon, uid, command, id, None).await;
-        let result = daemon
-            .answer(
-                id,
-                &bash_hash(command),
-                AnswerDecision::Option { index: 2 },
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        assert!(
-            matches!(result, AnswerResult::Rejected { .. }),
-            "{result:?}"
-        );
-        assert!(daemon.store.answer_claim(uid, id).unwrap().is_none());
-        assert!(!held.is_finished(), "a refusal let the hook go");
-        held.abort();
-    }
-
-    // ------------------------------------------------------- hook mapping
-
-    /// A run with no transcript (Claude's persistence turned off) has its turns
-    /// ended by the Stop hook, since no `stop_hook_summary` will ever be read.
-    #[tokio::test]
-    async fn the_stop_hook_records_a_turn_not_a_session_end() {
-        for transcript in [None, Some("/nonexistent/ccd-no-transcript.jsonl")] {
-            let daemon = test_daemon();
-            let mut payload =
-                json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"});
-            if let Some(path) = transcript {
-                payload["transcript_path"] = json!(path);
-            }
-            daemon
-                .handle_hook(HookPost {
-                    session_id: "cc-1".into(),
-                    session_uid: Some(TEST_UID.to_string()),
-                    event: "Stop".into(),
-                    payload,
-                    wait: false,
-                    holds_questions: false,
-                    holds_approvals: false,
-                })
-                .await;
-            let events = daemon.store.events_after(TEST_UID, 0, 10).unwrap();
-            let kinds: Vec<&EventKind> = events.iter().map(|e| &e.kind).collect();
-            assert!(kinds.contains(&&EventKind::TurnComplete), "{kinds:?}");
-            assert!(
-                !kinds.contains(&&EventKind::SessionEnd),
-                "a finished turn is not a finished session: {kinds:?}"
-            );
-        }
     }
 
     /// **The session list's branch and line counts are read when a turn ends,
@@ -16107,14 +11911,17 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
 
         let daemon = test_daemon();
-        let stop = || HookPost {
-            session_id: "cc-1".into(),
-            session_uid: Some(TEST_UID.to_string()),
-            event: "Stop".into(),
-            payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": repo}),
-            wait: false,
-            holds_questions: false,
-            holds_approvals: false,
+        hosted_run(&daemon, TEST_UID, repo.to_str().unwrap());
+        let turn_end = |turn: &str| {
+            let daemon = Arc::clone(&daemon);
+            let end = PendingEvent::new(
+                &SessionKey::new(TEST_UID, TEST_UID),
+                EventKind::TurnComplete,
+                json!({}),
+                Source::Daemon,
+            )
+            .with_source_event_id(turn.to_string());
+            async move { daemon.ingest(end).await.unwrap().expect("a new turn end") }
         };
         let read_after = |added: u64| {
             let daemon = Arc::clone(&daemon);
@@ -16130,7 +11937,7 @@ mod tests {
             }
         };
 
-        daemon.handle_hook(stop()).await;
+        turn_end("turn-1").await;
         let summary = read_after(1).await;
         assert_eq!(summary.git_branch.as_deref(), Some("main"));
         assert_eq!(
@@ -16154,900 +11961,10 @@ mod tests {
             "a listing between turns reads no git"
         );
 
-        daemon.handle_hook(stop()).await;
+        turn_end("turn-2").await;
         let summary = read_after(2).await;
         assert_eq!(summary.git_branch.as_deref(), Some("next"));
         let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    /// Claude runs the Stop hook before its final reply reaches the transcript
-    /// (up to 100 ms later), then writes the hooks' summary after the reply. The
-    /// turn is filed as over only after its reply, once.
-    #[tokio::test]
-    async fn a_turn_is_filed_as_over_after_its_reply() {
-        let lines: Vec<&str> = include_str!("../../../fixtures/transcript/session-sample.jsonl")
-            .lines()
-            .collect();
-        let path = std::env::temp_dir().join(format!(
-            "ccd-turn-end-{}-{}.jsonl",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        std::fs::write(&path, format!("{}\n", lines[0])).unwrap();
-        let daemon = test_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "Stop".into(),
-                payload: json!({
-                    "hook_event_name": "Stop",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": path,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        // Then the reply, the hooks' summary and the turn's duration.
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\n{}\n{}\n",
-                lines[0], lines[10], lines[11], lines[12]
-            ),
-        )
-        .unwrap();
-        let run = SessionKey::new(TEST_UID, "cc-1");
-        let scan = crate::tailer::scan_file(&daemon.store, &run, path.to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        daemon
-            .ingest_scan(TEST_UID, scan.events, scan.cursor)
-            .await
-            .unwrap();
-        std::fs::remove_file(&path).unwrap();
-        let order: Vec<EventKind> = daemon
-            .store
-            .events_after(TEST_UID, 0, 100)
-            .unwrap()
-            .into_iter()
-            .map(|event| event.kind)
-            .filter(|kind| matches!(kind, EventKind::AgentMessage | EventKind::TurnComplete))
-            .collect();
-        assert_eq!(order, [EventKind::AgentMessage, EventKind::TurnComplete]);
-    }
-
-    /// `/clear` moves the run to a new transcript, and the last turn's reply and
-    /// end can still be unread in the old one when it does, more than one read
-    /// away. They are read before the tailer follows the new file.
-    #[tokio::test]
-    async fn a_new_transcript_is_followed_only_after_the_old_one_is_read() {
-        let lines: Vec<&str> = include_str!("../../../fixtures/transcript/session-sample.jsonl")
-            .lines()
-            .collect();
-        let stem = std::env::temp_dir().join(format!(
-            "ccd-clear-{}-{}",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let (old, new) = (
-            stem.with_extension("old.jsonl"),
-            stem.with_extension("new.jsonl"),
-        );
-        let (daemon, tails) = daemon_watching_tails(
-            shared_store(),
-            Config {
-                fsevents: false,
-                // Longer than the old transcript is kept after `/clear`, so
-                // it is read only at the move, as the first tick after it.
-                tail_poll_ms: 1_500,
-                ..Config::default()
-            },
-        );
-        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
-        let start = |path: &std::path::Path| HookPost {
-            session_id: "cc-1".into(),
-            session_uid: Some(TEST_UID.to_string()),
-            event: "SessionStart".into(),
-            payload: json!({
-                "hook_event_name": "SessionStart",
-                "session_id": "uuid",
-                "cwd": "/tmp",
-                "transcript_path": path,
-            }),
-            wait: false,
-            holds_questions: false,
-            holds_approvals: false,
-        };
-        daemon.handle_hook(start(&old)).await;
-        // Past the tailer's 4 MiB read: 45 lines of 100 kB, then the reply and
-        // the hooks' summary.
-        let filler: String = (0..45)
-            .map(|i| {
-                format!(
-                    "{}\n",
-                    json!({"type": "user", "uuid": format!("f{i}"), "text": "x".repeat(100_000)})
-                )
-            })
-            .collect();
-        std::fs::write(
-            &old,
-            format!("{}\n{filler}{}\n{}\n", lines[0], lines[10], lines[11]),
-        )
-        .unwrap();
-        std::fs::write(&new, "").unwrap();
-        daemon.handle_hook(start(&new)).await;
-        let filed = || {
-            daemon
-                .store
-                .events_after(TEST_UID, 0, 100)
-                .unwrap()
-                .into_iter()
-                .map(|event| event.kind)
-                .filter(|kind| matches!(kind, EventKind::AgentMessage | EventKind::TurnComplete))
-                .collect::<Vec<_>>()
-        };
-        for _ in 0..400 {
-            if filed().len() == 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        std::fs::remove_file(&old).unwrap();
-        std::fs::remove_file(&new).unwrap();
-        assert_eq!(filed(), [EventKind::AgentMessage, EventKind::TurnComplete]);
-    }
-
-    /// `/clear` typed while Claude answers is queued and runs at the end of
-    /// the turn, and Claude writes that turn's reply and end to the old
-    /// transcript up to a write flush after the run has moved to the new one.
-    /// They are still filed, and so is what follows in the new transcript.
-    #[tokio::test]
-    async fn a_turn_that_ends_after_its_clear_still_gets_its_reply_and_end() {
-        let lines: Vec<&str> = include_str!("../../../fixtures/transcript/session-sample.jsonl")
-            .lines()
-            .collect();
-        let stem = std::env::temp_dir().join(format!(
-            "ccd-clear-late-{}-{}",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let (old, new) = (
-            stem.with_extension("old.jsonl"),
-            stem.with_extension("new.jsonl"),
-        );
-        let daemon = tailed(&old).await;
-        written(&daemon, &old, &[serde_json::from_str(lines[9]).unwrap()]).await;
-        std::fs::write(&new, "").unwrap();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "SessionStart".into(),
-                payload: json!({
-                    "hook_event_name": "SessionStart",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": new,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        std::fs::write(
-            &old,
-            format!("{}\n{}\n{}\n", lines[9], lines[10], lines[11]),
-        )
-        .unwrap();
-        std::fs::write(&new, format!("{}\n", lines[14])).unwrap();
-        let filed = || {
-            daemon
-                .store
-                .events_after(TEST_UID, 0, 100)
-                .unwrap()
-                .into_iter()
-                .filter(|event| event.source == Source::Transcript)
-                .filter_map(|event| event.source_event_id)
-                .collect::<Vec<_>>()
-        };
-        let want = [lines[9], lines[10], lines[11], lines[14]].map(|line| {
-            serde_json::from_str::<serde_json::Value>(line).unwrap()["uuid"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        });
-        for _ in 0..300 {
-            if filed().len() == want.len() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        std::fs::remove_file(&old).unwrap();
-        std::fs::remove_file(&new).unwrap();
-        assert_eq!(filed(), want);
-    }
-
-    /// A transcript longer than two of the tailer's 4 MiB reads: 90 lines of
-    /// 100 kB, then the line `last`.
-    fn write_long_transcript(path: &std::path::Path) {
-        let mut text: String = (0..90)
-            .map(|i| {
-                format!(
-                    "{}\n",
-                    json!({"type": "user", "uuid": format!("f{i}"), "text": "x".repeat(100_000)})
-                )
-            })
-            .collect();
-        text.push_str(&format!("{}\n", json!({"type": "user", "uuid": "last"})));
-        std::fs::write(path, text).unwrap();
-    }
-
-    /// Whether the run files its transcript's line `last` within 5 s.
-    async fn files_the_last_line(daemon: &Arc<Daemon>) -> bool {
-        for _ in 0..500 {
-            let events = daemon.store.events_after(TEST_UID, 0, 1_000).unwrap();
-            if events
-                .iter()
-                .any(|event| event.source_event_id.as_deref() == Some("last"))
-            {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        false
-    }
-
-    fn long_transcript_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "ccd-{name}-{}-{}.jsonl",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ))
-    }
-
-    /// A run that ends before its transcript has been read through (resumed
-    /// from a long conversation and quit at once) is read to the end before
-    /// its tail is let go, however many of the tailer's reads that takes.
-    #[tokio::test]
-    async fn a_run_that_ends_before_its_transcript_is_read_through_is_read_to_the_end() {
-        let path = long_transcript_path("ended-mid-read");
-        write_long_transcript(&path);
-        let (daemon, tails) = daemon_watching_tails(
-            shared_store(),
-            Config {
-                fsevents: false,
-                // Longer than the test: the first tick, at once, is the only
-                // read before the end.
-                tail_poll_ms: 10_000,
-                ..Config::default()
-            },
-        );
-        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "SessionStart".into(),
-                payload: json!({
-                    "hook_event_name": "SessionStart",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": path,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon
-            .transcript_tx
-            .send(crate::tailer::TailCommand::Stop {
-                session_uid: TEST_UID.to_string(),
-            })
-            .unwrap();
-        let filed = files_the_last_line(&daemon).await;
-        std::fs::remove_file(&path).unwrap();
-        assert!(filed, "the transcript's last line was not filed");
-    }
-
-    /// A run that ended while the daemon was down, with more of its transcript
-    /// unread than one read takes, is read to the end when the daemon starts.
-    #[tokio::test]
-    async fn a_run_that_ended_while_the_daemon_was_down_is_read_to_the_end() {
-        let path = long_transcript_path("ended-while-down");
-        write_long_transcript(&path);
-        let store = shared_store();
-        let now = protocol::time::now_rfc3339();
-        store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: TEST_UID.into(),
-                session_id: "cc-1".into(),
-                tmux_session: "cc-1".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: Some(path.to_string_lossy().into_owned()),
-                lifecycle: protocol::event::Lifecycle::Exited,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
-            .unwrap()
-            .assert_present();
-        let (daemon, tails) = daemon_watching_tails(
-            store,
-            Config {
-                fsevents: false,
-                tail_poll_ms: 10_000,
-                ..Config::default()
-            },
-        );
-        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
-        let filed = files_the_last_line(&daemon).await;
-        std::fs::remove_file(&path).unwrap();
-        assert!(filed, "the transcript's last line was not filed");
-    }
-
-    /// A run started after `TEST_UID`, and one started before it.
-    const LATER_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPZZ";
-    const EARLIER_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNP00";
-
-    /// A run's row naming `path`, as its hooks would leave it.
-    fn transcript_row(
-        uid: &str,
-        path: &std::path::Path,
-        lifecycle: protocol::event::Lifecycle,
-    ) -> crate::store::SessionRow {
-        let now = protocol::time::now_rfc3339();
-        crate::store::SessionRow {
-            session_uid: uid.into(),
-            session_id: "cc-1".into(),
-            tmux_session: "cc-1".into(),
-            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-            cwd: "/tmp".into(),
-            claude_session_id: None,
-            transcript_path: Some(path.to_string_lossy().into_owned()),
-            lifecycle,
-            created_at: now.clone(),
-            updated_at: now,
-            agent: protocol::agent::AgentKind::Claude,
-            codex_thread_id: None,
-            codex_socket: None,
-        }
-    }
-
-    /// A transcript line with id `id`, appended to `path`.
-    fn write_line(path: &std::path::Path, id: &str) {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(file, "{}", json!({"type": "user", "uuid": id})).unwrap();
-    }
-
-    /// The transcript line ids filed under `uid`.
-    fn filed_lines(store: &Store, uid: &str) -> Vec<String> {
-        store
-            .events_after(uid, 0, 1_000)
-            .unwrap()
-            .into_iter()
-            .filter_map(|event| event.source_event_id)
-            .collect()
-    }
-
-    /// Whether `uid` files the line `id` within 5 s.
-    async fn files_line(store: &Store, uid: &str, id: &str) -> bool {
-        for _ in 0..500 {
-            if filed_lines(store, uid).iter().any(|filed| filed == id) {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        false
-    }
-
-    /// A tailer over `store`, as a start brings one up; abort the handle to stop it.
-    fn start_tailer(store: &Arc<Store>) -> (Arc<Daemon>, tokio::task::JoinHandle<()>) {
-        let (daemon, tails) = daemon_watching_tails(
-            Arc::clone(store),
-            Config {
-                fsevents: false,
-                tail_poll_ms: 20,
-                ..Config::default()
-            },
-        );
-        let task = tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
-        (daemon, task)
-    }
-
-    /// A run naming `path`, as its hook does: the row says so, and the tailer is told.
-    fn claims(daemon: &Arc<Daemon>, store: &Store, uid: &str, path: &std::path::Path) {
-        store
-            .upsert_session(&transcript_row(uid, path, protocol::event::Lifecycle::Live))
-            .unwrap()
-            .assert_present();
-        daemon
-            .transcript_tx
-            .send(crate::tailer::TailCommand::Follow {
-                session_uid: uid.into(),
-                path: path.to_string_lossy().into_owned(),
-            })
-            .unwrap();
-    }
-
-    /// A run ending as `mark_exited` ends it for the tailer: the row ended, then
-    /// its tail is stopped. Returns once its transcript is forgotten, or after a
-    /// second if it never is, so a test of a tree that does not forget fails on
-    /// what it checks rather than here.
-    async fn ends(daemon: &Arc<Daemon>, store: &Store, uid: &str, path: &std::path::Path) {
-        store
-            .upsert_session(&transcript_row(
-                uid,
-                path,
-                protocol::event::Lifecycle::Exited,
-            ))
-            .unwrap()
-            .assert_present();
-        daemon
-            .transcript_tx
-            .send(crate::tailer::TailCommand::Stop {
-                session_uid: uid.into(),
-            })
-            .unwrap();
-        for _ in 0..100 {
-            if store
-                .get_session(uid)
-                .unwrap()
-                .unwrap()
-                .transcript_path
-                .is_none()
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// The original: a run ends, a later run `--resume`s its conversation, the
-    /// daemon restarts. The ended run keeps what it wrote and is given nothing of
-    /// the later run's, then or at the start.
-    #[tokio::test]
-    async fn an_ended_run_is_not_read_again_once_its_conversation_is_resumed() {
-        let path = long_transcript_path("resumed");
-        let store = shared_store();
-        let (daemon, first) = start_tailer(&store);
-        claims(&daemon, &store, TEST_UID, &path);
-        write_line(&path, "a1");
-        assert!(files_line(&store, TEST_UID, "a1").await);
-        ends(&daemon, &store, TEST_UID, &path).await;
-        claims(&daemon, &store, LATER_UID, &path);
-        write_line(&path, "b1");
-        assert!(files_line(&store, LATER_UID, "b1").await);
-
-        first.abort();
-        let (_daemon, _second) = start_tailer(&store);
-        write_line(&path, "b2");
-        let after_start = files_line(&store, LATER_UID, "b2").await;
-        std::fs::remove_file(&path).unwrap();
-        assert!(after_start, "the running run is followed after the start");
-        assert_eq!(filed_lines(&store, TEST_UID), ["a1"]);
-    }
-
-    /// The same after the later run has moved to a new transcript (`/clear`,
-    /// `/branch`, an in-session `/resume`): no run names the old file any more, and
-    /// the ended run is still not given what the later run wrote to it.
-    #[tokio::test]
-    async fn an_ended_run_stays_unread_after_its_resumer_moves_to_a_new_file() {
-        let old = long_transcript_path("resumed-then-cleared");
-        let new = long_transcript_path("cleared-to");
-        let store = shared_store();
-        let (daemon, first) = start_tailer(&store);
-        claims(&daemon, &store, TEST_UID, &old);
-        write_line(&old, "a1");
-        assert!(files_line(&store, TEST_UID, "a1").await);
-        ends(&daemon, &store, TEST_UID, &old).await;
-        claims(&daemon, &store, LATER_UID, &old);
-        write_line(&old, "b1");
-        assert!(files_line(&store, LATER_UID, "b1").await);
-        claims(&daemon, &store, LATER_UID, &new);
-        write_line(&new, "c1");
-        assert!(files_line(&store, LATER_UID, "c1").await);
-
-        first.abort();
-        let (_daemon, _second) = start_tailer(&store);
-        write_line(&new, "c2");
-        let after_start = files_line(&store, LATER_UID, "c2").await;
-        std::fs::remove_file(&old).unwrap();
-        std::fs::remove_file(&new).unwrap();
-        assert!(
-            after_start,
-            "the running run is followed on its new file after the start"
-        );
-        assert_eq!(filed_lines(&store, TEST_UID), ["a1"]);
-    }
-
-    /// A run started earlier that, still running, resumes a conversation a later
-    /// run named and has since ended: it is followed on that file across a start.
-    #[tokio::test]
-    async fn a_running_run_that_resumes_an_ended_runs_file_is_followed_after_a_start() {
-        let own = long_transcript_path("earlier-own");
-        let resumed = long_transcript_path("earlier-resumes");
-        let store = shared_store();
-        let (daemon, first) = start_tailer(&store);
-        claims(&daemon, &store, EARLIER_UID, &own);
-        write_line(&own, "x1");
-        assert!(files_line(&store, EARLIER_UID, "x1").await);
-        claims(&daemon, &store, TEST_UID, &resumed);
-        write_line(&resumed, "t1");
-        assert!(files_line(&store, TEST_UID, "t1").await);
-        ends(&daemon, &store, TEST_UID, &resumed).await;
-        claims(&daemon, &store, EARLIER_UID, &resumed);
-        write_line(&resumed, "e1");
-        assert!(files_line(&store, EARLIER_UID, "e1").await);
-
-        first.abort();
-        let (_daemon, _second) = start_tailer(&store);
-        write_line(&resumed, "e2");
-        let after_start = files_line(&store, EARLIER_UID, "e2").await;
-        std::fs::remove_file(&own).unwrap();
-        std::fs::remove_file(&resumed).unwrap();
-        assert!(after_start, "the earlier run lost its lines at the start");
-        assert_eq!(filed_lines(&store, TEST_UID), ["t1"]);
-    }
-
-    /// Two runs on one conversation at once: a later run resuming it does not
-    /// take the file from the one still running, which goes on filing its lines.
-    #[tokio::test]
-    async fn a_run_still_running_keeps_its_file_when_a_later_run_resumes_it() {
-        let path = long_transcript_path("two-live");
-        let store = shared_store();
-        let (daemon, _tailer) = start_tailer(&store);
-        claims(&daemon, &store, TEST_UID, &path);
-        write_line(&path, "a1");
-        assert!(files_line(&store, TEST_UID, "a1").await);
-        claims(&daemon, &store, LATER_UID, &path);
-        assert!(files_line(&store, LATER_UID, "a1").await);
-        write_line(&path, "a2");
-        let kept = files_line(&store, TEST_UID, "a2").await;
-        std::fs::remove_file(&path).unwrap();
-        assert!(
-            kept,
-            "the run still running lost its own line to the later one"
-        );
-    }
-
-    /// A run that ends within moments of `/clear` still has the start of its
-    /// new transcript read.
-    #[tokio::test]
-    async fn a_run_that_ends_just_after_its_clear_has_its_new_transcript_read() {
-        let stem = std::env::temp_dir().join(format!(
-            "ccd-clear-ended-{}-{}",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let (old, new) = (
-            stem.with_extension("old.jsonl"),
-            stem.with_extension("new.jsonl"),
-        );
-        let daemon = tailed(&old).await;
-        std::fs::write(&new, format!("{}\n", json!({"type": "user", "uuid": "n1"}))).unwrap();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "SessionStart".into(),
-                payload: json!({
-                    "hook_event_name": "SessionStart",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": new,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon
-            .transcript_tx
-            .send(crate::tailer::TailCommand::Stop {
-                session_uid: TEST_UID.to_string(),
-            })
-            .unwrap();
-        let filed = || {
-            daemon
-                .store
-                .events_after(TEST_UID, 0, 100)
-                .unwrap()
-                .iter()
-                .any(|event| event.source_event_id.as_deref() == Some("n1"))
-        };
-        for _ in 0..100 {
-            if filed() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        std::fs::remove_file(&old).unwrap();
-        std::fs::remove_file(&new).unwrap();
-        assert!(filed());
-    }
-
-    /// An old transcript left with a half-written last line when the run moves
-    /// on is read as far as it can be, and the run moves on.
-    #[tokio::test]
-    async fn a_half_written_last_line_does_not_hold_up_the_move() {
-        let stem = std::env::temp_dir().join(format!(
-            "ccd-clear-partial-{}-{}",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let (old, new) = (
-            stem.with_extension("old.jsonl"),
-            stem.with_extension("new.jsonl"),
-        );
-        let daemon = tailed(&old).await;
-        written(&daemon, &old, &[json!({"type": "user", "uuid": "o1"})]).await;
-        let mut text = std::fs::read_to_string(&old).unwrap();
-        text.push_str(r#"{"type":"assistant","uuid":"o2""#);
-        std::fs::write(&old, text).unwrap();
-        std::fs::write(&new, format!("{}\n", json!({"type": "user", "uuid": "n1"}))).unwrap();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "SessionStart".into(),
-                payload: json!({
-                    "hook_event_name": "SessionStart",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": new,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        let filed = || {
-            daemon
-                .store
-                .events_after(TEST_UID, 0, 100)
-                .unwrap()
-                .iter()
-                .any(|event| event.source_event_id.as_deref() == Some("n1"))
-        };
-        for _ in 0..300 {
-            if filed() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        std::fs::remove_file(&old).unwrap();
-        std::fs::remove_file(&new).unwrap();
-        assert!(filed(), "the new transcript was never followed");
-    }
-
-    /// A run deleted while its old transcript waits to be read after `/clear`
-    /// files nothing more, and the read of that file ends: the tailer goes on
-    /// filing every other run's transcript.
-    #[tokio::test]
-    async fn a_run_deleted_after_its_clear_holds_up_no_other_run() {
-        let stem = std::env::temp_dir().join(format!(
-            "ccd-clear-deleted-{}-{}",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let (old, new, other) = (
-            stem.with_extension("old.jsonl"),
-            stem.with_extension("new.jsonl"),
-            stem.with_extension("other.jsonl"),
-        );
-        let daemon = tailed(&old).await;
-        let start = |uid: &str, name: &str, path: &std::path::Path| HookPost {
-            session_id: name.into(),
-            session_uid: Some(uid.to_string()),
-            event: "SessionStart".into(),
-            payload: json!({
-                "hook_event_name": "SessionStart",
-                "session_id": "uuid",
-                "cwd": "/tmp",
-                "transcript_path": path,
-            }),
-            wait: false,
-            holds_questions: false,
-            holds_approvals: false,
-        };
-        const OTHER: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
-        std::fs::write(&other, "").unwrap();
-        daemon.handle_hook(start(OTHER, "cc-2", &other)).await;
-        // Three of the tailer's 4 MiB reads, unread when the run moves.
-        let filler: String = (0..120)
-            .map(|i| {
-                format!(
-                    "{}\n",
-                    json!({"type": "user", "uuid": format!("f{i}"), "text": "x".repeat(100_000)})
-                )
-            })
-            .collect();
-        std::fs::write(&new, "").unwrap();
-        daemon.handle_hook(start(TEST_UID, "cc-1", &new)).await;
-        std::fs::write(&old, filler).unwrap();
-        daemon
-            .db
-            .set_lifecycle(TEST_UID.to_string(), Lifecycle::Exited)
-            .await
-            .unwrap();
-        daemon
-            .db
-            .delete_exited_session(TEST_UID.to_string())
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
-        std::fs::write(
-            &other,
-            format!("{}\n", json!({"type": "user", "uuid": "o1"})),
-        )
-        .unwrap();
-        let mut filed = false;
-        for _ in 0..300 {
-            filed = !daemon
-                .store
-                .events_after(OTHER, 0, 100)
-                .unwrap()
-                .iter()
-                .all(|event| event.source_event_id.as_deref() != Some("o1"));
-            if filed {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        for path in [&old, &new, &other] {
-            std::fs::remove_file(path).unwrap();
-        }
-        assert!(filed, "the other run's line was not filed within 3 s");
-    }
-
-    /// A tailing daemon, and a writer for the run's transcript at `path`.
-    async fn tailed(path: &std::path::Path) -> Arc<Daemon> {
-        let (daemon, tails) = daemon_watching_tails(
-            shared_store(),
-            Config {
-                fsevents: false,
-                tail_poll_ms: 20,
-                ..Config::default()
-            },
-        );
-        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
-        std::fs::write(path, "").unwrap();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "SessionStart".into(),
-                payload: json!({
-                    "hook_event_name": "SessionStart",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": path,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon
-    }
-
-    async fn stop_hook(daemon: &Arc<Daemon>, path: &std::path::Path) {
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "Stop".into(),
-                payload: json!({
-                    "hook_event_name": "Stop",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "transcript_path": path,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-    }
-
-    /// Appends transcript lines to `path` and waits until the tailer has filed
-    /// them, returning the run's kinds of transcript fact so far.
-    async fn written(
-        daemon: &Arc<Daemon>,
-        path: &std::path::Path,
-        lines: &[serde_json::Value],
-    ) -> Vec<EventKind> {
-        let read = || {
-            daemon
-                .store
-                .events_after(TEST_UID, 0, 100)
-                .unwrap()
-                .into_iter()
-                .filter(|event| event.source == Source::Transcript)
-                .map(|event| event.kind)
-                .collect::<Vec<_>>()
-        };
-        let want = read().len() + lines.len();
-        let mut text = std::fs::read_to_string(path).unwrap();
-        for line in lines {
-            text.push_str(&format!("{line}\n"));
-        }
-        std::fs::write(path, text).unwrap();
-        for _ in 0..300 {
-            if read().len() == want {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        read()
-    }
-
-    /// A transcript the tailer has read and that is missing for a moment when
-    /// the Stop hook arrives (Claude moving it) is not a run without one: the
-    /// turn's end still comes from the transcript alone.
-    #[tokio::test]
-    async fn a_transcript_missing_in_passing_leaves_the_end_to_the_tailer() {
-        let path = std::env::temp_dir().join(format!(
-            "ccd-missing-{}-{}.jsonl",
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let daemon = tailed(&path).await;
-        written(&daemon, &path, &[json!({"type": "user", "uuid": "u1"})]).await;
-        std::fs::remove_file(&path).unwrap();
-        stop_hook(&daemon, &path).await;
-        let kinds: Vec<EventKind> = daemon
-            .store
-            .events_after(TEST_UID, 0, 100)
-            .unwrap()
-            .into_iter()
-            .map(|event| event.kind)
-            .collect();
-        assert!(!kinds.contains(&EventKind::TurnComplete), "{kinds:?}");
-    }
-
-    #[tokio::test]
-    async fn a_real_session_end_still_reports_session_end() {
-        let daemon = test_daemon();
-        // The run has to exist before it can end: an exit reported for a session
-        // nobody registered is a bug to log, not an event to invent.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "SessionStart".into(),
-                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
-            .await;
-        let kinds: Vec<EventKind> = daemon
-            .store
-            .events_after(TEST_UID, 0, 10)
-            .unwrap()
-            .into_iter()
-            .map(|e| e.kind)
-            .collect();
-        assert!(kinds.contains(&EventKind::SessionEnd), "{kinds:?}");
     }
 
     #[tokio::test]
@@ -17196,51 +12113,52 @@ mod tests {
         }
     }
 
-    /// A session row with no supervisor and no events — exactly the shape a
-    /// restart inherits from the process before it.
+    /// A hosted run's row with no host attached and no events — exactly the
+    /// shape a restart inherits from the process before it.
     fn seed_session(daemon: &Arc<Daemon>, uid: &str, name: &str, lifecycle: Lifecycle) {
         let now = protocol::time::now_rfc3339();
-        daemon
-            .store
-            .upsert_session(&SessionRow {
-                session_uid: uid.into(),
-                session_id: name.into(),
-                tmux_session: name.into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
-            .unwrap()
-            .assert_present();
+        let row = SessionRow {
+            session_uid: uid.into(),
+            session_id: name.into(),
+            tmux_session: name.into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        let request = format!("seed-{uid}");
+        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
     }
 
-    /// The same seed, for a run hosted by Codex rather than Claude.
+    /// A session row for a run hosted by Codex rather than Claude.
     fn seed_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
         let now = protocol::time::now_rfc3339();
         daemon
             .store
-            .upsert_session(&SessionRow {
-                session_uid: uid.into(),
-                session_id: name.into(),
-                tmux_session: name.into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Codex,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &SessionRow {
+                    session_uid: uid.into(),
+                    session_id: name.into(),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Codex,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
     }
@@ -17367,24 +12285,6 @@ mod tests {
         capture_daemon_on(shared_store())
     }
 
-    /// Hold every open card of `uid` for the phone, as Claude's waiting hook
-    /// does. A card filed through a hook that does not wait is answered at the
-    /// computer only, and so rings nothing; the tests that use this are about
-    /// what a doorbell for a card says, not how its hook came to be held.
-    async fn hold_open_cards(daemon: &Daemon, uid: &str) {
-        for entry in daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .values_mut()
-            .filter(|entry| entry.session.uid == uid)
-        {
-            entry.card.question_hold = Some(QuestionHold::Held);
-            entry.responder = Some(oneshot::channel().0);
-        }
-    }
-
     /// A decision the phone can answer, open on another run (`Ledger`) for the
     /// rest of the test. Filed straight into the daemon's map, so it rings
     /// nothing itself: a quiet occasion raised after it has a decision to ring
@@ -17415,8 +12315,6 @@ mod tests {
             std::sync::Mutex::new(Vec::new()),
             std::sync::Mutex::new(Vec::new()),
         ));
-        let (tx, rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(rx));
         let daemon = Daemon::new(
             config,
             store,
@@ -17426,61 +12324,39 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tx,
         );
         (daemon, capture)
     }
 
-    /// A quiet-state notification the way Claude's hook posts it.
-    fn quiet_hook(kind: &str, msg: &str) -> HookPost {
-        HookPost {
-            session_id: "cc-1".into(),
-            session_uid: Some(TEST_UID.into()),
-            event: "Notification".into(),
-            payload: json!({
-                "hook_event_name": "Notification",
-                "notification_type": kind,
-                "message": msg,
-                "cwd": "/tmp",
-            }),
-            wait: false,
-            holds_questions: false,
-            holds_approvals: false,
-        }
-    }
-
-    /// The doorbell's full contract, through the real hook path: no agent
-    /// text in the payload (the notification `message` routinely names files
-    /// and commands and was once copied verbatim into the APNs alert), one
-    /// ring per quiet state however often Claude re-announces it, and no ring
-    /// for a device whose live socket already carried the fact.
+    /// The doorbell's contract, through a hosted card: no agent text in the
+    /// payload (a card's command routinely names files, and agent text was once
+    /// copied verbatim into the APNs alert), and no ring for a device whose live
+    /// socket already carried the fact.
     #[tokio::test]
-    async fn the_doorbell_rings_once_skips_watchers_and_carries_no_agent_text() {
+    async fn the_doorbell_skips_watchers_and_carries_no_agent_text() {
         let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
 
         // A phone was watching live: its socket has delivered past anything
-        // this test ingests, so the seen-filter must exclude it at dispatch.
+        // this test files, so the seen-filter must exclude it at dispatch.
         daemon
             .push_gate
             .note_delivered("watching-phone", TEST_UID, 1_000);
 
-        daemon
-            .handle_hook(quiet_hook(
-                "agent_needs_input",
-                "I need /Users/alice/secrets/deploy_key.pem to continue",
-            ))
-            .await;
-        // Claude re-announces the same wait; the ambient latch owes silence.
-        daemon
-            .handle_hook(quiet_hook("idle_prompt", "still waiting"))
-            .await;
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            1,
+            "toolu_secret",
+            "Bash",
+            json!({"command": "cat /Users/alice/secrets/deploy_key.pem"}),
+        )
+        .await;
         // Dispatch runs behind a short grace so in-flight socket writes can
         // record themselves first; the assertions must outwait it.
         tokio::time::sleep(Duration::from_millis(700)).await;
 
         let rings = capture.0.lock().unwrap();
-        assert_eq!(rings.len(), 1, "one quiet state, one ring: {rings:?}");
+        assert_eq!(rings.len(), 1, "one card, one ring: {rings:?}");
         let (hint, excluded) = &rings[0];
         assert_eq!(hint.kind.sentence(), "Waiting on an approval");
         assert!(
@@ -17494,44 +12370,8 @@ mod tests {
         );
     }
 
-    /// The ambient latch through the real hook path: repeating the same quiet
-    /// state is silence, but *movement* — a tool starting, or the quiet state
-    /// changing class — reopens the bell. One ring per thing that happened,
-    /// not one per time Claude announced it.
-    #[tokio::test]
-    async fn the_doorbell_reopens_on_progress_and_on_state_change() {
-        let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
-
-        let wait = || quiet_hook("agent_needs_input", "waiting");
-        let done = || quiet_hook("agent_completed", "all done");
-        // The *first* wait never rings: the tool call lands inside its
-        // dispatch grace, and a push whose wait ended before it left the
-        // building is exactly the stale ring the ticket check exists to drop.
-        // Each later state is let ring before the next arrives: a run's newer
-        // quiet state retires an older one still in its grace.
-        daemon.handle_hook(wait()).await; // gated — then superseded below
-        daemon.handle_hook(wait()).await; // latched: same wait again
-        tool_call(&daemon, "cc-1", TEST_UID, "toolu_p1").await; // progress
-        daemon.handle_hook(wait()).await; // rings: waiting again after movement
-        rung_after(&capture, 1).await;
-        daemon.handle_hook(done()).await; // rings: state changed class
-        rung_after(&capture, 2).await;
-        daemon.handle_hook(done()).await; // latched: same completion again
-        daemon.handle_hook(wait()).await; // rings: changed class back
-
-        use crate::apns::PushKind;
-        assert_eq!(
-            rung_after(&capture, 3).await,
-            vec![PushKind::Approval; 3],
-            "a superseded wait stays silent; every surviving change rings once, \
-             as the decision it rings about"
-        );
-    }
-
-    /// A pending card, hand-built: the state it represents — one run holding a
-    /// second decision while its first is claimed — is not reachable through
-    /// the hooks.
+    /// A pending card, hand-built and filed with no host behind it: a Claude card
+    /// the computer alone can answer until a test makes it a hosted or a Codex one.
     fn pending_card(uid: &str, label: &str) -> PendingApproval {
         PendingApproval {
             card: serde_json::from_value(json!({
@@ -17542,16 +12382,12 @@ mod tests {
             session: SessionKey::new(uid, "cc-1"),
             project_label: label.into(),
             agent: protocol::agent::AgentKind::Claude,
-            created_ms: 0,
             raise: 0,
-            responder: None,
             claimed: false,
-            local_misses: 0,
             tool_ran: false,
-            rejected: false,
             fork: false,
             link: false,
-            question: None,
+            question: false,
         }
     }
 
@@ -17573,20 +12409,18 @@ mod tests {
         let entry = inner.pending.values_mut().next().unwrap();
         entry.claimed = false;
         entry.link = false;
-        assert_eq!(Waiting::of(&inner).decisions, 0, "no host and no hook");
+        assert_eq!(Waiting::of(&inner).decisions, 0, "no host");
     }
 
-    /// Two cards on one run are one agent, and the run is named once.
-    /// Unreachable through hooks alone — it takes a claimed card the
-    /// superseding sweep left standing — so the rule is pinned where it lives
-    /// rather than left to an arrangement no test can build.
+    /// Two cards on one run are one agent, and the run is named once. Pinned
+    /// where the rule lives, on hand-built cards.
     #[test]
     fn two_decisions_on_one_run_are_one_agent() {
-        // Held: the phone can answer it through the hook Claude holds.
+        // Hosted: the phone answers it through the run's host.
         let held = |uid: &str, label: &str| {
             let mut card = pending_card(uid, label);
             card.card.question_hold = Some(QuestionHold::Held);
-            card.responder = Some(oneshot::channel().0);
+            card.link = true;
             card
         };
         let mut inner = Inner::default();
@@ -17607,7 +12441,7 @@ mod tests {
             "two cards on one run are one agent, named once"
         );
 
-        // Only the computer can answer a card no hook is held for, so it
+        // Only the computer can answer a card with no host behind it, so it
         // neither counts nor names a run.
         inner.pending.insert(
             ("other-run".to_string(), "r-3".to_string()),
@@ -17632,7 +12466,7 @@ mod tests {
             .insert(("other-run".to_string(), "r-5".to_string()), claimed);
         assert_eq!(Waiting::of(&inner).decisions, 2);
 
-        // A Codex card is answered through its link, with no hook to hold.
+        // A Codex card is answered through its link.
         let mut codex = pending_card("other-run", "Ledger");
         codex.agent = protocol::agent::AgentKind::Codex;
         inner
@@ -17650,167 +12484,11 @@ mod tests {
         // The one decision waiting is a question, and says so.
         let mut inner = Inner::default();
         let mut asked = held(TEST_UID, "Aion");
-        asked.question = Some(QuestionState::default());
+        asked.question = true;
         inner
             .pending
             .insert((TEST_UID.to_string(), "q".to_string()), asked);
         assert!(Waiting::of(&inner).question);
-    }
-
-    /// **A run that moves takes its open cards with it.**
-    ///
-    /// The label is captured with the card so that composing a doorbell needs
-    /// no database read. A later hook can carry a different `cwd`, and the
-    /// fleet redraws from the row — so a card still holding the old name would
-    /// put one name on a lock screen and a different one on the list behind it.
-    #[tokio::test]
-    async fn a_card_is_named_by_where_its_run_is_now() {
-        let (daemon, capture) = capture_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/srv/dev/before",
-                    "prompt_id": "p-1",
-                    "tool_name": "Bash",
-                    "tool_input": { "command": "echo hi" },
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        hold_open_cards(&daemon, TEST_UID).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        capture.0.lock().unwrap().clear();
-
-        // The run moves: an ordinary hook carrying a different `cwd`.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "PreToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Read",
-                    "tool_input": { "file_path": "/srv/dev/after/x" },
-                    "cwd": "/srv/dev/after",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-2".into(),
-                session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQS".into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "agent_completed",
-                    "message": "done",
-                    "cwd": "/srv/dev/other",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let rings = capture.0.lock().unwrap();
-        let (hint, _) = rings.last().expect("the completion rings");
-        assert_eq!(
-            hint.project_label, "after",
-            "the card wears the run's current project, not the one it was filed in: {rings:?}"
-        );
-    }
-
-    /// **The supervisor is a cwd writer too.** A run that reconnects from a
-    /// different directory moves, and a card it is holding has to move with it
-    /// — or the doorbell names one project while the fleet names another.
-    #[tokio::test]
-    async fn a_supervisor_reconnecting_elsewhere_relabels_the_cards_it_holds() {
-        let (daemon, capture) = capture_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/srv/dev/before",
-                    "prompt_id": "p-1",
-                    "tool_name": "Bash",
-                    "tool_input": { "command": "echo hi" },
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        hold_open_cards(&daemon, TEST_UID).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        capture.0.lock().unwrap().clear();
-
-        // The run's supervisor registers from somewhere else.
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
-        daemon
-            .register_supervisor(
-                RegisterSession {
-                    session_id: "cc-1".to_string(),
-                    session_uid: Some(TEST_UID.to_string()),
-                    tmux_session: "cc-1".to_string(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                    cwd: "/srv/dev/after".to_string(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
-            .await
-            .expect("the supervisor registers");
-
-        // Another run finishes a turn, so the doorbell has to name the blocked
-        // one — and it names it by where that run is now.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-2".into(),
-                session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQS".into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "agent_completed",
-                    "message": "done",
-                    "cwd": "/srv/dev/other",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-
-        let rings = capture.0.lock().unwrap();
-        let (hint, _) = rings.last().expect("the completion rings");
-        assert_eq!(
-            hint.project_label, "after",
-            "the card moved with the run its supervisor re-registered: {rings:?}"
-        );
     }
 
     /// **A phone that re-pairs takes its token with it.** The store moves an
@@ -17876,50 +12554,29 @@ mod tests {
 
     /// **The doorbell names the run it is about, through the real path.**
     ///
-    /// `aion` is holding a decision when `ledger` finishes a turn. One slot
-    /// means `ledger`'s doorbell has to speak for the fleet — and titling it
-    /// `ledger` would send the reader to the wrong project to look for a card
-    /// that is not there.
+    /// `aion` is holding a decision when a Codex run finishes a turn. One slot
+    /// means the finished run's doorbell has to speak for the fleet — and
+    /// titling it after that run would send the reader to the wrong project to
+    /// look for a card that is not there.
     #[tokio::test]
     async fn the_doorbell_that_speaks_for_the_fleet_names_the_blocked_run() {
         let (daemon, capture) = capture_daemon();
         let blocked_uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-        // `aion`'s decision, held for the phone: its call joined, its hook waiting.
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event,
-                "cwd": "/srv/dev/aion",
-                "prompt_id": "p-1",
-                "tool_name": "Bash",
-                "tool_input": { "command": "echo hi" },
-            })
-        };
-        let mut before = hook("PreToolUse");
-        before["tool_use_id"] = json!("toolu_aion");
-        daemon.handle_hook(post(blocked_uid, before, false)).await;
-        let held = Arc::clone(&daemon);
-        let request = post(blocked_uid, hook("PermissionRequest"), true);
-        tokio::spawn(async move { held.handle_hook(request).await });
+        hosted_run(&daemon, blocked_uid, "/srv/dev/aion");
+        hosted_card(
+            &daemon,
+            blocked_uid,
+            1,
+            "toolu_aion",
+            "Bash",
+            json!({"command": "echo hi"}),
+        )
+        .await;
         // Past the decision's own grace, so what follows is counted alone.
         tokio::time::sleep(Duration::from_millis(700)).await;
         capture.0.lock().unwrap().clear();
 
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-2".into(),
-                session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQS".into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "agent_completed",
-                    "message": "done",
-                    "cwd": "/srv/dev/ledger",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
+        raise_ring(&daemon, Ring::CodexCompleted).await;
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
@@ -17928,73 +12585,6 @@ mod tests {
             (hint.kind, hint.project_label.as_str()),
             (crate::apns::PushKind::Approval, "aion"),
             "the decision's project, not the run that happened to ring: {rings:?}"
-        );
-    }
-
-    /// **A card the daemon inherited from its own restart rings no phone.**
-    ///
-    /// Cards are durable; the hook Claude held for one is not, so after a
-    /// restart the card is open with no hook behind it and only the computer
-    /// can answer it. The `permission_prompt` Claude repeats admits it as a
-    /// decision, and the run then does something ordinary — a tool starts —
-    /// but whatever happens, a doorbell for it would open onto a card the phone
-    /// cannot answer: the restored card the owner's phone was rung onto.
-    #[tokio::test]
-    async fn a_card_recovered_from_a_restart_rings_no_phone() {
-        let store = shared_store();
-        let before = daemon_on(Arc::clone(&store), Config::default());
-        raise_prompt(&before, TEST_UID, "p-open", "echo hi").await;
-
-        let (daemon, capture) = capture_daemon_on(store);
-        daemon.recover().await;
-        assert!(
-            !daemon
-                .open_cards_of_prompt(TEST_UID, "p-open")
-                .await
-                .is_empty(),
-            "the run-up: the restarted daemon holds the card"
-        );
-
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "permission_prompt",
-                    "message": "Claude needs your permission to use Bash",
-                    "prompt_id": "p-open",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        // A tool starts while the card waits — the run moved.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "PreToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Read",
-                    "tool_input": { "file_path": "/tmp/x" },
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let rings = capture.0.lock().unwrap();
-        assert!(
-            rings.is_empty(),
-            "only the computer can answer a recovered card: {rings:?}"
         );
     }
 
@@ -18008,13 +12598,22 @@ mod tests {
     #[tokio::test]
     async fn the_badge_counts_the_decisions_waiting_across_runs() {
         let (daemon, capture) = capture_daemon();
-        raise_held_prompt_in(&daemon, "cc-1", TEST_UID, "p-a", "echo a").await;
-        raise_held_prompt_in(
+        hosted_card(
             &daemon,
-            "cc-2",
+            TEST_UID,
+            1,
+            "toolu_a",
+            "Bash",
+            json!({"command": "echo a"}),
+        )
+        .await;
+        hosted_card(
+            &daemon,
             "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
-            "p-b",
-            "echo b",
+            1,
+            "toolu_b",
+            "Bash",
+            json!({"command": "echo b"}),
         )
         .await;
 
@@ -18037,14 +12636,31 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_counts_every_decision_waiting() {
         let (daemon, capture) = capture_daemon();
-        raise_held_prompt_in(&daemon, "cc-1", TEST_UID, "p-a1", "echo a1").await;
-        raise_held_prompt_in(&daemon, "cc-1", TEST_UID, "p-a2", "echo a2").await;
-        raise_held_prompt_in(
+        hosted_card(
             &daemon,
-            "cc-2",
+            TEST_UID,
+            1,
+            "toolu_a1",
+            "Bash",
+            json!({"command": "echo a1"}),
+        )
+        .await;
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            2,
+            "toolu_a2",
+            "Bash",
+            json!({"command": "echo a2"}),
+        )
+        .await;
+        hosted_card(
+            &daemon,
             "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
-            "p-b",
-            "echo b",
+            1,
+            "toolu_b",
+            "Bash",
+            json!({"command": "echo b"}),
         )
         .await;
 
@@ -18057,123 +12673,6 @@ mod tests {
         assert_eq!(crate::apns::alert(last).1, "3 waiting for you");
     }
 
-    /// **The notice must not eat the decision's key, and must not outlive it.**
-    ///
-    /// A `permission_prompt` can arrive before — or without — the
-    /// `PermissionRequest` that makes a card. Taking the permission gate for
-    /// that notice would consume the prompt's key, and the real request landing
-    /// afterwards would be suppressed as a duplicate of a ring that never
-    /// described a card: the reader would never be told about the decision.
-    ///
-    /// And the notice must not simply *join* it. Two dispatches survive their
-    /// grace independently, and APNs stores one notification per device without
-    /// saying which — so the reader could be left holding "waiting for your
-    /// input" while an answerable card sat behind it. The decision supersedes
-    /// the notice, and one ring goes out.
-    #[tokio::test]
-    async fn a_notice_that_arrives_before_its_card_does_not_silence_the_decision() {
-        let (daemon, capture) = capture_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "permission_prompt",
-                    "message": "Claude needs your permission to use Bash",
-                    "prompt_id": "p-late",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        // The structured request for that same prompt, arriving afterwards.
-        raise_held_prompt(&daemon, TEST_UID, "p-late", "echo hi").await;
-
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let rings = capture.0.lock().unwrap();
-        let kinds: Vec<_> = rings.iter().map(|(h, _)| h.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![crate::apns::PushKind::Approval],
-            "the decision supersedes the notice about it, and it is the one that rings: {rings:?}"
-        );
-    }
-
-    /// **A prompt whose card is gone is not news.** The decision rang, it was
-    /// answered, the card went with it — and a delayed or replayed notice about
-    /// that same prompt would be a notification about something that no longer
-    /// exists. Silence is the honest answer, and it is a different answer from
-    /// the one a prompt nobody has heard of gets.
-    #[tokio::test]
-    async fn a_notice_for_a_decision_that_already_rang_is_silent() {
-        let (daemon, capture) = capture_daemon();
-        raise_held_prompt(&daemon, TEST_UID, "p-done", "echo hi").await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert_eq!(capture.0.lock().unwrap().len(), 1, "the decision rang");
-
-        // The card goes: answered at the Mac, superseded, whatever ended it.
-        daemon.inner.lock().await.pending.clear();
-
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "permission_prompt",
-                    "message": "Claude needs your permission to use Bash",
-                    "prompt_id": "p-done",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert_eq!(
-            capture.0.lock().unwrap().len(),
-            1,
-            "no second ring for a decision that is over"
-        );
-    }
-
-    /// **A notice with no card behind it rings nothing.** A `permission_prompt`
-    /// whose `PermissionRequest` never arrived is Claude Code asking at the
-    /// computer, with nothing the phone can answer — the shape the owner's phone
-    /// was rung with, opening onto nothing.
-    #[tokio::test]
-    async fn a_permission_notice_with_no_card_behind_it_does_not_ring() {
-        let (daemon, capture) = capture_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "permission_prompt",
-                    "message": "Claude needs your permission to use Bash",
-                    "prompt_id": "orphan",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let rings = capture.0.lock().unwrap();
-        assert!(rings.is_empty(), "nothing the phone can answer: {rings:?}");
-    }
-
     /// A run deleted while a push waits out its dispatch grace must stay
     /// silent. Without the ticket check, the eviction emptied the delivery
     /// watermarks and the task then woke to an *empty* exclusion list — a
@@ -18181,29 +12680,18 @@ mod tests {
     #[tokio::test]
     async fn a_push_in_flight_when_its_session_is_deleted_never_rings() {
         let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
 
-        // An adopted run — no supervisor, no pending — so the deletion below
-        // is legal: the gate under test is the push's own ticket, not
-        // delete's guards.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "claude:push-1".into(),
-                session_uid: None,
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "agent_needs_input",
-                    "message": "waiting",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        let row = daemon.store.find_session("claude:push-1").unwrap().unwrap();
+        // An ended run with no card of its own, so the deletion below is legal:
+        // the gate under test is the push's own ticket, not delete's guards.
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Exited);
+        let ticket = daemon
+            .push_gate
+            .admit_decision(TEST_UID, "r-deleted")
+            .expect("a new card is news");
+        daemon.dispatch_push(TEST_UID.into(), 1, ticket, false, None);
         let outcome = daemon
-            .delete_exited_session(&row.session_uid)
+            .delete_exited_session(TEST_UID)
             .await
             .expect("the delete call itself succeeds");
         assert!(
@@ -18222,11 +12710,11 @@ mod tests {
     /// **A push admitted for a run that is already gone never rings.**
     ///
     /// The ticket catches an eviction that lands *after* admission. It cannot
-    /// catch one that lands just before: a hook already past `ensure_session`
-    /// goes on to admit, and mints its ticket against the epoch the eviction
-    /// had already bumped — so the ticket agrees with the world and the push
-    /// looks perfectly valid. What settles it is asking, at the moment of
-    /// ringing, whether the run is still there.
+    /// catch one that lands just before: an admission already under way mints
+    /// its ticket against the epoch the eviction had already bumped — so the
+    /// ticket agrees with the world and the push looks perfectly valid. What
+    /// settles it is asking, at the moment of ringing, whether the run is still
+    /// there.
     #[tokio::test]
     async fn a_push_admitted_for_a_run_that_is_already_gone_never_rings() {
         let (daemon, capture) = capture_daemon();
@@ -18236,9 +12724,9 @@ mod tests {
         // deleted run leaves behind.
         let ticket = daemon
             .push_gate
-            .admit_ambient(TEST_UID, crate::push_gate::Ambient::Waiting)
+            .admit_decision(TEST_UID, "r-gone")
             .expect("a fresh run admits");
-        daemon.dispatch_push(TEST_UID.into(), 1, ticket, true, None);
+        daemon.dispatch_push(TEST_UID.into(), 1, ticket, false, None);
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert!(
             capture.0.lock().unwrap().is_empty(),
@@ -18247,22 +12735,12 @@ mod tests {
 
         // The control: the same push for a run that does exist does ring, so
         // the silence above is the check and not the harness.
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
-        let row = daemon
-            .store
-            .find_session("cc-1")
-            .unwrap()
-            .expect("the hook filed a row");
-        // Past that hook's own dispatch grace, so its ring is not counted here.
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        capture.0.lock().unwrap().clear();
+        hosted_run(&daemon, TEST_UID, "/tmp");
         let ticket = daemon
             .push_gate
-            .admit_ambient(&row.session_uid, crate::push_gate::Ambient::Waiting)
-            .expect("a new class is news");
-        daemon.dispatch_push(row.session_uid.clone(), 1, ticket, true, None);
+            .admit_decision(TEST_UID, "r-there")
+            .expect("a new card is news");
+        daemon.dispatch_push(TEST_UID.into(), 1, ticket, false, None);
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
@@ -18271,82 +12749,33 @@ mod tests {
         );
     }
 
-    /// One ring per decision, through the real permission path: the
-    /// `permission_prompt` notification that trails every `PermissionRequest`
-    /// shares its prompt, so the twin finds the key and stays silent; a
-    /// replayed request is deduplicated; a genuinely new decision rings.
-    #[tokio::test]
-    async fn an_approval_rings_once_and_its_notification_twin_never_does() {
-        let (daemon, capture) = capture_daemon();
-
-        raise_held_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // rings
-                                                                       // Claude's own notification about the same prompt, moments later.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "permission_prompt",
-                    "message": "Claude needs your permission to use Bash",
-                    "prompt_id": "p-1",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await; // the twin: silent
-        raise_held_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // replay: silent
-                                                                       // Past the first ring's dispatch grace, so this is a second decision
-                                                                       // announced in its own right rather than one that supersedes a card
-                                                                       // nobody was told about — which is the test below.
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        raise_held_prompt(&daemon, TEST_UID, "p-2", "echo two").await; // new decision: rings
-
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let rings = capture.0.lock().unwrap();
-        assert_eq!(rings.len(), 2, "two decisions, two rings: {rings:?}");
-        assert!(
-            rings
-                .iter()
-                .all(|(h, _)| h.kind == crate::apns::PushKind::Approval
-                    && h.project_label == "tmp"),
-            "an approval ring names the project and why it rang, nothing else: {rings:?}"
-        );
-    }
-    /// A card answered at the Mac inside its doorbell's grace never rings: the
-    /// ring is for a decision still open.
+    /// A card that closes inside its doorbell's grace never rings: the ring is
+    /// for a decision still open.
     #[tokio::test]
     async fn a_card_retired_before_its_doorbell_rang_does_not_ring() {
         let (daemon, capture) = capture_daemon();
-        // Each in its own prompt: a doorbell rings once per prompt.
-        async fn raise(
-            daemon: &Arc<Daemon>,
-            prompt: &str,
-            command: &str,
-            id: &str,
-        ) -> tokio::task::JoinHandle<HookDecision> {
-            let hook = json!({
-                "hook_event_name": "PreToolUse", "cwd": "/tmp", "prompt_id": prompt,
-                "tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": id,
-            });
-            daemon
-                .handle_hook(post(TEST_UID, hook.clone(), false))
-                .await;
-            let mut request = hook;
-            request["hook_event_name"] = json!("PermissionRequest");
-            request.as_object_mut().unwrap().remove("tool_use_id");
-            let request = post(TEST_UID, request, true);
-            let daemon = Arc::clone(daemon);
-            let held = tokio::spawn(async move { daemon.handle_hook(request).await });
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            held
-        }
-        let _held = raise(&daemon, "p-first", "echo one", "toolu_first").await;
-        transcript_result(&daemon, TEST_UID, "toolu_first", true).await;
-        let _open = raise(&daemon, "p-second", "echo two", "toolu_second").await;
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            1,
+            "toolu_first",
+            "Bash",
+            json!({"command": "echo one"}),
+        )
+        .await;
+        assert!(daemon
+            .host_card_withdrawn(TEST_UID, HOST, 2, "toolu_first")
+            .await
+            .unwrap());
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            3,
+            "toolu_second",
+            "Bash",
+            json!({"command": "echo two"}),
+        )
+        .await;
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rung = format!("{:?}", capture.0.lock().unwrap());
@@ -18355,13 +12784,15 @@ mod tests {
             count, 1,
             "only the decision that is still open rings: {rung}"
         );
-        assert!(
-            !daemon
-                .open_cards_of_prompt(TEST_UID, "p-second")
-                .await
-                .is_empty(),
-            "and it is the one still open"
-        );
+        let open: Vec<String> = daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .keys()
+            .map(|(_, request)| request.clone())
+            .collect();
+        assert_eq!(open, ["toolu_second"], "and it is the one still open");
     }
 
     // ------------------------------- rings wait while someone is at the Mac
@@ -18374,7 +12805,6 @@ mod tests {
     /// or grace couples one to another.
     #[derive(Debug, Clone, Copy)]
     enum Ring {
-        ClaudeQuiet(&'static str),
         ClaudeApproval,
         ClaudeQuestion,
         CodexApproval,
@@ -18382,19 +12812,91 @@ mod tests {
         CodexCompleted,
     }
 
-    /// Raise `ring` the way its agent does. A held question is returned so its
-    /// hook, and so its card, stays open while the test watches.
-    async fn raise_ring(daemon: &Arc<Daemon>, ring: Ring) -> Option<HeldQuestion> {
+    /// The agent host every hosted card in these tests comes from.
+    const HOST: protocol::proc_identity::ProcessIdentity =
+        protocol::proc_identity::ProcessIdentity {
+            pid: 4242,
+            birth: protocol::proc_identity::BirthIdentity {
+                start_sec: 1,
+                start_usec: 2,
+            },
+        };
+
+    /// The hosted Claude run `uid` in `cwd`, begun and given its host [`HOST`], as a
+    /// start does.
+    fn hosted_run(daemon: &Arc<Daemon>, uid: &str, cwd: &str) {
+        let now = protocol::time::now_rfc3339();
+        let row = SessionRow {
+            session_uid: uid.into(),
+            session_id: uid.into(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: cwd.into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        let request = format!("start-{uid}");
+        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        daemon.store.record_host(uid, &HOST, None).unwrap();
+    }
+
+    /// The hosted Claude run `uid` asking `tool_name` with `input` through its agent host,
+    /// message `seq`: the engine's own path for a card ([`Daemon::host_card_asked`]). A
+    /// run not yet begun is begun in `/tmp`.
+    async fn hosted_card(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        seq: u64,
+        request_id: &str,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) {
+        if daemon.store.hosted_link(uid).unwrap().is_none() {
+            hosted_run(daemon, uid, "/tmp");
+        }
+        let asked = protocol::host::PermissionRequest {
+            tool_use_id: request_id.into(),
+            tool_name: tool_name.into(),
+            input,
+            options: json!({}),
+        };
+        assert!(
+            daemon.host_card_asked(uid, HOST, seq, asked).await.unwrap(),
+            "the card is filed"
+        );
+    }
+
+    /// Raise `ring` the way its agent does.
+    async fn raise_ring(daemon: &Arc<Daemon>, ring: Ring) {
         match ring {
-            Ring::ClaudeQuiet(kind) => {
-                daemon.handle_hook(quiet_hook(kind, "waiting")).await;
-                None
-            }
             Ring::ClaudeApproval => {
-                raise_held_prompt(daemon, TEST_UID, "p-1", "echo one").await;
-                None
+                hosted_card(
+                    daemon,
+                    TEST_UID,
+                    1,
+                    "toolu_away",
+                    "Bash",
+                    json!({"command": "echo one"}),
+                )
+                .await;
             }
-            Ring::ClaudeQuestion => Some(raise_question(daemon, TEST_UID, None, true).await),
+            Ring::ClaudeQuestion => {
+                hosted_card(
+                    daemon,
+                    TEST_UID,
+                    1,
+                    "toolu_away_question",
+                    protocol::host::ASK_USER_QUESTION,
+                    json!({"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]}),
+                )
+                .await;
+            }
             Ring::CodexApproval => {
                 register_codex_session(daemon, TEST_UID, "cc-1").await;
                 assert!(
@@ -18410,7 +12912,6 @@ mod tests {
                         .await,
                     "the card is filed"
                 );
-                None
             }
             Ring::CodexQuestion => {
                 register_codex_session(daemon, TEST_UID, "cc-1").await;
@@ -18439,7 +12940,6 @@ mod tests {
                         .await,
                     "the card is filed"
                 );
-                None
             }
             Ring::CodexCompleted => {
                 let (uid, _presence) = codex_run_with_link(
@@ -18451,7 +12951,6 @@ mod tests {
                 let session = SessionKey::new(&uid, "cc-9");
                 let done = codex_turn_terminal(daemon, &session, "th:turn:1").await;
                 daemon.push_codex_turn_complete(&session, &done).await;
-                None
             }
         }
     }
@@ -18489,22 +12988,6 @@ mod tests {
     async fn every_ring_waits_while_someone_is_at_the_mac_and_rings_once_they_have_left() {
         use crate::apns::PushKind;
         for (ring, kind, decision_elsewhere) in [
-            (
-                Ring::ClaudeQuiet("agent_completed"),
-                PushKind::Approval,
-                true,
-            ),
-            (Ring::ClaudeQuiet("idle_prompt"), PushKind::Approval, true),
-            (
-                Ring::ClaudeQuiet("agent_needs_input"),
-                PushKind::Approval,
-                true,
-            ),
-            (
-                Ring::ClaudeQuiet("permission_prompt"),
-                PushKind::Approval,
-                true,
-            ),
             (Ring::ClaudeApproval, PushKind::Approval, false),
             (Ring::ClaudeQuestion, PushKind::Question, false),
             (Ring::CodexApproval, PushKind::Approval, false),
@@ -18516,7 +12999,7 @@ mod tests {
                 open_a_decision(&daemon).await;
             }
             crate::presence::set_idle(Some(Duration::ZERO));
-            let _open = raise_ring(&daemon, ring).await;
+            raise_ring(&daemon, ring).await;
             tokio::time::sleep(Duration::from_millis(700)).await;
             assert_eq!(rung(&capture), vec![], "{ring:?} rang at the Mac");
 
@@ -18530,56 +13013,47 @@ mod tests {
     }
 
     /// **A doorbell rings only for a decision the phone can answer.** The
-    /// owner's phone was rung by runs going idle or finishing, and by permission
-    /// notices with no card behind them, and every such tap opened onto nothing
-    /// to answer. Each quiet occasion, raised the way its agent raises it, rings
-    /// nothing while nothing the phone can answer is open — nor while the only
-    /// open card is one the computer alone can answer, no hook being held for
-    /// it. With a decision the phone can answer open, it rings, and is about
-    /// that decision: often the first the owner hears of a card whose own
-    /// doorbell was held while he was at the computer.
+    /// owner's phone was rung by runs going idle or finishing, and every such
+    /// tap opened onto nothing to answer. A finished Codex turn rings nothing
+    /// while nothing the phone can answer is open — nor while the only open
+    /// card is one the computer alone can answer. With a decision the phone can
+    /// answer open, it rings, and is about that decision: often the first the
+    /// owner hears of a card whose own doorbell was held while he was at the
+    /// computer.
     #[tokio::test]
     async fn a_quiet_occasion_rings_only_for_a_decision_the_phone_can_answer() {
-        for ring in [
-            Ring::ClaudeQuiet("idle_prompt"),
-            Ring::ClaudeQuiet("agent_needs_input"),
-            Ring::ClaudeQuiet("agent_completed"),
-            Ring::ClaudeQuiet("permission_prompt"),
-            Ring::CodexCompleted,
-        ] {
-            let (daemon, capture) = capture_daemon();
-            let _open = raise_ring(&daemon, ring).await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            assert_eq!(rung(&capture), vec![], "{ring:?} with nothing open");
+        let (daemon, capture) = capture_daemon();
+        raise_ring(&daemon, Ring::CodexCompleted).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(rung(&capture), vec![], "with nothing open");
 
-            let (daemon, capture) = capture_daemon();
-            daemon.inner.lock().await.pending.insert(
-                ("other-run".into(), "r-at-the-computer".into()),
-                pending_card("other-run", "Ledger"),
-            );
-            let _open = raise_ring(&daemon, ring).await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            assert_eq!(
-                rung(&capture),
-                vec![],
-                "{ring:?} with only a card the computer alone can answer"
-            );
+        let (daemon, capture) = capture_daemon();
+        daemon.inner.lock().await.pending.insert(
+            ("other-run".into(), "r-at-the-computer".into()),
+            pending_card("other-run", "Ledger"),
+        );
+        raise_ring(&daemon, Ring::CodexCompleted).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            rung(&capture),
+            vec![],
+            "with only a card the computer alone can answer"
+        );
 
-            let (daemon, capture) = capture_daemon();
-            open_a_decision(&daemon).await;
-            let _open = raise_ring(&daemon, ring).await;
-            assert_eq!(
-                rung_after(&capture, 1).await,
-                vec![crate::apns::PushKind::Approval],
-                "{ring:?} with a decision the phone can answer open"
-            );
-            let doorbell = newest_doorbell(&capture);
-            assert_eq!(
-                (doorbell.decisions, doorbell.project_label.as_str()),
-                (1, "Ledger"),
-                "{ring:?} rings about the decision, named by its own run"
-            );
-        }
+        let (daemon, capture) = capture_daemon();
+        open_a_decision(&daemon).await;
+        raise_ring(&daemon, Ring::CodexCompleted).await;
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Approval],
+            "with a decision the phone can answer open"
+        );
+        let doorbell = newest_doorbell(&capture);
+        assert_eq!(
+            (doorbell.decisions, doorbell.project_label.as_str()),
+            (1, "Ledger"),
+            "it rings about the decision, named by its own run"
+        );
     }
 
     /// The newest doorbell a capture daemon handed its sender.
@@ -18700,48 +13174,36 @@ mod tests {
     /// **What a doorbell checked before waiting its turn is checked again after.**
     ///
     /// A doorbell waits for the ordering step behind any send still in it (held
-    /// here directly, as a stalled send holds it). In that wait the run can move
-    /// on — a new tool, a new prompt — and the owner can come back to the Mac.
-    /// The first makes it a doorbell about the past, dropped; the second holds it
-    /// until the owner leaves again.
+    /// here directly, as a stalled send holds it). In that wait its card can
+    /// close and the owner can come back to the Mac. The first makes it a
+    /// doorbell about the past, dropped; the second holds it until the owner
+    /// leaves again.
     ///
-    /// **Mutation:** check the ticket and the owner's presence only before the
+    /// **Mutation:** check the card and the owner's presence only before the
     /// wait, and both legs ring the moment the ordering step is free.
     #[tokio::test]
     async fn a_doorbell_that_waited_its_turn_is_checked_again() {
         use crate::apns::PushKind;
 
-        // The run moves on while its doorbell waits: dropped.
+        // The card closes while its doorbell waits: dropped.
         let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(AWAY));
         let stalled = daemon.ring_order.lock().await;
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
         tokio::time::sleep(Duration::from_millis(1_000)).await;
-        daemon
-            .handle_hook(post(
-                TEST_UID,
-                json!({
-                    "hook_event_name": "PreToolUse", "cwd": "/tmp", "tool_name": "Read",
-                    "tool_input": { "file_path": "/tmp/x" },
-                }),
-                false,
-            ))
-            .await;
+        assert!(daemon
+            .host_card_withdrawn(TEST_UID, HOST, 2, "toolu_away")
+            .await
+            .unwrap());
         drop(stalled);
         tokio::time::sleep(Duration::from_millis(1_000)).await;
-        assert_eq!(rung(&capture), vec![], "the run moved on while it waited");
+        assert_eq!(rung(&capture), vec![], "the card closed while it waited");
 
         // The owner comes back while it waits: held, then rung once they leave.
         let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(AWAY));
         let stalled = daemon.ring_order.lock().await;
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
         tokio::time::sleep(Duration::from_millis(1_000)).await;
         crate::presence::set_idle(Some(Duration::ZERO));
         drop(stalled);
@@ -18779,8 +13241,6 @@ mod tests {
             entered: std::sync::Mutex::new(Some(entered_tx)),
             release: std::sync::Mutex::new(Some(release_rx)),
         });
-        let (tx, rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(rx));
         let daemon = Daemon::new(
             Config::default(),
             shared_store(),
@@ -18790,16 +13250,13 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tx,
         );
         crate::presence::set_idle(Some(AWAY));
 
         // Run A's turn ends with one decision waiting elsewhere; its send stalls
         // after the count.
         open_a_decision(&daemon).await;
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
+        raise_ring(&daemon, Ring::CodexCompleted).await;
         tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
             .await
             .unwrap()
@@ -18829,40 +13286,6 @@ mod tests {
         );
     }
 
-    /// **And the reverse: a Claude turn that finishes while a Codex decision
-    /// waits still says a decision waits.**
-    ///
-    /// **Mutation:** count only the ringing agent's cards in the dispatch and
-    /// the finished Claude turn reads `Completed` with a count of 0.
-    #[tokio::test]
-    async fn a_finished_claude_turn_does_not_replace_a_waiting_codex_decision() {
-        use crate::apns::PushKind;
-        let (daemon, capture) = capture_daemon();
-        crate::presence::set_idle(Some(AWAY));
-        raise_mixed_codex_card(&daemon).await;
-        assert_eq!(rung_after(&capture, 1).await, vec![PushKind::Approval]);
-
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
-        assert_eq!(
-            rung_after(&capture, 2).await.len(),
-            2,
-            "the Claude turn end rang"
-        );
-        let after_claude_turn = newest_doorbell(&capture);
-        assert_eq!(
-            (after_claude_turn.kind, after_claude_turn.decisions),
-            (PushKind::Approval, 1),
-            "a finished Claude turn must not replace the waiting Codex decision: \
-             {after_claude_turn:?}"
-        );
-        assert_eq!(
-            crate::apns::alert(&after_claude_turn).1,
-            PushKind::Approval.sentence()
-        );
-    }
-
     /// **A direction override in a run's directory reaches the alert title as a
     /// replacement character.** The title of a direct APNs alert is the project
     /// label of the run holding the decision, drawn by the lock screen as it
@@ -18871,14 +13294,8 @@ mod tests {
     async fn a_direction_override_in_a_cwd_reaches_the_alert_title_replaced() {
         let (daemon, capture) = capture_daemon();
         crate::presence::set_idle(Some(AWAY));
-        let cwd = json!("/work/abc\u{202E}gpj.exe");
-        let request = json!({
-            "hook_event_name": "PermissionRequest", "cwd": cwd, "prompt_id": "p-1",
-            "tool_name": "Bash", "tool_input": { "command": "echo hi" },
-        });
-        daemon.handle_hook(post(TEST_UID, request, false)).await;
-        // Held inside the card's own dispatch grace, so its doorbell rings.
-        hold_open_cards(&daemon, TEST_UID).await;
+        hosted_run(&daemon, TEST_UID, "/work/abc\u{202E}gpj.exe");
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
         assert_eq!(rung_after(&capture, 1).await.len(), 1, "the decision rang");
         let title = crate::apns::alert(&newest_doorbell(&capture)).0;
         assert_eq!(title, "abc\u{FFFD}gpj.exe");
@@ -18888,11 +13305,8 @@ mod tests {
     #[tokio::test]
     async fn a_ring_waits_for_two_full_minutes_without_input() {
         let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(AWAY - Duration::from_millis(1)));
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(rung(&capture), vec![], "a breath short of two minutes");
 
@@ -18909,11 +13323,8 @@ mod tests {
     #[tokio::test]
     async fn a_phone_that_saw_the_fact_while_its_ring_was_held_is_not_rung() {
         let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
         crate::presence::set_idle(Some(Duration::ZERO));
-        daemon
-            .handle_hook(quiet_hook("agent_needs_input", "waiting"))
-            .await;
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         daemon
             .push_gate
@@ -18927,9 +13338,9 @@ mod tests {
     }
 
     /// **A held ring rings only if it still matters when the owner leaves.**
-    /// The run moving on (a tool, the turn ending, a new Codex turn), the
-    /// decision being answered at the Mac, or the run being deleted while the
-    /// owner sat there each mean there is nothing left to tell the phone.
+    /// The run moving on (a new Codex turn, the run ending), the decision
+    /// closing, or the run being deleted while the owner sat there each mean
+    /// there is nothing left to tell the phone.
     #[tokio::test]
     async fn a_held_ring_that_stopped_mattering_never_rings() {
         async fn leave_and_listen(capture: &CaptureSender, case: &str) {
@@ -18938,976 +13349,79 @@ mod tests {
             assert_eq!(rung(capture), vec![], "{case}");
         }
 
-        for moved in ["PreToolUse", "Stop"] {
-            let (daemon, capture) = capture_daemon();
-            crate::presence::set_idle(Some(Duration::ZERO));
-            daemon
-                .handle_hook(quiet_hook("agent_completed", "done"))
-                .await;
+        async fn codex_turn_held(daemon: &Arc<Daemon>) -> String {
+            open_a_decision(daemon).await;
+            let (uid, _presence) = codex_run_with_link(
+                daemon,
+                None,
+                crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            )
+            .await;
+            let session = SessionKey::new(&uid, "cc-9");
+            let done = codex_turn_terminal(daemon, &session, "th:turn:1").await;
+            daemon.push_codex_turn_complete(&session, &done).await;
             tokio::time::sleep(Duration::from_millis(700)).await;
-            daemon
-                .handle_hook(HookPost {
-                    session_id: "cc-1".into(),
-                    session_uid: Some(TEST_UID.into()),
-                    event: moved.into(),
-                    payload: json!({
-                        "hook_event_name": moved,
-                        "tool_name": "Read",
-                        "tool_input": { "file_path": "/tmp/x" },
-                        "cwd": "/tmp",
-                    }),
-                    wait: false,
-                    holds_questions: false,
-                    holds_approvals: false,
-                })
-                .await;
-            leave_and_listen(&capture, moved).await;
+            uid
         }
 
         let (daemon, capture) = capture_daemon();
         crate::presence::set_idle(Some(Duration::ZERO));
-        let (uid, _presence) = codex_run_with_link(
-            &daemon,
-            None,
-            crate::codex_link::CodexAddressee::Offline { thread_id: None },
-        )
-        .await;
-        let session = SessionKey::new(&uid, "cc-9");
-        let done = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
-        daemon.push_codex_turn_complete(&session, &done).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        let uid = codex_turn_held(&daemon).await;
         daemon.note_codex_turn_running(&uid);
         leave_and_listen(&capture, "a new Codex turn started").await;
 
         let (daemon, capture) = capture_daemon();
         crate::presence::set_idle(Some(Duration::ZERO));
-        let hook = json!({
-            "hook_event_name": "PreToolUse", "cwd": "/tmp", "prompt_id": "p-held",
-            "tool_name": "Bash", "tool_input": {"command": "echo one"}, "tool_use_id": "toolu_held",
-        });
-        daemon
-            .handle_hook(post(TEST_UID, hook.clone(), false))
-            .await;
-        let mut request = hook;
-        request["hook_event_name"] = json!("PermissionRequest");
-        request.as_object_mut().unwrap().remove("tool_use_id");
-        let _held = {
-            let daemon = Arc::clone(&daemon);
-            let request = post(TEST_UID, request, true);
-            tokio::spawn(async move { daemon.handle_hook(request).await })
-        };
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        let uid = codex_turn_held(&daemon).await;
         assert!(
-            !daemon
-                .open_cards_of_prompt(TEST_UID, "p-held")
-                .await
-                .is_empty(),
-            "the premise: an open decision"
+            daemon
+                .mark_exited(
+                    &SessionKey::new(&uid, "cc-9"),
+                    Some(0),
+                    Some("test"),
+                    observed_now(&daemon, &uid).await
+                )
+                .await,
+            "the premise: the run ended"
         );
-        transcript_result(&daemon, TEST_UID, "toolu_held", false).await;
-        leave_and_listen(&capture, "the decision was answered at the Mac").await;
+        leave_and_listen(&capture, "the run ended").await;
 
-        let (daemon, capture) = capture_daemon();
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let _asked = raise_question(&daemon, TEST_UID, None, true).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        question_ran(&daemon, TEST_UID, question_input()).await;
-        leave_and_listen(&capture, "the question was answered at the Mac").await;
-
-        for kind in ["idle_prompt", "agent_completed"] {
+        for ring in [Ring::ClaudeApproval, Ring::ClaudeQuestion] {
             let (daemon, capture) = capture_daemon();
             crate::presence::set_idle(Some(Duration::ZERO));
-            daemon.handle_hook(quiet_hook(kind, "waiting")).await;
+            raise_ring(&daemon, ring).await;
             tokio::time::sleep(Duration::from_millis(700)).await;
-            assert!(
-                daemon
-                    .mark_exited(
-                        &test_key(),
-                        Some(0),
-                        Some("test"),
-                        observed_now(&daemon, TEST_UID).await
-                    )
-                    .await,
-                "the premise: the run ended"
-            );
-            leave_and_listen(&capture, &format!("{kind}: the run ended")).await;
+            let request = daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .keys()
+                .map(|(_, request)| request.clone())
+                .next()
+                .expect("the premise: an open decision");
+            assert!(daemon
+                .host_card_withdrawn(TEST_UID, HOST, 2, &request)
+                .await
+                .unwrap());
+            leave_and_listen(&capture, &format!("{ring:?}: the card closed")).await;
         }
 
         let (daemon, capture) = capture_daemon();
         crate::presence::set_idle(Some(Duration::ZERO));
-        daemon
-            .handle_hook(HookPost {
-                session_id: "claude:push-away".into(),
-                session_uid: None,
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "agent_needs_input",
-                    "message": "waiting",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
+        open_a_decision(&daemon).await;
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Exited);
+        let ticket = daemon
+            .push_gate
+            .admit_decision(TEST_UID, "r-held")
+            .expect("a new card is news");
+        daemon.dispatch_push(TEST_UID.into(), 1, ticket, false, None);
         tokio::time::sleep(Duration::from_millis(700)).await;
-        let row = daemon
-            .store
-            .find_session("claude:push-away")
-            .unwrap()
-            .unwrap();
         assert!(matches!(
-            daemon.delete_exited_session(&row.session_uid).await,
+            daemon.delete_exited_session(TEST_UID).await,
             Ok(protocol::ws::DeleteSessionResult::Deleted { .. })
         ));
         leave_and_listen(&capture, "the run was deleted").await;
-    }
-
-    /// **A background question keeps its ten seconds; its ring takes two
-    /// minutes.** One idle reading, two thresholds: thirty seconds without
-    /// input hides the question from the Mac for the phone, exactly as before,
-    /// and its ring still waits until the Mac has been left for two minutes.
-    #[tokio::test]
-    async fn a_background_question_keeps_its_ten_seconds_while_its_ring_waits_two_minutes() {
-        let (daemon, capture) = capture_daemon();
-        let request_id = "toolu_fork_question";
-        let id = (TEST_UID.to_string(), request_id.to_string());
-        crate::presence::set_idle(Some(Duration::from_secs(30)));
-
-        let request: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../fixtures/claude/askuq-fork-permissionrequest-2.1.286.json"
-        ))
-        .unwrap();
-        let mut before = request.clone();
-        before["hook_event_name"] = json!("PreToolUse");
-        before["tool_use_id"] = json!(request_id);
-        daemon.handle_hook(post(TEST_UID, before, false)).await;
-        let (_end_hook, ended) = oneshot::channel::<()>();
-        let _hook = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let mut gone = Box::pin(async move {
-                    let _ = ended.await;
-                });
-                daemon
-                    .handle_hook_held(post(TEST_UID, request, true), &mut gone)
-                    .await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let hold = |daemon: &Daemon| {
-            daemon
-                .inner
-                .try_lock()
-                .unwrap()
-                .pending
-                .get(&id)
-                .and_then(|entry| entry.card.question_hold)
-        };
-        assert_eq!(
-            hold(&daemon),
-            Some(QuestionHold::Held),
-            "hidden from the Mac"
-        );
-        assert_eq!(rung(&capture), vec![], "and its ring waits");
-
-        crate::presence::set_idle(Some(AWAY));
-        assert_eq!(
-            rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Question]
-        );
-        assert_eq!(hold(&daemon), Some(QuestionHold::Held));
-    }
-
-    /// **An approval answered at the Mac does not ring while its call runs.**
-    ///
-    /// Claude Code 2.1.308, recorded: after "Yes" at the Mac the
-    /// `PermissionRequest` hook is left running (it was still alive 42 s later,
-    /// after the turn had ended) and nothing reaches the transcript until the
-    /// call's result, 25 s later for a 25 s command. What does change at once
-    /// is the screen: the dialog leaves the pane and the composer comes back.
-    /// The screen, read when the ring would go, is what ends it. A dialog still
-    /// on the pane is still a decision, and rings.
-    #[tokio::test]
-    async fn an_approval_answered_at_the_mac_does_not_ring_while_its_call_runs() {
-        for answered in [true, false] {
-            let (daemon, capture) = capture_daemon_configured(
-                shared_store(),
-                Config {
-                    local_resolve_grace_ms: 1,
-                    ..Config::default()
-                },
-            );
-            let supervisor = attach(
-                &daemon,
-                "cc-1",
-                TEST_UID,
-                &permission_pane("cargo build --release"),
-                "",
-            )
-            .await;
-            crate::presence::set_idle(Some(Duration::ZERO));
-            let hook = |event: &str| {
-                json!({
-                    "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p-long",
-                    "tool_name": "Bash", "tool_input": {"command": "cargo build --release"},
-                })
-            };
-            let mut before = hook("PreToolUse");
-            before["tool_use_id"] = json!("toolu_long");
-            daemon.handle_hook(post(TEST_UID, before, false)).await;
-            let (_end_hook, ended) = oneshot::channel::<()>();
-            let _held = {
-                let daemon = Arc::clone(&daemon);
-                let request = post(TEST_UID, hook("PermissionRequest"), true);
-                tokio::spawn(async move {
-                    let mut gone = Box::pin(async move {
-                        let _ = ended.await;
-                    });
-                    daemon.handle_hook_held(request, &mut gone).await
-                })
-            };
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            assert!(
-                !daemon
-                    .open_cards_of_prompt(TEST_UID, "p-long")
-                    .await
-                    .is_empty(),
-                "the premise: a held decision"
-            );
-            if answered {
-                *supervisor.visible.lock().unwrap() = COMPOSER_PANE.to_string();
-            }
-            for _ in 0..LOCAL_RESOLVE_MISSES {
-                daemon.sweep_local_resolutions().await;
-            }
-            assert!(
-                !daemon
-                    .open_cards_of_prompt(TEST_UID, "p-long")
-                    .await
-                    .is_empty(),
-                "the card itself waits for the call's result"
-            );
-            crate::presence::set_idle(Some(AWAY));
-            let expected = if answered {
-                vec![]
-            } else {
-                vec![crate::apns::PushKind::Approval]
-            };
-            assert_eq!(
-                rung_after(&capture, expected.len().max(1)).await,
-                expected,
-                "answered at the Mac: {answered}"
-            );
-        }
-    }
-
-    /// Claude Code's detailed transcript view (ctrl+o) over a call running after
-    /// "Yes" at the Mac, the shape recorded on 2.1.308: neither a dialog nor a
-    /// composer, so the screen says nothing either way.
-    const TRANSCRIPT_VIEW_PANE: &str = "\u{276f} LONGRUN go\n  Bash(python3 -c 'import time; time.sleep(40)')\n  \u{23bf}  Running\u{2026} (4s)\n\u{2500}\u{2500}\u{2500}\u{2500}\n  Showing detailed transcript \u{b7} ctrl+o to toggle \u{b7} \u{2191}\u{2193} scroll\n";
-
-    /// A held main-conversation approval whose pane shows `screens` in turn, one
-    /// sweep each with the owner at the Mac; then the owner leaves. What rang.
-    async fn ring_after_screens(screens: &[&str]) -> Vec<crate::apns::PushKind> {
-        let (daemon, capture) = capture_daemon_configured(
-            shared_store(),
-            Config {
-                local_resolve_grace_ms: 1,
-                ..Config::default()
-            },
-        );
-        let supervisor = attach(&daemon, "cc-1", TEST_UID, screens[0], "").await;
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p-long",
-                "tool_name": "Bash", "tool_input": {"command": "cargo build --release"},
-            })
-        };
-        let mut before = hook("PreToolUse");
-        before["tool_use_id"] = json!("toolu_long");
-        daemon.handle_hook(post(TEST_UID, before, false)).await;
-        let (_end_hook, ended) = oneshot::channel::<()>();
-        let _held = {
-            let daemon = Arc::clone(&daemon);
-            let request = post(TEST_UID, hook("PermissionRequest"), true);
-            tokio::spawn(async move {
-                let mut gone = Box::pin(async move {
-                    let _ = ended.await;
-                });
-                daemon.handle_hook_held(request, &mut gone).await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert!(
-            !daemon
-                .open_cards_of_prompt(TEST_UID, "p-long")
-                .await
-                .is_empty(),
-            "the premise: a held decision"
-        );
-        for screen in screens {
-            *supervisor.visible.lock().unwrap() = screen.to_string();
-            daemon.sweep_local_resolutions().await;
-            tokio::time::sleep(Duration::from_millis(1_100)).await;
-        }
-        assert!(
-            !daemon
-                .open_cards_of_prompt(TEST_UID, "p-long")
-                .await
-                .is_empty(),
-            "the card itself waits for the call's result"
-        );
-        crate::presence::set_idle(Some(AWAY));
-        rung_after(&capture, 1).await
-    }
-
-    /// **What the screen says is read when the ring would go, not when it was
-    /// first seen.** The dialog read as answered — the owner looking at another
-    /// pane with a composer, or any transient — and then back on the screen is
-    /// a decision still waiting, and it rings.
-    #[tokio::test]
-    async fn a_dialog_read_as_answered_and_then_back_still_rings() {
-        let dialog = permission_pane("cargo build --release");
-        assert_eq!(
-            ring_after_screens(&[&dialog, COMPOSER_PANE, COMPOSER_PANE, &dialog, &dialog]).await,
-            vec![crate::apns::PushKind::Approval]
-        );
-    }
-
-    /// **A run's newer quiet state retires its older one.** Finished, then
-    /// waiting again with nothing between that the daemon saw (a turn begun and
-    /// interrupted at the Mac): the owner, away, hears what the run is doing
-    /// now, not what it did before.
-    #[tokio::test]
-    async fn a_runs_newer_quiet_state_retires_its_older_one() {
-        let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
-        crate::presence::set_idle(Some(Duration::ZERO));
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        daemon
-            .handle_hook(quiet_hook("idle_prompt", "waiting"))
-            .await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        crate::presence::set_idle(Some(AWAY));
-        assert_eq!(
-            rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Approval]
-        );
-    }
-
-    /// One main-conversation Bash approval held the way cc-hook holds one, under
-    /// the prompt id Claude Code gives every call of one turn (2.1.308,
-    /// recorded: all of a turn's calls carry the turn's `prompt_id`).
-    async fn held_call_of_turn(
-        daemon: &Arc<Daemon>,
-        tool_use_id: &str,
-        command: &str,
-    ) -> oneshot::Sender<()> {
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "turn-1",
-                "tool_name": "Bash", "tool_input": {"command": command},
-            })
-        };
-        let mut before = hook("PreToolUse");
-        before["tool_use_id"] = json!(tool_use_id);
-        daemon.handle_hook(post(TEST_UID, before, false)).await;
-        let (end_hook, ended) = oneshot::channel::<()>();
-        let daemon = Arc::clone(daemon);
-        let request = post(TEST_UID, hook("PermissionRequest"), true);
-        tokio::spawn(async move {
-            let mut gone = Box::pin(async move {
-                let _ = ended.await;
-            });
-            daemon.handle_hook_held(request, &mut gone).await
-        });
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        end_hook
-    }
-
-    /// **Every approval of a turn rings once.** Claude Code 2.1.308 asks a
-    /// turn's second approval only after its first call has run, under the same
-    /// `prompt_id`: it is a decision of its own. Answered at the Mac, the first
-    /// does not ring; the second, left waiting, does — once, its
-    /// `permission_prompt` twin silent. With nobody at the Mac, each rings as it
-    /// is asked.
-    #[tokio::test]
-    async fn every_approval_of_a_turn_rings_once() {
-        for (idle, first_rings, twin) in [
-            (Some(Duration::ZERO), 0, false),
-            (Some(Duration::ZERO), 0, true),
-            (None, 1, false),
-            (None, 1, true),
-        ] {
-            let (daemon, capture) = capture_daemon();
-            crate::presence::set_idle(idle);
-            let _first = held_call_of_turn(&daemon, "toolu_first", "sleep 30").await;
-            transcript_result(&daemon, TEST_UID, "toolu_first", false).await;
-            assert_eq!(
-                rung_after(&capture, first_rings).await.len(),
-                first_rings,
-                "idle {idle:?}: the first"
-            );
-            let _second = held_call_of_turn(&daemon, "toolu_second", "sleep 31").await;
-            if twin {
-                daemon
-                    .handle_hook(HookPost {
-                        session_id: "cc-1".into(),
-                        session_uid: Some(TEST_UID.into()),
-                        event: "Notification".into(),
-                        payload: json!({
-                            "hook_event_name": "Notification",
-                            "notification_type": "permission_prompt",
-                            "message": "Claude needs your permission to use Bash",
-                            "prompt_id": "turn-1",
-                            "cwd": "/tmp",
-                        }),
-                        wait: false,
-                        holds_questions: false,
-                        holds_approvals: false,
-                    })
-                    .await;
-            }
-            crate::presence::set_idle(Some(AWAY));
-            let kinds = rung_after(&capture, first_rings + 1).await;
-            assert_eq!(
-                kinds.len(),
-                first_rings + 1,
-                "idle {idle:?}, twin {twin}: {kinds:?}"
-            );
-            assert!(
-                kinds.iter().all(|k| *k == crate::apns::PushKind::Approval),
-                "{kinds:?}"
-            );
-        }
-    }
-
-    /// **A turn begun by a line stamped only `turnOrigin` ends the ring before
-    /// it.** The phone's rule, the same: `promptSource` or `turnOrigin` on a line
-    /// that was not only recorded. Claude Code writes such a line for `/plan` and
-    /// `/goal` (2.1.308) and for an automatic compaction summary inside a running
-    /// turn (204 in the owner's transcripts, 2.1.278–2.1.303); either way the run
-    /// has moved on from the finished turn being held.
-    #[tokio::test]
-    async fn a_turn_stamped_only_with_its_origin_ends_the_ring_before_it() {
-        for line in [
-            json!({
-                "type": "user", "uuid": "plan-line", "isSidechain": false,
-                "message": {"role": "user", "content": "<local-command-stdout>Enabled plan mode</local-command-stdout>"},
-                "turnOrigin": "human", "turnPosition": {"promptIndex": 2, "turnIndex": 2},
-            }),
-            json!({
-                "type": "user", "uuid": "compact-line", "isSidechain": false,
-                "isCompactSummary": true,
-                "message": {"role": "user", "content": "This session is being continued from a previous conversation."},
-                "turnOrigin": "task_notification",
-            }),
-        ] {
-            let (daemon, capture) = capture_daemon();
-            crate::presence::set_idle(Some(Duration::ZERO));
-            daemon
-                .handle_hook(quiet_hook("agent_completed", "done"))
-                .await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            transcript_line(&daemon, &line).await;
-            crate::presence::set_idle(Some(AWAY));
-            tokio::time::sleep(Duration::from_millis(1_500)).await;
-            assert_eq!(rung(&capture), vec![], "{}", line["uuid"]);
-        }
-    }
-
-    /// **What the screen shows when the ring would go decides, and only the
-    /// composer back says answered.** The dialog rings; the detailed transcript
-    /// view (ctrl+o), which shows neither, rings; a pane that cannot be read
-    /// rings — unsure, the owner hears about it.
-    #[tokio::test]
-    async fn only_the_composer_back_on_the_screen_keeps_a_decision_from_ringing() {
-        let dialog = permission_pane("cargo build --release");
-        for (at_release, rings) in [
-            (Some(dialog.as_str()), true),
-            (Some(COMPOSER_PANE), false),
-            (Some(TRANSCRIPT_VIEW_PANE), true),
-            (None, true),
-        ] {
-            let (daemon, capture) = capture_daemon_configured(
-                shared_store(),
-                Config {
-                    local_resolve_poll_ms: 100,
-                    ..Config::default()
-                },
-            );
-            let supervisor = attach(&daemon, "cc-1", TEST_UID, &dialog, "").await;
-            crate::presence::set_idle(Some(Duration::ZERO));
-            let _held = held_call_of_turn(&daemon, "toolu_stale", "cargo build --release").await;
-            match at_release {
-                Some(screen) => *supervisor.visible.lock().unwrap() = screen.to_string(),
-                // The run goes on; its pane can no longer be read.
-                None => {
-                    daemon.inner.lock().await.supervisors.remove(TEST_UID);
-                }
-            }
-            crate::presence::set_idle(Some(AWAY));
-            let expected = if rings {
-                vec![crate::apns::PushKind::Approval]
-            } else {
-                vec![]
-            };
-            assert_eq!(rung_after(&capture, 1).await, expected, "{at_release:?}");
-        }
-    }
-
-    /// A supervisor that serves `screen` to every capture until `stall` is set,
-    /// and from then on answers none: a supervisor or tmux server that has
-    /// stopped responding.
-    async fn stalling_supervisor(
-        daemon: &Arc<Daemon>,
-        name: &str,
-        uid: &str,
-        screen: String,
-        stall: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Registration {
-        let (tx, mut rx) = mpsc::channel::<DaemonFrame>(64);
-        let inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>> =
-            Default::default();
-        {
-            let inflight = Arc::clone(&inflight);
-            tokio::spawn(async move {
-                while let Some(frame) = rx.recv().await {
-                    let DaemonFrame::SupervisorRequest { id, request } = frame else {
-                        continue;
-                    };
-                    if stall.load(std::sync::atomic::Ordering::SeqCst) {
-                        continue;
-                    }
-                    let result = match request {
-                        SupervisorRequest::Capture { .. } => SupervisorResult::Snapshot {
-                            text: screen.clone(),
-                        },
-                        _ => SupervisorResult::Pong,
-                    };
-                    if let Some(reply) = inflight.lock().unwrap().remove(&id) {
-                        let _ = reply.send(result);
-                    }
-                }
-            });
-        }
-        daemon
-            .register_supervisor(
-                RegisterSession {
-                    session_id: name.to_string(),
-                    session_uid: Some(uid.to_string()),
-                    tmux_session: name.to_string(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                    cwd: "/tmp".to_string(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                inflight,
-            )
-            .await
-            .expect("registration")
-    }
-
-    /// A main-conversation approval held for the phone in the run `name`.
-    async fn held_approval_in(daemon: &Arc<Daemon>, name: &str, uid: &str, call: &str) {
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": format!("turn-{name}"),
-                "tool_name": "Bash", "tool_input": {"command": format!("run {call}")},
-            })
-        };
-        let mut before = hook("PreToolUse");
-        before["tool_use_id"] = json!(call);
-        let mut pre = post(uid, before, false);
-        pre.session_id = name.into();
-        daemon.handle_hook(pre).await;
-        let mut request = post(uid, hook("PermissionRequest"), true);
-        request.session_id = name.into();
-        let held = Arc::clone(daemon);
-        tokio::spawn(async move { held.handle_hook(request).await });
-        for _ in 0..100 {
-            if daemon
-                .inner
-                .lock()
-                .await
-                .pending
-                .contains_key(&(uid.to_string(), call.to_string()))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// **The owner coming back while a ring reads the screen keeps it waiting.**
-    /// The read can take a whole sweep period; presence, the ticket and who has
-    /// seen the event are asked again after it, and the owner at the Mac means
-    /// the ring holds — it rings when they leave again.
-    #[tokio::test]
-    async fn the_owner_coming_back_during_the_screen_read_keeps_the_ring_waiting() {
-        let (daemon, capture) = capture_daemon_configured(
-            shared_store(),
-            Config {
-                local_resolve_poll_ms: 300,
-                ..Config::default()
-            },
-        );
-        let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let _supervisor = stalling_supervisor(
-            &daemon,
-            "cc-1",
-            TEST_UID,
-            permission_pane("run toolu_back"),
-            Arc::clone(&stall),
-        )
-        .await;
-        crate::presence::set_idle(Some(Duration::ZERO));
-        held_approval_in(&daemon, "cc-1", TEST_UID, "toolu_back").await;
-        stall.store(true, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        crate::presence::set_idle(Some(AWAY));
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        crate::presence::set_idle(Some(Duration::ZERO));
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
-        assert_eq!(rung(&capture), vec![], "rang at the Mac");
-        crate::presence::set_idle(Some(AWAY));
-        assert_eq!(
-            rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Approval]
-        );
-    }
-
-    /// **Screens that will not answer do not hold the fleet behind them.**
-    /// Each stalled read is allowed one sweep period, and each ring reads its
-    /// own: five stalled runs do not hold a healthy run's ring, and each of
-    /// them rings once its read has run out.
-    #[tokio::test]
-    async fn stalled_screen_reads_do_not_queue_behind_one_another() {
-        let period = Duration::from_millis(500);
-        let (daemon, capture) = capture_daemon_configured(
-            shared_store(),
-            Config {
-                local_resolve_poll_ms: period.as_millis() as u64,
-                ..Config::default()
-            },
-        );
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut supervisors = Vec::new();
-        for i in 0..5 {
-            let uid = protocol::uid::new().unwrap();
-            let name = format!("st-{i}");
-            let call = format!("toolu_st_{i}");
-            supervisors.push(
-                stalling_supervisor(
-                    &daemon,
-                    &name,
-                    &uid,
-                    permission_pane(&format!("run {call}")),
-                    Arc::clone(&stall),
-                )
-                .await,
-            );
-            held_approval_in(&daemon, &name, &uid, &call).await;
-        }
-        let healthy = protocol::uid::new().unwrap();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "healthy".into(),
-                session_uid: Some(healthy.clone()),
-                event: "Notification".into(),
-                payload: json!({
-                    "hook_event_name": "Notification",
-                    "notification_type": "idle_prompt",
-                    "message": "waiting",
-                    "cwd": "/tmp",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        stall.store(true, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(period * 2 + Duration::from_millis(600)).await;
-        let left = std::time::Instant::now();
-        crate::presence::set_idle(Some(AWAY));
-        let mut healthy_at = None;
-        while left.elapsed() < period * 8 {
-            if capture
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(hint, _)| hint.session_uid == healthy)
-            {
-                healthy_at = Some(left.elapsed());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let healthy_at = healthy_at.expect("the healthy run rang");
-        assert!(
-            healthy_at < period * 2,
-            "behind five stalled reads of {period:?} each: {healthy_at:?}"
-        );
-        assert_eq!(
-            rung_after(&capture, 6).await.len(),
-            6,
-            "every held ring went"
-        );
-    }
-
-    /// **A ring a prompt ended lets the next wait ring.** The prompt moved the
-    /// run as a tool or a turn's end would, so the latch reopens with it: the
-    /// turn it began can end without a `Stop` (interrupted at the Mac), and
-    /// Claude's next `idle_prompt` is news again.
-    #[tokio::test]
-    async fn a_ring_a_prompt_ended_lets_the_next_wait_ring() {
-        let (daemon, capture) = capture_daemon();
-        open_a_decision(&daemon).await;
-        crate::presence::set_idle(Some(Duration::ZERO));
-        daemon
-            .handle_hook(quiet_hook("idle_prompt", "waiting"))
-            .await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        transcript_line(&daemon, &restamped_prompt(false, "next")).await;
-        daemon
-            .handle_hook(quiet_hook("idle_prompt", "waiting"))
-            .await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        crate::presence::set_idle(Some(AWAY));
-        assert_eq!(
-            rung_after(&capture, 1).await,
-            vec![crate::apns::PushKind::Approval]
-        );
-    }
-
-    /// **A run's end does not reopen its latch.** A hook posted just before
-    /// the exit can land just after it, and what it says the run already said:
-    /// it is not said twice.
-    #[tokio::test]
-    async fn a_notification_repeated_after_its_run_ended_does_not_ring_again() {
-        for (first, late) in [
-            ("agent_completed", "agent_completed"),
-            ("idle_prompt", "idle_prompt"),
-        ] {
-            let (daemon, capture) = capture_daemon();
-            open_a_decision(&daemon).await;
-            daemon.handle_hook(quiet_hook(first, "x")).await;
-            assert_eq!(
-                rung_after(&capture, 1).await.len(),
-                1,
-                "the premise: {first} rang"
-            );
-            assert!(
-                daemon
-                    .mark_exited(
-                        &test_key(),
-                        Some(0),
-                        Some("test"),
-                        observed_now(&daemon, TEST_UID).await
-                    )
-                    .await
-            );
-            daemon.handle_hook(quiet_hook(late, "x")).await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            assert_eq!(
-                rung(&capture).len(),
-                1,
-                "{first} then {late} after the exit"
-            );
-        }
-    }
-
-    /// A user line from Claude Code 2.1.305's own transcript (the typed prompt,
-    /// or the scheduled prompt that fired with nothing typed), restamped now.
-    fn restamped_prompt(scheduled: bool, uuid: &str) -> serde_json::Value {
-        let line = include_str!("../../../fixtures/transcript/scheduled-prompt-2.1.305.jsonl")
-            .lines()
-            .nth(if scheduled { 32 } else { 36 })
-            .unwrap();
-        let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(
-            line["promptSource"],
-            if scheduled { "system" } else { "typed" }
-        );
-        line["uuid"] = json!(uuid);
-        line["timestamp"] = json!(protocol::time::now_rfc3339());
-        line
-    }
-
-    /// One transcript line, read the way the tailer reads it.
-    ///
-    /// A path of its own for every write: a file written where one was just
-    /// removed can get its inode back (ext4 does), and the cursor would then
-    /// verify against it instead of rescanning from zero.
-    async fn transcript_line(daemon: &Arc<Daemon>, line: &serde_json::Value) {
-        static WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-line-{}-{}-{}.jsonl",
-            std::process::id(),
-            line["uuid"].as_str().unwrap(),
-            WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::write(&path, format!("{line}\n")).unwrap();
-        let run = SessionKey::new(TEST_UID, "cc-1");
-        let scan = crate::tailer::scan_file(&daemon.store, &run, path.to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        daemon
-            .ingest_scan(TEST_UID, scan.events, scan.cursor)
-            .await
-            .unwrap();
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    /// **A prompt handed to Claude ends the held ring before it.** Claude
-    /// tells no hook when a prompt is typed at the Mac, but writes it to its
-    /// transcript stamped `promptSource`; a scheduled prompt that fires with
-    /// nothing typed is stamped `"system"`. Either starts a turn, so "Finished
-    /// a turn" is no longer the run's state and the held ring never rings.
-    #[tokio::test]
-    async fn a_prompt_handed_to_claude_ends_the_held_ring_before_it() {
-        for scheduled in [false, true] {
-            let (daemon, capture) = capture_daemon();
-            crate::presence::set_idle(Some(Duration::ZERO));
-            daemon
-                .handle_hook(quiet_hook("agent_completed", "done"))
-                .await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            transcript_line(&daemon, &restamped_prompt(scheduled, "next-prompt")).await;
-            crate::presence::set_idle(Some(AWAY));
-            tokio::time::sleep(crate::presence::POLL * 5).await;
-            assert_eq!(rung(&capture), vec![], "scheduled: {scheduled}");
-        }
-    }
-
-    /// **Only a prompt filed for the first time moves the run.** A transcript
-    /// read again — a cursor that fails its check rescans from zero — files
-    /// nothing new, and its prompts say nothing new: a held ring still rings,
-    /// and a wait that rang does not ring again. A prompt not filed before ends
-    /// the held ring and reopens the latch.
-    #[tokio::test]
-    async fn only_a_newly_filed_prompt_moves_the_run() {
-        use crate::apns::PushKind;
-        for again in [true, false] {
-            let prompt = restamped_prompt(false, "filed-once");
-            let next = if again {
-                prompt.clone()
-            } else {
-                restamped_prompt(false, "filed-now")
-            };
-
-            let (daemon, capture) = capture_daemon();
-
-            open_a_decision(&daemon).await;
-            crate::presence::set_idle(Some(Duration::ZERO));
-            tool_call(&daemon, "cc-1", TEST_UID, "toolu_first").await;
-            transcript_line(&daemon, &prompt).await;
-            daemon
-                .handle_hook(quiet_hook("agent_completed", "done"))
-                .await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            transcript_line(&daemon, &next).await;
-            crate::presence::set_idle(Some(AWAY));
-            let held = if again {
-                vec![PushKind::Approval]
-            } else {
-                vec![]
-            };
-            assert_eq!(
-                rung_after(&capture, 1).await,
-                held,
-                "held, read again: {again}"
-            );
-
-            let (daemon, capture) = capture_daemon();
-
-            open_a_decision(&daemon).await;
-            crate::presence::set_idle(Some(AWAY));
-            tool_call(&daemon, "cc-1", TEST_UID, "toolu_first").await;
-            transcript_line(&daemon, &prompt).await;
-            daemon
-                .handle_hook(quiet_hook("idle_prompt", "waiting"))
-                .await;
-            assert_eq!(
-                rung_after(&capture, 1).await,
-                vec![PushKind::Approval],
-                "the premise"
-            );
-            transcript_line(&daemon, &next).await;
-            daemon
-                .handle_hook(quiet_hook("idle_prompt", "waiting"))
-                .await;
-            // Past the dispatch grace, so a ring that should not come has had
-            // its chance.
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            let rang = if again { 1 } else { 2 };
-            assert_eq!(
-                rung_after(&capture, rang).await.len(),
-                rang,
-                "rang, read again: {again}"
-            );
-        }
-    }
-
-    /// **Only a prompt handed to the run ends its ring.** Not a line Claude
-    /// recorded without handing it over (`queueTranscriptOnly`), a user line it
-    /// never submitted as a prompt (no `promptSource`, no `turnOrigin`), or a
-    /// background agent's own line (`isSidechain`).
-    #[tokio::test]
-    async fn only_a_prompt_handed_to_the_run_ends_its_ring() {
-        let not_handed = {
-            let mut line = restamped_prompt(false, "not-handed");
-            line["queueTranscriptOnly"] = json!(true);
-            line
-        };
-        let unstamped = {
-            let mut line = restamped_prompt(false, "unstamped");
-            line.as_object_mut().unwrap().remove("promptSource");
-            line.as_object_mut().unwrap().remove("turnOrigin");
-            line
-        };
-        let sidechain = {
-            let mut line = restamped_prompt(false, "sidechain");
-            line["isSidechain"] = json!(true);
-            line
-        };
-        for (case, line) in [
-            ("not handed over", not_handed),
-            ("not a prompt", unstamped),
-            ("a background agent's", sidechain),
-        ] {
-            let (daemon, capture) = capture_daemon();
-            open_a_decision(&daemon).await;
-            crate::presence::set_idle(Some(Duration::ZERO));
-            daemon
-                .handle_hook(quiet_hook("agent_completed", "done"))
-                .await;
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            transcript_line(&daemon, &line).await;
-            crate::presence::set_idle(Some(AWAY));
-            assert_eq!(
-                rung_after(&capture, 1).await,
-                vec![crate::apns::PushKind::Approval],
-                "{case}"
-            );
-        }
     }
 
     /// The per-device floor: a second test inside the window is refused with
@@ -19947,49 +13461,6 @@ mod tests {
 
     // ===================================================== deleting one run
 
-    /// An adopted hook creates a row with no tmux location — the daemon cannot
-    /// claim to know where a process it never launched lives — while a hosted
-    /// recreation by exact uid keeps the location a crash left behind.
-    #[tokio::test]
-    async fn an_adopted_hook_records_no_location_and_a_hosted_recreation_keeps_its_own() {
-        let daemon = test_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "claude:8f37b678".into(),
-                session_uid: None,
-                event: "SessionStart".into(),
-                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        let adopted = daemon
-            .store
-            .find_session("claude:8f37b678")
-            .unwrap()
-            .unwrap();
-        assert_eq!(adopted.tmux_session, "");
-        assert_eq!(adopted.tmux_socket, "");
-
-        // Crash recovery: an exact-uid hook for a hosted name refabricates the
-        // hosted location, which for a `cc-*` run is correct.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-9".into(),
-                session_uid: Some(TEST_UID.into()),
-                event: "SessionStart".into(),
-                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        let hosted = daemon.store.get_session(TEST_UID).unwrap().unwrap();
-        assert_eq!(hosted.tmux_session, "cc-9");
-        assert_eq!(hosted.tmux_socket, protocol::TMUX_SOCKET_NAME);
-    }
-
     /// The sweep only asks tmux about sessions that live in tmux. An unhosted
     /// row is not probed, not counted, and above all not "proven" dead by a
     /// server that has never heard of it.
@@ -20012,12 +13483,20 @@ mod tests {
             codex_thread_id: None,
             codex_socket: None,
         };
-        daemon.store.upsert_session(&row).unwrap().assert_present();
+        daemon
+            .store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         row.session_uid = "01KYZ5E56X0D1RT7ZVRYK1ZEF8".into();
         row.session_id = "cc-1".into();
         row.tmux_session = "cc-1".into();
         row.tmux_socket = protocol::TMUX_SOCKET_NAME.into();
-        daemon.store.upsert_session(&row).unwrap().assert_present();
+        daemon
+            .store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
 
         // Every probe answers "gone" — the answer that used to kill both rows.
         let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
@@ -20039,97 +13518,6 @@ mod tests {
         );
     }
 
-    /// The primary resurrection path, closed: an adopted run's hooks carry no
-    /// uid, so a uid tombstone alone cannot stop the next hook minting a fresh
-    /// identity and putting the row straight back. Removing an adopted run
-    /// means "stop observing this conversation" — ordinary hooks are dropped —
-    /// and a SessionStart, a resume announcing itself, is the one thing that
-    /// clears the record and re-adopts.
-    #[tokio::test]
-    async fn a_deleted_adopted_run_stays_deleted_until_a_new_session_starts() {
-        let daemon = test_daemon();
-        let adopt = |event: &'static str| HookPost {
-            session_id: "claude:conv-1".into(),
-            session_uid: None,
-            event: event.into(),
-            payload: json!({"hook_event_name": event, "cwd": "/tmp"}),
-            wait: false,
-            holds_questions: false,
-            holds_approvals: false,
-        };
-        daemon.handle_hook(adopt("SessionStart")).await;
-        let first = daemon.store.find_session("claude:conv-1").unwrap().unwrap();
-        assert_eq!(
-            daemon
-                .delete_exited_session(&first.session_uid)
-                .await
-                .unwrap(),
-            protocol::ws::DeleteSessionResult::Deleted { events: 1 }
-        );
-
-        // The very next ordinary hook — the one that used to resurrect.
-        daemon.handle_hook(adopt("PostToolUse")).await;
-        assert!(
-            daemon
-                .store
-                .find_session("claude:conv-1")
-                .unwrap()
-                .is_none(),
-            "an ordinary hook must not bring a removed conversation back"
-        );
-
-        // A new session start is a request to observe again.
-        daemon.handle_hook(adopt("SessionStart")).await;
-        let readopted = daemon.store.find_session("claude:conv-1").unwrap();
-        assert!(readopted.is_some(), "a resume announcing itself re-adopts");
-        assert_ne!(
-            readopted.unwrap().session_uid,
-            first.session_uid,
-            "as a new run, never by resurrecting the deleted uid"
-        );
-    }
-
-    /// Deleting a live unhosted run retires its transcript tail. The cursor
-    /// died with the rows, so a tail left running would re-read the file from
-    /// byte zero every poll, forever, into a guard that drops every batch.
-    #[tokio::test]
-    async fn deleting_an_unhosted_run_stops_its_tail() {
-        let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
-        daemon
-            .handle_hook(HookPost {
-                session_id: "claude:conv-2".into(),
-                session_uid: None,
-                event: "SessionStart".into(),
-                payload: json!({
-                    "hook_event_name": "SessionStart", "cwd": "/tmp",
-                    "transcript_path": "/tmp/conv-2.jsonl"
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        let row = daemon.store.find_session("claude:conv-2").unwrap().unwrap();
-        assert!(matches!(
-            tails.try_recv(),
-            Ok(crate::tailer::TailCommand::Follow { .. })
-        ));
-
-        assert!(matches!(
-            daemon
-                .delete_exited_session(&row.session_uid)
-                .await
-                .unwrap(),
-            protocol::ws::DeleteSessionResult::Deleted { .. }
-        ));
-        match tails.try_recv() {
-            Ok(crate::tailer::TailCommand::Stop { session_uid }) => {
-                assert_eq!(session_uid, row.session_uid)
-            }
-            other => panic!("the delete must stop the tail, got {other:?}"),
-        }
-    }
-
     /// The registration that raced a delete: the row is gone, the tombstone is
     /// not, and installing the supervisor anyway would leave the daemon holding
     /// live state for a session with no row.
@@ -20143,30 +13531,24 @@ mod tests {
             protocol::ws::DeleteSessionResult::Deleted { events: 0 }
         );
 
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
         let refused = daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-1".into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.into()),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Claude,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: None,
+                codex_generation: None,
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await;
         assert!(
             refused.is_err(),
@@ -20201,30 +13583,24 @@ mod tests {
         codex_generation: Option<u64>,
         codex_thread_id: Option<String>,
     ) -> Result<Registration> {
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
         daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-1".into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent,
-                    agent_bin: None,
-                    codex_thread_id,
-                    codex_socket: None,
-                    codex_generation,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.into()),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent,
+                agent_bin: None,
+                codex_thread_id,
+                codex_socket: None,
+                codex_generation,
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
     }
 
@@ -20402,7 +13778,7 @@ mod tests {
     ///   * `supported_agents()` admits the agent, so the fail-closed gate passes;
     ///   * the control-link fact is complete, so `ControlLink::from_registration`
     ///     yields a link instead of bailing;
-    ///   * `upsert_session` files the row in `codex_sessions` and **not** in
+    ///   * `upsert_session_at_generation` files the row in `codex_sessions` and **not** in
     ///     `sessions` — read off the daemon's own database file rather than
     ///     through `Store`, because `Store::get_session` reads both tables and so
     ///     cannot tell a correctly filed row from one sitting in the table a
@@ -20426,31 +13802,25 @@ mod tests {
         let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
         assert!(protocol::uid::is_well_formed(uid), "{uid}");
         let socket = std::env::temp_dir().join("ccd-a92-nothing-listens-here.sock");
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
 
         let registration = daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-7".into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: "cc-7".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/work".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: Some(socket.to_string_lossy().into_owned()),
-                    codex_generation: Some(1),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: "cc-7".into(),
+                session_uid: Some(uid.into()),
+                tmux_session: "cc-7".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/work".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: Some(socket.to_string_lossy().into_owned()),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
             .expect("the Codex coordinator's own registration frame must be accepted");
         assert_eq!(registration.session.uid, uid);
@@ -20539,36 +13909,29 @@ mod tests {
         generation: u64,
         thread: Option<&str>,
     ) -> Result<Registration> {
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(_rx));
         daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-9".into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: "cc-9".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/work".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: thread.map(str::to_string),
-                    codex_socket: Some(
-                        std::env::temp_dir()
-                            .join(format!("ccd-a51-{uid}-nothing-listens.sock"))
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    codex_generation: Some(generation),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: "cc-9".into(),
+                session_uid: Some(uid.into()),
+                tmux_session: "cc-9".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/work".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: thread.map(str::to_string),
+                codex_socket: Some(
+                    std::env::temp_dir()
+                        .join(format!("ccd-a51-{uid}-nothing-listens.sock"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                codex_generation: Some(generation),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
     }
 
@@ -22236,28 +15599,28 @@ mod tests {
         let now = protocol::time::now_rfc3339();
         daemon
             .store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: uid.clone(),
-                session_id: "cc-9".into(),
-                tmux_session: "cc-9".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/work".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Codex,
-                codex_thread_id: claimed_thread.map(str::to_string),
-                codex_socket: Some("/tmp/ccd.sock".into()),
-            })
+            .upsert_session_at_generation(
+                &crate::store::SessionRow {
+                    session_uid: uid.clone(),
+                    session_id: "cc-9".into(),
+                    tmux_session: "cc-9".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Codex,
+                    codex_thread_id: claimed_thread.map(str::to_string),
+                    codex_socket: Some("/tmp/ccd.sock".into()),
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
         let presence = crate::codex_link::LinkPresence::new();
         presence.publish_for_tests(state);
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(_rx));
         let mut inner = daemon.inner.lock().await;
         inner.registration_epochs.insert(uid.clone(), owning_epoch);
         // A real registration at this epoch left the allocator here, so the next
@@ -22267,11 +15630,7 @@ mod tests {
         inner.supervisors.insert(
             uid.clone(),
             SupervisorHandle {
-                tx,
-                inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 epoch: owning_epoch,
-                protocol_minor: protocol::PROTOCOL_MINOR,
                 agent_bin: None,
                 codex_generation: Some(1),
             },
@@ -22332,12 +15691,9 @@ mod tests {
         );
 
         // A Claude run: it exists, and it has no connection to address.
-        daemon
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
-        let claude = daemon.store.find_session("cc-1").unwrap().unwrap();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
         let (row, addressee) = daemon
-            .resolve_codex_inbound(&claude.session_uid)
+            .resolve_codex_inbound(TEST_UID)
             .await
             .unwrap()
             .expect("the run is there");
@@ -23515,7 +16871,7 @@ mod tests {
         );
     }
 
-    /// **Two turns inside one dispatch grace are one ring, on either agent's path.**
+    /// **Two turns inside one dispatch grace are one ring.**
     ///
     /// The 400 ms grace exists so a doorbell describes the world at the moment it
     /// rings rather than the moment it was admitted, and the price of that is
@@ -23523,14 +16879,8 @@ mod tests {
     /// ring, and the reader is told the later, truer thing once. The alternative —
     /// two banners 300 ms apart about the same open decisions — is one fact said
     /// twice.
-    ///
-    /// Asserted for both agents in one test because the claim is *parity*: Claude
-    /// coalesces here by the same mechanism (its `Stop` hook records the progress
-    /// its `agent_completed` is admitted beside), and a Codex path that behaved
-    /// differently would be the defect. Measured, not assumed — this test is what
-    /// measured it.
     #[tokio::test]
-    async fn two_turns_inside_one_dispatch_grace_ring_once_on_both_paths() {
+    async fn two_turns_inside_one_dispatch_grace_ring_once() {
         let (daemon, capture) = capture_daemon();
         open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
@@ -23550,35 +16900,6 @@ mod tests {
             capture.0.lock().unwrap().len(),
             1,
             "the first turn's doorbell is superseded by the second, which rings"
-        );
-
-        // The Claude control, through the real hook path: `Stop` then the
-        // notification, twice, 100 ms apart — the shape the wire actually produces.
-        let (claude, claude_capture) = capture_daemon();
-        open_a_decision(&claude).await;
-        let stop = || HookPost {
-            session_id: "cc-1".into(),
-            session_uid: Some(TEST_UID.into()),
-            event: "Stop".into(),
-            payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
-            wait: false,
-            holds_questions: false,
-            holds_approvals: false,
-        };
-        claude.handle_hook(stop()).await;
-        claude
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        claude.handle_hook(stop()).await;
-        claude
-            .handle_hook(quiet_hook("agent_completed", "done"))
-            .await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert_eq!(
-            claude_capture.0.lock().unwrap().len(),
-            1,
-            "Claude collapses the same pair the same way — the grace is agent-neutral"
         );
     }
 
@@ -23692,7 +17013,7 @@ mod tests {
     /// the refusal would leave nothing behind and the incumbent's connection would
     /// still answer for the session.
     ///
-    /// **Mutation:** move the claim below the `upsert_session` — or read
+    /// **Mutation:** move the claim below the `upsert_session_at_generation` — or read
     /// `supervisors` in `codex_addressee_locked` — and this fails.
     #[tokio::test]
     async fn a_registration_that_has_begun_owns_the_session_before_its_row_lands() {
@@ -23720,31 +17041,25 @@ mod tests {
         // the shape of a registration caught part-way through, made deterministic.
         daemon.store.set_lifecycle(&uid, Lifecycle::Exited).unwrap();
         daemon.store.delete_exited_session(&uid).unwrap();
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
         assert!(
             daemon
-                .register_supervisor(
-                    RegisterSession {
-                        session_id: "cc-9".into(),
-                        session_uid: Some(uid.clone()),
-                        tmux_session: "cc-9".into(),
-                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                        cwd: "/work".into(),
-                        supervisor_pid: 4242,
-                        claude_bin: None,
-                        agent: protocol::agent::AgentKind::Claude,
-                        agent_bin: None,
-                        codex_thread_id: None,
-                        codex_socket: None,
-                        codex_generation: None,
-                        started_at: protocol::time::now_rfc3339(),
-                        protocol_minor: protocol::PROTOCOL_MINOR,
-                        exit_replay: false,
-                    },
-                    tx,
-                    Arc::new(std::sync::Mutex::new(HashMap::new())),
-                )
+                .register_supervisor(RegisterSession {
+                    session_id: "cc-9".into(),
+                    session_uid: Some(uid.clone()),
+                    tmux_session: "cc-9".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/work".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },)
                 .await
                 .is_err(),
             "the premise: this registration got as far as its row and no further"
@@ -23789,31 +17104,25 @@ mod tests {
 
         daemon.store.set_lifecycle(&uid, Lifecycle::Exited).unwrap();
         daemon.store.delete_exited_session(&uid).unwrap();
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
         assert!(
             daemon
-                .register_supervisor(
-                    RegisterSession {
-                        session_id: "cc-1".into(),
-                        session_uid: Some(uid.clone()),
-                        tmux_session: "cc-1".into(),
-                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                        cwd: "/tmp".into(),
-                        supervisor_pid: 4242,
-                        claude_bin: None,
-                        agent: protocol::agent::AgentKind::Claude,
-                        agent_bin: None,
-                        codex_thread_id: None,
-                        codex_socket: None,
-                        codex_generation: None,
-                        started_at: protocol::time::now_rfc3339(),
-                        protocol_minor: protocol::PROTOCOL_MINOR,
-                        exit_replay: false,
-                    },
-                    tx,
-                    Arc::new(std::sync::Mutex::new(HashMap::new())),
-                )
+                .register_supervisor(RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.clone()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },)
                 .await
                 .is_err(),
             "the premise: the replacement staked its claim and got no further"
@@ -23909,7 +17218,7 @@ mod tests {
     /// B goes through the real path. It is a future this test owns (see `nudge`)
     /// rather than a spawned task, so nothing happens inside its pause except what
     /// this test does there; polling stops on the poll that stakes B's claim, which
-    /// is the poll that carries B into `upsert_session` and leaves it there.
+    /// is the poll that carries B into `upsert_session_at_generation` and leaves it there.
     ///
     /// **C is staked by hand, because it can no longer be a second registration.**
     /// The acceptance gate is taken above B's stake and held to the end
@@ -23929,29 +17238,23 @@ mod tests {
         let daemon = test_daemon();
         let uid = protocol::uid::new().unwrap();
 
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
-        let mut overtaken = Box::pin(daemon.register_supervisor(
-            RegisterSession {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.clone()),
-                tmux_session: "cc-1".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                cwd: "/tmp".into(),
-                supervisor_pid: 4242,
-                claude_bin: None,
-                agent: protocol::agent::AgentKind::Claude,
-                agent_bin: None,
-                codex_thread_id: None,
-                codex_socket: None,
-                codex_generation: None,
-                started_at: protocol::time::now_rfc3339(),
-                protocol_minor: protocol::PROTOCOL_MINOR,
-                exit_replay: false,
-            },
-            tx,
-            Arc::new(std::sync::Mutex::new(HashMap::new())),
-        ));
+        let mut overtaken = Box::pin(daemon.register_supervisor(RegisterSession {
+            session_id: "cc-1".into(),
+            session_uid: Some(uid.clone()),
+            tmux_session: "cc-1".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Claude,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: None,
+            codex_generation: None,
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        }));
 
         // Drive B as far as its stake and no further. `try_lock` so this test never
         // joins the queue for `inner` itself and cannot be what B is waiting on.
@@ -23975,8 +17278,6 @@ mod tests {
         // C, inside B's pause: a later epoch, staked with a row and published as a
         // handle, which is the whole of what B has to find when it wakes.
         let winner = {
-            let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-            Box::leak(Box::new(rx));
             let mut inner = daemon.inner.lock().await;
             inner.next_epoch += 1;
             let epoch = inner.next_epoch;
@@ -23984,11 +17285,7 @@ mod tests {
             inner.supervisors.insert(
                 uid.clone(),
                 SupervisorHandle {
-                    tx,
-                    inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                    next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                     epoch,
-                    protocol_minor: protocol::PROTOCOL_MINOR,
                     agent_bin: None,
                     codex_generation: None,
                 },
@@ -24063,8 +17360,6 @@ mod tests {
         uid: &str,
         name: &str,
     ) -> impl std::future::Future<Output = Result<Registration>> {
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
         let daemon = Arc::clone(daemon);
         let info = RegisterSession {
             session_id: format!("cc-{name}"),
@@ -24083,11 +17378,7 @@ mod tests {
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
         };
-        async move {
-            daemon
-                .register_supervisor(info, tx, Arc::new(std::sync::Mutex::new(HashMap::new())))
-                .await
-        }
+        async move { daemon.register_supervisor(info).await }
     }
 
     /// Poll a future until it is ready, or give up. Bounded, and the sleep between
@@ -24111,7 +17402,7 @@ mod tests {
     ///
     /// The stake check above the supervisor publish is a real guard and it protected
     /// the wrong span. Two acceptance steps happen before it and both are durable:
-    /// `Db::upsert_session` writes this registration's cwd, session id, socket and
+    /// `Db::upsert_session_at_generation` writes this registration's cwd, session id, socket and
     /// thread id over whatever the row said, and `relabel_open_cards` stamps this
     /// registration's project onto every card the session is holding. Both are
     /// awaits, and a whole second registration for the same uid fits inside either
@@ -24164,7 +17455,7 @@ mod tests {
 
         let mut first = Box::pin(distinguishable_registration(&daemon, &uid, "first"));
         // Stopped on the poll that stakes its claim, which is the poll that carries
-        // it into `upsert_session` and leaves it there. `try_lock`, so this test
+        // it into `upsert_session_at_generation` and leaves it there. `try_lock`, so this test
         // never joins the queue for `inner` and cannot be what a registration is
         // waiting on.
         let mut staked = None;
@@ -24323,7 +17614,7 @@ mod tests {
         // lands the session has no addressee at all.
         //
         // Stopped on the poll that stakes its claim, which is the poll that carries it
-        // into `upsert_session` and leaves it there. `try_lock`, so this test never
+        // into `upsert_session_at_generation` and leaves it there. `try_lock`, so this test never
         // joins the queue for `inner` and cannot be what the registration waits on.
         // The fixture already staked a claim for this uid, so the stake to wait for is
         // a CHANGE to it, not its presence.
@@ -24395,163 +17686,6 @@ mod tests {
             "a row still saying Codex beside a `NoLink` addressee is a description \
              of no run that ever existed — the link was retired BY the registration \
              that made this row say Claude"
-        );
-    }
-
-    /// **The hook path is the row's OTHER writer, and it is gated too**.
-    ///
-    /// The resolver above holds the session's registration gate and says the pair it
-    /// returns is coherent. That is a claim about every writer of the row, and there
-    /// are three: `register_supervisor`, `Daemon::ensure_session` — which every hook
-    /// every run posts goes through, and which this test is about — and
-    /// `Daemon::mark_exited`, the lifecycle-only writer that takes the same gate for
-    /// its own reason (see the sweep test that pins it).
-    /// `ensure_session` reads the row and writes it
-    /// back — `agent`, `cwd`, `tmux_session` and `created_at` are all carried forward
-    /// from what it read — and `agent` is the one identity column
-    /// `Store::upsert_session` takes from `excluded` rather than COALESCE-ing. So an
-    /// unguarded hook that read before an acceptance and wrote after it restored the
-    /// agent the acceptance had just changed, and the resolver then returned that row
-    /// beside the new registration's addressee: the exact pair it promises not to
-    /// return, assembled by a writer its gate was not holding.
-    ///
-    /// Two legs, because the guard has two halves and a mutation can remove either.
-    ///
-    /// **Leg one — the re-read.** The hook is stopped on its first poll, which
-    /// dispatches the read that only answers WHICH run this hook is for. A whole
-    /// registration then runs and lands, moving the agent and the cwd. Walked out, the
-    /// hook must write what the registration left, because the values it carries
-    /// forward come from the read it takes under the gate and not from that first one.
-    ///
-    /// **Leg two — the gate.** A second hook is polled until it holds this session's
-    /// gate, and a registration is then asserted unable to finish: it is polled far
-    /// past the point where its own reads and writes would have settled. Released, it
-    /// lands — which is what proves the pendency was the gate and not a wedge.
-    ///
-    /// The registration is a Claude one moving a Codex row. That used to be the only
-    /// direction the real path could drive — `supported_agents()` refused every Codex
-    /// registration, so the opposite direction (a Codex registration moving a Claude
-    /// row) would have meant staging a registration nothing could make — and both
-    /// directions are now makeable. It is kept as it stands because the column and
-    /// the mechanism are the same either way, and because this direction needs no
-    /// control-link fixture to set up: what is under test is a read-modify-write on
-    /// the row, not which agent won it. `cwd` is asserted beside `agent` because the
-    /// hook carries no `cwd` of its own here, which is what makes that field a
-    /// read-modify-write too — and unlike `agent` it is a corruption the real path
-    /// can reach.
-    ///
-    /// **Mutations:** build the row from the unguarded read (delete the re-read under
-    /// the gate) and leg one hands back `Codex` and `/work`; drop the gate acquisition
-    /// in `ensure_session` and leg two's registration runs to completion inside the
-    /// hook's read-modify-write.
-    #[tokio::test]
-    async fn a_hook_may_not_write_the_row_across_a_registration_for_its_own_session() {
-        let daemon = test_daemon();
-        let (uid, _presence) = codex_run_with_link(
-            &daemon,
-            Some("th-before"),
-            crate::codex_link::CodexAddressee::Subscribed {
-                thread_id: "th-before".into(),
-            },
-        )
-        .await;
-        // No `cwd` and no `transcript_path`: the fields under test are then exactly
-        // the ones the hook carries forward from the row rather than asserting itself.
-        let input = input_from(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#);
-        let agent_of = |daemon: Arc<Daemon>, uid: String| async move {
-            let row = daemon
-                .db
-                .get_session(uid)
-                .await
-                .unwrap()
-                .expect("the run has a row");
-            (row.agent, row.cwd)
-        };
-        assert_eq!(
-            agent_of(Arc::clone(&daemon), uid.clone()).await,
-            (protocol::agent::AgentKind::Codex, "/work".to_string()),
-            "the premise: the row describes the Codex run the fixture staged"
-        );
-
-        // ---- Leg one: the re-read is the one that counts.
-        //
-        // Stopped on the first poll, which is the one that dispatches the read that
-        // only learns which run this is — before any gate is taken, because the uid a
-        // gate is keyed by is not known until that read answers.
-        let mut hooking = Box::pin(daemon.ensure_session("cc-9", Some(&uid), &input));
-        assert!(
-            nudge(hooking.as_mut()).is_pending(),
-            "the window this test needs is the one inside the hook, so it must still \
-             be in flight"
-        );
-        nudge_to_completion(
-            Box::pin(distinguishable_registration(&daemon, &uid, "moved")).as_mut(),
-            5_000,
-        )
-        .await
-        .expect("the registration must settle")
-        .expect("the registration is accepted");
-        nudge_to_completion(hooking.as_mut(), 5_000)
-            .await
-            .expect("the hook must settle once the gate frees")
-            .unwrap()
-            .expect("the hook keeps its run");
-        assert_eq!(
-            agent_of(Arc::clone(&daemon), uid.clone()).await,
-            (
-                protocol::agent::AgentKind::Claude,
-                "/tmp/moved-project".to_string()
-            ),
-            "a hook writes back what the row says NOW, not what it said when the hook \
-             worked out which run it belonged to: restoring either of these would hand \
-             the resolver a row describing the registration before last beside the \
-             addressee of the one that just landed"
-        );
-
-        // ---- Leg two: and nothing may register underneath it while it writes.
-        let gate = daemon.registration_gate(&uid).await;
-        let mut writing = Box::pin(daemon.ensure_session("cc-moved", Some(&uid), &input));
-        let mut held = false;
-        for _ in 0..2_000 {
-            assert!(
-                nudge(writing.as_mut()).is_pending(),
-                "a hook that finishes before this session's gate is ever contended \
-                 took no gate at all, and its read-modify-write is unguarded"
-            );
-            if gate.try_lock().is_err() {
-                held = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        assert!(
-            held,
-            "the hook must reach its guarded section and hold this session's gate"
-        );
-        let mut arriving = Box::pin(distinguishable_registration(&daemon, &uid, "later"));
-        assert!(
-            nudge_to_completion(arriving.as_mut(), 400).await.is_none(),
-            "an acceptance may not land inside a hook's read-modify-write: the hook \
-             would write the row it read a moment before the acceptance over the one \
-             the acceptance just wrote"
-        );
-
-        // Released, and both settle — which is what makes the pendency above a gate
-        // rather than a wedged future.
-        nudge_to_completion(writing.as_mut(), 5_000)
-            .await
-            .expect("the hook settles")
-            .unwrap()
-            .expect("the hook keeps its run");
-        nudge_to_completion(arriving.as_mut(), 5_000)
-            .await
-            .expect("the registration settles once the hook releases the gate")
-            .expect("the registration is accepted");
-        assert_eq!(
-            agent_of(Arc::clone(&daemon), uid.clone()).await.1,
-            "/tmp/later-project".to_string(),
-            "and the last writer is the registration, which ran wholly after the hook \
-             rather than inside it"
         );
     }
 
@@ -24783,7 +17917,7 @@ mod tests {
     async fn an_ended_run_with_a_supervisor_still_attached_is_not_deletable() {
         let daemon = test_daemon();
         let uid = TEST_UID;
-        let _pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let _attached = attach(&daemon, "cc-1", uid).await;
         assert!(
             daemon
                 .mark_exited(
@@ -25191,103 +18325,6 @@ mod tests {
         assert_eq!(sweep.gone, 0, "nothing was proven gone");
     }
 
-    /// The same seam, occupied by a **hook** rather than a registration.
-    ///
-    /// A hook is the writer the owner comparison cannot see: [`Daemon::ensure_session`]
-    /// writes the row `Live` and stakes no epoch at all, so the claim standing at the
-    /// commit is byte-identical to the one the sweep observed.
-    struct AHookLandsOnTheLastLook {
-        daemon: Arc<Daemon>,
-        uid: String,
-        looks: std::sync::Mutex<u32>,
-    }
-
-    impl crate::liveness::Presence for AHookLandsOnTheLastLook {
-        async fn presence(&self, _target: &crate::liveness::Target) -> crate::liveness::Sighting {
-            let look = {
-                let mut looks = self.looks.lock().unwrap();
-                *looks += 1;
-                *looks
-            };
-            if look == protocol::tmux::EXIT_CONFIRMATIONS {
-                self.daemon
-                    .handle_hook(HookPost {
-                        session_id: "cc-1".into(),
-                        session_uid: Some(self.uid.clone()),
-                        event: "SessionStart".into(),
-                        payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
-                        wait: false,
-                        holds_questions: false,
-                        holds_approvals: false,
-                    })
-                    .await;
-            }
-            crate::liveness::Sighting {
-                presence: protocol::tmux::SessionPresence::Gone,
-                owner: None,
-            }
-        }
-    }
-
-    /// **A ROW WRITTEN AFTER THE LOOK IS A ROW THE SWEEP NEVER EXAMINED**.
-    ///
-    /// The owner comparison answers "whose session is this", and that
-    /// is not the same question as "is this still the row I read". A hook is the
-    /// plainest demonstration: [`Daemon::ensure_session`] writes `Lifecycle::Live`
-    /// and stakes nothing, so the claim at the commit equals the claim the sweep
-    /// observed and an owner-only guard waves the stale evidence through — over the
-    /// liveness the hook just recorded, with a `SessionEnd` no later fact can
-    /// withdraw.
-    ///
-    /// The same guard covers the other trace of the same window, which this cannot
-    /// stage without hand-polling a future parked on a lock: a registration stakes
-    /// its epoch two awaits BEFORE its row write, so a sweep can hold the *new*
-    /// epoch and the *old* row at once and find them agreeing. That the two move
-    /// independently, and that evidence carrying one of each is refused, is
-    /// [`an_end_established_between_a_registrations_stake_and_its_row_write_is_refused`].
-    ///
-    /// **Mutation:** drop the `row_writes` comparison in `mark_exited` — keep the
-    /// gate and the owner comparison — and this fails at the lifecycle assertion,
-    /// `left: Exited, right: Live`, with a `SessionEnd` filed against a run whose
-    /// hook had just said it was alive.
-    #[tokio::test]
-    async fn a_hook_that_lands_before_the_commit_keeps_its_row_alive() {
-        let daemon = test_daemon();
-        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-
-        let tmux = AHookLandsOnTheLastLook {
-            daemon: Arc::clone(&daemon),
-            uid: TEST_UID.to_string(),
-            looks: std::sync::Mutex::new(0),
-        };
-        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
-
-        assert_eq!(
-            *tmux.looks.lock().unwrap(),
-            protocol::tmux::EXIT_CONFIRMATIONS,
-            "the premise: the sweep confirmed this row gone the full number of times \
-             and therefore reached its commit"
-        );
-        assert_eq!(
-            daemon.inner.lock().await.owner_of(TEST_UID),
-            None,
-            "the premise this test turns on: a hook stakes no registration, so the \
-             owner comparison sees the same answer before and after and cannot be \
-             what refuses this commit"
-        );
-        assert_eq!(
-            lifecycle_of(&daemon, TEST_UID),
-            Lifecycle::Live,
-            "the row was written after the look this end rests on, so the look was at \
-             a row that no longer exists"
-        );
-        assert!(
-            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
-            "and no end is filed either: a `SessionEnd` is durable"
-        );
-        assert_eq!(sweep.gone, 0, "nothing was proven gone");
-    }
-
     /// **THE STAKE AND THE ROW WRITE ARE TWO MOMENTS, AND AN END BETWEEN THEM IS
     /// STALE**.
     ///
@@ -25321,31 +18358,25 @@ mod tests {
             .unwrap();
         daemon.store.delete_exited_session(&doomed_uid).unwrap();
         let before = observed_now(&daemon, &doomed_uid).await;
-        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
         assert!(
             daemon
-                .register_supervisor(
-                    RegisterSession {
-                        session_id: "cc-2".into(),
-                        session_uid: Some(doomed_uid.clone()),
-                        tmux_session: "cc-2".into(),
-                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                        cwd: "/tmp".into(),
-                        supervisor_pid: 4242,
-                        claude_bin: None,
-                        agent: protocol::agent::AgentKind::Claude,
-                        agent_bin: None,
-                        codex_thread_id: None,
-                        codex_socket: None,
-                        codex_generation: None,
-                        started_at: protocol::time::now_rfc3339(),
-                        protocol_minor: protocol::PROTOCOL_MINOR,
-                        exit_replay: false,
-                    },
-                    tx,
-                    Arc::new(std::sync::Mutex::new(HashMap::new())),
-                )
+                .register_supervisor(RegisterSession {
+                    session_id: "cc-2".into(),
+                    session_uid: Some(doomed_uid.clone()),
+                    tmux_session: "cc-2".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },)
                 .await
                 .is_err(),
             "the premise: this registration staked its claim and its row write was refused"
@@ -25508,47 +18539,6 @@ mod tests {
         assert_eq!(kinds_of(&daemon, TEST_UID).len(), 1);
     }
 
-    #[tokio::test]
-    async fn proving_a_session_gone_also_stops_the_daemon_reading_its_transcript() {
-        // The same root cause seen from the filesystem. Nothing could tell the
-        // tailer a run had finished, because until the sweep existed the daemon
-        // could not establish that on its own — so every ended session's
-        // transcript stayed on the poll list and its working directory stayed
-        // watched, for the life of the process and again after every restart.
-        // Measured on the owner's Mac: 1,282 `fsevents could not watch` lines
-        // in one error log, against directories deleted days earlier.
-        let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
-        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-
-        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
-        daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
-
-        let command = tails.try_recv().expect("the tailer must be told to stop");
-        assert_eq!(
-            command,
-            crate::tailer::TailCommand::Stop {
-                session_uid: TEST_UID.to_string()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn a_reported_exit_stops_the_tail_too_rather_than_only_a_proven_one() {
-        // Both paths run through one `mark_exited`, which is what makes this
-        // true by construction rather than by two people remembering.
-        let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
-        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-        daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
-            .await;
-        assert_eq!(
-            tails.try_recv().expect("the tailer must be told to stop"),
-            crate::tailer::TailCommand::Stop {
-                session_uid: TEST_UID.to_string()
-            }
-        );
-    }
-
     #[test]
     fn a_sweep_that_could_not_see_never_reads_as_a_healthy_fleet() {
         // The same rule the startup log-integrity banner follows: the sentence
@@ -25586,24 +18576,15 @@ mod tests {
     #[tokio::test]
     async fn approval_cards_carry_a_risk_class() {
         let daemon = test_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "session_id": "uuid",
-                    "cwd": "/tmp",
-                    "prompt_id": "p1",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "rm -rf /tmp/build"},
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            1,
+            "toolu_rm",
+            "Bash",
+            json!({"command": "rm -rf /tmp/build"}),
+        )
+        .await;
 
         let event = daemon
             .store
@@ -25619,21 +18600,15 @@ mod tests {
     #[tokio::test]
     async fn a_read_only_tool_is_classified_low() {
         let daemon = test_daemon();
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "tool_name": "Read",
-                    "tool_input": {"file_path": "/tmp/x"},
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            1,
+            "toolu_read",
+            "Read",
+            json!({"file_path": "/tmp/x"}),
+        )
+        .await;
         let event = daemon
             .store
             .events_after(TEST_UID, 0, 10)
@@ -25646,163 +18621,6 @@ mod tests {
     }
 
     // ------------------------------------------------- local resolution
-
-    /// Drive a PermissionRequest and then its PostToolUse, as a real session
-    /// does when the operator approves at the keyboard.
-    async fn approve_at_the_keyboard(daemon: &Arc<Daemon>) -> String {
-        let tool_input = json!({"command": "touch /tmp/x"});
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "PreToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PreToolUse",
-                    "prompt_id": "p1",
-                    "tool_name": "Bash",
-                    "tool_input": tool_input,
-                    "tool_use_id": "toolu_local",
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "prompt_id": "p1",
-                    "tool_name": "Bash",
-                    "tool_input": tool_input,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        "toolu_local".to_string()
-    }
-
-    #[tokio::test]
-    async fn a_tool_result_resolves_its_approval_as_answered_locally() {
-        let daemon = test_daemon();
-        let request_id = approve_at_the_keyboard(&daemon).await;
-        assert_eq!(
-            daemon.sessions().await.unwrap()[0].blocked_on,
-            vec![request_id.clone()]
-        );
-
-        // The tool ran, which only happens if a human approved it.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "PostToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PostToolUse",
-                    "tool_name": "Bash",
-                    "tool_use_id": request_id,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon.sweep_local_resolutions().await;
-
-        assert!(
-            daemon.sessions().await.unwrap()[0].blocked_on.is_empty(),
-            "the card must stop asking once it has been answered"
-        );
-        let (_, outcome) = daemon
-            .store
-            .get_answer(TEST_UID, &request_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(outcome.resolved_by, ResolvedBy::Local);
-        assert_eq!(outcome.decision, AnswerDecision::Allow);
-        assert!(!outcome.inferred, "a tool that ran is an observation");
-
-        // And a late tap from the phone is a no-op returning that outcome.
-        let late = daemon
-            .answer(
-                &request_id,
-                "any-hash",
-                AnswerDecision::Deny,
-                None,
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await;
-        assert!(matches!(late, AnswerResult::Duplicate { .. }), "{late:?}");
-    }
-
-    #[tokio::test]
-    async fn an_unanswered_approval_is_left_alone_during_the_grace_period() {
-        // The expensive mistake would be resolving a card the human has not
-        // answered: it would vanish from the phone while the Mac still waits.
-        let daemon = test_daemon();
-        let request_id = approve_at_the_keyboard(&daemon).await;
-        for _ in 0..3 {
-            daemon.sweep_local_resolutions().await;
-        }
-        assert_eq!(
-            daemon.sessions().await.unwrap()[0].blocked_on,
-            vec![request_id],
-            "nothing observed means nothing resolved"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_pane_is_not_treated_as_an_absent_prompt() {
-        // No supervisor is attached, so `capture` fails. That is "we cannot
-        // see", not "the prompt is gone", and must resolve nothing even long
-        // after the grace period.
-        let daemon = daemon_with(Config {
-            local_resolve_grace_ms: 1,
-            ..Config::default()
-        });
-        let request_id = approve_at_the_keyboard(&daemon).await;
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        for _ in 0..5 {
-            daemon.sweep_local_resolutions().await;
-        }
-        assert_eq!(
-            daemon.sessions().await.unwrap()[0].blocked_on,
-            vec![request_id]
-        );
-    }
-
-    #[tokio::test]
-    async fn local_resolution_can_be_switched_off() {
-        let daemon = daemon_with(Config {
-            local_resolve: false,
-            ..Config::default()
-        });
-        let request_id = approve_at_the_keyboard(&daemon).await;
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "PostToolUse".into(),
-                payload: json!({
-                    "hook_event_name": "PostToolUse",
-                    "tool_use_id": request_id,
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        daemon.sweep_local_resolutions().await;
-        assert_eq!(
-            daemon.sessions().await.unwrap()[0].blocked_on,
-            vec![request_id]
-        );
-    }
 
     // ======================================================== prompt identity
 
@@ -25896,11 +18714,11 @@ mod tests {
     // =========================================== durable pending + two-phase
 
     #[tokio::test]
-    async fn an_answer_interrupted_mid_injection_is_never_typed_again() {
+    async fn an_answer_interrupted_mid_delivery_is_never_applied_again() {
         // The two-phase claim. Actuation used to precede the durable ledger, so
-        // a daemon killed between typing and recording came back with no record
-        // that anything had been attempted — and the next tap typed the answer
-        // into the agent a second time.
+        // a daemon killed between delivering and recording came back with no
+        // record that anything had been attempted — and the next tap delivered
+        // the answer to the agent a second time.
         let store = shared_store();
         let uid = TEST_UID;
         let request_id = "toolu_interrupted";
@@ -25920,7 +18738,7 @@ mod tests {
         assert!(store.get_answer(uid, request_id).unwrap().is_none());
 
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let _attached = attach(&daemon, "cc-1", uid).await;
         daemon.recover().await;
 
         // Recovery turns it into a terminal outcome that says what is true: the
@@ -25948,112 +18766,6 @@ mod tests {
             AnswerResult::Duplicate { outcome, .. } => assert!(outcome.indeterminate),
             other => panic!("a retry must not re-apply an interrupted answer: {other:?}"),
         }
-        assert!(
-            pane.typed().is_empty(),
-            "nothing may be typed a second time: {:?}",
-            pane.typed()
-        );
-    }
-    #[tokio::test]
-    async fn a_successful_answer_leaves_no_claim_behind_and_a_refused_one_releases_it() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let held = raise_held(&daemon, uid, "touch /tmp/a", "toolu_claim", None).await;
-        let hash = bash_hash("touch /tmp/a");
-
-        // Refused before anything is handed over: the claim must not survive, or
-        // the card would be permanently unanswerable for an answer never sent.
-        assert!(matches!(
-            daemon
-                .answer(
-                    "toolu_claim",
-                    &hash,
-                    AnswerDecision::Option { index: 2 },
-                    Some(uid),
-                    protocol::ws::AnsweredOn::Iphone
-                )
-                .await,
-            AnswerResult::Rejected { .. }
-        ));
-        assert!(
-            daemon
-                .store
-                .answer_claim(uid, "toolu_claim")
-                .unwrap()
-                .is_none(),
-            "a refusal sends nothing, so it must leave nothing claimed"
-        );
-
-        // Applied: the claim and the outcome settle in one transaction.
-        assert!(matches!(
-            daemon
-                .answer(
-                    "toolu_claim",
-                    &hash,
-                    AnswerDecision::Allow,
-                    Some(uid),
-                    protocol::ws::AnsweredOn::Iphone
-                )
-                .await,
-            AnswerResult::Applied { .. }
-        ));
-        assert_eq!(returned(held).await.decision, Decision::Allow);
-        assert!(daemon
-            .store
-            .answer_claim(uid, "toolu_claim")
-            .unwrap()
-            .is_none());
-        assert!(daemon
-            .store
-            .get_answer(uid, "toolu_claim")
-            .unwrap()
-            .is_some());
-        // The durable projection goes with it, so a restart does not resurrect
-        // a card that has been answered.
-        assert!(daemon.store.list_pending_approvals().unwrap().is_empty());
-    }
-    /// `ingest`'s duplicate result was computed and thrown away, then a pending
-    /// entry was inserted unconditionally — so a hook redelivered after the card
-    /// had been answered put a phantom block back on the session that nothing
-    /// could ever resolve.
-    #[tokio::test]
-    async fn a_duplicate_permission_hook_never_resurrects_a_resolved_card() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
-        let held = raise_held(&daemon, uid, "touch /tmp/a", "toolu_dup", None).await;
-        assert!(matches!(
-            daemon
-                .answer(
-                    "toolu_dup",
-                    &bash_hash("touch /tmp/a"),
-                    AnswerDecision::Allow,
-                    Some(uid),
-                    protocol::ws::AnsweredOn::Iphone
-                )
-                .await,
-            AnswerResult::Applied { .. }
-        ));
-        assert_eq!(returned(held).await.decision, Decision::Allow);
-        assert!(daemon.sessions().await.unwrap()[0].blocked_on.is_empty());
-        let seq_after_answer = daemon.store.max_seq(uid).unwrap();
-
-        // The same hook again — a shell wrapper retry, a redelivery, a rescan.
-        let again = json!({
-            "hook_event_name": "PermissionRequest", "cwd": "/tmp", "prompt_id": "p1",
-            "tool_name": "Bash", "tool_input": {"command": "touch /tmp/a"},
-        });
-        daemon.handle_hook(post(uid, again, false)).await;
-        assert!(
-            daemon.sessions().await.unwrap()[0].blocked_on.is_empty(),
-            "a replayed hook must not put an answered card back on the session"
-        );
-        assert_eq!(
-            daemon.store.max_seq(uid).unwrap(),
-            seq_after_answer,
-            "and it must not burn a sequence number either"
-        );
-        assert!(pane.typed().is_empty(), "typed {:?}", pane.typed());
     }
 
     // ===================================================== payload truncation
@@ -26341,90 +19053,13 @@ mod tests {
         }
     }
 
-    /// **The pasted-image prompts, as this build emits them.** Every event of
-    /// the recording, through the production tailer and [`Daemon::ingest_scan`]
-    /// with `max_payload_bytes` at 4096, serialised as a phone is sent it. Only
-    /// the scan's clock read (`ts`) is normalised. The phone's tests read the
-    /// copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`).
-    #[tokio::test]
-    async fn the_big_image_prompt_wire_fixture_is_what_this_build_emits() {
-        const FIXTURE: &str =
-            include_str!("../../../fixtures/claude/transcript-big-image-prompt-wire.json");
-        let derived = derived_big_image_prompt_wire().await;
-        let prompt = derived
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|event| event["payload"]["uuid"] == OVERSIZED_PROMPT)
-            .expect("the oversized prompt is sent with its uuid");
-        assert_eq!(prompt["payload"]["promptSource"], "typed");
-        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(
-            derived, committed,
-            "the committed big-image-prompt wire no longer matches what this build emits. \
-             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_big_image_prompt_wire_fixture, then copy it over its copy under \
-             ios/ (fixtures/check-duplicated-fixtures.sh names it)"
-        );
-    }
-
-    /// Rewrite `fixtures/claude/transcript-big-image-prompt-wire.json` with what
-    /// this build emits.
-    #[tokio::test]
-    #[ignore = "generator, not a gate"]
-    async fn regenerate_the_big_image_prompt_wire_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_big_image_prompt_wire().await).unwrap();
-        std::fs::write(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/transcript-big-image-prompt-wire.json"
-            ),
-            wire + "\n",
-        )
-        .unwrap();
-    }
-
-    async fn derived_big_image_prompt_wire() -> serde_json::Value {
-        let daemon = daemon_with(Config {
-            max_payload_bytes: 4096,
-            ..Config::default()
-        });
-        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-        let run = SessionKey::new(TEST_UID, "cc-1");
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/transcript/big-image-prompt-2.1.308.jsonl"
-        );
-        let scan = crate::tailer::scan_file(&daemon.store, &run, path)
-            .unwrap()
-            .unwrap();
-        daemon
-            .ingest_scan(TEST_UID, scan.events, scan.cursor)
-            .await
-            .unwrap();
-        let events: Vec<serde_json::Value> = daemon
-            .store
-            .events_after(TEST_UID, 0, 1000)
-            .unwrap()
-            .into_iter()
-            .map(|event| {
-                let mut value = serde_json::to_value(event).unwrap();
-                // The scan's clock read, the one field that is not the recording's.
-                value["ts"] = json!("2026-10-22T13:36:40.000Z");
-                value
-            })
-            .collect();
-        serde_json::Value::Array(events)
-    }
-
     // ========================================================== send_text
 
     #[tokio::test]
     async fn send_text_refuses_an_identity_that_does_not_match_its_own_text() {
         let daemon = test_daemon();
         let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let _attached = attach(&daemon, "cc-1", uid).await;
         let honest = protocol::hash::send_text_hash(uid, "deploy to prod", true);
 
         // A hash for different text: a captured frame replayed with new content
@@ -26452,14 +19087,13 @@ mod tests {
             matches!(unbound, SendTextResult::Refused { .. }),
             "{unbound:?}"
         );
-        assert!(pane.typed().is_empty());
     }
 
     #[tokio::test]
     async fn send_text_is_bounded_and_only_a_run_codeconnect_started_takes_one() {
         let daemon = test_daemon();
         let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let _attached = attach(&daemon, "cc-1", uid).await;
 
         let huge = "x".repeat(protocol::ws::MAX_SEND_TEXT_BYTES + 1);
         let refused = daemon.send_text(uid, huge, None, None, true, false).await;
@@ -26468,8 +19102,7 @@ mod tests {
             "{refused:?}"
         );
 
-        // A supervised run has nothing left to deliver a message: refused, and
-        // nothing typed into its pane.
+        // A supervised run has nothing left to deliver a message: refused.
         let unhosted = daemon
             .send_text(uid, "hello".into(), None, None, true, false)
             .await;
@@ -26479,85 +19112,6 @@ mod tests {
                 reason: "Only a run CodeConnect started takes messages; nothing was sent.".into()
             }
         );
-        assert!(pane.typed().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_request_that_is_never_answered_leaves_nothing_in_the_inflight_map() {
-        // The leak: the in-flight map was pruned only by an arriving *response*.
-        // Every timed-out request therefore left a `oneshot::Sender` behind
-        // permanently, on a map that lives as long as the supervisor's session
-        // — an unbounded growth on the stall path, which is the path that fires
-        // exactly when the daemon is already struggling. Nothing anywhere would
-        // ever have collected them.
-        let daemon = daemon_with(Config {
-            supervisor_timeout_ms: 50,
-            ..Config::default()
-        });
-        let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
-        assert_eq!(pane.inflight_len(), 0);
-
-        pane.go_silent();
-        for _ in 0..5 {
-            let _ = daemon.capture_visible(uid).await;
-        }
-        assert_eq!(
-            pane.inflight_len(),
-            0,
-            "five abandoned requests left {} entries behind",
-            pane.inflight_len()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_supervisor_that_stopped_reading_is_reported_as_not_sent() {
-        // The write queue is bounded now, so a supervisor whose process is
-        // stopped fills it. That must read as `NotSent` — the frame never left
-        // this process, so nothing can have been typed and a retry is safe —
-        // and it must not block the caller waiting for room.
-        let daemon = daemon_with(Config {
-            supervisor_timeout_ms: 50,
-            ..Config::default()
-        });
-        let uid = TEST_UID;
-        // Registered with a receiver that is dropped immediately: a closed
-        // channel is the strongest form of "not reading", and both refusals
-        // (full and closed) take the same branch.
-        let (tx, rx) = mpsc::channel(1);
-        drop(rx);
-        let _registration = daemon
-            .register_supervisor(
-                RegisterSession {
-                    session_id: "cc-1".into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
-            .await
-            .unwrap();
-
-        let started = std::time::Instant::now();
-        let result = daemon.capture_visible(uid).await;
-        assert!(result.is_err(), "a capture nobody can receive must fail");
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "it must fail fast rather than wait on a queue that will never drain"
-        );
     }
 
     #[test]
@@ -26566,218 +19120,6 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
         assert!(constant_time_eq(b"", b""));
-    }
-
-    #[test]
-    fn correlation_key_is_stable_for_the_same_call() {
-        let pre = input_from(
-            r#"{"hook_event_name":"PreToolUse","prompt_id":"p1","tool_name":"Bash",
-                "tool_input":{"command":"touch /tmp/a"},"tool_use_id":"toolu_1"}"#,
-        );
-        let perm = input_from(
-            r#"{"hook_event_name":"PermissionRequest","prompt_id":"p1","tool_name":"Bash",
-                "tool_input":{"command":"touch /tmp/a"}}"#,
-        );
-        assert_eq!(
-            correlation_key("cc-1", &pre),
-            correlation_key("cc-1", &perm),
-            "PermissionRequest must join to its PreToolUse"
-        );
-    }
-
-    #[test]
-    fn correlation_key_separates_different_commands() {
-        let a = input_from(
-            r#"{"prompt_id":"p1","tool_name":"Bash","tool_input":{"command":"touch /tmp/a"}}"#,
-        );
-        let b = input_from(
-            r#"{"prompt_id":"p1","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#,
-        );
-        assert_ne!(correlation_key("cc-1", &a), correlation_key("cc-1", &b));
-    }
-
-    /// Background agents in one turn share the main prompt's `prompt_id`; only
-    /// `agent_id` tells their calls apart, for every tool. The main
-    /// conversation's calls carry no `agent_id` and keep the key they always had.
-    #[test]
-    fn correlation_key_separates_background_agents() {
-        let call = |tool: &str, input: &str, agent: &str| {
-            input_from(&format!(
-                r#"{{"prompt_id":"p1",{agent}"tool_name":"{tool}","tool_input":{input}}}"#
-            ))
-        };
-        for (tool, input) in [
-            (
-                "AskUserQuestion",
-                r#"{"questions":[{"question":"Which?"}]}"#,
-            ),
-            ("Bash", r#"{"command":"ls"}"#),
-            ("Write", r#"{"file_path":"/tmp/a","content":"x"}"#),
-        ] {
-            let key = |agent| correlation_key("cc-1", &call(tool, input, agent)).unwrap();
-            assert_ne!(
-                key(r#""agent_id":"agentA","#),
-                key(r#""agent_id":"agentB","#)
-            );
-            assert_ne!(key(r#""agent_id":"agentA","#), key(""));
-            assert_eq!(
-                key(""),
-                format!(
-                    "cc-1|p1|{tool}|{}",
-                    approval_payload_hash(tool, &serde_json::from_str(input).unwrap())
-                ),
-                "the main conversation keeps its key"
-            );
-        }
-    }
-
-    /// Two background agents' identical Bash calls in one turn are two cards,
-    /// each joined to its own agent's call.
-    #[tokio::test]
-    async fn identical_approvals_from_two_background_agents_are_two_cards() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _pane = attach(
-            &daemon,
-            "cc-1",
-            uid,
-            &permission_pane("touch fork-was-here.txt"),
-            "",
-        )
-        .await;
-        let hook = |event: &str, agent: &str, tool_use_id: Option<&str>| {
-            let mut payload = json!({
-                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p1",
-                "agent_id": agent, "agent_type": "fork", "permission_mode": "bubble",
-                "tool_name": "Bash", "tool_input": {"command": "touch fork-was-here.txt"},
-            });
-            if let Some(id) = tool_use_id {
-                payload["tool_use_id"] = json!(id);
-            }
-            post(uid, payload, false)
-        };
-        daemon
-            .handle_hook(hook("PreToolUse", "agentA", Some("toolu_A")))
-            .await;
-        daemon
-            .handle_hook(hook("PreToolUse", "agentB", Some("toolu_B")))
-            .await;
-        daemon
-            .handle_hook(hook("PermissionRequest", "agentA", None))
-            .await;
-        daemon
-            .handle_hook(hook("PermissionRequest", "agentB", None))
-            .await;
-        let requests: Vec<String> = daemon
-            .store
-            .events_after(uid, 0, 1000)
-            .unwrap()
-            .into_iter()
-            .filter(|event| event.kind == EventKind::ApprovalRequest)
-            .map(|event| {
-                event.payload["card"]["request_id"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(requests, vec!["toolu_A".to_string(), "toolu_B".to_string()]);
-    }
-
-    /// Two open calls with one key: the request joins neither, so it is not
-    /// held for the phone. Once one of them has run, a request joins the other.
-    #[tokio::test]
-    async fn a_request_with_two_open_identical_calls_joins_neither() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let with_id = |event: &str, id: &str| {
-            let mut hook = question_hook(event);
-            hook["tool_use_id"] = json!(id);
-            post(uid, hook, false)
-        };
-        daemon.handle_hook(with_id("PreToolUse", "toolu_one")).await;
-        daemon.handle_hook(with_id("PreToolUse", "toolu_two")).await;
-        let request = || {
-            let mut request = post(uid, question_hook("PermissionRequest"), true);
-            request.holds_questions = true;
-            request
-        };
-        // Bounded: a request that joined a call is held for the phone.
-        tokio::time::timeout(Duration::from_secs(2), daemon.handle_hook(request()))
-            .await
-            .expect("the request was held although it joined no call");
-        let cards: Vec<(String, Option<QuestionHold>)> = daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .iter()
-            .map(|((_, id), entry)| (id.clone(), entry.card.question_hold))
-            .collect();
-        assert_eq!(cards.len(), 1, "{cards:?}");
-        assert!(cards[0].0.starts_with("pr-"), "joined a call: {cards:?}");
-        assert_eq!(cards[0].1, Some(QuestionHold::AtMac));
-
-        daemon
-            .handle_hook(with_id("PostToolUse", "toolu_one"))
-            .await;
-        // The first call ran; a request now joins the one still open.
-        let later = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { daemon.handle_hook(request()).await })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!later.is_finished(), "the later request was not held");
-        let hold = daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .get(&(uid.to_string(), "toolu_two".to_string()))
-            .and_then(|entry| entry.card.question_hold);
-        assert_eq!(hold, Some(QuestionHold::Held));
-        later.abort();
-    }
-
-    #[test]
-    fn correlation_key_separates_sessions() {
-        let input =
-            input_from(r#"{"prompt_id":"p1","tool_name":"Bash","tool_input":{"command":"ls"}}"#);
-        assert_ne!(
-            correlation_key("cc-1", &input),
-            correlation_key("cc-2", &input)
-        );
-    }
-
-    #[test]
-    fn correlation_key_absent_without_tool_details() {
-        assert!(correlation_key("cc-1", &input_from(r#"{"prompt_id":"p1"}"#)).is_none());
-    }
-
-    #[test]
-    fn tool_events_get_distinct_dedup_ids() {
-        let input = input_from(
-            r#"{"hook_event_name":"PreToolUse","tool_use_id":"toolu_1","tool_name":"Bash"}"#,
-        );
-        let pre = hook_event(&test_key(), &HookEventName::PreToolUse, &json!({}), &input);
-        let post = hook_event(&test_key(), &HookEventName::PostToolUse, &json!({}), &input);
-        assert_eq!(pre.source_event_id.as_deref(), Some("pre:toolu_1"));
-        assert_eq!(post.source_event_id.as_deref(), Some("post:toolu_1"));
-        assert_ne!(pre.source_event_id, post.source_event_id);
-    }
-
-    #[test]
-    fn notifications_get_no_dedup_id() {
-        // Two identical idle notifications are two real facts.
-        let input =
-            input_from(r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
-        let event = hook_event(
-            &test_key(),
-            &HookEventName::Notification,
-            &json!({}),
-            &input,
-        );
-        assert_eq!(event.source_event_id, None);
     }
 
     // ======================================= the still-shared ledger tables
@@ -26910,7 +19252,7 @@ mod tests {
     /// produced by the producer now, and the three tests below are refusals
     /// standing in front of a session that genuinely registered.
     ///
-    /// The row still lands in `codex_sessions` — `upsert_session` routes by agent
+    /// The row still lands in `codex_sessions` — `upsert_session_at_generation` routes by agent
     /// — and the assertion here is still that every daemon read finds it, because
     /// a gate reading through `all_sessions` is the only reason these tests mean
     /// anything.
@@ -26928,35 +19270,29 @@ mod tests {
     /// closed channel keeps that counterfactual a prompt refusal instead of a wait
     /// on a supervisor that will never answer.
     async fn register_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
         daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: name.into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: Some(
-                        std::env::temp_dir()
-                            .join(format!("ccd-ledger-{uid}-nothing-listens.sock"))
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    codex_generation: Some(1),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: name.into(),
+                session_uid: Some(uid.into()),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: Some(
+                    std::env::temp_dir()
+                        .join(format!("ccd-ledger-{uid}-nothing-listens.sock"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
             .expect("the Codex coordinator's own registration frame must be accepted");
         assert_eq!(
@@ -27447,305 +19783,6 @@ mod tests {
         );
     }
 
-    /// The turn boundaries of one measured Claude Code 2.1.316 session (round 3,
-    /// R3-1), its paths replaced: a prompt queued while a short turn ran (0–7), one
-    /// typed during a tool call (8–12), Esc (13–14) and the next prompt (15–17), a
-    /// background task's report (18–22), and a manual /compact (23–26).
-    const TURNS: &str =
-        include_str!("../../../fixtures/claude/transcript-turn-boundaries-2.1.316.jsonl");
-
-    fn turns(lines: std::ops::Range<usize>) -> Vec<String> {
-        TURNS.lines().map(str::to_string).collect::<Vec<_>>()[lines].to_vec()
-    }
-
-    /// A run's transcript, read by the tailer as Claude Code appends to it.
-    struct Transcript {
-        path: std::path::PathBuf,
-        uid: String,
-        /// Added to each line's timestamp: the run writes `TURNS` now, from a second
-        /// after it started, with the measured spacing.
-        offset_ms: i64,
-    }
-
-    impl Transcript {
-        /// `TURNS`, as the run writes them now.
-        fn of(uid: &str) -> Transcript {
-            let first: serde_json::Value =
-                serde_json::from_str(TURNS.lines().next().unwrap()).unwrap();
-            let first =
-                protocol::time::unix_ms_from_rfc3339(first["timestamp"].as_str().unwrap()).unwrap();
-            let mut transcript = Transcript::as_written(uid);
-            transcript.offset_ms = protocol::time::now_unix_ms() + 1_000 - first;
-            transcript
-        }
-
-        /// Lines at the times they carry: a conversation written before the run.
-        fn as_written(uid: &str) -> Transcript {
-            let path =
-                std::env::temp_dir().join(format!("ccd-turns-{}-{uid}.jsonl", std::process::id()));
-            let _ = std::fs::remove_file(&path);
-            Transcript {
-                path,
-                uid: uid.to_string(),
-                offset_ms: 0,
-            }
-        }
-
-        /// When the measured session's hook at `ms` (by `TURNS`' clock) comes now.
-        fn at(&self, ms: i64) -> i64 {
-            1_793_579_000_000 + ms + self.offset_ms
-        }
-
-        /// Append `lines` and read them as one scan.
-        async fn read(&self, daemon: &Arc<Daemon>, lines: Vec<String>) {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-                .unwrap();
-            for line in lines {
-                let mut line: serde_json::Value = serde_json::from_str(&line).unwrap();
-                if let Some(at) = line["timestamp"]
-                    .as_str()
-                    .and_then(protocol::time::unix_ms_from_rfc3339)
-                {
-                    line["timestamp"] =
-                        protocol::time::rfc3339_from_unix_ms(at + self.offset_ms).into();
-                }
-                writeln!(file, "{line}").unwrap();
-            }
-            let run = SessionKey::new(&self.uid, "cc-1");
-            let scan = crate::tailer::scan_file(&daemon.store, &run, self.path.to_str().unwrap())
-                .unwrap()
-                .unwrap();
-            daemon
-                .ingest_scan(&self.uid, scan.events, scan.cursor)
-                .await
-                .unwrap();
-        }
-    }
-
-    impl Drop for Transcript {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-
-    /// Whether the wake rule would wake `uid` now, between its turns.
-    fn wakeable(daemon: &Arc<Daemon>, uid: &str) -> bool {
-        let claimed = daemon
-            .store
-            .claim_mail_wake(uid, protocol::time::now_unix_ms(), true)
-            .unwrap();
-        if claimed {
-            daemon.store.release_mail_wake(uid).unwrap();
-        }
-        claimed
-    }
-
-    /// **A Claude turn runs from its start to its end as its transcript has them**
-    /// (round 3, R3-1). A prompt queued while a turn runs is submitted before that
-    /// turn's Stop and starts its own turn after it (the attacker's q shape); one
-    /// typed during a tool call joins the turn running, which ends once. Esc ends
-    /// nothing until the next turn ends. A background task's report is a turn. A
-    /// manual /compact starts none. The hooks come at their measured times.
-    #[tokio::test]
-    async fn a_turn_runs_from_its_start_to_its_end_as_its_transcript_has_them() {
-        let daemon = test_daemon();
-        let uid = register(&daemon, "cc-1", None).await.session.uid;
-        leave_mail(&daemon, &uid, "hi");
-        let transcript = Transcript::of(&uid);
-        let prompt = |ms: i64| daemon.store.mail_prompt(&uid, transcript.at(ms)).unwrap();
-        let stop = || {
-            daemon
-                .store
-                .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
-                .unwrap()
-        };
-
-        prompt(124_141);
-        transcript.read(&daemon, turns(0..2)).await;
-        prompt(124_602);
-        stop();
-        assert!(
-            !wakeable(&daemon, &uid),
-            "q: a prompt is queued behind the Stop"
-        );
-        transcript.read(&daemon, turns(2..5)).await;
-        assert!(
-            !wakeable(&daemon, &uid),
-            "q: taken off the queue after the first turn's end, before its own start is read"
-        );
-        transcript.read(&daemon, turns(5..6)).await;
-        assert!(!wakeable(&daemon, &uid), "q: the queued turn runs");
-        stop();
-        transcript.read(&daemon, turns(6..8)).await;
-        assert!(wakeable(&daemon, &uid), "q: the queued turn ended");
-
-        prompt(148_845);
-        transcript.read(&daemon, turns(8..9)).await;
-        prompt(154_897);
-        transcript.read(&daemon, turns(9..11)).await;
-        assert!(!wakeable(&daemon, &uid), "a prompt joined the running turn");
-        stop();
-        transcript.read(&daemon, turns(11..13)).await;
-        assert!(wakeable(&daemon, &uid), "the turn it joined ended once");
-
-        prompt(206_505);
-        transcript.read(&daemon, turns(13..15)).await;
-        assert!(!wakeable(&daemon, &uid), "Esc ends no turn");
-        prompt(216_583);
-        transcript.read(&daemon, turns(15..16)).await;
-        stop();
-        transcript.read(&daemon, turns(16..18)).await;
-        assert!(wakeable(&daemon, &uid), "the next turn ended");
-
-        transcript.read(&daemon, turns(18..19)).await;
-        prompt(224_515);
-        transcript.read(&daemon, turns(19..21)).await;
-        assert!(
-            !wakeable(&daemon, &uid),
-            "a background task's report runs a turn"
-        );
-        stop();
-        transcript.read(&daemon, turns(21..23)).await;
-        assert!(wakeable(&daemon, &uid), "the report's turn ended");
-
-        transcript.read(&daemon, turns(23..27)).await;
-        assert!(wakeable(&daemon, &uid), "a manual /compact starts no turn");
-    }
-
-    /// **Only a prompt that starts a turn with none running is told of mail
-    /// waiting** (final round, F1). A prompt typed while a turn runs joins it, and
-    /// one queued behind it runs right after it: told, either would read the mail
-    /// inside a turn. The wake after that turn reads it instead. So does the one
-    /// after Esc, which ends no turn.
-    #[tokio::test]
-    async fn only_a_prompt_with_no_turn_running_is_told_of_mail() {
-        let daemon = test_daemon();
-        let uid = register(&daemon, "cc-1", None).await.session.uid;
-        leave_mail(&daemon, &uid, "hi");
-        let transcript = Transcript::of(&uid);
-        let told = |ms: i64| daemon.store.mail_prompt(&uid, transcript.at(ms)).unwrap();
-
-        assert!(told(124_141), "a prompt with no turn running is told");
-        transcript.read(&daemon, turns(0..2)).await;
-        assert!(!told(124_602), "a prompt queued behind the running turn");
-        transcript.read(&daemon, turns(2..8)).await;
-
-        assert!(told(148_845), "a prompt with no turn running is told");
-        transcript.read(&daemon, turns(8..9)).await;
-        assert!(!told(154_897), "a prompt typed during a tool call");
-        transcript.read(&daemon, turns(9..13)).await;
-
-        assert!(told(206_505), "a prompt with no turn running is told");
-        transcript.read(&daemon, turns(13..15)).await;
-        assert!(!told(216_583), "the prompt after Esc");
-    }
-
-    /// **A resumed conversation's unended turn is not the run's** (final round, K1):
-    /// `codeconnect claude --resume`, or /resume inside a run, reads the conversation
-    /// into the run from its start, and a turn it left without an end (Esc, a killed
-    /// process) does not leave the new run taken for running.
-    #[tokio::test]
-    async fn a_resumed_conversations_unended_turn_is_not_the_runs() {
-        let daemon = test_daemon();
-        let uid = register(&daemon, "cc-1", None).await.session.uid;
-        leave_mail(&daemon, &uid, "hi");
-        let resumed: Vec<String> =
-            include_str!("../../../fixtures/transcript/interrupts-2.1.304/resume-after-esc.jsonl")
-                .lines()
-                .take(27)
-                .map(str::to_string)
-                .collect();
-        Transcript::as_written(&uid).read(&daemon, resumed).await;
-        assert!(wakeable(&daemon, &uid), "the resumed run is idle");
-    }
-
-    /// **A restart reads on from the transcript** (rounds 1–3). A turn running when
-    /// the daemon stopped is still running (shape M); one that ended while it was
-    /// down is running until its end is read (variant B). A Claude wake whose Stop
-    /// found no daemon is dropped (variant W); a Codex wake, which may still be held
-    /// in Codex's queue, is not queued twice.
-    #[tokio::test]
-    async fn a_restart_reads_on_from_the_transcript() {
-        let daemon = test_daemon();
-        let busy = register(&daemon, "cc-1", None).await.session.uid;
-        let done = register(&daemon, "cc-2", None).await.session.uid;
-        let woken = register(&daemon, "cc-3", None).await.session.uid;
-        let codex = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &codex, "cc-4").await;
-        for run in [&busy, &done, &woken, &codex] {
-            leave_mail(&daemon, run, "hi");
-        }
-        let (busy_transcript, done_transcript) = (Transcript::of(&busy), Transcript::of(&done));
-        busy_transcript.read(&daemon, turns(8..9)).await;
-        done_transcript.read(&daemon, turns(8..9)).await;
-        let now = protocol::time::now_unix_ms();
-        assert!(daemon.store.claim_mail_wake(&woken, now, true).unwrap());
-        assert!(daemon.store.claim_mail_wake(&codex, now, false).unwrap());
-
-        daemon.recover().await;
-        assert!(!wakeable(&daemon, &busy), "M: still running");
-        assert!(
-            !wakeable(&daemon, &done),
-            "B: running until its end is read"
-        );
-        assert!(wakeable(&daemon, &woken), "W: the Claude wake is gone");
-        assert!(
-            !daemon
-                .store
-                .claim_mail_wake(&codex, protocol::time::now_unix_ms(), false)
-                .unwrap(),
-            "the held Codex wake is still outstanding"
-        );
-    }
-
-    /// **Without the transcript's marks a turn is taken for running** (round 3,
-    /// R3-1): the safe default should a Claude Code update stop writing them. With no
-    /// turn start in the transcript, the UserPromptSubmit hook still marks one, so no
-    /// turn is woken in; with no turn end, the run is not woken and its mail waits.
-    #[tokio::test]
-    async fn without_the_transcripts_marks_a_turn_is_taken_for_running() {
-        let daemon = test_daemon();
-        let uid = register(&daemon, "cc-1", None).await.session.uid;
-        leave_mail(&daemon, &uid, "hi");
-        let transcript = Transcript::of(&uid);
-        let unmarked = |lines: std::ops::Range<usize>| -> Vec<String> {
-            turns(lines)
-                .into_iter()
-                .filter_map(|line| {
-                    let mut line: serde_json::Value = serde_json::from_str(&line).unwrap();
-                    let object = line.as_object_mut().unwrap();
-                    if object["type"] == "queue-operation"
-                        || object
-                            .get("subtype")
-                            .is_some_and(|s| s == "stop_hook_summary")
-                    {
-                        return None;
-                    }
-                    object.remove("promptSource");
-                    object.remove("turnOrigin");
-                    Some(line.to_string())
-                })
-                .collect()
-        };
-
-        daemon
-            .store
-            .mail_prompt(&uid, transcript.at(124_141))
-            .unwrap();
-        transcript.read(&daemon, unmarked(0..1)).await;
-        assert!(!wakeable(&daemon, &uid), "the hook marks the start");
-        transcript.read(&daemon, unmarked(1..8)).await;
-        daemon
-            .store
-            .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
-            .unwrap();
-        assert!(!wakeable(&daemon, &uid), "no end seen: still running");
-    }
-
     /// **A run whose supervisor has not come back yet still takes mail** (round 1,
     /// R1-2): after a restart, a run is listed and sent to by its saved row and the
     /// mail it was launched able to take, not by whether its supervisor has registered
@@ -27947,47 +19984,11 @@ mod tests {
         .contains("tagged"));
     }
 
-    /// The same frame with the agent swapped, so a test can register the SAME uid
-    /// as Claude and then try to move it.
-    async fn register_claude_session(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        name: &str,
-    ) -> Result<Registration> {
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(_rx));
-        daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: name.into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: Some("/usr/local/bin/claude".into()),
-                    agent: protocol::agent::AgentKind::Claude,
-                    agent_bin: Some("/usr/local/bin/claude".into()),
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
-            .await
-    }
-
     /// **A uid does not leave Claude, and the rows are why.**
     ///
-    /// The three gates above ask [`Daemon::shared_ledgers_admit`] of the row's
-    /// agent and then write later — `send_text` immediately, the hook seven awaits
-    /// later, `answer` five. That is only sound if the answer cannot change under
-    /// them, and the store will happily change it: an `upsert_session` whose agent
+    /// A gate that asks [`Daemon::shared_ledgers_admit`] of the row's agent writes
+    /// later. That is only sound if the answer cannot change under it, and the
+    /// store will happily change it: an `upsert_session_at_generation` whose agent
     /// disagrees with where the row lives *moves* the row, deliberately, leaving
     /// the four shared ledgers exactly where they were, because they are keyed by
     /// uid and nothing walks them.
@@ -28006,28 +20007,17 @@ mod tests {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_claude_session(&daemon, uid, "cc-1")
-            .await
-            .expect("a Claude registration is ordinary");
 
         // A real card, through the real producer, so the rows this is about exist.
-        daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/tmp",
-                    "prompt_id": "p1",
-                    "tool_name": "Bash",
-                    "tool_input": { "command": "touch /tmp/a" },
-                }),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
+        hosted_card(
+            &daemon,
+            uid,
+            1,
+            "toolu_a",
+            "Bash",
+            json!({"command": "touch /tmp/a"}),
+        )
+        .await;
         let before = ledger_rows(&db, uid);
         assert!(
             before.iter().any(|(_, count)| *count > 0),
@@ -28056,7 +20046,7 @@ mod tests {
         );
     }
 
-    /// Commit a Claude row for `uid`, through the same [`Store::upsert_session`] a
+    /// Commit a Claude row for `uid`, through the same [`Store::upsert_session_at_generation`] a
     /// registration's own acceptance calls.
     ///
     /// The test below holds the acceptance gate in order to stage an interleave, so
@@ -28067,21 +20057,24 @@ mod tests {
     fn commit_claude_row(daemon: &Arc<Daemon>, uid: &str, name: &str) {
         daemon
             .store
-            .upsert_session(&SessionRow {
-                session_uid: uid.into(),
-                session_id: name.into(),
-                tmux_session: name.into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: protocol::time::now_rfc3339(),
-                updated_at: protocol::time::now_rfc3339(),
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &SessionRow {
+                    session_uid: uid.into(),
+                    session_id: name.into(),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: Lifecycle::Live,
+                    created_at: protocol::time::now_rfc3339(),
+                    updated_at: protocol::time::now_rfc3339(),
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
     }
@@ -28170,36 +20163,29 @@ mod tests {
         uid: &str,
         name: &str,
     ) -> Result<Registration> {
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(_rx));
         daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: name.into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: Some(
-                        std::env::temp_dir()
-                            .join(format!("ccd-move-{uid}-nothing-listens.sock"))
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    codex_generation: Some(1),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: name.into(),
+                session_uid: Some(uid.into()),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: Some(
+                    std::env::temp_dir()
+                        .join(format!("ccd-move-{uid}-nothing-listens.sock"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
     }
 
@@ -28223,31 +20209,24 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         let uid = TEST_UID;
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(_rx));
         let refusal = daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-1".into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: Some("/usr/local/bin/claude".into()),
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: Some("/opt/homebrew/bin/codex".into()),
-                    codex_thread_id: None,
-                    codex_socket: Some("/tmp/nothing-listens.sock".into()),
-                    codex_generation: Some(1),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.into()),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: Some("/usr/local/bin/claude".into()),
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: Some("/opt/homebrew/bin/codex".into()),
+                codex_thread_id: None,
+                codex_socket: Some("/tmp/nothing-listens.sock".into()),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
             .expect_err("a Codex registration naming a Claude binary is internally inconsistent");
         assert!(
@@ -28286,99 +20265,18 @@ mod tests {
             .await;
 
         // **The reason is asserted, and it is the load-bearing assertion.**
-        // Without the gate this call still ends in a refusal — the registered
-        // supervisor's channel is closed, so `supervisor_request` cannot deliver
-        // — but only after `claim_text_mutation` has written an `applying` row,
-        // and that late refusal then releases it. (Before the run was registered
-        // rather than staged, the late refusal was "no supervisor attached"
-        // instead; it is a different sentence at the same point on the path, and
-        // the point is what this test is about.) So the count below reads zero
-        // either way, and
-        // only the reason says which side of the durable write the refusal
-        // happened on. The window it leaves is not theoretical: a daemon killed
-        // inside it leaves the `applying` row behind, and a rolled-back v0.6.0
-        // rewrites every one it finds.
+        // Without the gate this call still ends in a refusal — the run has no host
+        // to deliver it — so the count below reads zero either way, and only the
+        // reason says it was the agent gate that refused it.
         match &result {
             SendTextResult::Refused { reason } => assert!(
-                reason.contains("codex session") && reason.contains("nothing was typed"),
+                reason.contains("codex session") && reason.contains("nothing was sent"),
                 "the refusal must name the agent it refused, before the claim: {reason}"
             ),
             other => panic!("a Codex session must not be typed into: {other:?}"),
         }
         assert_no_ledger_rows(&db, uid);
         assert_no_insert_was_attempted(&db, uid);
-    }
-
-    /// **A Claude hook is not the road a Codex approval arrives on.**
-    ///
-    /// This tripwire used to say something stronger and now says something
-    /// narrower, and the narrowing is the point. It was written when *no* Codex
-    /// card could exist, because `pending_approvals` was shared with a v0.6.0
-    /// daemon that sweeps it globally; the table is now split and
-    /// [`Daemon::raise_codex_approval`] raises Codex cards for real. What
-    /// remains true — and is what this pins — is that they do not arrive
-    /// *here*. This daemon installs no `PermissionRequest` hook for Codex, so a
-    /// hook posted against a Codex uid means the uid or the payload is somebody
-    /// else's, and carding it would mint a second, Claude-shaped card for a
-    /// question the link is already asking properly.
-    ///
-    /// So the assertions are unchanged and their justification is not: no card,
-    /// no row in any shared ledger, and a passthrough rather than a denial —
-    /// declining to observe must never reach the agent as the human's answer.
-    ///
-    /// **Mutation:** change the gate's arm to `self.shared_ledgers_admit(..)`
-    /// and this stays green, which is why the sentence matters more than the
-    /// predicate; delete the gate entirely and both the card assertion and
-    /// `assert_no_insert_was_attempted` go red, because `persist_pending` writes
-    /// the shared table and the schema trigger then refuses the write.
-    #[tokio::test]
-    async fn a_permission_request_for_a_codex_session_raises_no_card() {
-        let (store, db) = shared_store_on_disk();
-        let uid = TEST_UID;
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        // Registered rather than staged — see `register_codex_session`. The hook
-        // below posts against the same `cc-1` this registration owns, so
-        // `ensure_session` finds the registration's row and preserves its agent,
-        // which is the arm the gate reads.
-        register_codex_session(&daemon, uid, "cc-1").await;
-        arm_ledger_tripwire(&db);
-
-        // Posted exactly as `raise_prompt` does, inline only because this test is
-        // about the answer the hook gets back and that helper discards it.
-        let decision = daemon
-            .handle_hook(HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.to_string()),
-                event: "PermissionRequest".into(),
-                payload: json!({
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/tmp",
-                    "prompt_id": "p1",
-                    "tool_name": "Bash",
-                    "tool_input": { "command": "touch /tmp/a" },
-                }),
-                wait: true,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-
-        // The durable half first, because it is the one the rollback story turns
-        // on: `persist_pending` writes `pending_approvals` unconditionally once a
-        // card exists, and that row survives everything.
-        assert_no_ledger_rows(&db, uid);
-        assert_no_insert_was_attempted(&db, uid);
-        assert!(
-            daemon.inner.lock().await.pending.is_empty(),
-            "no card may exist for a run whose answers cannot be typed"
-        );
-        // Declining to observe is not answering: a refusal that reached the agent
-        // as `Deny` would be this daemon denying a tool call nobody was asked
-        // about.
-        assert!(
-            matches!(decision.decision, Decision::Passthrough),
-            "an unobserved request must pass through, never deny: {decision:?}"
-        );
     }
 
     /// A real command approval, read by the production parser so the option table
@@ -29313,36 +21211,29 @@ mod tests {
         started_at: &str,
         exit_replay: bool,
     ) -> Result<Registration> {
-        let (tx, _rx) =
-            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(_rx));
         daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: name.into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: Some(
-                        std::env::temp_dir()
-                            .join(format!("ccd-replay-{uid}-nothing-listens.sock"))
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    codex_generation: Some(1),
-                    started_at: started_at.to_string(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: name.into(),
+                session_uid: Some(uid.into()),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: Some(
+                    std::env::temp_dir()
+                        .join(format!("ccd-replay-{uid}-nothing-listens.sock"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                codex_generation: Some(1),
+                started_at: started_at.to_string(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay,
+            })
             .await
     }
 
@@ -30564,21 +22455,24 @@ mod tests {
             ),
         ] {
             store
-                .upsert_session(&SessionRow {
-                    session_uid: uid.into(),
-                    session_id: name.into(),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Live,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                    agent,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
+                .upsert_session_at_generation(
+                    &SessionRow {
+                        session_uid: uid.into(),
+                        session_id: name.into(),
+                        tmux_session: name.into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                        cwd: "/tmp".into(),
+                        claude_session_id: None,
+                        transcript_path: None,
+                        lifecycle: protocol::event::Lifecycle::Live,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                        agent,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                    },
+                    None,
+                )
                 .unwrap()
                 .assert_present();
         }
@@ -30640,21 +22534,24 @@ mod tests {
         // is the state the fleet reports as `NoLink` and is a different fact from a
         // link that exists and is between connections.
         store
-            .upsert_session(&SessionRow {
-                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNORP".into(),
-                session_id: "cc-orphan".into(),
-                tmux_session: "cc-orphan".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                agent: protocol::agent::AgentKind::Codex,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &SessionRow {
+                    session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNORP".into(),
+                    session_id: "cc-orphan".into(),
+                    tmux_session: "cc-orphan".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    agent: protocol::agent::AgentKind::Codex,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
         let refused = daemon
@@ -31551,21 +23448,24 @@ mod tests {
         let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ2";
         let now = protocol::time::now_rfc3339();
         store
-            .upsert_session(&SessionRow {
-                session_uid: claude.into(),
-                session_id: "cc-claude".into(),
-                tmux_session: "cc-claude".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &SessionRow {
+                    session_uid: claude.into(),
+                    session_id: "cc-claude".into(),
+                    tmux_session: "cc-claude".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
         assert_eq!(
@@ -31600,21 +23500,24 @@ mod tests {
         let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ3";
         let now = protocol::time::now_rfc3339();
         store
-            .upsert_session(&SessionRow {
-                session_uid: claude.into(),
-                session_id: "cc-claude".into(),
-                tmux_session: "cc-claude".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &SessionRow {
+                    session_uid: claude.into(),
+                    session_id: "cc-claude".into(),
+                    tmux_session: "cc-claude".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
 
@@ -31646,7 +23549,7 @@ mod tests {
             panic!("a Codex session is not typed into: {typed:?}")
         };
         assert!(
-            reason.contains("only types into Claude sessions"),
+            reason.contains("only sends messages to Claude sessions"),
             "{reason}"
         );
 
@@ -32073,12 +23976,10 @@ mod tests {
         register_codex_session(&daemon, uid, "cc-1").await;
         arm_ledger_tripwire(&db);
 
-        // The card is placed in memory rather than raised through the hook,
-        // because the hook gate makes raising one impossible — which is the
-        // arrangement this test is about. `answer` is the gate *behind* that one,
-        // and it has to hold for a card that got into memory some other way: a
-        // `pending_approvals` projection written by a build without this
-        // scaffolding and restored by `recover`, or a Codex producer.
+        // The card is placed in memory by hand: `answer` has to hold for a card
+        // that got into memory some other way — a `pending_approvals` projection
+        // written by a build without this scaffolding and restored by `recover`,
+        // or a Codex producer.
         let request_id = "toolu_codex_1";
         let tool_input = json!({ "command": "touch /tmp/a" });
         let payload_hash = approval_payload_hash("Bash", &tool_input);
@@ -32097,11 +23998,6 @@ mod tests {
             question_hold: None,
             allow_for_session: false,
         };
-        // A live receiver, because a held hook is the case that writes the most:
-        // with a responder to answer through, the answer needs no supervisor and
-        // is claimed durably in `answer_claims` before it is handed over.
-        // Ungated, that is what this call does.
-        let (responder_tx, responder_rx) = oneshot::channel::<HookDecision>();
         daemon.inner.lock().await.pending.insert(
             (uid.to_string(), request_id.to_string()),
             PendingApproval {
@@ -32110,17 +24006,13 @@ mod tests {
                 // The tripwire's whole point is a Codex card that got into
                 // memory some other way, so it is a Codex card here too.
                 agent: protocol::agent::AgentKind::Codex,
-                created_ms: protocol::time::now_unix_ms(),
                 raise: 0,
-                responder: Some(responder_tx),
                 claimed: false,
-                local_misses: 0,
                 tool_ran: false,
-                rejected: false,
                 project_label: "cc-1".into(),
                 fork: false,
                 link: false,
-                question: None,
+                question: false,
             },
         );
 
@@ -32188,113 +24080,6 @@ mod tests {
         }
         assert_no_ledger_rows(&db, uid);
         assert_no_insert_was_attempted(&db, uid);
-        // Held open for the whole call: with a dropped receiver the handoff
-        // finds no hook, which is not the path that writes the most.
-        drop(responder_rx);
-    }
-
-    /// **The Claude pane sweep does not touch a Codex card.**
-    ///
-    /// Every line of `sweep_local_resolutions` is about a Claude prompt: it
-    /// searches the pane for Claude's permission box and Claude's composer, and
-    /// it resolves through `resolve_without_phone`, which writes `answers` — one
-    /// of the tables a rolled-back v0.6.0 daemon rewrites globally — and deletes
-    /// from `pending_approvals`, which is not where a Codex card lives.
-    ///
-    /// Before the approval observer this was safe by construction, because
-    /// `pending` could hold nothing but Claude cards. It now can, and run
-    /// against one the sweep would do three wrong things at once: read a Codex
-    /// TUI pane for a Claude prompt, leak a Codex row into `answers`, and delete
-    /// nothing from `codex_pending_approvals` — leaving the card on the phone
-    /// with the only thing that could retire it already gone from memory.
-    ///
-    /// **`tool_ran` is set by hand, and that is what makes this test mean
-    /// anything.** This sweep has two arms: the `tool_ran` arm, which resolves
-    /// at once and needs no pane, and the pane arm, which is behind a
-    /// `capture_visible` that fails outright in a test with no supervisor. The
-    /// first version of this test drove only the pane arm — and passed with the
-    /// filter REMOVED, because the capture failed and the sweep `continue`d
-    /// before reaching anything. Measured, not suspected. So it drives the arm
-    /// that runs, which is the one immediately behind the filter.
-    ///
-    /// **Mutation:** drop `p.agent.is_claude()` from the candidate filter and
-    /// the Codex card is resolved: `answers` gets a row for a Codex run, which
-    /// is a table a rolled-back v0.6.0 daemon rewrites globally, and the card
-    /// leaves memory while its row in `codex_pending_approvals` stays — the
-    /// phone keeps a card nothing can ever retire.
-    #[tokio::test]
-    async fn the_claude_pane_sweep_leaves_a_codex_card_alone() {
-        let (store, db) = shared_store_on_disk();
-        let uid = TEST_UID;
-        // No grace, so a single sweep is enough to resolve anything the filter
-        // admits. Without it this would pass for the trivial reason that nothing
-        // had waited long enough.
-        let config = Config {
-            local_resolve: true,
-            local_resolve_grace_ms: 0,
-            ..Config::default()
-        };
-        let daemon = daemon_on(Arc::clone(&store), config);
-        register_codex_session(&daemon, uid, "cc-1").await;
-        arm_ledger_tripwire(&db);
-
-        let request_id = "codex-composite-1";
-        let tool_input = json!({ "command": "touch /tmp/a" });
-        let card = ApprovalCard {
-            request_id: request_id.to_string(),
-            payload_hash: approval_payload_hash("command", &tool_input),
-            tool_name: "command".into(),
-            tool_input: tool_input.clone(),
-            display_text: approval_payload_text("command", &tool_input),
-            permission_suggestions: None,
-            prompt_id: None,
-            permission_mode: None,
-            risk: None,
-            generation: 1,
-            identity_bound: false,
-            question_hold: None,
-            allow_for_session: false,
-        };
-        daemon.inner.lock().await.pending.insert(
-            (uid.to_string(), request_id.to_string()),
-            PendingApproval {
-                card,
-                session: SessionKey::new(uid, "cc-1"),
-                agent: protocol::agent::AgentKind::Codex,
-                // Old enough that the grace cannot be what saves it.
-                created_ms: 0,
-                raise: 0,
-                responder: None,
-                claimed: false,
-                local_misses: 0,
-                // See the note above: the arm of this sweep that resolves
-                // without reading a pane, so the filter is what has to stop it.
-                tool_ran: true,
-                rejected: false,
-                project_label: "cc-1".into(),
-                fork: false,
-                link: false,
-                question: None,
-            },
-        );
-
-        // Swept as many times as the miss counter could possibly need.
-        for _ in 0..(LOCAL_RESOLVE_MISSES + 2) {
-            daemon.sweep_local_resolutions().await;
-        }
-
-        assert!(
-            daemon
-                .inner
-                .lock()
-                .await
-                .pending
-                .contains_key(&(uid.to_string(), request_id.to_string())),
-            "a Codex card is retired by the frames that settle it, not by a sweep \
-             looking for a Claude prompt on a Codex pane"
-        );
-        assert_no_ledger_rows(&db, uid);
-        assert_no_insert_was_attempted(&db, uid);
     }
 
     /// Raise one ordinary Codex command card, the way the link does.
@@ -32329,54 +24114,6 @@ mod tests {
                 "commandExecution",
             )
             .await
-    }
-
-    /// **Claude's stale-approval sweep must never reach a Codex card.**
-    ///
-    /// The sweep answers an unanswered card at the Mac's expense: it writes the
-    /// shared `answers` table, reports `AnswerPath::SendKeys` and deletes from the
-    /// shared `pending_approvals`. Every one of those is a table a rolled-back
-    /// v0.6.0 daemon rewrites globally, so a Codex card passing through it is the
-    /// rollback leak the whole agent split exists to prevent — and the outcome it
-    /// files is a Claude-shaped keyboard timeout for a question no keyboard was
-    /// ever shown.
-    ///
-    /// It is also a lie about the wire. The measured Codex approval never times
-    /// out: the app-server holds the `serverRequest` open until something answers
-    /// it, and the frames that settle it are what retire the card.
-    ///
-    /// **Mutation:** drop the `p.agent.is_claude()` filter from
-    /// `expire_stale_approvals` and both halves go red — the Codex card vanishes
-    /// from memory and a row appears in the shared ledgers.
-    #[tokio::test]
-    async fn a_codex_card_is_never_swept_by_claudes_stale_approval_expiry() {
-        let (store, db) = shared_store_on_disk();
-        let uid = TEST_UID;
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
-        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
-
-        // Older than any age the sweep could be asked about.
-        daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .get_mut(&(uid.to_string(), "derived-1".to_string()))
-            .expect("the card just raised")
-            .created_ms = 0;
-        daemon.expire_stale_approvals(1).await;
-
-        assert_eq!(
-            open_cards(&daemon, uid).len(),
-            1,
-            "the app-server is still waiting on this request, so the card stands"
-        );
-        assert!(
-            approval_events(&daemon, uid, EventKind::ApprovalResolved).is_empty(),
-            "a Claude-shaped keyboard timeout is not a terminal any Codex frame produced"
-        );
-        assert_no_ledger_rows(&db, uid);
     }
 
     /// **A Codex approval's two events carry what the phone needs to act on the
@@ -33128,10 +24865,7 @@ mod tests {
         // And the doorbell was never admitted: the gate's key for this request is
         // still free, which it would not be if a push had been dispatched.
         assert!(
-            daemon
-                .push_gate
-                .admit_decision(uid, "derived-1", None)
-                .is_some(),
+            daemon.push_gate.admit_decision(uid, "derived-1").is_some(),
             "a refused card must not have rung"
         );
     }
@@ -33432,11 +25166,6 @@ mod tests {
 
     /// A live 2.1.286 session's hooks for one 4-question `AskUserQuestion`.
     const QUESTION_HOOKS: &str = include_str!("../../../fixtures/claude/askuq-4q-2.1.286.jsonl");
-    /// The same question answered at the keyboard: its `PostToolUse`.
-    const QUESTION_KEYBOARD: &str =
-        include_str!("../../../fixtures/claude/askuq-4q-keyboard-posttooluse-2.1.286.json");
-    /// The question dialog on the pane, as 2.1.286 draws it.
-    const QUESTION_PANE: &str = include_str!("../../../fixtures/claude/askuq-4q-pane-2.1.286.txt");
 
     fn question_hook(event: &str) -> serde_json::Value {
         QUESTION_HOOKS
@@ -33448,10 +25177,6 @@ mod tests {
 
     fn question_input() -> serde_json::Value {
         question_hook("PermissionRequest")["tool_input"].clone()
-    }
-
-    fn question_hash() -> String {
-        protocol::hash::approval_payload_hash("AskUserQuestion", &question_input())
     }
 
     /// The `tool_use_id` the fixture's `PreToolUse` names, which the card is
@@ -33482,2081 +25207,157 @@ mod tests {
         ]
     }
 
-    fn post(uid: &str, payload: serde_json::Value, wait: bool) -> HookPost {
-        HookPost {
-            session_id: "cc-1".into(),
-            session_uid: Some(uid.to_string()),
-            event: payload["hook_event_name"].as_str().unwrap().to_string(),
-            payload,
-            wait,
-            holds_questions: wait,
-            holds_approvals: wait,
-        }
-    }
-
-    /// A question held the way cc-hook holds one, on a connection whose closing
-    /// the test controls: dropping the returned sender is Claude ending the hook.
-    struct HeldQuestion {
-        hook: tokio::task::JoinHandle<HookDecision>,
-        end_hook: oneshot::Sender<()>,
-    }
-
-    async fn raise_question(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        agent_id: Option<&str>,
-        holds_questions: bool,
-    ) -> HeldQuestion {
-        // A background agent's hooks all carry its `agent_id`.
-        let from_agent = |mut hook: serde_json::Value| {
-            if let Some(agent_id) = agent_id {
-                hook["agent_id"] = json!(agent_id);
-                hook["agent_type"] = json!("fork");
-            }
-            hook
-        };
-        daemon
-            .handle_hook(post(uid, from_agent(question_hook("PreToolUse")), false))
-            .await;
-        let request = from_agent(question_hook("PermissionRequest"));
-        let mut request = post(uid, request, true);
-        request.holds_questions = holds_questions;
-        let (end_hook, ended) = oneshot::channel::<()>();
-        let hook = {
-            let daemon = Arc::clone(daemon);
-            tokio::spawn(async move {
-                let mut gone = Box::pin(async move {
-                    let _ = ended.await;
-                });
-                daemon.handle_hook_held(request, &mut gone).await
-            })
-        };
-        // Admitted once its card is written down, the last thing admission
-        // writes, or once its hook has already returned.
-        for _ in 0..200 {
-            let written = daemon
-                .store
-                .list_pending_approvals()
-                .unwrap()
-                .iter()
-                .any(|row| row.session_uid == uid && row.request_id == QUESTION_ID);
-            if written || hook.is_finished() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        HeldQuestion { hook, end_hook }
-    }
-
-    /// The held hook's answer, failing the test rather than hanging it when the
-    /// hook is never let go.
-    async fn returned(hook: tokio::task::JoinHandle<HookDecision>) -> HookDecision {
-        tokio::time::timeout(Duration::from_secs(10), hook)
-            .await
-            .expect("the held hook never returned")
-            .unwrap()
-    }
-
-    async fn question_ran(daemon: &Arc<Daemon>, uid: &str, tool_input: serde_json::Value) {
-        let mut ran = question_hook("PostToolUse");
-        ran["tool_input"] = tool_input;
-        daemon.handle_hook(post(uid, ran, false)).await;
-    }
-
-    /// The question ran with the phone's answer, the answer's resolution filed
-    /// before the tool result. The `PostToolUse` hook tells the waiting answer
-    /// which answer ran before it files the result, so in one hook call the two
-    /// race for the session's next seq; a fixture of either takes this order.
-    async fn question_ran_after_answer(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-        sent: serde_json::Value,
-        answering: tokio::task::JoinHandle<AnswerResult>,
-    ) -> AnswerResult {
-        let mut ran = question_hook("PostToolUse");
-        ran["tool_input"] = sent.clone();
-        daemon
-            .note_question_ran(uid, &serde_json::from_value(ran).unwrap())
-            .await;
-        let answered = answering.await.unwrap();
-        question_ran(daemon, uid, sent).await;
-        answered
-    }
-
-    fn card_hold(daemon: &Daemon, uid: &str) -> Option<QuestionHold> {
-        daemon
-            .inner
-            .try_lock()
-            .unwrap()
-            .pending
-            .get(&(uid.to_string(), QUESTION_ID.to_string()))
-            .and_then(|entry| entry.card.question_hold)
-    }
-
-    async fn answer_question(daemon: &Arc<Daemon>, decision: AnswerDecision) -> AnswerResult {
-        daemon
-            .answer(
-                QUESTION_ID,
-                &question_hash(),
-                decision,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-    }
-
-    /// Claude asks every `AskUserQuestion` through a `PermissionRequest`, so a
-    /// phone without the question card sees it as an approval. Nothing such a
-    /// phone sends answers a question that is not held: Allow, an option or text
-    /// would pick options nobody chose, and nothing is ever typed.
-    #[tokio::test]
-    async fn an_older_phone_types_nothing_into_a_question_not_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        // An older cc-hook: the question is not held, which is exactly the card
-        // an older phone answers.
-        let raised = raise_question(&daemon, uid, None, false).await;
-        for decision in [
-            AnswerDecision::Allow,
-            AnswerDecision::Option { index: 1 },
-            AnswerDecision::Text { text: "1".into() },
-        ] {
-            match answer_question(&daemon, decision.clone()).await {
-                AnswerResult::Rejected { reason } => assert!(
-                    reason.contains("asking you a question"),
-                    "{decision:?}: {reason}"
-                ),
-                other => panic!("{decision:?} must be refused: {other:?}"),
-            }
-        }
-        assert!(
-            daemon
-                .store
-                .answer_claim(uid, QUESTION_ID)
-                .unwrap()
-                .is_none(),
-            "nothing was claimed"
-        );
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
-        match answer_question(&daemon, AnswerDecision::Deny).await {
-            AnswerResult::Rejected { reason } => {
-                assert!(reason.contains("not being held"), "{reason}")
-            }
-            other => panic!("deny must be refused: {other:?}"),
-        }
-        assert!(
-            supervisor.typed().is_empty(),
-            "typed {:?}",
-            supervisor.typed()
-        );
-        drop(raised.end_hook);
-    }
-
-    /// An answer left claimed by a daemon that stopped is recorded as unknown,
-    /// claiming neither that it was sent nor how: whatever this build claimed —
-    /// answers, a decline, a Deny — could only have gone to its card's hook,
-    /// never typed; an older daemon's approval could only have been typed.
+    /// An answer an earlier build left claimed, on a run it did not host, is
+    /// recorded as unknown, claiming neither that it was sent nor how: answers, a
+    /// decline, or a Deny on a card held for the phone could only have gone to
+    /// its card's hook, never typed; an older daemon's approval could only have
+    /// been typed.
     #[tokio::test]
     async fn an_answer_cut_off_by_a_stop_is_recorded_by_the_path_it_could_take() {
-        // `legacy`: the card was filed by an older daemon, which typed approvals.
-        for (question, legacy, decision) in [
+        // The card row an earlier build filed: held for the phone, or, from an
+        // older daemon still, with no hold.
+        fn file_card(db: &std::path::Path, request_id: &str, held: bool) {
+            let input = json!({ "command": "touch /tmp/a" });
+            let mut card = serde_json::to_value(ApprovalCard {
+                request_id: request_id.to_string(),
+                payload_hash: approval_payload_hash("Bash", &input),
+                tool_name: "Bash".into(),
+                display_text: approval_payload_text("Bash", &input),
+                tool_input: input,
+                permission_suggestions: None,
+                prompt_id: Some("p1".into()),
+                permission_mode: None,
+                risk: None,
+                generation: 1,
+                identity_bound: true,
+                question_hold: Some(QuestionHold::Held),
+                allow_for_session: false,
+            })
+            .unwrap();
+            if !held {
+                card.as_object_mut().unwrap().remove("question_hold");
+            }
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .execute(
+                    "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
+                                                   generation, created_ms)
+                     VALUES (?1, 'cc-1', ?2, ?3, 1, 0)",
+                    rusqlite::params![TEST_UID, request_id, card.to_string()],
+                )
+                .unwrap();
+        }
+
+        // `card`: the claimed request's card row, if it has one.
+        for (card, decision, via) in [
             (
-                true,
-                false,
+                None,
                 AnswerDecision::Answers {
                     answers: keyboard_choices(),
                 },
+                AnswerPath::HookReturn,
             ),
-            (true, false, AnswerDecision::Decline),
-            (true, false, AnswerDecision::Deny),
-            (false, false, AnswerDecision::Deny),
-            (false, true, AnswerDecision::Deny),
+            (None, AnswerDecision::Decline, AnswerPath::HookReturn),
+            (Some(true), AnswerDecision::Deny, AnswerPath::HookReturn),
+            (Some(false), AnswerDecision::Deny, AnswerPath::SendKeys),
         ] {
-            let store = shared_store();
-            let uid = TEST_UID;
-            let before = daemon_on(Arc::clone(&store), Config::default());
-            let request_id = if question {
-                let _raised = raise_question(&before, uid, None, true).await;
-                QUESTION_ID.to_string()
-            } else {
-                let _supervisor =
-                    attach(&before, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
-                raise_prompt(&before, uid, "p1", "touch /tmp/a").await
-            };
-            let payload_hash = before.inner.lock().await.pending
-                [&(uid.to_string(), request_id.clone())]
-                .card
-                .payload_hash
-                .clone();
-            if legacy {
-                let mut row = store
-                    .list_pending_approvals()
-                    .unwrap()
-                    .into_iter()
-                    .find(|row| row.request_id == request_id)
-                    .unwrap();
-                let mut card: serde_json::Value = serde_json::from_str(&row.card).unwrap();
-                card.as_object_mut().unwrap().remove("question_hold");
-                row.card = card.to_string();
-                store.upsert_pending_approval(&row).unwrap();
+            let (store, db) = shared_store_on_disk();
+            let request_id = "toolu_cut_off";
+            let restarted = daemon_on(Arc::clone(&store), Config::default());
+            commit_claude_row(&restarted, TEST_UID, "cc-1");
+            if let Some(held) = card {
+                file_card(&db, request_id, held);
             }
             store
                 .claim_answer(&AnswerClaim {
-                    session_uid: uid.to_string(),
+                    session_uid: TEST_UID.to_string(),
                     session_id: "cc-1".to_string(),
-                    request_id: request_id.clone(),
-                    payload_hash,
+                    request_id: request_id.to_string(),
+                    payload_hash: bash_hash("touch /tmp/a"),
                     decision: serde_json::to_string(&decision).unwrap(),
                     started_at: protocol::time::now_rfc3339(),
                 })
                 .unwrap();
 
-            let restarted = daemon_on(Arc::clone(&store), Config::default());
             restarted.recover().await;
-            let (_, outcome) = store.get_answer(uid, &request_id).unwrap().unwrap();
+            let (_, outcome) = store.get_answer(TEST_UID, request_id).unwrap().unwrap();
             assert!(outcome.indeterminate, "{decision:?}");
             assert_eq!(outcome.decision, decision);
+            assert_eq!(outcome.applied_via, via, "{decision:?}");
             let detail = outcome.detail.unwrap();
             assert!(detail.contains("whether it was"), "{detail}");
-            if legacy {
-                assert_eq!(outcome.applied_via, AnswerPath::SendKeys);
-            } else {
-                assert_eq!(outcome.applied_via, AnswerPath::HookReturn, "{decision:?}");
-                assert!(!detail.contains("typ"), "{decision:?}: {detail}");
-            }
-        }
-
-        // An answer claimed with no card row behind it (its write failed) is
-        // still a question's: answers are claimed for nothing else.
-        let store = shared_store();
-        store
-            .claim_answer(&AnswerClaim {
-                session_uid: TEST_UID.to_string(),
-                session_id: "cc-1".to_string(),
-                request_id: QUESTION_ID.to_string(),
-                payload_hash: question_hash(),
-                decision: serde_json::to_string(&AnswerDecision::Answers {
-                    answers: keyboard_choices(),
-                })
-                .unwrap(),
-                started_at: protocol::time::now_rfc3339(),
-            })
-            .unwrap();
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        let _supervisor = attach(&daemon, "cc-1", TEST_UID, QUESTION_PANE, "").await;
-        daemon.recover().await;
-        let (_, outcome) = store.get_answer(TEST_UID, QUESTION_ID).unwrap().unwrap();
-        assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
-        assert!(!outcome.detail.unwrap().contains("typ"));
-    }
-
-    /// The phone's answer goes back through the held hook as exactly what the
-    /// keyboard produces, and is recorded as applied only once the
-    /// `PostToolUse` shows Claude ran with it. Nothing is typed.
-    #[tokio::test]
-    async fn a_held_question_is_answered_through_its_hook_and_confirmed_by_its_result() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-            })
-        };
-        let returned = returned(raised.hook).await;
-        assert_eq!(returned.decision, Decision::Allow);
-        let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-        let sent = returned.updated_input.expect("an answer carries its input");
-        assert_eq!(sent["answers"], keyboard["tool_input"]["answers"]);
-        assert_eq!(sent["annotations"], keyboard["tool_input"]["annotations"]);
-
-        // Claude runs the tool with what it was handed.
-        question_ran(&daemon, uid, sent).await;
-        match answering.await.unwrap() {
-            AnswerResult::Applied { outcome } => {
-                assert_eq!(outcome.resolved_by, ResolvedBy::Phone);
-                assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
-            }
-            other => panic!("the confirmed answer is applied: {other:?}"),
-        }
-        assert!(supervisor.typed().is_empty(), "{:?}", supervisor.typed());
-        // One answer per request: a second tap replays the first.
-        assert!(matches!(
-            answer_question(
-                &daemon,
-                AnswerDecision::Answers {
-                    answers: keyboard_choices()
-                }
-            )
-            .await,
-            AnswerResult::Duplicate { .. }
-        ));
-    }
-
-    /// Two background agents asking the identical question in one turn, with
-    /// the Mac left alone: each gets its own held card under its own
-    /// `tool_use_id`, and the phone's answer to one returns through that
-    /// agent's hook only.
-    #[tokio::test]
-    async fn identical_questions_from_two_background_agents_each_get_their_own_card() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let hook = |event: &str, agent: &str| {
-            let mut payload = question_hook(event);
-            payload["agent_id"] = json!(agent);
-            payload["agent_type"] = json!("fork");
-            payload
-        };
-        for (agent, id) in [("agentA", "toolu_A"), ("agentB", "toolu_B")] {
-            let mut pre = hook("PreToolUse", agent);
-            pre["tool_use_id"] = json!(id);
-            daemon.handle_hook(post(uid, pre, false)).await;
-        }
-        let mut hooks = Vec::new();
-        for agent in ["agentA", "agentB"] {
-            let request = post(uid, hook("PermissionRequest", agent), true);
-            let daemon = Arc::clone(&daemon);
-            hooks.push(tokio::spawn(async move {
-                daemon
-                    .handle_hook_held(request, &mut std::future::pending())
-                    .await
-            }));
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let mut cards: Vec<String> = daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .keys()
-            .map(|(_, id)| id.clone())
-            .collect();
-        cards.sort();
-        assert_eq!(cards, vec!["toolu_A".to_string(), "toolu_B".to_string()]);
-        for id in ["toolu_A", "toolu_B"] {
             assert_eq!(
-                daemon.inner.lock().await.pending[&(uid.to_string(), id.to_string())]
-                    .card
-                    .question_hold,
-                Some(QuestionHold::Held)
+                detail.contains("typ"),
+                via == AnswerPath::SendKeys,
+                "{decision:?}: {detail}"
             );
         }
-
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                daemon
-                    .answer(
-                        "toolu_B",
-                        &question_hash(),
-                        AnswerDecision::Answers {
-                            answers: keyboard_choices(),
-                        },
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-            })
-        };
-        let b = hooks.pop().unwrap();
-        let a = hooks.pop().unwrap();
-        let sent = tokio::time::timeout(Duration::from_secs(5), b)
-            .await
-            .expect("agent B's hook returned")
-            .unwrap()
-            .updated_input
-            .expect("with the answer");
-        assert!(!a.is_finished(), "agent A's hook is still held");
-        let mut ran = hook("PostToolUse", "agentB");
-        ran["tool_use_id"] = json!("toolu_B");
-        ran["tool_input"] = sent;
-        daemon.handle_hook(post(uid, ran, false)).await;
-        assert!(matches!(
-            answering.await.unwrap(),
-            AnswerResult::Applied { .. }
-        ));
-        a.abort();
-    }
-
-    /// A background agent's question held for the phone is not on screen, so
-    /// the prompt that is — an ordinary Bash approval asked before it — is
-    /// still the current one, and its card stays live.
-    #[tokio::test]
-    async fn a_held_background_question_leaves_the_prompt_on_screen_live() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let bash = raise_prompt(&daemon, uid, "p-bash", "touch ran.txt").await;
-        let raised = raise_question(&daemon, uid, Some("agentA"), true).await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        assert!(daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .contains_key(&(uid.to_string(), bash.clone())));
-        assert!(!daemon
-            .store
-            .events_after(uid, 0, 1000)
-            .unwrap()
-            .iter()
-            .any(|event| event.kind == EventKind::ApprovalResolved
-                && event.item_id.as_deref() == Some(bash.as_str())));
-        drop(raised.end_hook);
-        returned(raised.hook).await;
-    }
-
-    /// A question whose `PermissionRequest` cannot be joined to its call's
-    /// `tool_use_id` is not held: its `PostToolUse` could never say whose
-    /// answer Claude ran with. It goes to the Mac and its hook returns at once.
-    #[tokio::test]
-    async fn a_question_not_joined_to_its_call_goes_to_the_mac() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let request = post(uid, question_hook("PermissionRequest"), true);
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            daemon.handle_hook_held(request, &mut std::future::pending()),
-        )
-        .await
-        .expect("the hook returns at once");
-        let inner = daemon.inner.lock().await;
-        let holds: Vec<_> = inner
-            .pending
-            .values()
-            .map(|entry| entry.card.question_hold)
-            .collect();
-        assert_eq!(holds, vec![Some(QuestionHold::AtMac)]);
-    }
-
-    /// A question whose card would not reach the phone whole is not held: the
-    /// event is cut to a preview past `max_payload_bytes`, which no phone can
-    /// answer, so holding a background agent's question would hide it from
-    /// both. It goes to the Mac and its hook returns at once. The same
-    /// question under the default limit is held.
-    #[tokio::test]
-    async fn a_question_too_large_for_its_card_goes_to_the_mac() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let uid = TEST_UID;
-        for (limit, expected) in [
-            (1024, QuestionHold::AtMac),
-            (Config::default().max_payload_bytes, QuestionHold::Held),
-        ] {
-            let daemon = daemon_with(Config {
-                max_payload_bytes: limit,
-                ..Config::default()
-            });
-            let raised = raise_question(&daemon, uid, Some("a02422e26e1da95bb"), true).await;
-            assert_eq!(card_hold(&daemon, uid), Some(expected), "limit {limit}");
-            let card = approval_events(&daemon, uid, EventKind::ApprovalRequest)
-                .pop()
-                .unwrap()
-                .payload;
-            if expected == QuestionHold::AtMac {
-                assert_eq!(returned(raised.hook).await.decision, Decision::Ask);
-                assert_eq!(
-                    card["_codeconnect_truncated"], true,
-                    "the event is still cut"
-                );
-            } else {
-                assert_eq!(card["card"]["question_hold"], "held");
-                assert!(!raised.hook.is_finished());
-                drop(raised.end_hook);
-            }
-        }
-    }
-
-    /// The Mac's answer (`mac_answered`) or the end of the turn, as its hook
-    /// delivers it.
-    async fn mac_ends_question(daemon: &Arc<Daemon>, uid: &str, mac_answered: bool) {
-        if mac_answered {
-            let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-            question_ran(daemon, uid, keyboard["tool_input"].clone()).await;
-        } else {
-            let mut stop = question_hook("PreToolUse");
-            stop["hook_event_name"] = json!("Stop");
-            daemon.handle_hook(post(uid, stop, false)).await;
-        }
-    }
-
-    /// The question's held hook is let go, the phone can no longer answer it,
-    /// and an ended turn leaves nothing pending.
-    async fn question_is_over(
-        daemon: &Arc<Daemon>,
-        hook: tokio::task::JoinHandle<HookDecision>,
-        mac_answered: bool,
-    ) {
-        let returned = tokio::time::timeout(Duration::from_secs(5), hook)
-            .await
-            .unwrap_or_else(|_| panic!("mac_answered {mac_answered}: the hook is still held"))
-            .unwrap();
-        assert_eq!(returned.decision, Decision::Passthrough, "{mac_answered}");
-        match answer_question(
-            daemon,
-            AnswerDecision::Answers {
-                answers: keyboard_choices(),
-            },
-        )
-        .await
-        {
-            AnswerResult::Rejected { .. } | AnswerResult::Duplicate { .. } => {}
-            other => panic!("mac_answered {mac_answered}: answerable after the end: {other:?}"),
-        }
-        if !mac_answered {
-            assert!(daemon
-                .store
-                .get_answer(TEST_UID, QUESTION_ID)
-                .unwrap()
-                .is_some());
-            assert!(daemon.store.list_pending_approvals().unwrap().is_empty());
-        }
-    }
-
-    fn held_question_hook(
-        daemon: &Arc<Daemon>,
-        uid: &str,
-    ) -> tokio::task::JoinHandle<HookDecision> {
-        let daemon = Arc::clone(daemon);
-        let request = post(uid, question_hook("PermissionRequest"), true);
-        tokio::spawn(async move {
-            daemon
-                .handle_hook_held(request, &mut std::future::pending())
-                .await
-        })
-    }
-
-    /// The Mac's answer or the end of the turn already filed when the
-    /// question's hook reaches the daemon — the question's admission was slow —
-    /// is read back from the log: the hook is let go at once.
-    #[tokio::test]
-    async fn a_mac_answer_or_turn_end_filed_before_the_question_is_read_back() {
-        for mac_answered in [true, false] {
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-            daemon
-                .handle_hook(post(uid, question_hook("PreToolUse"), false))
-                .await;
-            mac_ends_question(&daemon, uid, mac_answered).await;
-            let hook = held_question_hook(&daemon, uid);
-            question_is_over(&daemon, hook, mac_answered).await;
-        }
-    }
-
-    /// The Mac's answer or the end of the turn arriving while the question's
-    /// card waits to be written finds the question at once: the hook is let go
-    /// before anything is written, here while this test holds the run's write
-    /// gate.
-    #[tokio::test]
-    async fn a_mac_answer_or_turn_end_during_the_card_s_write_finds_it() {
-        for mac_answered in [true, false] {
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-            daemon
-                .handle_hook(post(uid, question_hook("PreToolUse"), false))
-                .await;
-            let gate = daemon.publish_gate(uid).await;
-            let writes = gate.lock().await;
-            let hook = held_question_hook(&daemon, uid);
-            let id = (uid.to_string(), QUESTION_ID.to_string());
-            for _ in 0..200 {
-                if daemon.inner.lock().await.pending.contains_key(&id) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(
-                daemon.inner.lock().await.pending.contains_key(&id),
-                "mac_answered {mac_answered}: the question is registered while its card waits"
-            );
-            let signal = {
-                let daemon = Arc::clone(&daemon);
-                tokio::spawn(async move { mac_ends_question(&daemon, uid, mac_answered).await })
-            };
-            let found = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let inner = daemon.inner.lock().await;
-                    let entry = inner.pending.get(&id);
-                    if entry.is_none_or(|entry| entry.responder.is_none()) {
-                        return;
-                    }
-                    drop(inner);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await;
-            assert!(
-                approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty(),
-                "the card is still waiting to be written"
-            );
-            assert!(
-                found.is_ok(),
-                "mac_answered {mac_answered}: the question was found before anything was written"
-            );
-            drop(writes);
-            signal.await.unwrap();
-            question_is_over(&daemon, hook, mac_answered).await;
-        }
-    }
-
-    /// The Mac's answer checked for its question before the question was
-    /// registered, and written only after the question's card was written and
-    /// read back, is found by its own hook's second check after its write: the
-    /// question's hook is let go. Here the test orders the two hooks with the
-    /// daemon's state lock and the run's registration gate.
-    #[tokio::test]
-    async fn a_mac_answer_written_after_the_question_s_read_back_still_finds_it() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        daemon
-            .handle_hook(post(uid, question_hook("PreToolUse"), false))
-            .await;
-        let registration = daemon.registration_gate(uid).await;
-
-        let state = daemon.inner.lock().await;
-        let hook = held_question_hook(&daemon, uid);
-        for _ in 0..200 {
-            if registration.try_lock().is_err() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(
-            registration.try_lock().is_err(),
-            "the question's hook is registering its run"
-        );
-        let mac = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { mac_ends_question(&daemon, uid, true).await })
-        };
-        tokio::task::yield_now().await;
-        let (release, released) = oneshot::channel::<()>();
-        let holder = {
-            let registration = Arc::clone(&registration);
-            tokio::spawn(async move {
-                let _held = registration.lock().await;
-                let _ = released.await;
-            })
-        };
-        tokio::task::yield_now().await;
-        // The Mac's answer checks first, then waits on the gate the holder
-        // keeps while the question is registered, written and read back.
-        drop(state);
-        let mut written = false;
-        for _ in 0..200 {
-            written = daemon
-                .store
-                .list_pending_approvals()
-                .unwrap()
-                .iter()
-                .any(|row| row.request_id == QUESTION_ID);
-            if written {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(written, "the question is admitted");
-        assert!(!mac.is_finished(), "the Mac's answer is not yet written");
-
-        let _ = release.send(());
-        holder.await.unwrap();
-        mac.await.unwrap();
-        let returned = tokio::time::timeout(Duration::from_secs(2), hook)
-            .await
-            .expect("the question's hook is let go")
-            .unwrap();
-        assert_eq!(returned.decision, Decision::Passthrough);
-    }
-
-    /// A question whose turn ended while its card waited to be written is
-    /// over by the time the card is written: nothing more is filed for it. Its
-    /// card is not written down as pending, where, already answered, nothing
-    /// would ever remove it.
-    #[tokio::test]
-    async fn a_question_over_before_its_card_is_written_files_nothing_more() {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        daemon
-            .handle_hook(post(uid, question_hook("PreToolUse"), false))
-            .await;
-        let gate = daemon.publish_gate(uid).await;
-        let writes = gate.lock().await;
-        let hook = held_question_hook(&daemon, uid);
-        let id = (uid.to_string(), QUESTION_ID.to_string());
-        for _ in 0..200 {
-            if daemon.inner.lock().await.pending.contains_key(&id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let turn_end = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { mac_ends_question(&daemon, uid, false).await })
-        };
-        for _ in 0..200 {
-            if !daemon.inner.lock().await.pending.contains_key(&id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(
-            !daemon.inner.lock().await.pending.contains_key(&id),
-            "the turn's end closed the question while its card waited"
-        );
-        drop(writes);
-        turn_end.await.unwrap();
-        question_is_over(&daemon, hook, false).await;
-        let rows: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT count(*) FROM pending_approvals", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(rows, 0);
-    }
-
-    /// First complete answer wins, in both orders. The Mac first: its
-    /// `PostToolUse` lets the held hook go and the phone's later answer is
-    /// refused. The phone's answer racing a Mac answer that Claude took first:
-    /// the `PostToolUse` carries the Mac's choices, and the phone is told so.
-    #[tokio::test]
-    async fn the_first_complete_answer_wins_whichever_end_gives_it() {
-        let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-
-        // The Mac first.
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-        assert_eq!(
-            returned(raised.hook).await.decision,
-            Decision::Passthrough,
-            "the held hook is let go without a decision"
-        );
-        match answer_question(
-            &daemon,
-            AnswerDecision::Answers {
-                answers: keyboard_choices(),
-            },
-        )
-        .await
-        {
-            AnswerResult::Rejected { reason } => {
-                assert!(reason.contains("answered at the computer"), "{reason}")
-            }
-            other => panic!("the late phone answer is refused: {other:?}"),
-        }
-        daemon.sweep_local_resolutions().await;
-        let (_, outcome) = daemon
-            .db
-            .get_answer(uid.to_string(), QUESTION_ID.to_string())
-            .await
-            .unwrap()
-            .expect("resolved");
-        assert_eq!(outcome.resolved_by, ResolvedBy::Local);
-        assert!(!outcome.inferred, "a tool result is an observation");
-
-        // The phone's answer, beaten inside Claude by the Mac's.
-        let daemon = test_daemon();
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let mut other = keyboard_choices();
-        other[0].selected = vec![1];
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                answer_question(&daemon, AnswerDecision::Answers { answers: other }).await
-            })
-        };
-        assert_eq!(returned(raised.hook).await.decision, Decision::Allow);
-        question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-        match answering.await.unwrap() {
-            AnswerResult::Rejected { reason } => {
-                assert!(
-                    reason.contains("answered at the computer first"),
-                    "{reason}"
-                )
-            }
-            other => panic!("the beaten answer is not applied: {other:?}"),
-        }
-        assert!(daemon
-            .store
-            .answer_claim(uid, QUESTION_ID)
-            .unwrap()
-            .is_none());
-    }
-
-    /// Claude validates nothing in a hook's answer (measured: two answers of
-    /// four, and a label from nowhere, are both taken), so a bad one is refused
-    /// here, before anything is claimed, and the question stays answerable.
-    #[tokio::test]
-    async fn an_incomplete_answer_is_refused_and_the_question_stays_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let mut partial = keyboard_choices();
-        partial.truncate(2);
-        match answer_question(&daemon, AnswerDecision::Answers { answers: partial }).await {
-            AnswerResult::Rejected { reason } => assert!(reason.contains("2 answer(s) for 4")),
-            other => panic!("{other:?}"),
-        }
-        {
-            let inner = daemon.inner.lock().await;
-            let entry = inner
-                .pending
-                .get(&(uid.to_string(), QUESTION_ID.to_string()))
-                .unwrap();
-            assert!(!entry.claimed);
-            assert!(entry.responder.is_some(), "the hook is still held");
-        }
-        assert!(daemon
-            .store
-            .answer_claim(uid, QUESTION_ID)
-            .unwrap()
-            .is_none());
-        assert!(!raised.hook.is_finished());
-        drop(raised.end_hook);
-    }
-
-    /// A decline is Escape: the main conversation's turn stops (`interrupt`).
-    /// An older phone's Deny on a held question is the same.
-    #[tokio::test]
-    async fn a_decline_stops_the_turn() {
-        for decision in [AnswerDecision::Decline, AnswerDecision::Deny] {
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-            let raised = raise_question(&daemon, uid, None, true).await;
-            let answering = {
-                let daemon = Arc::clone(&daemon);
-                let decision = decision.clone();
-                tokio::spawn(async move { answer_question(&daemon, decision).await })
-            };
-            let returned = returned(raised.hook).await;
-            assert_eq!(returned.decision, Decision::Deny, "{decision:?}");
-            assert!(returned.interrupt, "{decision:?}");
-            assert!(returned.updated_input.is_none());
-            match answering.await.unwrap() {
-                AnswerResult::Duplicate { outcome, .. } => {
-                    assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
-                    assert!(
-                        outcome.indeterminate,
-                        "{decision:?}: Claude never says it took a decline"
-                    );
-                }
-                other => panic!("{decision:?}: {other:?}"),
-            }
-        }
-    }
-
-    /// The decline Claude is handed names the kind of device it came from.
-    #[tokio::test]
-    async fn a_decline_tells_claude_which_kind_of_device_declined() {
-        for (answered_on, reason) in [
-            (AnsweredOn::Iphone, "Declined from iPhone"),
-            (AnsweredOn::Mac, "Declined from Mac"),
-        ] {
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-            let raised = raise_question(&daemon, uid, None, true).await;
-            let answering = {
-                let daemon = Arc::clone(&daemon);
-                tokio::spawn(async move {
-                    daemon
-                        .answer(
-                            QUESTION_ID,
-                            &question_hash(),
-                            AnswerDecision::Decline,
-                            Some("cc-1"),
-                            answered_on,
-                        )
-                        .await
-                })
-            };
-            let returned = returned(raised.hook).await;
-            assert_eq!(returned.reason.as_deref(), Some(reason), "{answered_on:?}");
-            match answering.await.unwrap() {
-                AnswerResult::Duplicate { outcome, .. } => {
-                    assert_eq!(outcome.answered_on, Some(answered_on))
-                }
-                other => panic!("{answered_on:?}: {other:?}"),
-            }
-        }
-    }
-
-    /// A background agent's question declined from the phone is denied without
-    /// an interrupt.
-    #[tokio::test]
-    async fn a_background_agent_s_decline_is_denied_without_an_interrupt() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let id = (uid.to_string(), QUESTION_ID.to_string());
-        daemon.inner.lock().await.pending.get_mut(&id).unwrap().fork = true;
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { answer_question(&daemon, AnswerDecision::Decline).await })
-        };
-        let returned = returned(raised.hook).await;
-        assert_eq!(returned.decision, Decision::Deny);
-        assert!(!returned.interrupt);
-        assert!(matches!(
-            answering.await.unwrap(),
-            AnswerResult::Duplicate { outcome, .. } if outcome.indeterminate
-        ));
-    }
-
-    /// "Chat about this" at the Mac denies the question without running the
-    /// tool or ending the hook. The end of the main conversation's turn shows
-    /// the question is gone: the hook is let go and the card closed, so the
-    /// phone is not left answering a question that no longer exists. A
-    /// background agent's events, and the question's own, prove nothing about
-    /// the main conversation's question.
-    #[tokio::test]
-    async fn the_main_conversation_moving_on_ends_its_held_question() {
-        {
-            let moved_on = question_hook("Stop");
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-            let raised = raise_question(&daemon, uid, None, true).await;
-
-            let mut agent_event = moved_on.clone();
-            agent_event["agent_id"] = json!("a02422e26e1da95bb");
-            if let Some(input) = agent_event["tool_input"].as_object_mut() {
-                input.insert("command".into(), json!("false"));
-            }
-            daemon.handle_hook(post(uid, agent_event, false)).await;
-            daemon
-                .handle_hook(post(uid, question_hook("PreToolUse"), false))
-                .await;
-            assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-
-            daemon.handle_hook(post(uid, moved_on.clone(), false)).await;
-            assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-            let id = (uid.to_string(), QUESTION_ID.to_string());
-            assert!(!daemon.inner.lock().await.pending.contains_key(&id));
-            match answer_question(
-                &daemon,
-                AnswerDecision::Answers {
-                    answers: keyboard_choices(),
-                },
-            )
-            .await
-            {
-                AnswerResult::Duplicate { outcome, .. } => {
-                    assert_eq!(outcome.resolved_by, ResolvedBy::Local);
-                    assert!(outcome.inferred);
-                }
-                other => panic!("{other:?}"),
-            }
-        }
-    }
-
-    /// Only the end of the main conversation's turn closes its question. A
-    /// replayed `PermissionRequest` for the question itself, a `PostToolUse`
-    /// late for an earlier tool, and the `PreToolUse` and `PermissionRequest`
-    /// of a tool asked for in the same message, which Claude fires together
-    /// with the question's, prove nothing.
-    #[tokio::test]
-    async fn a_replayed_request_or_a_late_sibling_leaves_the_question_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let mut late_result = question_hook("PostToolUse");
-        late_result["tool_use_id"] = json!("toolu_fake_earlier");
-        late_result["tool_name"] = json!("Bash");
-        daemon.handle_hook(post(uid, late_result, false)).await;
-        let mut sibling = question_hook("PreToolUse");
-        sibling["tool_use_id"] = json!("toolu_fake_sibling");
-        sibling["tool_name"] = json!("Read");
-        sibling["tool_input"] = json!({ "file_path": "/etc/hosts" });
-        daemon.handle_hook(post(uid, sibling.clone(), false)).await;
-        let mut sibling_request = question_hook("PermissionRequest");
-        sibling_request["tool_name"] = sibling["tool_name"].clone();
-        sibling_request["tool_input"] = sibling["tool_input"].clone();
-        daemon.handle_hook(post(uid, sibling_request, false)).await;
-        daemon
-            .handle_hook(post(uid, question_hook("PermissionRequest"), false))
-            .await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        assert!(!raised.hook.is_finished());
-    }
-
-    /// Claude ending the hook while a phone answer has the card claimed — the
-    /// claim landing at any moment before the close takes the card: the close
-    /// backs off for the claim, and the claim then finds the hook gone. The
-    /// card must not be left held with nothing holding it.
-    #[tokio::test]
-    async fn the_hook_ending_under_a_phone_claim_does_not_leave_the_card_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let id = (uid.to_string(), QUESTION_ID.to_string());
-        daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .get_mut(&id)
-            .unwrap()
-            .claimed = true;
-        drop(raised.end_hook);
-        returned(raised.hook).await;
-        daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .get_mut(&id)
-            .unwrap()
-            .claimed = false;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Ended));
-    }
-
-    /// A phone answer whose claim cannot be written sends nothing and lets go
-    /// of nothing: the question stays held, and the next answer is taken —
-    /// from the phone, or at the Mac, whose answer releases the hook.
-    #[tokio::test]
-    async fn a_claim_that_cannot_be_recorded_leaves_the_question_held() {
-        for mac_answers in [false, true] {
-            claim_fails_then(mac_answers).await;
-        }
-    }
-
-    async fn claim_fails_then(mac_answers: bool) {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let sql = rusqlite::Connection::open(&path).unwrap();
-        sql.execute_batch(
-            "CREATE TRIGGER no_room BEFORE INSERT ON answer_claims \
-             BEGIN SELECT RAISE(FAIL, 'database or disk is full'); END;",
-        )
-        .unwrap();
-        match answer_question(&daemon, AnswerDecision::Decline).await {
-            AnswerResult::Rejected { reason } => {
-                assert!(reason.contains("nothing was sent"), "{reason}")
-            }
-            other => panic!("{other:?}"),
-        }
-        assert!(!raised.hook.is_finished());
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        sql.execute_batch("DROP TRIGGER no_room").unwrap();
-        if mac_answers {
-            let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-            question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-            assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-            return;
-        }
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { answer_question(&daemon, AnswerDecision::Decline).await })
-        };
-        assert_eq!(returned(raised.hook).await.decision, Decision::Deny);
-        assert!(matches!(
-            answering.await.unwrap(),
-            AnswerResult::Duplicate { outcome, .. } if outcome.indeterminate
-        ));
-    }
-
-    /// The end of the turn lets a held question's hook go, then closes its
-    /// card. A phone answer arriving between the two has no hook to answer
-    /// through and is refused before it claims the card; a claimed card is
-    /// left to its answer, so a claim would leave this one open, held, with
-    /// nothing holding it. Here the card is closed while any claim would still
-    /// be waiting on a write this test holds open.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_answer_after_the_hook_went_does_not_keep_the_card_open() {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let id = (uid.to_string(), QUESTION_ID.to_string());
-        // The end of the turn, as far as letting the hook go.
-        let (session, responder) = {
-            let mut inner = daemon.inner.lock().await;
-            let entry = inner.pending.get_mut(&id).unwrap();
-            (entry.session.clone(), entry.responder.take().unwrap())
-        };
-        let _ = responder.send(HookDecision::passthrough());
-        assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-
-        let sql = rusqlite::Connection::open(&path).unwrap();
-        sql.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { answer_question(&daemon, AnswerDecision::Decline).await })
-        };
-        for _ in 0..200 {
-            if answering.is_finished() || daemon.inner.lock().await.pending[&id].claimed {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        // The rest of the end of the turn.
-        let closing = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                daemon
-                    .resolve_without_phone(
-                        QUESTION_ID,
-                        &session,
-                        AnswerDecision::Decline,
-                        ResolvedBy::Local,
-                        "the question was closed at the Mac before the phone answered it",
-                        true,
-                    )
-                    .await
-            })
-        };
-        for _ in 0..200 {
-            if closing.is_finished() || !daemon.inner.lock().await.pending.contains_key(&id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        sql.execute_batch("COMMIT").unwrap();
-        closing.await.unwrap();
-        assert!(matches!(
-            answering.await.unwrap(),
-            AnswerResult::Rejected { reason } if reason == NOT_HELD
-        ));
-        assert!(
-            !daemon.inner.lock().await.pending.contains_key(&id),
-            "the card is closed"
-        );
-    }
-
-    /// A disk that fills while the phone's answer is being recorded can fail
-    /// both that record and the write of the Mac's answer that beat it. The
-    /// hook the phone's answer had taken is then the Mac's, and is let go:
-    /// nothing else would, with the Mac's answer never written.
-    #[tokio::test]
-    async fn a_full_disk_lets_the_hook_of_a_question_the_mac_answered_go() {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let id = (uid.to_string(), QUESTION_ID.to_string());
-        let entry = |check: fn(&PendingApproval) -> bool| {
-            let daemon = Arc::clone(&daemon);
-            let id = id.clone();
-            async move {
-                for _ in 0..200 {
-                    if daemon
-                        .inner
-                        .lock()
-                        .await
-                        .pending
-                        .get(&id)
-                        .is_some_and(check)
-                    {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                false
-            }
-        };
-
-        let disk = rusqlite::Connection::open(&path).unwrap();
-        disk.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move { answer_question(&daemon, AnswerDecision::Decline).await })
-        };
-        assert!(
-            entry(|entry| entry.claimed).await,
-            "the answer waits to be recorded"
-        );
-        let mac = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-            })
-        };
-        assert!(
-            entry(|entry| entry.tool_ran).await,
-            "the Mac's answer is known"
-        );
-        disk.execute_batch(
-            "CREATE TRIGGER full_claims BEFORE INSERT ON answer_claims \
-             BEGIN SELECT RAISE(FAIL, 'database or disk is full'); END; \
-             CREATE TRIGGER full_events BEFORE INSERT ON events \
-             BEGIN SELECT RAISE(FAIL, 'database or disk is full'); END; \
-             COMMIT",
-        )
-        .unwrap();
-
-        assert!(matches!(
-            answering.await.unwrap(),
-            AnswerResult::Rejected { .. }
-        ));
-        mac.await.unwrap();
-        let released = tokio::time::timeout(Duration::from_secs(2), raised.hook).await;
-        assert_eq!(
-            released.expect("the hook is let go").unwrap().decision,
-            Decision::Passthrough
-        );
-    }
-
-    /// A phone answer Claude takes from the hook but never runs with — the
-    /// question was gone at the Mac, "Chat about this" before the turn ended —
-    /// is recorded as unknown, as handed to Claude and never confirmed, never as
-    /// a daemon that stopped while typing.
-    #[tokio::test]
-    async fn an_answer_claude_never_confirms_is_recorded_as_unknown() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-            })
-        };
-        assert_eq!(returned(raised.hook).await.decision, Decision::Allow);
-        match answering.await.unwrap() {
-            AnswerResult::Duplicate { outcome, .. } => {
-                assert!(outcome.indeterminate);
-                assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
-                let detail = outcome.detail.unwrap_or_default();
-                assert!(detail.contains("never said which answer"), "{detail}");
-                assert!(!detail.contains("daemon stopped"), "{detail}");
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// The Mac answers while a phone answer's claim waits on a write that then
-    /// fails, and the turn ends before the writes clear: Claude ran with the
-    /// Mac's answer, so the hook is let go and the card closes as answered at
-    /// the Mac — not held for an answer that can no longer count, and not
-    /// declined by the end of the turn.
-    #[tokio::test]
-    async fn a_mac_answer_during_a_failing_claim_closes_the_card_as_the_mac_s() {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        // The claim's write waits on another process's lock, then fails.
-        let foreign = rusqlite::Connection::open(&path).unwrap();
-        foreign
-            .execute_batch(
-                "CREATE TRIGGER no_room BEFORE INSERT ON answer_claims \
-                 BEGIN SELECT RAISE(FAIL, 'database or disk is full'); END; \
-                 BEGIN IMMEDIATE;",
-            )
-            .unwrap();
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let mac = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let turn_ended = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                daemon
-                    .handle_hook(post(uid, question_hook("Stop"), false))
-                    .await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        foreign.execute_batch("ROLLBACK").unwrap();
-        let refused = answering.await.unwrap();
-        mac.await.unwrap();
-        turn_ended.await.unwrap();
-        assert!(
-            matches!(refused, AnswerResult::Rejected { .. }),
-            "{refused:?}"
-        );
-        assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-        daemon.sweep_local_resolutions().await;
-        match answer_question(&daemon, AnswerDecision::Decline).await {
-            AnswerResult::Duplicate { outcome, .. } => {
-                assert_eq!(outcome.resolved_by, ResolvedBy::Local);
-                assert_eq!(
-                    outcome.decision,
-                    AnswerDecision::Answers {
-                        answers: Vec::new()
-                    }
-                );
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// The same race with the other process's lock held throughout: the phone
-    /// hears its answer refused as soon as the claim's write gives up, with the
-    /// card still pending — nothing has tried to record the Mac's answer, which
-    /// would wait out the same lock — and the local-resolution sweep records it
-    /// once the lock clears.
-    #[tokio::test]
-    async fn a_failing_claim_is_answered_without_waiting_on_the_mac_s_record() {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let foreign = rusqlite::Connection::open(&path).unwrap();
-        foreign.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let mac = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-            })
-        };
-        // The claim's write gives up after the store's busy wait, however long
-        // a slow machine stretches that. Resolving takes the card out of
-        // `pending` before it writes anything, so a card still there when the
-        // reply arrives is one nothing has tried to record yet.
-        let refused = answering.await.unwrap();
-        let still_pending = daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .contains_key(&(uid.to_string(), QUESTION_ID.to_string()));
-        foreign.execute_batch("ROLLBACK").unwrap();
-        mac.await.unwrap();
-        assert!(
-            matches!(refused, AnswerResult::Rejected { .. }),
-            "{refused:?}"
-        );
-        assert!(still_pending, "the reply waited on the Mac's record");
-        assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-        daemon.sweep_local_resolutions().await;
-        let recorded = approval_events(&daemon, uid, EventKind::ApprovalResolved)
-            .pop()
-            .expect("the Mac's answer was never recorded")
-            .payload;
-        assert_eq!(recorded["resolved_by"], "local");
-        assert_eq!(
-            recorded["decision"],
-            serde_json::json!({"type": "answers", "answers": []})
-        );
-    }
-
-    /// A question answered at the Mac is settled the moment its `PostToolUse`
-    /// arrives, before anything is written: with the database locked by another
-    /// process, the held hook is let go at once, not after the write waits.
-    #[tokio::test]
-    async fn a_question_s_result_is_settled_before_anything_is_written() {
-        let (store, path) = shared_store_on_disk();
-        let daemon = daemon_on(store, Config::default());
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let foreign = rusqlite::Connection::open(&path).unwrap();
-        foreign.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let mac = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
-            })
-        };
-        let released = tokio::time::timeout(Duration::from_secs(2), raised.hook).await;
-        foreign.execute_batch("ROLLBACK").unwrap();
-        mac.await.unwrap();
-        assert_eq!(
-            released
-                .expect("the hook waited on the write")
-                .unwrap()
-                .decision,
-            Decision::Passthrough
-        );
     }
 
     /// A question's doorbell says it is a question, not an approval.
     #[tokio::test]
     async fn a_question_rings_as_a_question() {
         let (daemon, capture) = capture_daemon();
-        let _raised = raise_question(&daemon, TEST_UID, None, true).await;
+        raise_ring(&daemon, Ring::ClaudeQuestion).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
         assert_eq!(rings.len(), 1, "{rings:?}");
         assert_eq!(rings[0].0.kind, crate::apns::PushKind::Question);
     }
 
-    /// A prompt queued during a turn starts the next turn as soon as the last
-    /// one ends, and can ask its question before the tailer files the last
-    /// turn's end, even between the question's `PreToolUse` and its
-    /// `PermissionRequest`. Neither that end nor the Stop hook before it closes
-    /// the question.
-    #[tokio::test]
-    async fn the_previous_turn_ending_leaves_the_next_question_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        daemon
-            .handle_hook(post(uid, question_hook("Stop"), false))
-            .await;
-        daemon
-            .handle_hook(post(uid, question_hook("PreToolUse"), false))
-            .await;
-        let summary = json!({"type": "system", "subtype": "stop_hook_summary", "uuid": "s1"});
-        daemon
-            .ingest(
-                PendingEvent::new(
-                    &SessionKey::new(uid, "cc-1"),
-                    EventKind::TurnComplete,
-                    summary,
-                    Source::Transcript,
-                )
-                .with_source_event_id("s1".to_string()),
-            )
-            .await
-            .unwrap();
-        let raised = raise_question(&daemon, uid, None, true).await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        assert!(!raised.hook.is_finished());
-    }
-
-    /// A background agent's question is not the main conversation's: the main
-    /// conversation going on says nothing about it.
-    #[tokio::test]
-    async fn the_main_conversation_moving_on_leaves_a_background_question_held() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        let id = (uid.to_string(), QUESTION_ID.to_string());
-        daemon.inner.lock().await.pending.get_mut(&id).unwrap().fork = true;
-        daemon
-            .handle_hook(post(uid, question_hook("Stop"), false))
-            .await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        assert!(!raised.hook.is_finished());
-    }
-
-    /// Claude ending a held question's hook — Escape or the session ending —
-    /// closes the card, from a session whose hook timeout is Claude's
-    /// maximum. From an older session it may be the old two-minute timeout with
-    /// the question still on the Mac, so the card only stops being answerable.
-    #[tokio::test]
-    async fn the_hook_ending_closes_the_card_or_ends_its_hold() {
-        for (minor, resolved) in [(protocol::PROTOCOL_MINOR, true), (20, false)] {
-            let daemon = test_daemon();
-            let uid = TEST_UID;
-            let _supervisor = attach_speaking(&daemon, "cc-1", uid, QUESTION_PANE, "", minor).await;
-            let raised = raise_question(&daemon, uid, None, true).await;
-            drop(raised.end_hook);
-            assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-            let answer = daemon
-                .db
-                .get_answer(uid.to_string(), QUESTION_ID.to_string())
-                .await
-                .unwrap();
-            if resolved {
-                let (_, outcome) = answer.expect("closed");
-                assert_eq!(outcome.resolved_by, ResolvedBy::Local);
-                assert_eq!(outcome.decision, AnswerDecision::Decline);
-                assert!(outcome.inferred);
-            } else {
-                assert!(answer.is_none());
-                assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Ended));
-                assert!(daemon
-                    .store
-                    .events_after(uid, 0, 1000)
-                    .unwrap()
-                    .iter()
-                    .any(
-                        |event| event.kind == EventKind::Other("question_hold".into())
-                            && event.payload["question_hold"] == "ended"
-                    ));
-                match answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-                {
-                    AnswerResult::Rejected { reason } => {
-                        assert!(reason.contains("not being held"), "{reason}")
-                    }
-                    other => panic!("{other:?}"),
-                }
-            }
-        }
-    }
-
-    /// A held background agent's question waits as long as Claude does: the
-    /// 15-minute expiry, a newer prompt from the main conversation, and the pane
-    /// sweep (which would read the idle composer behind it as "answered") leave
-    /// it alone, and it is still answerable after all three.
-    /// The fifteen-minute expiry retires an ordinary approval nobody answered,
-    /// but never a question: a question at the Mac is still waiting there, and
-    /// only its own ending — answered, closed, the turn or session over — may
-    /// close its card.
-    #[tokio::test]
-    async fn the_expiry_retires_a_stale_approval_but_never_a_question() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, Some("a02422e26e1da95bb"), true).await;
-        assert_eq!(returned(raised.hook).await.decision, Decision::Ask);
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
-        // Another run's approval, so nothing here supersedes the question.
-        let other = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
-        let approval = raise_prompt_in(&daemon, "cc-2", other, "p-b", "git status").await;
-        for entry in daemon.inner.lock().await.pending.values_mut() {
-            entry.created_ms -= 16 * 60 * 1000;
-        }
-
-        daemon.expire_stale_approvals(15 * 60 * 1000).await;
-
-        assert!(
-            daemon.store.get_answer(uid, QUESTION_ID).unwrap().is_none(),
-            "a question at the Mac is not retired by age"
-        );
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
-        let (_, expired) = daemon
-            .store
-            .get_answer(other, &approval)
-            .unwrap()
-            .expect("the stale approval is retired");
-        assert_eq!(expired.resolved_by, ResolvedBy::Timeout);
-        assert_eq!(expired.decision, AnswerDecision::Deny);
-        assert!(expired.inferred);
-    }
-
-    /// Make every open card older than the fifteen-minute expiry.
-    async fn age_past_the_expiry(daemon: &Arc<Daemon>) {
-        for entry in daemon.inner.lock().await.pending.values_mut() {
-            entry.created_ms -= 16 * 60 * 1000;
-        }
-    }
-
-    fn approval_hold(daemon: &Daemon, uid: &str, request_id: &str) -> Option<QuestionHold> {
-        daemon
-            .inner
-            .try_lock()
-            .unwrap()
-            .pending
-            .get(&(uid.to_string(), request_id.to_string()))
-            .and_then(|entry| entry.card.question_hold)
-    }
-
-    /// Whether the run's card is still open, still blocking its run, and has no
-    /// recorded ending.
-    async fn still_waiting(daemon: &Arc<Daemon>, uid: &str, request_id: &str) -> bool {
-        daemon.store.get_answer(uid, request_id).unwrap().is_none()
-            && daemon
-                .sessions()
-                .await
-                .unwrap()
-                .iter()
-                .any(|s| s.session_uid == uid && s.blocked_on == [request_id.to_string()])
-    }
-
-    /// A card restored after a restart can be answered only at the computer, and
-    /// while its prompt is on the run's screen it is waiting there: the expiry
-    /// leaves it however old it is, and the prompt leaving the screen closes it
-    /// as answered at the keyboard.
-    ///
-    /// **Mutation:** drop the screen check from `expire_stale_approvals` and the
-    /// card is closed by timeout with its prompt still up.
-    #[tokio::test]
-    async fn a_restored_approval_on_the_screen_outlasts_the_expiry() {
-        let store = shared_store();
-        let uid = TEST_UID;
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        let _hook = raise_held(&daemon, uid, "touch a.txt", "toolu_kept", None).await;
-        let restarted = daemon_on(
-            store,
-            Config {
-                local_resolve_grace_ms: 1,
-                ..Config::default()
-            },
-        );
-        restarted.recover().await;
-        let supervisor = attach(&restarted, "cc-1", uid, &permission_pane("touch a.txt"), "").await;
-        assert_eq!(
-            approval_hold(&restarted, uid, "toolu_kept"),
-            Some(QuestionHold::Ended)
-        );
-        age_past_the_expiry(&restarted).await;
-
-        restarted.expire_stale_approvals(15 * 60 * 1000).await;
-        assert!(still_waiting(&restarted, uid, "toolu_kept").await);
-
-        supervisor.show(COMPOSER_PANE);
-        for _ in 0..LOCAL_RESOLVE_MISSES {
-            restarted.sweep_local_resolutions().await;
-        }
-        let (_, closed) = restarted
-            .store
-            .get_answer(uid, "toolu_kept")
-            .unwrap()
-            .expect("closed once the prompt left the screen");
-        assert_eq!(closed.resolved_by, ResolvedBy::Local);
-        assert!(closed.inferred);
-    }
-
-    /// The same for a card shown at the Mac from the start, with no restart.
-    ///
-    /// **Mutation:** as above.
-    #[tokio::test]
-    async fn an_approval_at_the_mac_on_the_screen_outlasts_the_expiry() {
-        let daemon = daemon_with(Config {
-            local_resolve_grace_ms: 1,
-            ..Config::default()
-        });
-        let uid = TEST_UID;
-        let supervisor = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/x"), "").await;
-        let request_id = approve_at_the_keyboard(&daemon).await;
-        assert_eq!(
-            approval_hold(&daemon, uid, &request_id),
-            Some(QuestionHold::AtMac)
-        );
-        age_past_the_expiry(&daemon).await;
-
-        daemon.expire_stale_approvals(15 * 60 * 1000).await;
-        assert!(still_waiting(&daemon, uid, &request_id).await);
-
-        supervisor.show(COMPOSER_PANE);
-        for _ in 0..LOCAL_RESOLVE_MISSES {
-            daemon.sweep_local_resolutions().await;
-        }
-        let (_, closed) = daemon
-            .store
-            .get_answer(uid, &request_id)
-            .unwrap()
-            .expect("closed once the prompt left the screen");
-        assert_eq!(closed.resolved_by, ResolvedBy::Local);
-    }
-
-    /// Age still closes a card whose screen says nothing: one that shows neither
-    /// a prompt nor the composer (the detailed transcript view), and one that
-    /// cannot be read at all (no supervisor).
-    #[tokio::test]
-    async fn the_expiry_still_closes_a_card_whose_screen_says_nothing() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, TRANSCRIPT_VIEW_PANE, "").await;
-        let shown = approve_at_the_keyboard(&daemon).await;
-        let unread = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
-        let blind = raise_prompt_in(&daemon, "cc-2", unread, "p-b", "git status").await;
-        age_past_the_expiry(&daemon).await;
-
-        daemon.expire_stale_approvals(15 * 60 * 1000).await;
-
-        for (uid, request_id) in [(uid, shown.as_str()), (unread, blind.as_str())] {
-            let (_, closed) = daemon
-                .store
-                .get_answer(uid, request_id)
-                .unwrap()
-                .unwrap_or_else(|| panic!("{request_id} is closed by age"));
-            assert_eq!(closed.resolved_by, ResolvedBy::Timeout);
-        }
-    }
-
-    /// A newer prompt in the run does not retire a question still open at the
-    /// Mac: a background agent's question and the main conversation's next
-    /// prompt are on screen together, so the newer one is no proof the
-    /// question went.
-    #[tokio::test]
-    async fn a_newer_prompt_never_retires_a_question_at_the_mac() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&daemon, uid, Some("a02422e26e1da95bb"), true).await;
-        assert_eq!(returned(raised.hook).await.decision, Decision::Ask);
-        raise_prompt(&daemon, uid, "p-next", "git status").await;
-        assert!(
-            daemon.store.get_answer(uid, QUESTION_ID).unwrap().is_none(),
-            "the question is not superseded"
-        );
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
-    }
-
-    #[tokio::test]
-    async fn a_held_question_outlasts_expiry_newer_prompts_and_the_pane_sweep() {
-        let daemon = daemon_with(Config {
-            local_resolve_grace_ms: 1_000,
-            ..Config::default()
-        });
-        let uid = TEST_UID;
-        let supervisor = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        let raised = raise_question(&daemon, uid, None, true).await;
-        {
-            let mut inner = daemon.inner.lock().await;
-            let entry = inner
-                .pending
-                .get_mut(&(uid.to_string(), QUESTION_ID.to_string()))
-                .unwrap();
-            entry.fork = true;
-            // Backdated so every age check is past its limit.
-            entry.created_ms -= 3_600_000;
-        }
-
-        daemon.expire_stale_approvals(0).await;
-        raise_prompt(&daemon, uid, "p-next", "git status").await;
-        for _ in 0..3 {
-            daemon.sweep_local_resolutions().await;
-        }
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        assert!(!raised.hook.is_finished());
-
-        let answering = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-            })
-        };
-        let sent = returned(raised.hook).await.updated_input.unwrap();
-        question_ran(&daemon, uid, sent).await;
-        assert!(matches!(
-            answering.await.unwrap(),
-            AnswerResult::Applied { .. }
-        ));
-        assert!(supervisor.typed().is_empty());
-    }
-
-    /// A held question alone in its run gives the pane sweep nothing to read:
-    /// its run is not captured, so a new card beside it is bound by its own
-    /// settle wait to the prompt Claude draws for it, not to the one still on
-    /// screen when the card arrived, and the phone's answer to it lands.
-    #[tokio::test]
-    async fn a_held_question_does_not_bring_its_run_into_the_pane_sweep() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, &permission_pane("rm stale.txt"), "").await;
-        let _raised = raise_question(&daemon, uid, Some("agentA"), true).await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        for entry in daemon.inner.lock().await.pending.values_mut() {
-            entry.created_ms -= 3_600_000;
-        }
-        let bash = raise_held(&daemon, uid, "touch ran.txt", "toolu_bash", None).await;
-        daemon.sweep_local_resolutions().await;
-        pane.show(&permission_pane("touch ran.txt"));
-        assert!(matches!(
-            daemon
-                .answer(
-                    "toolu_bash",
-                    &bash_hash("touch ran.txt"),
-                    AnswerDecision::Allow,
-                    Some(uid),
-                    protocol::ws::AnsweredOn::Iphone
-                )
-                .await,
-            AnswerResult::Applied { .. }
-        ));
-        assert_eq!(returned(bash).await.decision, Decision::Allow);
-    }
-
-    /// A held question is not judged from the pane even while the sweep reads
-    /// the pane for an older ordinary card in the same run — here a background
-    /// agent's question, which leaves the prompt before it live: the prompt
-    /// gone and the composer back closes that card, and the question stays
-    /// held.
-    #[tokio::test]
-    async fn a_held_question_is_not_swept_with_an_older_card_beside_it() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = daemon_with(Config {
-            local_resolve_grace_ms: 1_000,
-            ..Config::default()
-        });
-        let uid = TEST_UID;
-        let _supervisor = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        let bash = raise_prompt(&daemon, uid, "p-bash", "touch ran.txt").await;
-        let raised = raise_question(&daemon, uid, Some("agentA"), true).await;
-        {
-            let mut inner = daemon.inner.lock().await;
-            // Backdated so both are past the grace period.
-            for entry in inner.pending.values_mut() {
-                entry.created_ms -= 3_600_000;
-            }
-        }
-        for _ in 0..3 {
-            daemon.sweep_local_resolutions().await;
-        }
-        assert!(!daemon
-            .inner
-            .lock()
-            .await
-            .pending
-            .contains_key(&(uid.to_string(), bash)));
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-        assert!(!raised.hook.is_finished());
-    }
-
-    /// A restart takes the held hook's connection with it: the question is at
-    /// the Mac, and the card says so instead of offering answers nothing can
-    /// deliver.
-    #[tokio::test]
-    async fn a_restart_ends_the_phone_s_hold() {
-        let store = shared_store();
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        let uid = TEST_UID;
-        let _raised = raise_question(&daemon, uid, None, true).await;
-        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
-
-        let restarted = daemon_on(store, Config::default());
-        restarted.recover().await;
-        assert_eq!(card_hold(&restarted, uid), Some(QuestionHold::Ended));
-        assert!(restarted
-            .store
-            .events_after(uid, 0, 1000)
-            .unwrap()
-            .iter()
-            .any(
-                |event| event.kind == EventKind::Other("question_hold".into())
-                    && event.payload["question_hold"] == "ended"
-            ));
-    }
-
-    /// A background agent's question — a live 2.1.286 fork's `PermissionRequest`
-    /// — through the real admission and the real presence watch, with the
-    /// Mac's idle time set by the test. Asked while someone is at the Mac (input
-    /// within ten seconds, or an idle time that cannot be read) it goes there
-    /// and the hook returns at once. Asked with the Mac left alone it is held for
-    /// the phone and stays held; input resuming anywhere on the Mac hands it back
-    /// within a poll or two: the hook returns with no decision, Claude draws the
-    /// question, and the phone can no longer answer it.
-    #[tokio::test]
-    async fn a_background_question_is_held_only_while_the_mac_is_left_alone() {
-        let uid = TEST_UID;
-        let request_id = "toolu_fork_question";
-        let id = (uid.to_string(), request_id.to_string());
-        let raise = |daemon: Arc<Daemon>| async move {
-            let request: serde_json::Value = serde_json::from_str(include_str!(
-                "../../../fixtures/claude/askuq-fork-permissionrequest-2.1.286.json"
-            ))
-            .unwrap();
-            let mut before = request.clone();
-            before["hook_event_name"] = json!("PreToolUse");
-            before["tool_use_id"] = json!(request_id);
-            daemon.handle_hook(post(uid, before, false)).await;
-            let (end_hook, ended) = oneshot::channel::<()>();
-            let hook = {
-                let daemon = Arc::clone(&daemon);
-                tokio::spawn(async move {
-                    let mut gone = Box::pin(async move {
-                        let _ = ended.await;
-                    });
-                    daemon
-                        .handle_hook_held(post(uid, request, true), &mut gone)
-                        .await
-                })
-            };
-            for _ in 0..200 {
-                if daemon
-                    .inner
-                    .lock()
-                    .await
-                    .pending
-                    .contains_key(&(uid.to_string(), request_id.to_string()))
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            HeldQuestion { hook, end_hook }
-        };
-        let hold = |daemon: &Daemon| {
-            daemon
-                .inner
-                .try_lock()
-                .unwrap()
-                .pending
-                .get(&id)
-                .and_then(|entry| entry.card.question_hold)
-        };
-
-        for idle in [
-            Some(crate::presence::QUESTION_IDLE - Duration::from_millis(10)),
-            None,
-        ] {
-            crate::presence::set_idle(idle);
-            let daemon = test_daemon();
-            let raised = raise(Arc::clone(&daemon)).await;
-            assert_eq!(
-                returned(raised.hook).await.decision,
-                Decision::Ask,
-                "{idle:?}"
-            );
-            assert_eq!(hold(&daemon), Some(QuestionHold::AtMac), "{idle:?}");
-        }
-
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        let daemon = test_daemon();
-        let raised = raise(Arc::clone(&daemon)).await;
-        assert_eq!(hold(&daemon), Some(QuestionHold::Held));
-        tokio::time::sleep(crate::presence::POLL * 5).await;
-        assert!(!raised.hook.is_finished(), "held while nobody is back");
-        assert_eq!(hold(&daemon), Some(QuestionHold::Held));
-
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let back = std::time::Instant::now();
-        assert_eq!(returned(raised.hook).await.decision, Decision::Passthrough);
-        assert!(
-            back.elapsed() < crate::presence::POLL * 3,
-            "{:?}",
-            back.elapsed()
-        );
-        assert_eq!(hold(&daemon), Some(QuestionHold::AtMac));
-        let hash = daemon.inner.lock().await.pending[&id]
-            .card
-            .payload_hash
-            .clone();
-        match daemon
-            .answer(
-                request_id,
-                &hash,
-                AnswerDecision::Decline,
-                Some("cc-1"),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            AnswerResult::Rejected { reason } => assert!(reason.contains("not being held")),
-            other => panic!("{other:?}"),
-        }
-        drop(raised.end_hook);
-    }
-
-    /// **A run's open cards close when it ends.** Nobody is left to answer one
-    /// Claude showed at the Mac or a question held for the phone, so each is
-    /// closed as the session ending, a held hook is let go, and a phone answer
-    /// afterwards is a duplicate of that ending rather than a refusal saying
-    /// Claude is showing it at the Mac.
+    /// **A run's open cards close when it ends.** Nobody is left to answer an
+    /// approval or a question held for the phone, so each is closed as the
+    /// session ending.
     #[tokio::test]
     async fn a_runs_open_cards_close_when_it_ends() {
         let daemon = test_daemon();
-        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-        let shown = raise_held(
+        hosted_card(
             &daemon,
             TEST_UID,
-            "touch a.txt",
-            "toolu_at_mac",
-            Some("agentA"),
+            1,
+            "toolu_approval",
+            "Bash",
+            json!({"command": "touch a.txt"}),
         )
         .await;
-        returned(shown).await;
-        let question = raise_question(&daemon, TEST_UID, None, true).await;
-        let held = |request_id: &str| {
-            daemon
-                .inner
-                .try_lock()
-                .unwrap()
-                .pending
-                .get(&(TEST_UID.to_string(), request_id.to_string()))
-                .and_then(|entry| entry.card.question_hold)
-        };
-        assert_eq!(held("toolu_at_mac"), Some(QuestionHold::AtMac));
-        assert_eq!(held(QUESTION_ID), Some(QuestionHold::Held));
-
-        daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
-            .await;
-
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            2,
+            QUESTION_ID,
+            protocol::host::ASK_USER_QUESTION,
+            question_input(),
+        )
+        .await;
         assert_eq!(
-            returned(question.hook).await.decision,
-            Decision::Passthrough
+            daemon.inner.lock().await.pending.len(),
+            2,
+            "the premise: two open cards"
         );
+
+        assert!(
+            daemon
+                .mark_exited(
+                    &SessionKey::new(TEST_UID, TEST_UID),
+                    Some(0),
+                    Some("test"),
+                    observed_now(&daemon, TEST_UID).await
+                )
+                .await,
+            "the premise: the run ended"
+        );
+
         assert!(daemon.inner.lock().await.pending.is_empty());
         assert!(daemon.store.list_pending_approvals().unwrap().is_empty());
-        for (request_id, hash, decision) in [
-            (
-                "toolu_at_mac",
-                bash_hash("touch a.txt"),
-                AnswerDecision::Deny,
-            ),
-            (QUESTION_ID, question_hash(), AnswerDecision::Decline),
-        ] {
-            match daemon
-                .answer(
-                    request_id,
-                    &hash,
-                    AnswerDecision::Allow,
-                    Some(TEST_UID),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await
-            {
-                AnswerResult::Duplicate { outcome, .. } => {
-                    assert_eq!(outcome.resolved_by, ResolvedBy::Timeout);
-                    assert_eq!(outcome.decision, decision);
-                    assert_eq!(outcome.detail.as_deref(), Some(RUN_ENDED));
-                    assert!(outcome.inferred);
-                }
-                other => panic!("{request_id}: {other:?}"),
-            }
+        let mut closed: Vec<String> = Vec::new();
+        for event in approval_events(&daemon, TEST_UID, EventKind::ApprovalResolved) {
+            let outcome: AnswerOutcome = serde_json::from_value(event.payload).unwrap();
+            assert_eq!(outcome.resolved_by, ResolvedBy::Timeout);
+            assert_eq!(outcome.detail.as_deref(), Some(RUN_ENDED));
+            closed.push(outcome.request_id);
         }
-        drop(question.end_hook);
+        closed.sort();
+        assert_eq!(closed, ["toolu_approval", QUESTION_ID]);
     }
 
     /// The Codex card a run leaves when it ends, retired in Codex's own store.
@@ -35615,528 +25416,10 @@ mod tests {
         assert_retired_as_ended(&restarted, uid, "req-left");
     }
 
-    /// **What a phone reads for Claude's questions, as this build emits it.**
-    ///
-    /// `fixtures/claude/minor-21-wire.json` is the daemon's own bytes for every
-    /// question state the phone renders — a held card answered from the phone, a
-    /// hold that ended, a card at the Mac, and a question answered there — driven
-    /// through the production path from a live 2.1.286 question. The phone
-    /// decodes exactly this file in its tests, so a change to any of these shapes
-    /// must change the file, in the diff. Only clock reads are normalised.
-    #[tokio::test]
-    async fn the_minor_21_wire_fixture_is_what_this_build_emits() {
-        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-21-wire.json");
-        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-        for key in [
-            "held_request",
-            "answered_from_phone",
-            "hold_ended",
-            "at_mac_request",
-            "answered_at_mac",
-        ] {
-            let _: Event = serde_json::from_value(committed[key].clone()).expect(key);
-        }
-        let card: ApprovalCard =
-            serde_json::from_value(committed["held_request"]["payload"]["card"].clone()).unwrap();
-        assert_eq!(card.question_hold, Some(QuestionHold::Held));
-        let outcome: AnswerOutcome =
-            serde_json::from_value(committed["answered_from_phone"]["payload"].clone()).unwrap();
-        assert_eq!(
-            outcome.decision,
-            AnswerDecision::Answers {
-                answers: keyboard_choices()
-            }
-        );
-        assert_eq!(
-            committed["hold_ended"]["payload"],
-            json!({"request_id": QUESTION_ID, "question_hold": "ended"})
-        );
-        assert_eq!(
-            derived_minor_21_wire().await,
-            committed,
-            "the committed minor-21 wire contract no longer matches what this build emits. \
-             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_minor_21_wire_fixture, then copy it over its copies under ios/ \
-             (fixtures/check-duplicated-fixtures.sh names them)"
-        );
-    }
-
-    /// Rewrite `fixtures/claude/minor-21-wire.json` with what this build emits.
-    #[tokio::test]
-    #[ignore = "generator, not a gate"]
-    async fn regenerate_the_minor_21_wire_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_minor_21_wire().await).unwrap();
-        std::fs::write(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/minor-21-wire.json"
-            ),
-            wire + "\n",
-        )
-        .unwrap();
-    }
-
-    /// **The approval wire a minor-22 daemon sends, emitted by this build.** The
-    /// phone's own tests read the copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`), so the shape the phone is tested
-    /// against is the shape this daemon writes, not one written by hand.
-    #[tokio::test]
-    async fn the_minor_22_wire_fixture_is_what_this_build_emits() {
-        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-22-wire.json");
-        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(
-            derived_minor_22_wire().await,
-            committed,
-            "the committed minor-22 wire contract no longer matches what this build emits. \
-             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_minor_22_wire_fixture, then copy it over its copy under ios/ \
-             (fixtures/check-duplicated-fixtures.sh names it)"
-        );
-    }
-
-    /// Rewrite `fixtures/claude/minor-22-wire.json` with what this build emits.
-    #[tokio::test]
-    #[ignore = "generator, not a gate"]
-    async fn regenerate_the_minor_22_wire_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_minor_22_wire().await).unwrap();
-        std::fs::write(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/minor-22-wire.json"
-            ),
-            wire + "\n",
-        )
-        .unwrap();
-    }
-
-    /// **An answer from each kind of device, as a minor-34 daemon records it,
-    /// emitted by this build.** The apps' own tests read the copy under `ios/`.
-    #[tokio::test]
-    async fn the_minor_34_wire_fixture_is_what_this_build_emits() {
-        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-34-wire.json");
-        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(
-            derived_minor_34_wire().await,
-            committed,
-            "the committed minor-34 wire contract no longer matches what this build emits. \
-             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_minor_34_wire_fixture, then copy it over its copy under ios/"
-        );
-    }
-
-    /// Rewrite `fixtures/claude/minor-34-wire.json` with what this build emits.
-    #[tokio::test]
-    #[ignore = "generator, not a gate"]
-    async fn regenerate_the_minor_34_wire_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_minor_34_wire().await).unwrap();
-        std::fs::write(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/minor-34-wire.json"
-            ),
-            wire + "\n",
-        )
-        .unwrap();
-    }
-
-    /// One approval answered from each kind of device: its `approval_resolved`
-    /// event, with the timestamps fixed so the file is stable.
-    async fn derived_minor_34_wire() -> serde_json::Value {
-        let mut wire = serde_json::Map::new();
-        for (key, answered_on) in [
-            ("answered_on_iphone", AnsweredOn::Iphone),
-            ("answered_on_mac", AnsweredOn::Mac),
-        ] {
-            let daemon = test_daemon();
-            let command = "make zz-target";
-            let held = raise_held(&daemon, TEST_UID, command, "toolu_answered", None).await;
-            let result = daemon
-                .answer(
-                    "toolu_answered",
-                    &bash_hash(command),
-                    AnswerDecision::Allow,
-                    Some("cc-1"),
-                    answered_on,
-                )
-                .await;
-            assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
-            returned(held).await;
-            let mut events = approval_events(&daemon, TEST_UID, EventKind::ApprovalResolved);
-            assert_eq!(events.len(), 1, "{key}");
-            let mut event = serde_json::to_value(events.remove(0)).unwrap();
-            event["ts"] = json!("2026-11-10T00:00:00.000Z");
-            event["payload"]["resolved_at"] = json!("2026-11-10T00:00:00.000Z");
-            wire.insert(key.into(), event);
-        }
-        serde_json::Value::Object(wire)
-    }
-
-    async fn derived_minor_22_wire() -> serde_json::Value {
-        let uid = TEST_UID;
-        let event = |daemon: &Daemon, kind: EventKind| {
-            let mut events = approval_events(daemon, uid, kind.clone());
-            assert_eq!(events.len(), 1, "one {kind:?}");
-            serde_json::to_value(events.remove(0)).unwrap()
-        };
-
-        // Held, with Claude's suggestion (which the phone does not grant), and
-        // allowed.
-        let allowed = test_daemon();
-        let mut hook = json!({
-            "hook_event_name": "PreToolUse", "cwd": "/tmp/work", "prompt_id": "p1",
-            "tool_name": "Bash", "tool_input": {"command": "make zz-target"},
-            "tool_use_id": "toolu_allowed",
-            "permission_suggestions": [{
-                "type": "addRules", "behavior": "allow", "destination": "localSettings",
-                "rules": [{"toolName": "Bash", "ruleContent": "make zz-target *"}],
-            }],
-        });
-        allowed.handle_hook(post(uid, hook.clone(), false)).await;
-        hook["hook_event_name"] = json!("PermissionRequest");
-        hook.as_object_mut().unwrap().remove("tool_use_id");
-        let held = {
-            let daemon = Arc::clone(&allowed);
-            let request = post(uid, hook, true);
-            tokio::spawn(async move { daemon.handle_hook(request).await })
-        };
-        let hash = approval_payload_hash("Bash", &json!({"command": "make zz-target"}));
-        let mut result = None;
-        for _ in 0..200 {
-            match allowed
-                .answer(
-                    "toolu_allowed",
-                    &hash,
-                    AnswerDecision::Allow,
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await
-            {
-                AnswerResult::Rejected { .. } => {
-                    tokio::time::sleep(Duration::from_millis(10)).await
-                }
-                other => {
-                    result = Some(other);
-                    break;
-                }
-            }
-        }
-        assert!(matches!(result, Some(AnswerResult::Applied { .. })));
-        returned(held).await;
-
-        // Held, and denied with a reason.
-        let reasoned = test_daemon();
-        let held = raise_held(&reasoned, uid, "touch d.txt", "toolu_reason", None).await;
-        assert!(matches!(
-            reasoned
-                .answer(
-                    "toolu_reason",
-                    &bash_hash("touch d.txt"),
-                    AnswerDecision::Text {
-                        text: "use the other file".into()
-                    },
-                    Some("cc-1"),
-                    protocol::ws::AnsweredOn::Iphone,
-                )
-                .await,
-            AnswerResult::Applied { .. }
-        ));
-        returned(held).await;
-
-        // A background agent's, asked while someone is at the Mac.
-        crate::presence::set_idle(Some(Duration::ZERO));
-        let at_mac = test_daemon();
-        let shown = raise_held(&at_mac, uid, "touch a.txt", "toolu_at_mac", Some("agentA")).await;
-        returned(shown).await;
-
-        // Held, then Claude ended the hook.
-        let ended = test_daemon();
-        let (end_hook, gone) = oneshot::channel::<()>();
-        let mut pre = json!({
-            "hook_event_name": "PreToolUse", "cwd": "/tmp", "prompt_id": "p1",
-            "tool_name": "Bash", "tool_input": {"command": "touch e.txt"},
-            "tool_use_id": "toolu_ended",
-        });
-        ended.handle_hook(post(uid, pre.clone(), false)).await;
-        pre["hook_event_name"] = json!("PermissionRequest");
-        pre.as_object_mut().unwrap().remove("tool_use_id");
-        let request = post(uid, pre, true);
-        let hook = {
-            let daemon = Arc::clone(&ended);
-            tokio::spawn(async move {
-                let mut gone = Box::pin(async move {
-                    let _ = gone.await;
-                });
-                daemon.handle_hook_held(request, &mut gone).await
-            })
-        };
-        for _ in 0..200 {
-            if !approval_events(&ended, uid, EventKind::ApprovalRequest).is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        drop(end_hook);
-        returned(hook).await;
-
-        // Held, then its run ended.
-        let run_ended = test_daemon();
-        seed_session(&run_ended, uid, "cc-1", Lifecycle::Live);
-        let held = raise_held(&run_ended, uid, "touch f.txt", "toolu_run_ended", None).await;
-        run_ended
-            .session_exited("cc-1", Some(uid), Some(0), None, None)
-            .await;
-        returned(held).await;
-
-        let mut out = json!({
-            "held_request": event(&allowed, EventKind::ApprovalRequest),
-            "answered_allow": event(&allowed, EventKind::ApprovalResolved),
-            "denied_with_reason": event(&reasoned, EventKind::ApprovalResolved),
-            "at_mac_request": event(&at_mac, EventKind::ApprovalRequest),
-            "hold_ended": event(&ended, EventKind::Other("question_hold".into())),
-            "closed_when_run_ended": event(&run_ended, EventKind::ApprovalResolved),
-        });
-        fn normalise(value: &mut serde_json::Value) {
-            match value {
-                serde_json::Value::Object(map) => {
-                    for (key, slot) in map.iter_mut() {
-                        if matches!(key.as_str(), "ts" | "resolved_at") {
-                            *slot = json!("2026-10-08T00:00:00.000Z");
-                        } else {
-                            normalise(slot);
-                        }
-                    }
-                }
-                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
-                _ => {}
-            }
-        }
-        normalise(&mut out);
-        out
-    }
-
-    async fn derived_minor_21_wire() -> serde_json::Value {
-        let uid = TEST_UID;
-        let event = |daemon: &Daemon, kind: EventKind| {
-            let mut events = approval_events(daemon, uid, kind.clone());
-            assert_eq!(events.len(), 1, "one {kind:?}");
-            serde_json::to_value(events.remove(0)).unwrap()
-        };
-        let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
-
-        // Held, and answered from the phone.
-        let answered = test_daemon();
-        let _supervisor = attach(&answered, "cc-1", uid, QUESTION_PANE, "").await;
-        let raised = raise_question(&answered, uid, None, true).await;
-        let answering = {
-            let daemon = Arc::clone(&answered);
-            tokio::spawn(async move {
-                answer_question(
-                    &daemon,
-                    AnswerDecision::Answers {
-                        answers: keyboard_choices(),
-                    },
-                )
-                .await
-            })
-        };
-        let sent = returned(raised.hook).await.updated_input.unwrap();
-        assert!(matches!(
-            question_ran_after_answer(&answered, uid, sent, answering).await,
-            AnswerResult::Applied { .. }
-        ));
-
-        // Held, then Claude ended the hook in a session from before this build.
-        let ended = test_daemon();
-        let _supervisor = attach_speaking(&ended, "cc-1", uid, QUESTION_PANE, "", 20).await;
-        let raised = raise_question(&ended, uid, None, true).await;
-        drop(raised.end_hook);
-        returned(raised.hook).await;
-
-        // Never held (an older cc-hook), and answered at the Mac.
-        let at_mac = test_daemon();
-        let _supervisor = attach(&at_mac, "cc-1", uid, QUESTION_PANE, "").await;
-        raise_question(&at_mac, uid, None, false).await;
-        question_ran(&at_mac, uid, keyboard["tool_input"].clone()).await;
-        at_mac.sweep_local_resolutions().await;
-
-        let mut out = json!({
-            "held_request": event(&answered, EventKind::ApprovalRequest),
-            "answered_from_phone": event(&answered, EventKind::ApprovalResolved),
-            "hold_ended": event(&ended, EventKind::Other("question_hold".into())),
-            "at_mac_request": event(&at_mac, EventKind::ApprovalRequest),
-            "answered_at_mac": event(&at_mac, EventKind::ApprovalResolved),
-        });
-        fn normalise(value: &mut serde_json::Value) {
-            match value {
-                serde_json::Value::Object(map) => {
-                    for (key, slot) in map.iter_mut() {
-                        if matches!(key.as_str(), "ts" | "resolved_at") {
-                            let was = slot.as_str().unwrap_or_default();
-                            assert!(
-                                was.len() == 24 && was.ends_with('Z'),
-                                "{key} was expected to be a clock read, and is {slot}"
-                            );
-                            *slot = json!("2026-10-03T00:00:00.000Z");
-                        } else {
-                            normalise(slot);
-                        }
-                    }
-                }
-                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
-                _ => {}
-            }
-        }
-        normalise(&mut out);
-        out
-    }
-
-    /// **Questions whose text would draw as something else, as this build
-    /// emits them.** `fixtures/claude/askuq-rlo-inputs.json` holds two
-    /// `AskUserQuestion` inputs, sent through the 2.1.286 hooks in place of
-    /// theirs: `everywhere` carries U+202E in its question, header, label,
-    /// description and a 2,101-unit preview, and is refused — sent to the
-    /// phone all the same, to be answered at the Mac; `unchecked` carries it
-    /// only in its headers, descriptions and long preview, which the daemon
-    /// does not check, over two questions, and is held — then answered from the
-    /// phone with each question's first option. Only clock reads are normalised. The phone's display
-    /// tests read the copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`).
-    #[tokio::test]
-    async fn the_rlo_question_cards_fixture_is_what_this_build_emits() {
-        const FIXTURE: &str = include_str!("../../../fixtures/claude/question-cards-rlo-wire.json");
-        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(
-            derived_rlo_question_cards().await,
-            committed,
-            "the committed RLO question cards no longer match what this build emits. \
-             Regenerate them with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_rlo_question_cards_fixture, then copy it over its copy under \
-             ios/ (fixtures/check-duplicated-fixtures.sh names it)"
-        );
-    }
-
-    /// Rewrite `fixtures/claude/question-cards-rlo-wire.json` with what this
-    /// build emits.
-    #[tokio::test]
-    #[ignore = "generator, not a gate"]
-    async fn regenerate_the_rlo_question_cards_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_rlo_question_cards().await).unwrap();
-        std::fs::write(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/question-cards-rlo-wire.json"
-            ),
-            wire + "\n",
-        )
-        .unwrap();
-    }
-
-    async fn derived_rlo_question_cards() -> serde_json::Value {
-        const INPUTS: &str = include_str!("../../../fixtures/claude/askuq-rlo-inputs.json");
-        let inputs: serde_json::Value = serde_json::from_str(INPUTS).unwrap();
-        let uid = TEST_UID;
-        let event = |daemon: &Daemon, kind: EventKind| {
-            let mut events = approval_events(daemon, uid, kind.clone());
-            assert_eq!(events.len(), 1, "one {kind:?}");
-            serde_json::to_value(events.remove(0)).unwrap()
-        };
-        let raise = |input: serde_json::Value| async move {
-            let daemon = test_daemon();
-            let supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-            let mut pre = question_hook("PreToolUse");
-            pre["tool_input"] = input.clone();
-            daemon.handle_hook(post(uid, pre, false)).await;
-            let mut request = question_hook("PermissionRequest");
-            request["tool_input"] = input;
-            let request = post(uid, request, true);
-            let hook = {
-                let daemon = Arc::clone(&daemon);
-                tokio::spawn(async move {
-                    let mut gone = Box::pin(std::future::pending::<()>());
-                    daemon.handle_hook_held(request, &mut gone).await
-                })
-            };
-            for _ in 0..200 {
-                if !approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            (daemon, supervisor, hook)
-        };
-
-        // Refused, and sent to be answered at the Mac.
-        let (everywhere, _supervisor, hook) = raise(inputs["everywhere"].clone()).await;
-        let refused = event(&everywhere, EventKind::ApprovalRequest);
-        hook.abort();
-
-        // Held, and answered from the phone with its first option.
-        let input = inputs["unchecked"].clone();
-        let hash = protocol::hash::approval_payload_hash("AskUserQuestion", &input);
-        let (unchecked, _supervisor, hook) = raise(input).await;
-        let held = event(&unchecked, EventKind::ApprovalRequest);
-        let answering = {
-            let daemon = Arc::clone(&unchecked);
-            tokio::spawn(async move {
-                daemon
-                    .answer(
-                        QUESTION_ID,
-                        &hash,
-                        AnswerDecision::Answers {
-                            answers: vec![
-                                protocol::ws::QuestionAnswer {
-                                    selected: vec![0],
-                                    ..Default::default()
-                                };
-                                2
-                            ],
-                        },
-                        Some("cc-1"),
-                        protocol::ws::AnsweredOn::Iphone,
-                    )
-                    .await
-            })
-        };
-        let sent = returned(hook).await.updated_input.unwrap();
-        assert!(matches!(
-            question_ran_after_answer(&unchecked, uid, sent, answering).await,
-            AnswerResult::Applied { .. }
-        ));
-
-        let mut out = json!({
-            "everywhere": refused,
-            "unchecked": held,
-            "unchecked_answered": event(&unchecked, EventKind::ApprovalResolved),
-        });
-        fn normalise(value: &mut serde_json::Value) {
-            match value {
-                serde_json::Value::Object(map) => {
-                    for (key, slot) in map.iter_mut() {
-                        if matches!(key.as_str(), "ts" | "resolved_at") {
-                            let was = slot.as_str().unwrap_or_default();
-                            assert!(
-                                was.len() == 24 && was.ends_with('Z'),
-                                "{key} was expected to be a clock read, and is {slot}"
-                            );
-                            *slot = json!("2026-10-03T00:00:00.000Z");
-                        } else {
-                            normalise(slot);
-                        }
-                    }
-                }
-                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
-                _ => {}
-            }
-        }
-        normalise(&mut out);
-        out
-    }
-
     /// **ExitPlanMode's plan, as this build emits the card.** `fixtures/claude/
     /// exit-plan-input.json` is one ExitPlanMode `tool_input` — a plan and its
-    /// `planFilePath` — raised through the held approval path a real plan card
-    /// takes. The daemon builds `display_text` and `payload_hash`; only clock
+    /// `planFilePath` — asked by a hosted run's agent host, the path a real plan
+    /// card takes. The daemon builds `display_text` and `payload_hash`; only clock
     /// reads are normalised. R2T1-F2: the phone must draw the plan, not this
     /// `{tool}\n{input}`. The phone's copy under `ios/` is byte-identical
     /// (`fixtures/check-duplicated-fixtures.sh`).
@@ -36174,34 +25457,9 @@ mod tests {
         let input: serde_json::Value = serde_json::from_str(INPUT).unwrap();
         let uid = TEST_UID;
         let daemon = test_daemon();
-        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
-        // The same held path the real plan card takes: a PreToolUse, then a held
-        // PermissionRequest that raises the card. Only the tool and its input change;
-        // the hook envelope (and its already-vetted paths) is the question fixture's.
-        let mut pre = question_hook("PreToolUse");
-        pre["tool_name"] = json!("ExitPlanMode");
-        pre["tool_input"] = input.clone();
-        daemon.handle_hook(post(uid, pre, false)).await;
-        let mut request = question_hook("PermissionRequest");
-        request["tool_name"] = json!("ExitPlanMode");
-        request["tool_input"] = input;
-        let request = post(uid, request, true);
-        let hook = {
-            let daemon = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let mut gone = Box::pin(std::future::pending::<()>());
-                daemon.handle_hook_held(request, &mut gone).await
-            })
-        };
-        for _ in 0..200 {
-            if !approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        hosted_card(&daemon, uid, 1, QUESTION_ID, "ExitPlanMode", input).await;
         let mut events = approval_events(&daemon, uid, EventKind::ApprovalRequest);
         assert_eq!(events.len(), 1, "one ExitPlanMode card");
-        hook.abort();
         let mut out = json!({ "exit_plan": serde_json::to_value(events.remove(0)).unwrap() });
         fn normalise(value: &mut serde_json::Value) {
             match value {
@@ -36267,15 +25525,25 @@ mod tests {
     }
 
     /// **A pending ref names the seq of its own request event**, for a Claude
-    /// card (filed by the hook, source `hook`) and a Codex card (filed with its
-    /// row, source `daemon`, carrying its turn).
+    /// card (asked by its agent host) and a Codex card (filed with its row,
+    /// carrying its turn).
     #[tokio::test]
     async fn a_pending_ref_names_the_seq_of_its_request_event_for_both_agents() {
         let daemon = test_daemon();
+        hosted_run(&daemon, TEST_UID, "/tmp");
         for n in 0..3 {
-            tool_call(&daemon, "cc-1", TEST_UID, &format!("toolu_{n}")).await;
+            tool_call(&daemon, TEST_UID, TEST_UID, &format!("toolu_{n}")).await;
         }
-        let request_id = raise_prompt(&daemon, TEST_UID, "p1", "touch /tmp/a").await;
+        let request_id = "toolu_card".to_string();
+        hosted_card(
+            &daemon,
+            TEST_UID,
+            1,
+            &request_id,
+            "Bash",
+            json!({"command": "touch /tmp/a"}),
+        )
+        .await;
         let request = request_event(&daemon, TEST_UID, &request_id);
         assert_eq!(
             request.seq, 4,
@@ -36332,10 +25600,22 @@ mod tests {
     /// `sessions` reply names them by reference, stays under 64 KiB, and decodes.
     #[tokio::test]
     async fn a_sessions_reply_with_three_huge_cards_stays_small_and_decodes() {
-        let daemon = test_daemon();
+        // Under a payload limit that lets such a card through whole.
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4 * 1024 * 1024,
+            ..Config::default()
+        });
         let big = "x".repeat(600 * 1024);
-        for n in 0..3 {
-            raise_prompt(&daemon, TEST_UID, &format!("p{n}"), &format!("{big}{n}")).await;
+        for n in 0..3u64 {
+            hosted_card(
+                &daemon,
+                TEST_UID,
+                n + 1,
+                &format!("toolu_{n}"),
+                "Bash",
+                json!({ "command": format!("{big}{n}") }),
+            )
+            .await;
         }
         let sessions = daemon.sessions().await.unwrap();
         assert_eq!(
@@ -36357,58 +25637,10 @@ mod tests {
         );
     }
 
-    /// **A background agent's hooks never change the run's permission mode** —
-    /// its tool call or its question, measured on 2.1.286 with mode `bubble` and
-    /// an effort of its own.
-    #[tokio::test]
-    async fn a_background_agents_hooks_never_change_the_permission_mode() {
-        let daemon = test_daemon();
-        daemon
-            .handle_hook(post(
-                TEST_UID,
-                json!({
-                    "hook_event_name": "PreToolUse",
-                    "cwd": "/tmp",
-                    "permission_mode": "acceptEdits",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "ls"},
-                    "tool_use_id": "toolu_main",
-                }),
-                false,
-            ))
-            .await;
-        let main_seq = daemon.store.max_seq(TEST_UID).unwrap();
-
-        let question = fork_permission_request();
-        let mut call = question.clone();
-        call["hook_event_name"] = json!("PreToolUse");
-        call["tool_use_id"] = json!("toolu_fork");
-        daemon.handle_hook(post(TEST_UID, call, false)).await;
-        daemon.handle_hook(post(TEST_UID, question, false)).await;
-        let filed = daemon.store.events_after(TEST_UID, main_seq, 100).unwrap();
-        assert_eq!(
-            filed.len(),
-            2,
-            "the premise: both of the fork's hooks were filed"
-        );
-        assert!(filed.iter().all(|event| event
-            .payload
-            .to_string()
-            .contains("\"permission_mode\":\"bubble\"")));
-
-        assert_eq!(
-            summary_of(&daemon, TEST_UID).await.permission_mode,
-            Some(protocol::event::Fact {
-                value: "acceptEdits".into(),
-                seq: main_seq,
-            })
-        );
-    }
-
     /// **A restart is not activity.** A run's supervisor registering again with a
     /// restarted daemon, and the `link_state` that files, leave the row's
     /// `updated_at` where the run's last activity put it, so an idle run keeps its
-    /// age and its place; a hook, which is activity, still moves it.
+    /// age and its place.
     #[tokio::test]
     async fn a_restart_leaves_a_runs_updated_at_where_its_activity_put_it() {
         const ACTIVE: &str = "2026-01-01T00:00:00.000Z";
@@ -36417,7 +25649,10 @@ mod tests {
         register(&daemon, "cc-1", Some(TEST_UID)).await;
         let mut row = store.get_session(TEST_UID).unwrap().unwrap();
         row.updated_at = ACTIVE.into();
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         let links = |store: &Store| {
             let log = store.events_after(TEST_UID, 0, 100).unwrap();
             log.iter()
@@ -36438,172 +25673,30 @@ mod tests {
             ACTIVE,
             "the restart's registration moved the run's updated_at"
         );
-
-        restarted
-            .handle_hook(post(
-                TEST_UID,
-                json!({"hook_event_name": "UserPromptSubmit", "prompt": "go", "cwd": "/tmp"}),
-                false,
-            ))
-            .await;
-        assert_ne!(
-            store.get_session(TEST_UID).unwrap().unwrap().updated_at,
-            ACTIVE,
-            "a hook did not move the run's updated_at"
-        );
     }
 
-    /// **A restart, as a phone is sent it.** Three runs on one daemon:
-    /// - A and B each start a tool call, A first;
-    /// - C does nothing, so its only event is its registration's link fact;
-    /// - the daemon restarts, and B, C, then A register again, so A's link fact is the newest;
-    /// - A then starts another tool call;
-    /// - C's supervisor reports it exited.
-    ///
-    /// Each stage is recorded as the `sessions` list after it and the events it added, in the order the daemon wrote
-    /// them. Every clock read becomes the stamp of the step it fell in, so the bytes are the same on every build and
-    /// the order is the daemon's. The phone's fleet tests read the copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`).
-    #[tokio::test]
-    async fn the_restart_link_state_wire_fixture_is_what_this_build_emits() {
-        const FIXTURE: &str = include_str!("../../../fixtures/claude/restart-link-state-wire.json");
-        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(
-            derived_restart_link_state_wire().await,
-            committed,
-            "the committed restart wire no longer matches what this build emits. Regenerate it with \
-             cargo test -p ccd --bin ccd -- --ignored regenerate_the_restart_link_state_wire_fixture, then \
-             copy it over its copy under ios/ (fixtures/check-duplicated-fixtures.sh names it)"
-        );
-    }
-
-    /// Rewrite `fixtures/claude/restart-link-state-wire.json` with what this build emits.
-    #[tokio::test]
-    #[ignore = "generator, not a gate"]
-    async fn regenerate_the_restart_link_state_wire_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_restart_link_state_wire().await).unwrap();
-        std::fs::write(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/restart-link-state-wire.json"
-            ),
-            wire + "\n",
-        )
-        .unwrap();
-    }
-
-    async fn derived_restart_link_state_wire() -> serde_json::Value {
-        const A: &str = TEST_UID;
-        const B: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
-        const C: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQT";
-        let runs = [(A, "cc-a"), (B, "cc-b"), (C, "cc-c")];
-        let store = shared_store();
-        let mut steps: Vec<String> = Vec::new();
-        // A step's boundary is read after a pause, so every clock read of one step falls after its own boundary and
-        // before the next one.
-        async fn step(steps: &mut Vec<String>) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            steps.push(protocol::time::now_rfc3339());
-        }
-        let mut seen: HashMap<&str, u64> = HashMap::new();
-        let mut stages = serde_json::Map::new();
-        let mut record = |name: &str, daemon_sessions: Vec<SessionSummary>| {
-            let mut events: Vec<Event> = runs
-                .iter()
-                .flat_map(|(uid, _)| {
-                    let after = seen.get(uid).copied().unwrap_or(0);
-                    store.events_after(uid, after, 1000).unwrap()
-                })
-                .collect();
-            for event in &events {
-                let last = seen
-                    .entry(
-                        runs.iter()
-                            .find(|(uid, _)| *uid == event.session_uid)
-                            .unwrap()
-                            .0,
-                    )
-                    .or_insert(0);
-                *last = (*last).max(event.seq);
-            }
-            events.sort_by(|left, right| left.ts.cmp(&right.ts).then(left.seq.cmp(&right.seq)));
-            stages.insert(
-                name.into(),
-                json!({"sessions": daemon_sessions, "events": events}),
-            );
-        };
-
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        for (uid, name) in runs {
-            step(&mut steps).await;
-            register(&daemon, name, Some(uid)).await;
-        }
-        for (uid, name) in [runs[0], runs[1]] {
-            step(&mut steps).await;
-            tool_call(&daemon, name, uid, &format!("toolu_{name}_1")).await;
-        }
-        record("before_restart", daemon.sessions().await.unwrap());
-
-        let restarted = daemon_on(Arc::clone(&store), Config::default());
-        for (uid, name) in [runs[1], runs[2], runs[0]] {
-            step(&mut steps).await;
-            register(&restarted, name, Some(uid)).await;
-        }
-        record("restart", restarted.sessions().await.unwrap());
-
-        step(&mut steps).await;
-        tool_call(&restarted, "cc-a", A, "toolu_cc-a_2").await;
-        record("activity", restarted.sessions().await.unwrap());
-
-        step(&mut steps).await;
-        restarted
-            .session_exited("cc-c", Some(C), Some(0), None, None)
-            .await;
-        record("end", restarted.sessions().await.unwrap());
-
-        let mut wire = serde_json::Value::Object(stages);
-        normalise_clocks(&mut wire, &steps);
-        wire
-    }
-
-    /// Every RFC 3339 stamp in `ts`, `created_at` and `updated_at` becomes the fixed stamp of the step it fell in:
-    /// minute `k` for a read at or after `steps[k]`. Equal steps read equal, and the order is kept.
-    fn normalise_clocks(value: &mut serde_json::Value, steps: &[String]) {
-        match value {
-            serde_json::Value::Object(map) => {
-                for (key, field) in map.iter_mut() {
-                    match field {
-                        serde_json::Value::String(stamp)
-                            if matches!(key.as_str(), "ts" | "created_at" | "updated_at") =>
-                        {
-                            let step = steps
-                                .iter()
-                                .rposition(|start| start.as_str() <= stamp.as_str())
-                                .unwrap_or(0);
-                            *stamp = format!("2026-01-01T00:{step:02}:00.000Z");
-                        }
-                        _ => normalise_clocks(field, steps),
-                    }
-                }
-            }
-            serde_json::Value::Array(items) => items
-                .iter_mut()
-                .for_each(|item| normalise_clocks(item, steps)),
-            _ => {}
-        }
-    }
-
-    /// **A quiet run's facts are right after a restart**, rebuilt from the log:
-    /// the model a `/model` receipt set after the `SessionStart`, and the mode a
-    /// transcript line set after the main agent's hook — and a background
-    /// agent's later hook changes neither, before the restart or after it.
+    /// **A quiet run's facts are right after a restart**, rebuilt from the log an
+    /// earlier build wrote: the model a `/model` receipt set after the
+    /// `SessionStart`, and the mode a transcript line set after the main agent's
+    /// hook — and a background agent's later hook changes neither, before the
+    /// restart or after it.
     #[tokio::test]
     async fn a_quiet_sessions_facts_are_rebuilt_from_the_log_after_a_restart() {
         let store = shared_store();
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        daemon
-            .handle_hook(post(
-                TEST_UID,
+        commit_claude_row(&daemon, TEST_UID, "cc-1");
+        let key = test_key();
+        let filed = |id: &str, kind: EventKind, source: Source, payload: serde_json::Value| {
+            PendingEvent::new(&key, kind, payload, source).with_source_event_id(id.to_string())
+        };
+        let mut fork_call = fork_permission_request();
+        fork_call["hook_event_name"] = json!("PreToolUse");
+        fork_call["tool_use_id"] = json!("toolu_fork");
+        for event in [
+            filed(
+                "start",
+                EventKind::SessionStart,
+                Source::Hook,
                 json!({
                     "hook_event_name": "SessionStart",
                     "cwd": "/tmp",
@@ -36611,52 +25704,36 @@ mod tests {
                     "model": "claude-opus-5[1m]",
                     "permission_mode": "default",
                 }),
-                false,
-            ))
-            .await;
-        tool_call(&daemon, "cc-1", TEST_UID, "toolu_1").await;
-        let key = test_key();
-        let line = |uuid: &str, kind: EventKind, payload: serde_json::Value| {
-            PendingEvent::new(&key, kind, payload, Source::Transcript)
-                .with_source_event_id(uuid.to_string())
-        };
-        let cursor = crate::store::TailCursor {
-            path: "/dev/null".into(),
-            dev: 0,
-            ino: 0,
-            offset: 0,
-            last_line_start: 0,
-            last_line_sha: String::new(),
-        };
-        daemon
-            .ingest_scan(
-                TEST_UID,
-                vec![
-                    line(
-                        "u1",
-                        EventKind::UserMessage,
-                        json!({"type": "user", "uuid": "u1", "message": {"role": "user",
-                            "content": "<local-command-stdout>Set model to claude-sonnet-5 and saved as your default for new sessions</local-command-stdout>"}}),
-                    ),
-                    line(
-                        "u2",
-                        EventKind::Other("transcript_permission-mode".into()),
-                        json!({"type": "permission-mode", "uuid": "u2", "permissionMode": "acceptEdits"}),
-                    ),
-                    line(
-                        "u3",
-                        EventKind::UserMessage,
-                        json!({"type": "user", "uuid": "u3", "message": {"role": "user", "content": "thanks"}}),
-                    ),
-                ],
-                cursor,
-            )
-            .await
-            .unwrap();
-        let mut call = fork_permission_request();
-        call["hook_event_name"] = json!("PreToolUse");
-        call["tool_use_id"] = json!("toolu_fork");
-        daemon.handle_hook(post(TEST_UID, call, false)).await;
+            ),
+            filed(
+                "toolu_1",
+                EventKind::ToolCall,
+                Source::Hook,
+                json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_1"}),
+            ),
+            filed(
+                "u1",
+                EventKind::UserMessage,
+                Source::Transcript,
+                json!({"type": "user", "uuid": "u1", "message": {"role": "user",
+                    "content": "<local-command-stdout>Set model to claude-sonnet-5 and saved as your default for new sessions</local-command-stdout>"}}),
+            ),
+            filed(
+                "u2",
+                EventKind::Other(protocol::facts::TRANSCRIPT_PERMISSION_MODE.into()),
+                Source::Transcript,
+                json!({"type": "permission-mode", "uuid": "u2", "permissionMode": "acceptEdits"}),
+            ),
+            filed(
+                "u3",
+                EventKind::UserMessage,
+                Source::Transcript,
+                json!({"type": "user", "uuid": "u3", "message": {"role": "user", "content": "thanks"}}),
+            ),
+            filed("toolu_fork", EventKind::ToolCall, Source::Hook, fork_call),
+        ] {
+            daemon.ingest(event).await.unwrap().expect("a new event");
+        }
 
         let log = store.events_after(TEST_UID, 0, 100).unwrap();
         let by_id = |id: &str| {

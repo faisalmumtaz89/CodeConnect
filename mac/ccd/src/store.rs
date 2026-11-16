@@ -123,13 +123,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     agents. `answer_claims` and `text_mutations` are deliberately NOT split:
 ///     nothing writes a Codex row into either, and a table split ahead of its
 ///     producer is the speculative half-surface this design refuses.
-///   * `6` — an ended run's transcript is forgotten once read through
-///     (`tailer::finish`), so no start reads a file a later run has resumed.
-///     Rows that ended before that rule existed still name theirs, and the
-///     first start would read each one again, filing whatever runs that resumed
-///     it wrote since; so on the way up they are forgotten once. **A version
-///     gate, as `3` is:** run every start, it would drop the final read of a run
-///     whose last read a killed daemon left unfinished. No schema changes, so an
+///   * `6` — an ended run's transcript is forgotten, so no start reads a file a
+///     later run has resumed; on the way up the rows that ended before are
+///     forgotten once. A version gate, as `3` is. No schema changes, so an
 ///     older daemon reads everything; a rollback writes its own number back,
 ///     and the way back up forgets the rows it ended, once more.
 const SCHEMA_VERSION: i64 = 6;
@@ -153,9 +149,8 @@ pub struct Store {
 /// not the [`Store`] opened on it, and no clone a test kept to open it again.
 ///
 /// SQLite leaves a `-wal` and a `-shm` beside the file it is given, so "delete the
-/// db" has to mean all three, and a file the test writes beside it goes too. Not
-/// fussiness: a suite that leaves its files behind on every run is how a machine
-/// ends up with gigabytes of them.
+/// db" has to mean all three. Not fussiness: a suite that leaves its files behind
+/// on every run is how a machine ends up with gigabytes of them.
 #[cfg(test)]
 #[derive(Clone)]
 pub struct TempDb(std::sync::Arc<TempDbFile>);
@@ -163,34 +158,22 @@ pub struct TempDb(std::sync::Arc<TempDbFile>);
 #[cfg(test)]
 struct TempDbFile {
     db: std::path::PathBuf,
-    beside: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]
 impl TempDb {
     pub fn new(stem: &str) -> TempDb {
-        TempDb::holding(std::env::temp_dir().join(format!("{stem}.db")), None)
+        let file = TempDbFile {
+            db: std::env::temp_dir().join(format!("{stem}.db")),
+        };
+        file.remove();
+        TempDb(std::sync::Arc::new(file))
     }
 
     /// `<prefix>-<pid>-<n>-<ms>.db`: the counter is load-bearing, because tests
     /// run in parallel threads and a millisecond alone lets two share a file.
     pub fn unique(prefix: &str) -> TempDb {
         TempDb::new(&unique_stem(prefix))
-    }
-
-    /// [`TempDb::unique`], and the path of one more file beside it, the same name
-    /// with `extension`, that goes with it: a transcript a test writes next to
-    /// its database.
-    pub fn unique_with_file(prefix: &str, extension: &str) -> (TempDb, std::path::PathBuf) {
-        let db = std::env::temp_dir().join(format!("{}.db", unique_stem(prefix)));
-        let file = db.with_extension(extension);
-        (TempDb::holding(db, Some(file.clone())), file)
-    }
-
-    fn holding(db: std::path::PathBuf, beside: Option<std::path::PathBuf>) -> TempDb {
-        let file = TempDbFile { db, beside };
-        file.remove();
-        TempDb(std::sync::Arc::new(file))
     }
 
     pub fn path(&self) -> &Path {
@@ -231,9 +214,6 @@ impl TempDbFile {
             let mut path = self.db.clone().into_os_string();
             path.push(suffix);
             let _ = std::fs::remove_file(std::path::PathBuf::from(path));
-        }
-        if let Some(beside) = &self.beside {
-            let _ = std::fs::remove_file(beside);
         }
     }
 }
@@ -287,16 +267,6 @@ impl SessionRow {
     pub fn key(&self) -> SessionKey {
         SessionKey::new(&self.session_uid, &self.session_id)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct TailCursor {
-    pub path: String,
-    pub dev: i64,
-    pub ino: i64,
-    pub offset: u64,
-    pub last_line_start: u64,
-    pub last_line_sha: String,
 }
 
 /// A paired device as stored. The token hash never leaves this module, so no
@@ -457,11 +427,8 @@ pub enum TokenAuth {
 pub enum LedgerWrite {
     /// This answer won the race and is now the record.
     Recorded,
-    /// Already resolved; `outcome` is the original and must be returned as-is.
-    Existing {
-        outcome: AnswerOutcome,
-        payload_hash: String,
-    },
+    /// Already resolved: the original stands and nothing was written.
+    Existing,
 }
 
 /// An approval card as persisted, so a restart does not answer "unknown" to a
@@ -478,8 +445,6 @@ pub struct PendingApprovalRow {
     pub request_id: String,
     /// Serialised [`protocol::ws::ApprovalCard`].
     pub card: String,
-    pub generation: u64,
-    pub created_ms: i64,
 }
 
 /// The same card for a Codex run, plus the four columns that make one Codex
@@ -556,7 +521,7 @@ pub struct AnswerClaim {
     pub started_at: String,
 }
 
-/// What `upsert_session` did.
+/// What `upsert_session_at_generation` did.
 #[must_use = "a tombstoned upsert wrote nothing; the session must not be set up"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionUpsert {
@@ -810,7 +775,7 @@ fn hosted_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostedRun> {
 /// Returns `(table, other)`. The pair rather than just the table, because every
 /// caller that writes one has to be able to say something about the other: the
 /// upsert **moves** a uid it finds in the other rather than adding a second copy
-/// — see [`Store::upsert_session`] for why moving and not refusing — and the two
+/// — see [`Store::upsert_session_at_generation`] for why moving and not refusing — and the two
 /// removal paths delete from both and check the total.
 ///
 /// **Everything that is not Claude goes to `codex_sessions`**, including an
@@ -864,7 +829,6 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "answer_claims",
     "text_mutations",
     "mutation_ledger",
-    "tail_cursors",
     "mail",
     "mail_sent",
     "mail_wake",
@@ -1591,6 +1555,13 @@ impl Store {
                 AND (tmux_session != '' OR tmux_socket != '')",
             [],
         )?;
+        // An earlier build's transcript cursors and name tombstones: nothing reads
+        // them, and a cursor names a run's transcript, so they do not outlive the
+        // code that kept them. Every start, as the fix above: a rolled-back daemon
+        // makes them again, empty.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS tail_cursors; DROP TABLE IF EXISTS deleted_names;",
+        )?;
         // The one-shot push-tuple repair — see [`SCHEMA_VERSION`] on why it is
         // gated where the GLOB fix above is not. Ordered after the column
         // additions so the columns it names are present on a legacy database.
@@ -1660,11 +1631,6 @@ impl Store {
     }
 
     /// Append many facts in one transaction. Duplicates are skipped silently.
-    ///
-    /// Deliberately *not* used by the transcript tailer, which must advance its
-    /// cursor in the same transaction — see
-    /// [`Store::append_batch_with_cursor`]. This is the plain form, for callers
-    /// with no cursor to keep honest (the fixture replay harness).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn append_batch(&self, pendings: &[PendingEvent]) -> Result<Vec<Event>> {
         if pendings.is_empty() {
@@ -1678,65 +1644,6 @@ impl Store {
                 out.push(event);
             }
         }
-        tx.commit()?;
-        Ok(out)
-    }
-
-    /// Append a transcript batch **and** advance its cursor, atomically.
-    ///
-    /// The cursor is a claim: "everything up to byte N of this file is in the
-    /// log". Saving it in a separate transaction from the events makes that
-    /// claim briefly false, and a crash inside that window makes it *permanently*
-    /// false — the lines are skipped on every subsequent poll, and no rescan
-    /// ever revisits them because the cursor says they were consumed. One
-    /// `BEGIN IMMEDIATE` is what turns the claim back into a fact: either both
-    /// halves land or neither does, and neither leaves the log with a hole.
-    ///
-    /// An empty batch still advances the cursor. Blank lines and lines that are
-    /// not facts (malformed JSON, entries we do not map) legitimately produce no
-    /// events, and refusing to move past them would re-read the same bytes
-    /// forever.
-    ///
-    /// **A batch for a session that is gone is dropped, cursor and all.** Ending
-    /// a run stops its tail by *queueing* a `TailCommand::Stop`, so one more
-    /// poll can already be in flight when the run's rows are deleted. Landing it
-    /// afterwards would file events and a cursor under a `session_uid` with no
-    /// row — the schema has no foreign key to prevent that, and the resulting
-    /// orphans are the exact shape `SESSION_SCOPED_TABLES` exists to avoid.
-    /// Checked inside the same `BEGIN IMMEDIATE` as the writes, so the delete
-    /// either happened before this and the batch is refused, or after it and the
-    /// delete takes these rows with the rest. There is no third ordering: both
-    /// transactions are `Immediate` on the one write connection.
-    pub fn append_batch_with_cursor(
-        &self,
-        session_uid: &str,
-        pendings: &[PendingEvent],
-        cursor: &TailCursor,
-    ) -> Result<Vec<Event>> {
-        let mut conn = self.write();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let known: bool = tx.query_row(
-            // `all_sessions`: "does this run still exist" is a question about
-            // the fleet, not about one table. Asked of Claude's half alone it
-            // answers "no" for a live Codex run, rolls the batch back, and — the
-            // part that does not recover — leaves the cursor where it was.
-            "SELECT EXISTS(SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
-            params![session_uid],
-            |row| row.get(0),
-        )?;
-        if !known {
-            // Rolled back rather than committed empty: the cursor must not move
-            // for a session whose log no longer exists.
-            tx.rollback()?;
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::with_capacity(pendings.len());
-        for pending in pendings {
-            if let Some(event) = append_in_tx(&tx, pending)? {
-                out.push(event);
-            }
-        }
-        save_cursor_in_tx(&tx, session_uid, cursor)?;
         tx.commit()?;
         Ok(out)
     }
@@ -2091,14 +1998,6 @@ impl Store {
         Ok(ids)
     }
 
-    /// The sequence number of the event a hook filed under `source_event_id`
-    /// in this run, read on the dedup index.
-    pub fn hook_event_seq(&self, session_uid: &str, source_event_id: &str) -> Result<Option<u64>> {
-        Ok(self
-            .filed_event(session_uid, &Source::Hook, source_event_id)?
-            .map(|(seq, _)| seq))
-    }
-
     /// The seq and turn of the event `source` filed under `source_event_id` in
     /// this run, read on the dedup index.
     pub fn filed_event(
@@ -2117,28 +2016,6 @@ impl Store {
             )
             .optional()?;
         Ok(filed.map(|(seq, turn_id)| (seq as u64, turn_id)))
-    }
-
-    /// A transcript entry this run filed under Claude's `uuid` for it.
-    pub fn transcript_entry(
-        &self,
-        session_uid: &str,
-        uuid: &str,
-    ) -> Result<Option<serde_json::Value>> {
-        let conn = self.read();
-        let payload: Option<String> = conn
-            .query_row(
-                "SELECT payload FROM events
-                  WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
-                params![
-                    session_uid,
-                    protocol::event::Source::Transcript.as_str(),
-                    uuid
-                ],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(payload.and_then(|payload| serde_json::from_str(&payload).ok()))
     }
 
     /// How many events this run actually has.
@@ -2269,15 +2146,15 @@ impl Store {
     /// deleted, in which case nothing is written and the caller is told.
     ///
     /// **The tombstone check is inside the statement, and that is the fix.** A
-    /// hook or registration looks a row up, awaits, and writes; a phone's
-    /// delete can commit between those two steps, and the write would re-insert
-    /// the row the user just removed. No ordering at the caller can close that
-    /// window — only the write itself refusing can, because every write goes
-    /// through the one connection whose transactions are serial.
+    /// registration looks a row up, awaits, and writes; a phone's delete can
+    /// commit between those two steps, and the write would re-insert the row the
+    /// user just removed. No ordering at the caller can close that window — only
+    /// the write itself refusing can, because every write goes through the one
+    /// connection whose transactions are serial.
     ///
     /// Callers must not treat `Tombstoned` as success: whatever they were about
-    /// to set up for this session — a tail, a push, an in-memory supervisor —
-    /// must not happen.
+    /// to set up for this session — a push, an in-memory supervisor — must not
+    /// happen.
     ///
     /// **Which table a run is written to is decided by its `agent`, here and
     /// nowhere else.** Claude goes to `sessions`, everything else to
@@ -2289,41 +2166,15 @@ impl Store {
     /// in both tables would be returned twice by the view, and `get_session`
     /// would answer with whichever the planner reached first. So a write whose
     /// agent disagrees with where the row currently lives **moves the row**
-    /// rather than adding a second copy.
+    /// rather than adding a second copy, carrying the whole row across first and
+    /// then applying the ordinary upsert on top of it. The carry is `SELECT *`,
+    /// which is only correct because the two tables have one column order —
+    /// `both_session_tables_have_one_shape` is what keeps that true.
     ///
-    /// **Moving, not refusing, and that choice is deliberate.** A re-registration
-    /// really can arrive under a different agent — `register_supervisor` treats
-    /// the registration as the authority on which agent a run is, and
-    /// `the_resolver_never_pairs_one_registrations_row_with_anothers_addressee`
-    /// exercises exactly that path. Whether a run may change agents at all is a
-    /// question about registration adoption (generation-aware adoption), not
-    /// about storage, and answering it here would be this layer
-    /// inventing a policy the layer that owns it has not adopted. So the store
-    /// does the one thing it can do without deciding anything: it carries the
-    /// whole row across first, and then applies the ordinary upsert on top of
-    /// it. The `COALESCE`d fields survive the move because the row that arrives
-    /// in the new table is the row that left the old one — a delete-and-insert
-    /// would silently drop the transcript path and the Codex identity a later
-    /// heartbeat does not carry.
+    /// It carries the **Codex generation this registration was accepted at** —
+    /// the durable high-water evidence.
     ///
-    /// The carry is `SELECT *`, which is only correct because the two tables
-    /// have one column order — `both_session_tables_have_one_shape` is what
-    /// keeps that true.
-    ///
-    /// **Writes no Codex generation.** Every caller but one is a writer that
-    /// knows nothing about visits — a hook, a heartbeat, a tailer, a fixture —
-    /// and a generation is a fact about a *registration*. `None` is
-    /// `COALESCE`d away by the statement below, so none of them can blank a
-    /// high-water they were never told about. The registration path uses
-    /// [`Store::upsert_session_at_generation`].
-    pub fn upsert_session(&self, row: &SessionRow) -> Result<SessionUpsert> {
-        self.upsert_session_at_generation(row, None)
-    }
-
-    /// The same write, carrying the **Codex generation this registration was
-    /// accepted at** — the durable high-water evidence.
-    ///
-    /// A second method rather than a fourteenth field on [`SessionRow`], and the
+    /// A second argument rather than a fourteenth field on [`SessionRow`], and the
     /// reason is what the column is *for*. `SessionRow` is the fleet projection
     /// — the shape `all_sessions` returns, the shape every reader in the daemon
     /// decodes, the shape twenty-one call sites construct. The generation is
@@ -2495,11 +2346,10 @@ impl Store {
                     -- generation — blanks it, which is right, because its
                     -- thread is a new one nobody has adopted yet.
                     --
-                    -- Every other writer is untouched, and structurally rather
-                    -- than by convention: a hook, a heartbeat or a tailer reaches
-                    -- this through [`Store::upsert_session`], whose `None` makes
+                    -- Every other write is untouched, and structurally rather
+                    -- than by convention: its `None` makes
                     -- `excluded.codex_generation` NULL, fails the first test, and
-                    -- takes the ELSE arm — the `COALESCE` those writers have
+                    -- takes the ELSE arm — the `COALESCE` such writes have
                     -- always had. `-1` is a sentinel below every generation a
                     -- producer mints (the coordinator starts at 1) and is there
                     -- only so a row predating the column compares as lower
@@ -2598,27 +2448,6 @@ impl Store {
         // Read as "no provable high-water" rather than cast into a colossal
         // `u64` that would refuse every registration this session ever makes.
         Ok(generation.and_then(|g| u64::try_from(g).ok()))
-    }
-
-    /// Whether this name was deliberately removed — see `deleted_names`.
-    pub fn name_is_tombstoned(&self, session_id: &str) -> Result<bool> {
-        let conn = self.read();
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM deleted_names WHERE session_id = ?1)",
-            params![session_id],
-            |row| row.get(0),
-        )?)
-    }
-
-    /// A SessionStart is a resume announcing itself: observation was asked for
-    /// again, so the removal stops applying.
-    pub fn clear_name_tombstone(&self, session_id: &str) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "DELETE FROM deleted_names WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
     }
 
     pub fn get_session(&self, session_uid: &str) -> Result<Option<SessionRow>> {
@@ -3762,9 +3591,9 @@ impl Store {
         // seeks, one per table — with a temp b-tree over the at most two rows
         // they return. Measured over 2,000 sessions: 0.0023ms to 0.0040ms per
         // lookup.
-        let row: Option<(String, String, String)> = tx
+        let row: Option<(String, String)> = tx
             .query_row(
-                "SELECT lifecycle, tmux_socket, session_id FROM all_sessions
+                "SELECT lifecycle, tmux_socket FROM all_sessions
                   WHERE session_uid = ?1
                   ORDER BY (lifecycle IN (?2, ?3) OR tmux_socket = '') ASC
                   LIMIT 1",
@@ -3773,10 +3602,10 @@ impl Store {
                     lifecycle_str(Lifecycle::Exited),
                     lifecycle_str(Lifecycle::Failed)
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some((lifecycle, tmux_socket, session_id_of_row)) = row else {
+        let Some((lifecycle, tmux_socket)) = row else {
             return Ok(DeleteOutcome::NotFound);
         };
         let ccd_hosted: bool = tx.query_row(
@@ -3862,16 +3691,6 @@ impl Store {
             "INSERT OR IGNORE INTO deleted_sessions(session_uid, deleted_at) VALUES(?1, ?2)",
             params![session_uid, protocol::time::now_rfc3339()],
         )?;
-        if unhosted {
-            // And under this *name*: an adopted run's hooks carry no uid, so
-            // without this the very next one would mint a fresh identity and
-            // put the row straight back — the resurrection wearing a new uid.
-            // See `deleted_names`; a SessionStart clears it.
-            tx.execute(
-                "INSERT OR IGNORE INTO deleted_names(session_id, deleted_at) VALUES(?1, ?2)",
-                params![session_id_of_row, protocol::time::now_rfc3339()],
-            )?;
-        }
         tx.commit()?;
         Ok(DeleteOutcome::Deleted { events })
     }
@@ -4212,7 +4031,8 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Insert-once ledger write. Returns the original outcome if one exists.
+    /// Insert-once ledger write: [`LedgerWrite::Existing`], writing nothing, if an
+    /// outcome is already recorded.
     ///
     /// The read and the insert run inside a single immediate transaction, so two
     /// answers racing from two phones cannot both observe "not yet answered".
@@ -4230,22 +4050,16 @@ impl Store {
     ) -> Result<LedgerWrite> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String)> = tx
+        let existing: Option<i64> = tx
             .query_row(
-                "SELECT payload_hash, outcome FROM answers
-                  WHERE session_uid = ?1 AND request_id = ?2",
+                "SELECT 1 FROM answers WHERE session_uid = ?1 AND request_id = ?2",
                 params![session_uid, request_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()?;
-        if let Some((hash, encoded)) = existing {
+        if existing.is_some() {
             tx.commit()?;
-            let outcome = serde_json::from_str(&encoded)
-                .with_context(|| format!("decoding stored outcome for {request_id}"))?;
-            return Ok(LedgerWrite::Existing {
-                outcome,
-                payload_hash: hash,
-            });
+            return Ok(LedgerWrite::Existing);
         }
         tx.execute(
             // `WHERE EXISTS(sessions)`: an answer settling just as its session
@@ -4928,54 +4742,6 @@ impl Store {
 
     // ----------------------------------------------------- pending approvals
 
-    /// Persist a card so a restart can still answer "what is this agent waiting
-    /// for?" with the truth rather than with silence.
-    /// False when the session was deleted while the approval was in flight:
-    /// nothing was written, and the caller must retire its in-memory half too.
-    pub fn upsert_pending_approval(&self, row: &PendingApprovalRow) -> Result<bool> {
-        let conn = self.write();
-        let changed = conn.execute(
-            // `SELECT ... WHERE EXISTS(all_sessions)` rather than VALUES: an
-            // approval for a session that was deleted mid-flight must not leave
-            // an orphan row that is later recovered as an indeterminate answer
-            // for a run nobody can name.
-            //
-            // **`pending_approvals` is not agent-scoped, and that is a bound
-            // obligation, not an oversight.** A v0.6.0 daemon reads this table
-            // GLOBALLY — `list_pending_approvals` there does not go through a
-            // `sessions` row — so a Codex card sitting here after a rollback is
-            // visible to it, and its recovery can delete one.
-            //
-            // The guard above deliberately does not stop that: it asks
-            // `all_sessions`, so it accepts a Codex uid. What stops it is
-            // upstream, in the daemon — `Daemon::handle_permission_request`
-            // refuses a non-Claude session before a card is built at all, which
-            // is scaffolding that lifts once this table is split per agent. The
-            // refusal is up there rather than down here on purpose: a store
-            // guard that quietly dropped a Codex card would report success and
-            // lose the card, which is the failure this whole isolation exists to
-            // prevent in the other direction. See [`create_schema`].
-            "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
-                                           generation, created_ms)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6
-              WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)
-             ON CONFLICT(session_uid, request_id) DO UPDATE SET
-                session_id = excluded.session_id,
-                card       = excluded.card,
-                generation = excluded.generation,
-                created_ms = excluded.created_ms",
-            params![
-                row.session_uid,
-                row.session_id,
-                row.request_id,
-                row.card,
-                row.generation as i64,
-                row.created_ms,
-            ],
-        )?;
-        Ok(changed > 0)
-    }
-
     pub fn delete_pending_approval(&self, session_uid: &str, request_id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -4996,8 +4762,7 @@ impl Store {
     /// log. And an ordinary write failure left the reverse, an in-memory card
     /// the phone was rung about and a restart forgot.
     ///
-    /// One `BEGIN IMMEDIATE` removes both orderings. `append_batch_with_cursor`
-    /// took the same shape for the same reason: a projection and the fact it
+    /// One `BEGIN IMMEDIATE` removes both orderings: a projection and the fact it
     /// projects cannot be two commits.
     ///
     /// The row is written **first inside the transaction**, so a constraint
@@ -5128,7 +4893,7 @@ impl Store {
             // that survived a restart is exactly as real as a Claude one. Only
             // the OLD daemon is meant to be blind to half of them, and it is
             // blind by not knowing the second table's name — see `create_schema`.
-            "SELECT p.session_uid, p.session_id, p.request_id, p.card, p.generation, p.created_ms
+            "SELECT p.session_uid, p.session_id, p.request_id, p.card
                FROM all_pending_approvals p
               WHERE NOT EXISTS (SELECT 1 FROM answers a
                                  WHERE a.session_uid = p.session_uid
@@ -5141,8 +4906,6 @@ impl Store {
                 session_id: row.get(1)?,
                 request_id: row.get(2)?,
                 card: row.get(3)?,
-                generation: row.get::<_, i64>(4)? as u64,
-                created_ms: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -5180,8 +4943,9 @@ impl Store {
 
     /// Drop a claim that never actuated, so the card can be answered again.
     ///
-    /// Only ever called when the supervisor *refused* — that is, when we know
-    /// nothing was typed. A claim whose fate is unknown is left where it is.
+    /// Only ever called when the answer did not reach the agent — the run's host
+    /// refused it or never took it — that is, when we know nothing was sent. A
+    /// claim whose fate is unknown is left where it is.
     pub fn release_answer_claim(&self, session_uid: &str, request_id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -5768,12 +5532,10 @@ impl Store {
             "UPDATE mail_sent SET offer = NULL, offer_state = NULL WHERE offer IS NOT NULL",
             [],
         )?;
-        // A Claude wake whose turn ran while no daemon was listening left nothing
-        // behind, its Stop hook having found no daemon, so none is outstanding. A Codex
+        // A Claude wake is not outstanding across a restart. A Codex
         // wake stays outstanding: the link files the turn that carried it when it
         // attaches again, and that ends it, while a wake still held in Codex's queue
-        // must not be queued twice. Whether a turn runs is read from its transcript,
-        // which the tailer reads on from where it stopped.
+        // must not be queued twice.
         tx.execute(
             "UPDATE mail_wake SET outstanding = 0
               WHERE session_uid NOT IN (SELECT session_uid FROM codex_sessions)",
@@ -6333,52 +6095,7 @@ impl Store {
         }
         Ok(out)
     }
-
-    /// An ended run's transcript, read through, is no longer its to read: the
-    /// tailer forgets it so no later start reads the file again (see
-    /// `tailer::finish`). Only an ended row, so a run a late hook brought back
-    /// keeps the file it is still writing.
-    pub fn forget_transcript(&self, session_uid: &str) -> Result<()> {
-        self.write().execute(
-            "UPDATE sessions SET transcript_path = NULL
-              WHERE session_uid = ?1 AND lifecycle = 'exited'",
-            params![session_uid],
-        )?;
-        Ok(())
-    }
-
-    pub fn load_cursor(&self, session_uid: &str) -> Result<Option<TailCursor>> {
-        let conn = self.read();
-        let cursor = conn
-            .query_row(
-                "SELECT path, dev, ino, offset, last_line_start, last_line_sha
-                   FROM tail_cursors WHERE session_uid = ?1",
-                params![session_uid],
-                |row| {
-                    Ok(TailCursor {
-                        path: row.get(0)?,
-                        dev: row.get(1)?,
-                        ino: row.get(2)?,
-                        offset: row.get::<_, i64>(3)? as u64,
-                        last_line_start: row.get::<_, i64>(4)? as u64,
-                        last_line_sha: row.get(5)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(cursor)
-    }
 }
-
-// There is deliberately no public `save_cursor`.
-//
-// A cursor may only move inside the transaction that appends the events it is
-// claiming — see `Store::append_batch_with_cursor`. A standalone save is what
-// once let a cursor advance past lines that had not reached the log yet: a
-// crash between the two writes skipped those lines permanently, and no later
-// poll ever revisited the bytes, because the cursor said they were consumed.
-// Removing the entry point makes the invariant structural rather than a rule
-// somebody has to remember.
 
 /// The database a second daemon takes `pairing_codes.allow_ssh` off at the
 /// instant [`Store::create_pairing_code`] has probed for that column and has not
@@ -6485,29 +6202,6 @@ fn harden_sidecars(path: &Path) {
     }
 }
 
-fn save_cursor_in_tx(conn: &Connection, session_uid: &str, cursor: &TailCursor) -> Result<()> {
-    conn.execute(
-        "INSERT INTO tail_cursors(session_uid, path, dev, ino, offset,
-                                  last_line_start, last_line_sha, updated_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(session_uid) DO UPDATE SET
-            path = excluded.path, dev = excluded.dev, ino = excluded.ino,
-            offset = excluded.offset, last_line_start = excluded.last_line_start,
-            last_line_sha = excluded.last_line_sha, updated_at = excluded.updated_at",
-        params![
-            session_uid,
-            cursor.path,
-            cursor.dev,
-            cursor.ino,
-            cursor.offset as i64,
-            cursor.last_line_start as i64,
-            cursor.last_line_sha,
-            protocol::time::now_rfc3339(),
-        ],
-    )?;
-    Ok(())
-}
-
 /// One `text_mutations` row, as read. A named struct rather than a tuple: five
 /// same-shaped columns, three of them optional, is exactly where a positional
 /// read starts silently returning the wrong field.
@@ -6607,23 +6301,19 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 /// rests on does not cover any of that.
 ///
 /// They are still not split, and the reason has changed shape since it was
-/// first written down. It was "no producer exists". That was **wrong**: three
-/// daemon paths reach these tables agent-agnostically today — `send_text`,
-/// which claims `text_mutations` before it knows whether a supervisor is even
-/// attached; the `PermissionRequest` hook, whose `ensure_session` *preserves* an
-/// existing row's agent rather than filtering on it; and `answer`, which claims
-/// `answer_claims` before every one of its refusals. All three would have
-/// written for a Codex run.
+/// first written down. It was "no producer exists". That was **wrong**: daemon
+/// paths reach these tables agent-agnostically — `send_text`, which claims
+/// `text_mutations`, and `answer`, which claims `answer_claims` before every one
+/// of its refusals. Both would have written for a Codex run.
 ///
-/// So the real reason is a decision: **each of those three producers now refuses
+/// So the real reason is a decision: **each of those producers refuses
 /// a non-Claude session outright, before any durable write.** That is
-/// scaffolding, deliberately — it makes Codex approvals and Codex text mutations
-/// impossible rather than merely unbuilt, and it is what splitting these tables
+/// scaffolding, deliberately — it makes Codex text mutations and Codex claims in
+/// these tables impossible rather than merely unbuilt, and it is what splitting these tables
 /// per agent removes. It is cheap and reversible where splitting four tables now
 /// would be machinery built ahead of the wire that will shape it. The refusals live in
-/// `Daemon::send_text`, `Daemon::handle_permission_request` and `Daemon::answer`;
-/// `send_text_to_a_codex_session_is_refused_before_it_claims_anything`,
-/// `a_permission_request_for_a_codex_session_raises_no_card` and
+/// `Daemon::send_text` and `Daemon::answer`;
+/// `send_text_to_a_codex_session_is_refused_before_it_claims_anything` and
 /// `answering_a_codex_card_is_refused_before_the_claim` drive those real paths
 /// against a Codex row and read all four tables back off the daemon's own
 /// database file, and
@@ -6674,7 +6364,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- closed rather than posing as Claude.
             --
             -- Every row in THIS table is 'claude' — the move below keeps it that
-            -- way, and `upsert_session` routes by this value so nothing else can
+            -- way, and `upsert_session_at_generation` routes by this value so nothing else can
             -- land here. The column stays because it is what the move is defined
             -- over: a rollback writes rows here again, and the way back up has to
             -- be able to ask which of them are not Claude's. Decoded through
@@ -6691,7 +6381,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- Claude and for every row predating it; carried on this table for
             -- the same one-shape reason as the two columns above, and for no
             -- other — no row that lives here can ever have a value, because
-            -- `upsert_session` routes a Codex run to `codex_sessions` and only a
+            -- `upsert_session_at_generation` routes a Codex run to `codex_sessions` and only a
             -- Codex registration writes this column. See `codex_sessions` below
             -- for what it means and why it is rollback-isolated in practice.
             codex_generation  INTEGER
@@ -6717,7 +6407,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at        TEXT NOT NULL,
             updated_at        TEXT NOT NULL,
             -- Declared identically to `sessions`, `DEFAULT 'claude'` and all,
-            -- because "identical" is the property that matters: `upsert_session`
+            -- because "identical" is the property that matters: `upsert_session_at_generation`
             -- moves a run between the two tables with `INSERT … SELECT *`, which
             -- is correct only while the column ORDER matches. Every insert here
             -- names `agent` explicitly, so the default is never reached; it is
@@ -6742,7 +6432,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- thing it refuses is a generation the daemon has already adopted.
             --
             -- **Rollback-isolated: a rolled-back daemon never sees a value.** Only a
-            -- Codex registration ever writes a non-NULL value, and `upsert_session`
+            -- Codex registration ever writes a non-NULL value, and `upsert_session_at_generation`
             -- files a Codex run here — in the table a v0.6.0 daemon does not
             -- know the name of, and cannot re-file into `sessions` because the
             -- shadow trigger below refuses the write. The twin column on
@@ -6823,7 +6513,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         --
         -- **And it does not catch this build's own writes.** The one statement
         -- here that inserts into `sessions` for a uid living in
-        -- `codex_sessions` is `upsert_session`'s carry, which is
+        -- `codex_sessions` is `upsert_session_at_generation`'s carry, which is
         -- `INSERT INTO sessions SELECT * FROM codex_sessions` — so `NEW.agent`
         -- is that row's real agent, not `'claude'`, and the guard is a
         -- registration re-filing a run under a different agent rather than a
@@ -6852,7 +6542,7 @@ refusing to file a second copy of it in the shared sessions table');
         -- which the shadowing shape could not offer without triggers.
         --
         -- `UNION ALL`, not `UNION`: a uid lives in exactly one of the two tables
-        -- (`upsert_session` moves a run rather than copying it), so there is
+        -- (`upsert_session_at_generation` moves a run rather than copying it), so there is
         -- nothing to deduplicate and `UNION` would only buy a sort.
         --
         -- Measured, not assumed, on the owner's real store: SQLite pushes the
@@ -7167,17 +6857,6 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             PRIMARY KEY(operation_kind, session_uid, client_request_id)
         );
 
-        CREATE TABLE IF NOT EXISTS tail_cursors(
-            session_uid     TEXT PRIMARY KEY,
-            path            TEXT    NOT NULL,
-            dev             INTEGER NOT NULL,
-            ino             INTEGER NOT NULL,
-            offset          INTEGER NOT NULL,
-            last_line_start INTEGER NOT NULL,
-            last_line_sha   TEXT    NOT NULL,
-            updated_at      TEXT    NOT NULL
-        );
-
         -- A run ccd hosts, of either agent: the app's start request it answers,
         -- its host's kernel identity (null until the host has written host.json),
         -- the highest host message whose effects are committed, and the SDK's
@@ -7217,18 +6896,6 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         CREATE TABLE IF NOT EXISTS deleted_sessions(
             session_uid TEXT PRIMARY KEY,
             deleted_at  TEXT NOT NULL
-        );
-
-        -- The same decision at the name level, for runs that have no uid to
-        -- tombstone. An adopted session's hooks carry no CodeConnect uid, so a
-        -- uid tombstone cannot stop the next hook minting a fresh identity and
-        -- putting the row straight back. Removing an adopted run means "stop
-        -- observing this conversation": its name is recorded here, ordinary
-        -- hooks for it are dropped, and an explicit SessionStart — a resume
-        -- announcing itself — clears the entry and re-adopts.
-        CREATE TABLE IF NOT EXISTS deleted_names(
-            session_id TEXT PRIMARY KEY,
-            deleted_at TEXT NOT NULL
         );
 
         -- Every folder a session has started in, with its newest start: the
@@ -7351,14 +7018,14 @@ fn needs_session_uid_migration(conn: &Connection) -> Result<bool> {
 /// invariant broken at once: `all_sessions` is a `UNION ALL` and returns the run
 /// twice, the old daemon's prune can walk the `sessions` copy and delete the
 /// shared events underneath it, and the next agent flip through
-/// [`Store::upsert_session`] carries a row onto a uid that is already a primary
+/// [`Store::upsert_session_at_generation`] carries a row onto a uid that is already a primary
 /// key in the destination and fails.
 ///
 /// An `agent`-only predicate never sees that row and the damage is permanent.
 /// So the question this asks is not "is this row's agent Codex" but **"does this
 /// row belong in `sessions` at all"**, and a uid that already exists in
 /// `codex_sessions` answers no whatever the `agent` column says. Nothing this
-/// build writes can make that pair — [`Store::upsert_session`] moves a run
+/// build writes can make that pair — [`Store::upsert_session_at_generation`] moves a run
 /// rather than copying it — so the only thing that produces one is a rollback,
 /// and treating it as Codex-owned is what makes a rollback round trip
 /// self-healing rather than terminal. [`move_codex_sessions`] does the
@@ -7711,7 +7378,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     // would widen one half, leave the other, and fail
     // `both_session_tables_have_one_shape` — which is exactly the drift that
     // test exists to catch, and exactly what would break the `INSERT … SELECT *`
-    // carry in `upsert_session` at runtime.
+    // carry in `upsert_session_at_generation` at runtime.
     //
     // Appended last on both, which is where `ALTER TABLE … ADD COLUMN` puts it
     // and where the `CREATE TABLE`s above declare it, so the two orders agree
@@ -8177,12 +7844,6 @@ fn migrate_to_session_uids(conn: &mut Connection) -> Result<()> {
             SELECT m.session_uid, a.request_id, a.payload_hash, a.outcome, a.created_at
               FROM answers_v0 a JOIN _uid_map m ON m.session_id = a.session_id;
 
-        INSERT INTO tail_cursors(session_uid, path, dev, ino, offset,
-                                 last_line_start, last_line_sha, updated_at)
-            SELECT m.session_uid, c.path, c.dev, c.ino, c.offset,
-                   c.last_line_start, c.last_line_sha, c.updated_at
-              FROM tail_cursors_v0 c JOIN _uid_map m ON m.session_id = c.session_id;
-
         DROP TABLE sessions_v0;
         DROP TABLE events_v0;
         DROP TABLE answers_v0;
@@ -8229,9 +7890,8 @@ pub enum CodexCardOutcome {
 /// produces a different key for one item and would otherwise put two cards on
 /// the phone for one question.
 ///
-/// The `WHERE EXISTS` guard is `upsert_pending_approval`'s, for the same
-/// reason: an approval for a run deleted mid-flight must not leave an orphan
-/// row that recovery later raises for a session nobody can name.
+/// The `WHERE EXISTS` guard: an approval for a run deleted mid-flight must not
+/// leave an orphan row that recovery later raises for a session nobody can name.
 ///
 /// # A re-delivery is compared, not merged
 ///
@@ -8342,11 +8002,10 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
         pending.kind.as_str()
     );
 
-    // A fact for a session that is gone is dropped, not filed. A hook or an
+    // A fact for a session that is gone is dropped, not filed. An event or an
     // approval already in flight when the phone's delete commits would
-    // otherwise write rows keyed to a uid nothing can name again — the same
-    // orphan shape `append_batch_with_cursor` refuses, enforced here so every
-    // single-event path shares the rule. `None` is the shape callers already
+    // otherwise write rows keyed to a uid nothing can name again — an orphan,
+    // refused here so every single-event path shares the rule. `None` is the shape callers already
     // tolerate for a dedup miss.
     //
     // `all_sessions`, and this is the single highest-consequence line of the
@@ -8659,10 +8318,7 @@ mod tests {
     fn the_mutation_ledger_conflicts_on_changed_material_and_never_actuates_twice() {
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let now = protocol::time::now_rfc3339();
 
         // The immutable material a compose was claimed with: it was a `turn_start`
@@ -8838,10 +8494,7 @@ mod tests {
     fn an_answer_is_claimed_and_settled_in_the_one_generalized_ledger() {
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let now = protocol::time::now_rfc3339();
         insert_codex_card(&store, &session, "derived-1", "item-1", "turn-1", 10, "{}").unwrap();
 
@@ -8945,10 +8598,7 @@ mod tests {
     fn a_retirement_that_cannot_commit_leaves_the_answer_claim_live() {
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let now = protocol::time::now_rfc3339();
         insert_codex_card(&store, &session, "derived-1", "item-1", "turn-1", 10, "{}").unwrap();
         let material = ClaimedMaterial {
@@ -9024,10 +8674,7 @@ mod tests {
     fn an_answer_terminal_that_settles_no_claim_rolls_the_whole_commit_back() {
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let now = protocol::time::now_rfc3339();
 
         // --- no claim at all under this key ---
@@ -9127,10 +8774,7 @@ mod tests {
     fn recovery_reads_every_unsettled_answer_claim_and_no_other_operation() {
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let now = protocol::time::now_rfc3339();
         let material = |route: &str| ClaimedMaterial {
             thread_id: "th-1".into(),
@@ -9219,10 +8863,7 @@ mod tests {
         let (_p, path) = {
             let (store, path) = temp_store();
             // NEW daemon writes only Claude rows (the only kind the shared table holds).
-            store
-                .upsert_session(&session_row(&key("AA", "cc-1")))
-                .unwrap()
-                .assert_present();
+            begin(&store, &key("AA", "cc-1"));
             drop(store);
             ((), path)
         };
@@ -9292,10 +8933,7 @@ mod tests {
         use protocol::event::sdk_event_id;
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let filed = |kind: EventKind, id: String| {
             let mut event = PendingEvent::new(&session, kind, json!({"x": 1}), Source::Sdk);
             event.source_event_id = Some(id);
@@ -9355,10 +8993,7 @@ mod tests {
         // know is read back as `Unknown`, not `Daemon`.
         let (store, _p) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         store
             .write()
             .execute(
@@ -9392,6 +9027,26 @@ mod tests {
         }
     }
 
+    /// `session`'s run, begun as the engine begins one, its uid standing for the start
+    /// request.
+    fn begin(store: &Store, session: &SessionKey) {
+        assert_eq!(
+            store
+                .begin_run(&session_row(session), &session.uid, None)
+                .unwrap(),
+            None
+        );
+    }
+
+    /// The host a test records for a run whose cards it files. Nothing here signals it.
+    const HOST: ProcessIdentity = ProcessIdentity {
+        pid: 4242,
+        birth: protocol::proc_identity::BirthIdentity {
+            start_sec: 1,
+            start_usec: 0,
+        },
+    };
+
     /// **A folder stays on the project list after its runs are removed and the
     /// daemon restarts**, it covers both agents' tables, keeps the newest start,
     /// and a run filed by a build without the table is folded in on open.
@@ -9405,10 +9060,7 @@ mod tests {
             row.created_at = at.into();
             row.agent = agent;
             row.lifecycle = lifecycle;
-            assert!(matches!(
-                store.upsert_session(&row).unwrap(),
-                SessionUpsert::Present
-            ));
+            assert_eq!(store.begin_run(&row, &session.uid, None).unwrap(), None);
             session.uid
         };
         let old = file(
@@ -9581,7 +9233,7 @@ mod tests {
     fn seed_run(store: &Store, session: &SessionKey, lifecycle: Lifecycle, events: u32) {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &session.uid, None).unwrap(), None);
         for i in 0..events {
             store
                 .append_event(&pending(
@@ -9726,8 +9378,7 @@ mod tests {
     ///     "rollback-isolated" means here — asked of SQLite directly rather than
     ///     through `get_session`, which reads both tables and so cannot tell a
     ///     correctly filed value from a misfiled one;
-    ///   * an ordinary [`Store::upsert_session`] — every hook, heartbeat and
-    ///     tailer write in the daemon — **cannot blank it**, because it passes
+    ///   * a write with no generation **cannot blank it**, because it passes
     ///     `None` into the `COALESCE`. A blanked high-water is a session a stale
     ///     supervisor could re-adopt at any generation it liked;
     ///   * it **survives the cross-table carry**, which is the one path that
@@ -9794,7 +9445,10 @@ mod tests {
         // A later write that knows nothing about visits must not erase it.
         let mut heartbeat = codex_session_row(&codex);
         heartbeat.cwd = "/elsewhere".into();
-        store.upsert_session(&heartbeat).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&heartbeat, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(
             store.get_session(&codex.uid).unwrap().unwrap().cwd,
             "/elsewhere",
@@ -9809,7 +9463,10 @@ mod tests {
         // And it survives the carry between tables, which moves a row wholesale.
         let mut as_claude = session_row(&codex);
         as_claude.agent = AgentKind::Claude;
-        store.upsert_session(&as_claude).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&as_claude, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(
             table_counts(&store),
             (1, 0),
@@ -9841,8 +9498,8 @@ mod tests {
     ///     generation column can carry;
     ///   * a write at or BELOW the standing generation still `COALESCE`s, which is
     ///     the reconnect that names no thread and must change nothing;
-    ///   * and a writer with no generation at all — every hook, heartbeat and
-    ///     tailer in the daemon — is on the `COALESCE` arm regardless.
+    ///   * and a writer with no generation at all is on the `COALESCE` arm
+    ///     regardless.
     ///
     /// **Mutation:** replace the `CASE` with the bare
     /// `COALESCE(excluded.codex_thread_id, {table}.codex_thread_id)` and the first
@@ -9907,7 +9564,10 @@ mod tests {
         let legacy = key("CY", "cx-2");
         let mut row = codex_session_row(&legacy);
         row.codex_thread_id = Some("th-from-the-seam".into());
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(store.codex_generation(&legacy.uid).unwrap(), None);
         row.codex_thread_id = None;
         store
@@ -9981,7 +9641,7 @@ mod tests {
             "a uid with no row has no high-water"
         );
         store
-            .upsert_session(&session_row(&claude))
+            .upsert_session_at_generation(&session_row(&claude), None)
             .unwrap()
             .assert_present();
         assert_eq!(
@@ -10000,11 +9660,11 @@ mod tests {
         let claude = key("AA", "cc-1");
         let codex = key("CX", "cx-1");
         store
-            .upsert_session(&session_row(&claude))
+            .upsert_session_at_generation(&session_row(&claude), None)
             .unwrap()
             .assert_present();
         store
-            .upsert_session(&codex_session_row(&codex))
+            .upsert_session_at_generation(&codex_session_row(&codex), None)
             .unwrap()
             .assert_present();
 
@@ -10056,7 +9716,10 @@ mod tests {
         seed_run(&store, &claude, Lifecycle::Live, 2);
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         for i in 0..2 {
             store
                 .append_event(&pending(
@@ -10183,7 +9846,10 @@ mod tests {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
         row.transcript_path = Some(format!("/tmp/{}.jsonl", session.uid));
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
     }
 
     fn transcript_of(store: &Store, session: &SessionKey) -> Option<String> {
@@ -10216,20 +9882,6 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         assert!(transcript_of(&store, &ended).is_some());
-    }
-
-    /// The tailer forgets an ended run's transcript once it has read it through,
-    /// and never a running one's: a late hook may have brought it back.
-    #[test]
-    fn only_an_ended_run_forgets_its_transcript() {
-        let (store, _path) = temp_store();
-        let (ended, live) = (key("EE", "cc-1"), key("BB", "cc-2"));
-        with_transcript(&store, &ended, Lifecycle::Exited);
-        with_transcript(&store, &live, Lifecycle::Live);
-        store.forget_transcript(&ended.uid).unwrap();
-        store.forget_transcript(&live.uid).unwrap();
-        assert_eq!(transcript_of(&store, &ended), None);
-        assert!(transcript_of(&store, &live).is_some());
     }
 
     /// The ten-column `INSERT … ON CONFLICT DO UPDATE` v0.6.0's `upsert_session`
@@ -10525,7 +10177,10 @@ mod tests {
                 let codex = key("CX", "cx-1");
                 let mut row = codex_session_row(&codex);
                 row.lifecycle = Lifecycle::Live;
-                store.upsert_session(&row).unwrap().assert_present();
+                store
+                    .upsert_session_at_generation(&row, None)
+                    .unwrap()
+                    .assert_present();
                 assert_eq!(table_counts(&store), (0, 1));
                 store
                     .append_event(&pending(&codex, EventKind::ToolCall, Some("e0")))
@@ -10734,7 +10389,7 @@ mod tests {
     ///     examined — but that is the claim, and it is worth pinning.
     ///   * A re-registration that moves a run *from* Codex *to* Claude. That
     ///     genuinely does insert into `sessions` for a uid living in
-    ///     `codex_sessions`: [`Store::upsert_session`]'s carry is
+    ///     `codex_sessions`: [`Store::upsert_session_at_generation`]'s carry is
     ///     `INSERT INTO sessions SELECT * FROM codex_sessions`. `NEW.agent` is
     ///     that row's real agent rather than the default, which is exactly what
     ///     the `WHEN` clause distinguishes, so the flip goes through and every
@@ -10745,7 +10400,7 @@ mod tests {
 
         let claude = key("AA", "cc-1");
         store
-            .upsert_session(&session_row(&claude))
+            .upsert_session_at_generation(&session_row(&claude), None)
             .unwrap()
             .assert_present();
         assert_eq!(table_counts(&store), (1, 0));
@@ -10753,13 +10408,19 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.transcript_path = Some("/tmp/codex.jsonl".into());
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(table_counts(&store), (1, 1));
 
         // The flip: same uid, now announcing itself as Claude.
         let mut flipped = session_row(&codex);
         flipped.transcript_path = None;
-        store.upsert_session(&flipped).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&flipped, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(
             table_counts(&store),
             (2, 0),
@@ -10795,7 +10456,10 @@ mod tests {
         row.lifecycle = Lifecycle::Live;
         row.cwd = "/work/before".into();
         row.updated_at = "2020-01-01T00:00:00.000Z".into();
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(table_counts(&store), (0, 1));
         drop(store);
 
@@ -10895,7 +10559,10 @@ mod tests {
             let codex = key("CX", "cx-1");
             let mut row = codex_session_row(&codex);
             row.lifecycle = Lifecycle::Live;
-            store.upsert_session(&row).unwrap().assert_present();
+            store
+                .upsert_session_at_generation(&row, None)
+                .unwrap()
+                .assert_present();
             store
                 .append_event(&pending(&codex, EventKind::ToolCall, Some("e0")))
                 .unwrap();
@@ -11018,7 +10685,10 @@ mod tests {
         row.cwd = "/work/before".into();
         row.updated_at = "2026-08-28T12:00:00.000Z".into();
         let born = row.created_at.clone();
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         drop(store);
 
         {
@@ -11069,7 +10739,10 @@ mod tests {
         row.lifecycle = Lifecycle::Exited;
         row.cwd = "/work/before".into();
         row.updated_at = "2026-08-28T12:00:00.000Z".into();
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         drop(store);
 
         {
@@ -11121,7 +10794,10 @@ mod tests {
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
         row.cwd = "/work/isolated".into();
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         // A duplicate, staged from before the refusal, because the point is what
         // happens when the invariant does not hold.
         {
@@ -11203,7 +10879,10 @@ mod tests {
         row.lifecycle = Lifecycle::Live;
         row.transcript_path = Some("/tmp/codex.jsonl".into());
         let born = row.created_at.clone();
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         for i in 0..2 {
             store
                 .append_event(&pending(
@@ -11296,7 +10975,7 @@ mod tests {
         // The failure that was waiting downstream: an agent flip now carries the
         // row instead of colliding with a second copy of it.
         store
-            .upsert_session(&session_row(&codex))
+            .upsert_session_at_generation(&session_row(&codex), None)
             .unwrap()
             .assert_present();
         assert_eq!(table_counts(&store), (1, 0));
@@ -11317,7 +10996,10 @@ mod tests {
         row.cwd = "/work/current".into();
         row.updated_at = "2099-01-01T00:00:00.000Z".into();
         row.transcript_path = None;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         drop(store);
 
         {
@@ -11398,10 +11080,10 @@ mod tests {
         let doomed = key("CY", "cx-2");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
         let mut second = codex_session_row(&doomed);
         second.lifecycle = Lifecycle::Live;
-        store.upsert_session(&second).unwrap().assert_present();
+        assert_eq!(store.begin_run(&second, &doomed.uid, None).unwrap(), None);
         store
             .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
             .unwrap();
@@ -11451,14 +11133,20 @@ mod tests {
         let session = key("AA", "cc-1");
         let mut learned = session_row(&session);
         learned.transcript_path = Some("/tmp/x.jsonl".into());
-        store.upsert_session(&learned).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&learned, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(table_counts(&store), (1, 0));
 
         // Claude -> Codex. A heartbeat-shaped write: it knows the new agent and
         // carries no transcript path.
         let mut flipped = codex_session_row(&session);
         flipped.transcript_path = None;
-        store.upsert_session(&flipped).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&flipped, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(
             table_counts(&store),
             (0, 1),
@@ -11476,7 +11164,10 @@ mod tests {
         // And back again, still one row, still carrying what it learned.
         let mut back = session_row(&session);
         back.transcript_path = None;
-        store.upsert_session(&back).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&back, None)
+            .unwrap()
+            .assert_present();
         assert_eq!(table_counts(&store), (1, 0));
         let returned = store.get_session(&session.uid).unwrap().expect("one row");
         assert_eq!(returned.agent, AgentKind::Claude);
@@ -11511,7 +11202,9 @@ mod tests {
         );
 
         assert_eq!(
-            store.upsert_session(&codex_session_row(&session)).unwrap(),
+            store
+                .upsert_session_at_generation(&codex_session_row(&session), None)
+                .unwrap(),
             SessionUpsert::Tombstoned
         );
         assert_eq!(
@@ -11550,7 +11243,10 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Exited;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         store
             .append_event(&pending(&codex, EventKind::ToolCall, Some("e0")))
             .unwrap();
@@ -11603,7 +11299,9 @@ mod tests {
         // A registration under the *other* agent, which is the write whose carry
         // moves a row between tables before the guarded upsert runs.
         assert_eq!(
-            store.upsert_session(&session_row(&codex)).unwrap(),
+            store
+                .upsert_session_at_generation(&session_row(&codex), None)
+                .unwrap(),
             SessionUpsert::Tombstoned,
             "a tombstoned uid is refused whichever agent asks for it back"
         );
@@ -11628,7 +11326,7 @@ mod tests {
 
     /// The two tables must not drift apart.
     ///
-    /// `all_sessions` selects the same columns from each, and `upsert_session`
+    /// `all_sessions` selects the same columns from each, and `upsert_session_at_generation`
     /// carries a row between them with `INSERT … SELECT *`, so a column added to
     /// one and forgotten on the other turns every session read into a prepare
     /// error and every agent change into a column-count error at runtime. Read
@@ -11727,7 +11425,8 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        store.record_host(&codex.uid, &HOST, None).unwrap();
         let now = protocol::time::now_rfc3339();
 
         // `append_in_tx` — every fact either agent records.
@@ -11735,25 +11434,6 @@ mod tests {
             .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
             .unwrap()
             .is_some());
-
-        // `append_batch_with_cursor` — the batch AND its cursor.
-        let cursor = TailCursor {
-            path: "/tmp/x.jsonl".into(),
-            dev: 1,
-            ino: 2,
-            offset: 4096,
-            last_line_start: 4000,
-            last_line_sha: "abc".into(),
-        };
-        let batch = [pending(&codex, EventKind::ToolCall, Some("two"))];
-        assert_eq!(
-            store
-                .append_batch_with_cursor(&codex.uid, &batch, &cursor)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(store.load_cursor(&codex.uid).unwrap().is_some());
 
         // `orphan_event_count` — a Codex run's log is history with an owner, not
         // history whose provenance nobody understands.
@@ -11772,10 +11452,10 @@ mod tests {
             store
                 .record_answer(&codex.uid, "req-1", "hash", &answer)
                 .unwrap(),
-            LedgerWrite::Existing { .. }
+            LedgerWrite::Existing
         ));
 
-        // `upsert_pending_approval` no longer accepts a Codex run, and that is
+        // The shared `pending_approvals` no longer accepts a Codex run, and that is
         // the one guard in the six that changed. It used to, on purpose, while
         // the daemon's own refusal was the thing keeping the shared table clean
         // — scaffolding that stood only because nothing produced a Codex card.
@@ -11785,14 +11465,15 @@ mod tests {
         // success and lost the card is the failure this whole seam exists to
         // prevent in the other direction.
         let refused = store
-            .upsert_pending_approval(&PendingApprovalRow {
-                session_uid: codex.uid.clone(),
-                session_id: codex.name.clone(),
-                request_id: "req-2".into(),
-                card: "{}".into(),
-                generation: 1,
-                created_ms: 0,
-            })
+            .commit_host_card(
+                &codex.uid,
+                &codex.name,
+                &HOST,
+                1,
+                "req-2",
+                Some(("{}", 0)),
+                &[],
+            )
             .expect_err("a Codex card must not land in the shared table");
         assert!(
             format!("{refused:#}").contains("codex_pending_approvals"),
@@ -11876,11 +11557,9 @@ mod tests {
     /// `every_existence_guard_asks_about_the_whole_fleet` proves it does, which
     /// is deliberate: a guard that silently dropped a Codex card would leave a
     /// test like this green for ever and ship the bug. What keeps them empty is
-    /// an explicit refusal at each of the three producers that can reach them,
-    /// in the daemon: `Daemon::send_text`, `Daemon::handle_permission_request`
-    /// and `Daemon::answer` each refuse a non-Claude row before any durable
-    /// write, and `send_text_to_a_codex_session_is_refused_before_it_claims_anything`,
-    /// `a_permission_request_for_a_codex_session_raises_no_card` and
+    /// an explicit refusal at the daemon's producers: `Daemon::send_text` and
+    /// `Daemon::answer` each refuse a non-Claude row before any durable write,
+    /// and `send_text_to_a_codex_session_is_refused_before_it_claims_anything` and
     /// `answering_a_codex_card_is_refused_before_the_claim` drive those real
     /// paths and read these same four tables back off the daemon's own database
     /// file. Those are the tests that can see a producer; this one cannot, and
@@ -11888,14 +11567,17 @@ mod tests {
     ///
     /// What this one still adds is the floor underneath them: the paths a Codex
     /// run *does* travel in this build — facts — must not reach these tables by
-    /// some route that has nothing to do with the three gated producers.
+    /// some route that has nothing to do with the gated producers.
     #[test]
     fn no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally() {
         let (store, _path) = temp_store();
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
 
         // Everything a Codex run reaches in the store as things stand: facts,
         // and the generalized mutation ledger built for it.
@@ -11946,16 +11628,18 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        store.record_host(&codex.uid, &HOST, None).unwrap();
 
-        let shared = store.upsert_pending_approval(&PendingApprovalRow {
-            session_uid: codex.uid.clone(),
-            session_id: codex.name.clone(),
-            request_id: "derived-1".into(),
-            card: "{}".into(),
-            generation: 1,
-            created_ms: 10,
-        });
+        let shared = store.commit_host_card(
+            &codex.uid,
+            &codex.name,
+            &HOST,
+            1,
+            "derived-1",
+            Some(("{}", 10)),
+            &[],
+        );
         let err = shared.expect_err("the shared table must refuse a Codex card");
         assert!(
             matches!(
@@ -11971,20 +11655,25 @@ mod tests {
         // A Claude run is untouched by the refusal: it is the uid that decides,
         // and a trigger that over-refused would take the Claude path with it.
         let claude = key("AA", "cc-1");
+        begin(&store, &claude);
+        store.record_host(&claude.uid, &HOST, None).unwrap();
         store
-            .upsert_session(&session_row(&claude))
+            .commit_host_card(
+                &claude.uid,
+                &claude.name,
+                &HOST,
+                1,
+                "req-1",
+                Some(("{}", 11)),
+                &[],
+            )
             .unwrap()
-            .assert_present();
+            .expect("the cursor moved");
         assert!(store
-            .upsert_pending_approval(&PendingApprovalRow {
-                session_uid: claude.uid.clone(),
-                session_id: claude.name.clone(),
-                request_id: "req-1".into(),
-                card: "{}".into(),
-                generation: 1,
-                created_ms: 11,
-            })
-            .unwrap());
+            .list_pending_approvals()
+            .unwrap()
+            .iter()
+            .any(|card| card.session_uid == claude.uid));
     }
 
     /// **A re-delivered approval rebinds its card instead of minting a second.**
@@ -12020,7 +11709,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
 
         assert_eq!(
             insert_codex_card(
@@ -12056,7 +11745,8 @@ mod tests {
         assert_eq!(open.len(), 1, "a re-delivery must not mint a second card");
         assert_eq!(open[0].card, r#"{"v":1}"#);
         assert_eq!(
-            open[0].created_ms, 10,
+            store.codex_pending_approvals(&codex.uid).unwrap()[0].created_ms,
+            10,
             "and it is the same question, not a newer one"
         );
 
@@ -12147,25 +11837,25 @@ mod tests {
     fn the_fleet_read_sees_both_agents_and_a_delete_takes_the_codex_cards() {
         let (store, _path) = temp_store();
         let claude = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&claude))
-            .unwrap()
-            .assert_present();
+        begin(&store, &claude);
+        store.record_host(&claude.uid, &HOST, None).unwrap();
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
 
         store
-            .upsert_pending_approval(&PendingApprovalRow {
-                session_uid: claude.uid.clone(),
-                session_id: claude.name.clone(),
-                request_id: "req-1".into(),
-                card: "{}".into(),
-                generation: 1,
-                created_ms: 1,
-            })
-            .unwrap();
+            .commit_host_card(
+                &claude.uid,
+                &claude.name,
+                &HOST,
+                1,
+                "req-1",
+                Some(("{}", 1)),
+                &[],
+            )
+            .unwrap()
+            .expect("the cursor moved");
         insert_codex_card(&store, &codex, "derived-1", "exec-1", "tu-1", 2, "{}").unwrap();
 
         let open = store.list_pending_approvals().unwrap();
@@ -12173,9 +11863,7 @@ mod tests {
 
         // The lifecycle predicate that guards deletion lives in the SQL, so the
         // run has to have actually ended before it can be deleted.
-        let mut ended = codex_session_row(&codex);
-        ended.lifecycle = Lifecycle::Exited;
-        store.upsert_session(&ended).unwrap().assert_present();
+        store.set_lifecycle(&codex.uid, Lifecycle::Exited).unwrap();
         store.delete_exited_session(&codex.uid).unwrap();
         let after = store.list_pending_approvals().unwrap();
         assert_eq!(after.len(), 1, "a deleted Codex run leaves no orphan card");
@@ -12198,7 +11886,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
         store
             .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
             .unwrap();
@@ -12281,47 +11969,6 @@ mod tests {
         Ok(outcome)
     }
 
-    /// **The write that arrives after the delete.** Ending a run stops its tail
-    /// by queueing a command, so one more transcript poll can already be under
-    /// way when the phone removes the run. Landing it afterwards would file
-    /// events and a cursor under a `session_uid` with no row — orphans of
-    /// exactly the kind `SESSION_SCOPED_TABLES` exists to prevent, and which
-    /// nothing would ever clean up because no session names them.
-    #[test]
-    fn a_transcript_batch_for_a_deleted_run_is_refused_entirely() {
-        let (store, _path) = temp_store();
-        let gone = key("AA", "cc-1");
-        seed_run(&store, &gone, Lifecycle::Exited, 2);
-        let cursor = TailCursor {
-            path: "/tmp/x.jsonl".into(),
-            dev: 1,
-            ino: 2,
-            offset: 4096,
-            last_line_start: 4000,
-            last_line_sha: "abc".into(),
-        };
-
-        assert_eq!(
-            store.delete_exited_session(&gone.uid).unwrap(),
-            DeleteOutcome::Deleted { events: 2 }
-        );
-
-        let late = [pending(&gone, EventKind::ToolCall, Some("late-1"))];
-        let written = store
-            .append_batch_with_cursor(&gone.uid, &late, &cursor)
-            .unwrap();
-
-        assert!(
-            written.is_empty(),
-            "nothing may be written for a run that is gone"
-        );
-        assert_eq!(store.count_events(&gone.uid).unwrap(), 0);
-        assert!(
-            store.load_cursor(&gone.uid).unwrap().is_none(),
-            "and the cursor must not come back either — it is a session-scoped row like any other"
-        );
-    }
-
     /// The daemon's own delete rule, stated as a matrix. Hosted rows need the
     /// proof; unhosted rows (empty socket — nothing here ever put them in tmux)
     /// are removable at any lifecycle, because the proof cannot exist.
@@ -12337,7 +11984,10 @@ mod tests {
             row.lifecycle = lifecycle;
             row.tmux_session = String::new();
             row.tmux_socket = String::new();
-            store.upsert_session(&row).unwrap().assert_present();
+            store
+                .upsert_session_at_generation(&row, None)
+                .unwrap()
+                .assert_present();
             assert_eq!(
                 store.delete_exited_session(&unhosted.uid).unwrap(),
                 DeleteOutcome::Deleted { events: 0 },
@@ -12358,9 +12008,11 @@ mod tests {
             DeleteOutcome::Deleted { events: 1 }
         );
 
-        // The exact shape of `ensure_session`'s second half after losing the race.
+        // A registration that lost the race to the delete.
         assert_eq!(
-            store.upsert_session(&session_row(&doomed)).unwrap(),
+            store
+                .upsert_session_at_generation(&session_row(&doomed), None)
+                .unwrap(),
             SessionUpsert::Tombstoned,
             "an upsert that raced the delete must write nothing"
         );
@@ -12382,7 +12034,9 @@ mod tests {
         seed_run(&store, &doomed, Lifecycle::Exited, 1);
         assert_eq!(store.prune_exited_sessions(&[], false).unwrap().len(), 1);
         assert_eq!(
-            store.upsert_session(&session_row(&doomed)).unwrap(),
+            store
+                .upsert_session_at_generation(&session_row(&doomed), None)
+                .unwrap(),
             SessionUpsert::Tombstoned
         );
         // And a dry run decides nothing, so it records nothing.
@@ -12390,7 +12044,7 @@ mod tests {
         seed_run(&store, &spared, Lifecycle::Exited, 1);
         assert_eq!(store.prune_exited_sessions(&[], true).unwrap().len(), 1);
         store
-            .upsert_session(&session_row(&spared))
+            .upsert_session_at_generation(&session_row(&spared), None)
             .unwrap()
             .assert_present();
     }
@@ -12405,7 +12059,7 @@ mod tests {
         let decoy = key("CC", "Claude:shout");
         for k in [&adopted, &hosted, &decoy] {
             store
-                .upsert_session(&session_row(k))
+                .upsert_session_at_generation(&session_row(k), None)
                 .unwrap()
                 .assert_present();
         }
@@ -12522,16 +12176,19 @@ mod tests {
         store
             .record_answer(&dead.uid, "toolu_1", "hash", &outcome)
             .unwrap();
+        store.record_host(&dead.uid, &HOST, None).unwrap();
         store
-            .upsert_pending_approval(&PendingApprovalRow {
-                session_uid: dead.uid.clone(),
-                session_id: dead.name.clone(),
-                request_id: "toolu_2".into(),
-                card: "{}".into(),
-                generation: 1,
-                created_ms: 0,
-            })
-            .unwrap();
+            .commit_host_card(
+                &dead.uid,
+                &dead.name,
+                &HOST,
+                1,
+                "toolu_2",
+                Some(("{}", 0)),
+                &[],
+            )
+            .unwrap()
+            .expect("the cursor moved");
         store
             .claim_answer(&AnswerClaim {
                 session_uid: dead.uid.clone(),
@@ -12551,24 +12208,6 @@ mod tests {
                 &protocol::time::now_rfc3339(),
             )
             .unwrap();
-        // The cursor is only written alongside a transcript batch, which is the
-        // invariant that keeps consuming lines and recording that they were
-        // consumed in one transaction.
-        store
-            .append_batch_with_cursor(
-                &dead.uid,
-                &[pending(&dead, EventKind::AgentMessage, Some("tail-1"))],
-                &TailCursor {
-                    path: "/tmp/t.jsonl".into(),
-                    dev: 1,
-                    ino: 1,
-                    offset: 1,
-                    last_line_start: 0,
-                    last_line_sha: "x".into(),
-                },
-            )
-            .unwrap();
-        assert!(store.load_cursor(&dead.uid).unwrap().is_some());
 
         store.prune_exited_sessions(&[], false).unwrap();
 
@@ -12596,10 +12235,7 @@ mod tests {
         let (store, path) = temp_store();
         let (receiver, sender) = (key("R1", "cc-1"), key("S1", "cc-2"));
         for session in [&receiver, &sender] {
-            store
-                .upsert_session(&session_row(session))
-                .unwrap()
-                .assert_present();
+            begin(&store, session);
         }
         (store, path, receiver, sender)
     }
@@ -12656,10 +12292,7 @@ mod tests {
     fn mail_is_kept_once_per_id_and_limited_per_pair() {
         let (store, _path, receiver, sender) = mail_store();
         let other = key("R2", "cc-3");
-        store
-            .upsert_session(&session_row(&other))
-            .unwrap()
-            .assert_present();
+        begin(&store, &other);
         let t0 = 1_000_000_000;
         let take = |id: &str, to: &SessionKey, computer: &str, from: &str, at: i64| {
             store
@@ -12885,10 +12518,7 @@ mod tests {
         );
         store.release_mail("o3").unwrap();
         let other = key("R3", "cc-4");
-        store
-            .upsert_session(&session_row(&other))
-            .unwrap()
-            .assert_present();
+        begin(&store, &other);
         store
             .take_mail(
                 &intake("m3", &other, "", &sender.uid, "hi"),
@@ -13286,7 +12916,7 @@ mod tests {
             // The one deliberate exception: tombstones are the record that a
             // deletion happened, so they are precisely the rows that must
             // SURVIVE the deletion they describe.
-            if name == "deleted_sessions" || name == "deleted_names" {
+            if name == "deleted_sessions" {
                 continue;
             }
             let mut info = conn.prepare(&format!("PRAGMA table_info({name})")).unwrap();
@@ -13372,10 +13002,7 @@ mod tests {
     fn seq_is_monotonic_and_per_run() {
         let (store, _path) = temp_store();
         let first = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&first))
-            .unwrap()
-            .assert_present();
+        begin(&store, &first);
         for expected in 1..=3u64 {
             let event = store
                 .append_event(&pending(&first, EventKind::ToolCall, None))
@@ -13385,10 +13012,7 @@ mod tests {
         }
         // A second session starts its own numbering.
         let second = key("AB", "cc-2");
-        store
-            .upsert_session(&session_row(&second))
-            .unwrap()
-            .assert_present();
+        begin(&store, &second);
         let other = store
             .append_event(&pending(&second, EventKind::ToolCall, None))
             .unwrap()
@@ -13405,15 +13029,9 @@ mod tests {
         // with an empty log, not continue somebody else's numbering.
         let (store, _path) = temp_store();
         let dead = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&dead))
-            .unwrap()
-            .assert_present();
+        begin(&store, &dead);
         let live = key("AB", "cc-1");
-        store
-            .upsert_session(&session_row(&live))
-            .unwrap()
-            .assert_present();
+        begin(&store, &live);
         assert_ne!(dead.uid, live.uid);
 
         for i in 0..5 {
@@ -13468,12 +13086,12 @@ mod tests {
         let mut row = session_row(&old);
         row.created_at = "2026-07-01T00:00:00.000Z".into();
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &old.uid, None).unwrap(), None);
 
         let mut row = session_row(&new);
         row.created_at = "2026-07-02T00:00:00.000Z".into();
         row.lifecycle = Lifecycle::Exited;
-        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.begin_run(&row, &new.uid, None).unwrap(), None);
 
         assert_eq!(
             store.find_session("cc-1").unwrap().unwrap().session_uid,
@@ -13495,10 +13113,7 @@ mod tests {
     fn count_and_max_seq_agree_for_a_healthy_log() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         for i in 0..7 {
             store
                 .append_event(&pending(
@@ -13521,10 +13136,7 @@ mod tests {
     fn duplicate_source_event_id_consumes_no_seq() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let first = store
             .append_event(&pending(&session, EventKind::ToolCall, Some("toolu_1")))
             .unwrap();
@@ -13546,10 +13158,7 @@ mod tests {
     fn same_id_from_a_different_source_is_a_different_fact() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let mut hook = pending(&session, EventKind::ToolCall, Some("uuid-1"));
         hook.source = Source::Hook;
         let mut transcript = pending(&session, EventKind::ToolCall, Some("uuid-1"));
@@ -13564,10 +13173,7 @@ mod tests {
     fn a_runs_effort_is_read_back_only_from_after_its_end() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let effort = |level: &str| {
             let mut notice = pending(&session, EventKind::Notification, None);
             notice.payload = serde_json::json!({"notification_type": "model_set", "effort": level});
@@ -13595,10 +13201,7 @@ mod tests {
     fn events_without_ids_are_never_collapsed() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         assert!(store
             .append_event(&pending(&session, EventKind::Notification, None))
             .unwrap()
@@ -13614,10 +13217,7 @@ mod tests {
     fn restart_backfill_does_not_duplicate_or_renumber() {
         let (store, path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let batch: Vec<_> = (0..5)
             .map(|i| pending(&session, EventKind::UserMessage, Some(&format!("u{i}"))))
             .collect();
@@ -13642,10 +13242,7 @@ mod tests {
     fn events_after_replays_only_the_tail() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         for i in 0..5 {
             store
                 .append_event(&pending(
@@ -13671,10 +13268,7 @@ mod tests {
     fn unknown_kind_survives_a_database_round_trip() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let mut event = pending(&session, EventKind::Other("future_kind".into()), None);
         event.payload = json!({"a": [1, 2, 3]});
         store.append_event(&event).unwrap();
@@ -13699,13 +13293,10 @@ mod tests {
     }
 
     #[test]
-    fn ledger_is_insert_once_and_returns_the_original() {
+    fn ledger_is_insert_once_and_keeps_the_original() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         let first = outcome("toolu_1", AnswerDecision::Allow);
         assert!(matches!(
             store
@@ -13716,19 +13307,15 @@ mod tests {
 
         // A second, *different* decision must not overwrite the first.
         let second = outcome("toolu_1", AnswerDecision::Deny);
-        match store
-            .record_answer(&session.uid, "toolu_1", "hash-a", &second)
-            .unwrap()
-        {
-            LedgerWrite::Existing {
-                outcome,
-                payload_hash,
-            } => {
-                assert_eq!(outcome.decision, AnswerDecision::Allow);
-                assert_eq!(payload_hash, "hash-a");
-            }
-            LedgerWrite::Recorded => panic!("duplicate must not be recorded"),
-        }
+        assert!(matches!(
+            store
+                .record_answer(&session.uid, "toolu_1", "hash-a", &second)
+                .unwrap(),
+            LedgerWrite::Existing
+        ));
+        let (payload_hash, stored) = store.get_answer(&session.uid, "toolu_1").unwrap().unwrap();
+        assert_eq!(stored.decision, AnswerDecision::Allow);
+        assert_eq!(payload_hash, "hash-a");
     }
 
     #[test]
@@ -13738,15 +13325,9 @@ mod tests {
         // second's card come back as an already-applied duplicate.
         let (store, _path) = temp_store();
         let dead = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&dead))
-            .unwrap()
-            .assert_present();
+        begin(&store, &dead);
         let live = key("AB", "cc-1");
-        store
-            .upsert_session(&session_row(&live))
-            .unwrap()
-            .assert_present();
+        begin(&store, &live);
 
         store
             .record_answer(
@@ -13799,15 +13380,9 @@ mod tests {
         // rather than "whichever row SQLite reached first".
         let (store, _path) = temp_store();
         let old = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&old))
-            .unwrap()
-            .assert_present();
+        begin(&store, &old);
         let new = key("AB", "cc-1");
-        store
-            .upsert_session(&session_row(&new))
-            .unwrap()
-            .assert_present();
+        begin(&store, &new);
         store
             .record_answer(
                 &old.uid,
@@ -13839,10 +13414,7 @@ mod tests {
     fn ledger_survives_restart() {
         let (store, path) = temp_store();
         let session = key("AA", "cc-1");
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
+        begin(&store, &session);
         store
             .record_answer(
                 &session.uid,
@@ -13920,7 +13492,10 @@ mod tests {
         let mut row = session_row(&registered);
         row.agent = AgentKind::Codex;
         row.lifecycle = Lifecycle::Starting;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
         assert!(!store
             .record_hosted_thread(&registered.uid, "thr-4")
             .unwrap());
@@ -13949,7 +13524,7 @@ mod tests {
         let (store, _path) = temp_store();
         let typed = key("AA", "cc-1");
         store
-            .upsert_session(&session_row(&typed))
+            .upsert_session_at_generation(&session_row(&typed), None)
             .unwrap()
             .assert_present();
         let hosted = begun(&store, "BB", "req-1");
@@ -14025,18 +13600,27 @@ mod tests {
         let session = key("AA", "cc-1");
         let mut row = session_row(&session);
         row.lifecycle = Lifecycle::Starting;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
 
-        // SessionStart teaches us the transcript path.
+        // A later write has learned the transcript path and the Claude session.
         row.transcript_path = Some("/tmp/x.jsonl".into());
         row.claude_session_id = Some("uuid-1".into());
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
 
-        // A later heartbeat knows neither; they must not be erased.
+        // A write after it knows neither; they must not be erased.
         row.transcript_path = None;
         row.claude_session_id = None;
-        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .upsert_session_at_generation(&row, None)
+            .unwrap()
+            .assert_present();
 
         let stored = store.get_session(&session.uid).unwrap().unwrap();
         assert_eq!(stored.transcript_path.as_deref(), Some("/tmp/x.jsonl"));
@@ -14050,14 +13634,8 @@ mod tests {
         let (store, _path) = temp_store();
         let first = key("AA", "cc-1");
         let second = key("AB", "cc-1");
-        store
-            .upsert_session(&session_row(&first))
-            .unwrap()
-            .assert_present();
-        store
-            .upsert_session(&session_row(&second))
-            .unwrap()
-            .assert_present();
+        begin(&store, &first);
+        begin(&store, &second);
         let rows = store.list_sessions().unwrap();
         assert_eq!(rows.len(), 2, "the second run must not replace the first");
         assert!(rows.iter().all(|r| r.session_id == "cc-1"));
@@ -14542,62 +14120,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cursor_round_trip() {
-        let (store, _path) = temp_store();
-        let session = key("AA", "cc-1");
-        assert!(store.load_cursor(&session.uid).unwrap().is_none());
-        let cursor = TailCursor {
-            path: "/tmp/x.jsonl".into(),
-            dev: 16777232,
-            ino: 12345,
-            offset: 4096,
-            last_line_start: 4000,
-            last_line_sha: "abc".into(),
-        };
-        // The row first: a batch for a session that is not in `sessions` is
-        // refused, so that a tail poll still in flight when a run is deleted
-        // cannot file events — or a cursor — under a uid nobody can name.
-        store
-            .upsert_session(&session_row(&session))
-            .unwrap()
-            .assert_present();
-        // Through the production path: a cursor only ever moves alongside the
-        // events it claims, so there is nothing else to save it with.
-        store
-            .append_batch_with_cursor(&session.uid, &[], &cursor)
-            .unwrap();
-        let back = store.load_cursor(&session.uid).unwrap().unwrap();
-        assert_eq!(back.offset, 4096);
-        assert_eq!(back.ino, 12345);
-        assert_eq!(back.last_line_sha, "abc");
-    }
-
-    #[test]
-    fn a_new_run_of_an_old_name_starts_with_no_cursor() {
-        // `codeconnect claude --resume` in a reused name points a *new* run at the same
-        // transcript. It must re-read that transcript into its own log rather
-        // than inheriting a cursor that says "already consumed".
-        let (store, _path) = temp_store();
-        let dead = key("AA", "cc-1");
-        let live = key("AB", "cc-1");
-        store
-            .append_batch_with_cursor(
-                &dead.uid,
-                &[],
-                &TailCursor {
-                    path: "/tmp/x.jsonl".into(),
-                    dev: 1,
-                    ino: 2,
-                    offset: 900,
-                    last_line_start: 800,
-                    last_line_sha: "abc".into(),
-                },
-            )
-            .unwrap();
-        assert!(store.load_cursor(&live.uid).unwrap().is_none());
-    }
-
     // ------------------------------------------------------- schema migration
 
     /// Build a database in the exact pre-`session_uid` shape, including its
@@ -14686,6 +14208,40 @@ mod tests {
         TempDb::unique("ccd-legacy")
     }
 
+    /// **What an earlier build kept for its transcript tailer and its hook path
+    /// goes at open.** `tail_cursors` names each run's transcript and the hash of
+    /// its last line read, `deleted_names` the names of deleted runs, and nothing
+    /// reads either now: an upgraded store opens without them, so a deleted run
+    /// leaves neither behind.
+    #[test]
+    fn an_earlier_builds_cursors_and_name_tombstones_are_dropped_at_open() {
+        let path = legacy_path();
+        drop(Store::open(path.path()).unwrap());
+        rusqlite::Connection::open(path.path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tail_cursors(session_uid TEXT PRIMARY KEY, path TEXT NOT NULL);
+                 INSERT INTO tail_cursors VALUES('u-1', '/tmp/one.jsonl');
+                 CREATE TABLE deleted_names(session_id TEXT PRIMARY KEY);
+                 INSERT INTO deleted_names VALUES('cc-1');",
+            )
+            .unwrap();
+
+        let reopened = Store::open(path.path()).unwrap();
+        let conn = rusqlite::Connection::open(path.path()).unwrap();
+        for table in ["tail_cursors", "deleted_names"] {
+            let left: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0, "{table} outlived the open");
+        }
+        drop(reopened);
+    }
+
     #[test]
     fn an_older_database_is_migrated_without_losing_anything() {
         let path = legacy_path();
@@ -14719,9 +14275,9 @@ mod tests {
                 [],
             )
             .unwrap();
-            // A name with history but no session row: the daemon adopts sessions
+            // A name with history but no session row: the daemon adopted sessions
             // from hooks, and this is what a database rebuilt under a running
-            // supervisor actually looks like (observed in practice).
+            // supervisor actually looked like (observed in practice).
             conn.execute(
                 "INSERT INTO events VALUES('cc-2', 1, '2026-07-30T12:00:00.000Z',
                                            'session_start', '{}', 'hook', 'orphan-1', NULL, NULL)",
@@ -14770,11 +14326,16 @@ mod tests {
         assert_eq!(hash, "hash-a");
         assert_eq!(outcome.decision, AnswerDecision::Allow);
 
-        // So did the cursor, so the tailer resumes instead of re-reading.
-        assert_eq!(
-            store.load_cursor(&one.session_uid).unwrap().unwrap().offset,
-            4096
-        );
+        // The cursors are not carried over: nothing reads them.
+        let cursors: i64 = store
+            .read()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tail_cursors'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursors, 0);
 
         // The orphan got a real row with the transcript its cursor named, so
         // its history is reachable rather than stranded behind a uid nothing
@@ -15155,7 +14716,7 @@ mod tests {
     /// on both halves — and a one-sided entry would not fail at open. It would
     /// fail later and elsewhere: `all_sessions` would still prepare (it names
     /// neither), and the break would surface as a column-count error inside
-    /// `upsert_session`'s `INSERT … SELECT *` the first time a run changed
+    /// `upsert_session_at_generation`'s `INSERT … SELECT *` the first time a run changed
     /// agent.
     ///
     /// **The predecessor's two tables are written out rather than derived from

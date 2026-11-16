@@ -77,7 +77,7 @@ To uninstall, follow [Uninstalling](site/support.md#uninstalling): on a Mac with
 iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon on your computer
 ```
 
-The daemon, `ccd`, logs every session's events. Claude Code reports to it through its hooks, and Codex through Codex's own app server; approval requests come only through those channels, never from the screen. Your answer goes back the same way rather than being typed into the prompt, and if the daemon cannot be reached the prompt stays at your keyboard. More in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The daemon, `ccd`, logs every session's events. Claude Code reports to it through the agent host CodeConnect runs it in, and Codex through Codex's own app server; approval requests come only through those channels, never from the screen. Your answer goes back the same way rather than being typed into the prompt. More in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Security and privacy
 

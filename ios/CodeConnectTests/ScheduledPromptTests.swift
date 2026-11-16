@@ -9,8 +9,9 @@ import XCTest
 /// 2.1.305, recorded against a fake model, scheduling a one-shot prompt that
 /// fires with nothing typed — an `isMeta` user line stamped `promptSource:
 /// "system"` (seq 30), answered (31) and closed (32) — between two typed
-/// prompts, through the daemon's production tailer and store as the events a
-/// phone is sent (`ccd/src/fixture_replay.rs` re-derives it).
+/// prompts, through an earlier daemon's transcript tailer and store as the
+/// events a phone is sent (frozen, as that daemon emitted it; never
+/// regenerated: `fixtures/README.md`).
 @MainActor
 final class ScheduledPromptTests: XCTestCase {
 

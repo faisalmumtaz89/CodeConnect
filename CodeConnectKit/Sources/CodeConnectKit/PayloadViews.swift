@@ -2,11 +2,14 @@ import Foundation
 
 /// Typed reads over the untyped `Event.payload`.
 ///
-/// The daemon stores hook stdin and transcript lines verbatim
-/// (`ccd/src/state.rs` `hook_event`, `ccd/src/tailer.rs` `transcript_event`),
-/// so every accessor here is written against a shape recorded from a real
-/// session in `fixtures/`. Nothing throws: an absent or reshaped field means
-/// "unknown", which the UI renders as unknown rather than guessing.
+/// A payload is what the daemon filed from the agent: on a Claude run
+/// CodeConnect started, `protocol::sdk_map`'s events; on a Codex run,
+/// `ccd/src/codex_adapter.rs`'s, mapped from the app-server's notifications; in
+/// an earlier daemon's logs, hook stdin and transcript lines stored verbatim. So
+/// every accessor here is written against a shape recorded from a real session
+/// in `fixtures/`. Nothing throws: an
+/// absent or reshaped field means "unknown", which the UI renders as unknown
+/// rather than guessing.
 extension JSONValue {
     /// Round-trips through JSON so `Codable` types defined against the wire can
     /// be read straight out of a payload.

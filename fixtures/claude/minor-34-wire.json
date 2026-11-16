@@ -7,15 +7,13 @@
       "decision": {
         "type": "allow"
       },
-      "detail": "Sent to Claude from a phone",
-      "indeterminate": true,
       "request_id": "toolu_answered",
       "resolved_at": "2026-11-10T00:00:00.000Z",
       "resolved_by": "phone",
-      "session_id": "cc-1"
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
     },
-    "seq": 3,
-    "session_id": "cc-1",
+    "seq": 4,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "daemon",
     "source_event_id": "resolved:toolu_answered",
@@ -29,15 +27,13 @@
       "decision": {
         "type": "allow"
       },
-      "detail": "Sent to Claude from a phone",
-      "indeterminate": true,
       "request_id": "toolu_answered",
       "resolved_at": "2026-11-10T00:00:00.000Z",
       "resolved_by": "phone",
-      "session_id": "cc-1"
+      "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
     },
-    "seq": 3,
-    "session_id": "cc-1",
+    "seq": 4,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "daemon",
     "source_event_id": "resolved:toolu_answered",

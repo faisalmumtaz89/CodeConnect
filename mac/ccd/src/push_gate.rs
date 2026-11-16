@@ -8,21 +8,16 @@
 //!     is noise. Fed by the WebSocket layer after every successful send —
 //!     never before, because "written to the socket" is the only delivery this
 //!     side can attest — and consulted at push-dispatch time.
-//!   * **The ambient latch** is per session: Claude re-fires `idle_prompt` on
-//!     a timer, so "still waiting" arrives as a stream of new events that all
-//!     carry the same news. The latch pushes a class once and stays shut until
-//!     the class changes or the run demonstrably moves (a tool runs, a turn
-//!     ends, text lands) — at which point a later wait is a new fact again.
-//!     A run is in one quiet state at a time: a new one retires the run's
-//!     older quiet-state push, held or in its grace, so it never rings a state
-//!     the run has left.
+//!   * **The quiet-state ticket** is per session: a run is in one quiet state
+//!     at a time, so a new one retires the run's older quiet-state push, held
+//!     or in its grace, and the run demonstrably moving retires one still
+//!     waiting — it never rings a state the run has left. Moving is a Codex turn
+//!     or thread starting ([`PushGate::note_progress`]), and a decision or a turn
+//!     end, whose admissions take the same step ([`PushGate::admit_decision`],
+//!     [`PushGate::admit_turn_end`]).
 //!
-//! Permission requests are deliberately **not** ambient: a second approval is
-//! a second decision, always news. Each is keyed by its own card — Claude Code
-//! (2.1.308, recorded) gives every call of one turn the same `prompt_id`, so a
-//! key per prompt silenced every approval of a turn after its first. The
-//! `permission_prompt` notification twin, which names only the prompt, is
-//! matched to the card it is about; one decision deserves one ring.
+//! Permission requests are not quiet states: a second approval is a second
+//! decision, always news, and each card rings once.
 //!
 //! In memory only, on purpose. A subscribe reseeds delivery from the client's
 //! own `after_seq`, and the cost of a daemon restart is at most one repeated
@@ -30,24 +25,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-
-/// The two ambient classes a session's quiet-state pushes collapse into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ambient {
-    /// `agent_needs_input` and `idle_prompt`: the run wants a human.
-    Waiting,
-    /// `agent_completed`: the run finished a turn.
-    Done,
-}
-
-/// What a `permission_prompt` turned out to be.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Notice {
-    /// There is a card behind it, named here: this is that decision, said once.
-    Decision(String),
-    /// There is not: a run is waiting on a human.
-    Waiting,
-}
 
 /// What a scheduled push captures at gating time and re-checks at dispatch,
 /// so the grace window cannot deliver a fact the world has moved past.
@@ -57,35 +34,24 @@ pub struct Ticket {
     progress_epoch: u64,
 }
 
-/// **Lock order: `epochs` → `ambient` → `permission` → `delivered`.** Every
-/// compound operation acquires in that order and holds what it needs
-/// simultaneously, which is what makes the gate's promises *constructive*
-/// rather than probabilistic: admission reads its ticket under the same
-/// guard that flips the latch, so progress cannot slip between them; the
-/// dispatch-time validity check and exclusion snapshot share one guard pair
-/// with eviction, so a delete can never be half-visible — either the push
-/// sees the old epoch with the watermarks intact, or the new epoch and
-/// drops.
+/// **Lock order: `epochs` → `permission` → `delivered`.** Every compound
+/// operation acquires in that order and holds what it needs simultaneously,
+/// which is what makes the gate's promises *constructive* rather than
+/// probabilistic: admission reads its ticket under the same guard that bumps
+/// the epoch, so progress cannot slip between them; the dispatch-time validity
+/// check and exclusion snapshot share one guard pair with eviction, so a delete
+/// can never be half-visible — either the push sees the old epoch with the
+/// watermarks intact, or the new epoch and drops.
 #[derive(Default)]
 pub struct PushGate {
     /// device_id -> session_uid -> highest seq written to that device's socket.
     delivered: Mutex<HashMap<String, HashMap<String, u64>>>,
-    /// session_uid -> the last ambient class actually pushed.
-    ambient: Mutex<HashMap<String, Ambient>>,
-    /// session_uid -> the approvals that already rang.
-    permission: Mutex<HashMap<String, Rung>>,
+    /// session_uid -> the cards that already rang.
+    permission: Mutex<HashMap<String, HashSet<String>>>,
     /// session_uid -> (bumped on evict, bumped on progress). A push dispatched
     /// after its grace compares its ticket against these — see
     /// `exclusions_if_valid`.
     epochs: Mutex<HashMap<String, (u64, u64)>>,
-}
-
-/// One run's approvals that already rang: each card once, and the prompts they
-/// were asked under — what a notice with no card left behind is checked against.
-#[derive(Default)]
-struct Rung {
-    cards: HashSet<String>,
-    prompts: HashSet<String>,
 }
 
 fn ticket_under_lock(epochs: &HashMap<String, (u64, u64)>, session_uid: &str) -> Ticket {
@@ -118,30 +84,12 @@ impl PushGate {
         }
     }
 
-    /// Whether an ambient push of `class` is news for this session; on yes,
-    /// the ticket the dispatch must carry. Latch and ticket move under one
-    /// guard: read apart, a `note_progress` landing between them would fold
-    /// into the ticket, and the push it should have cancelled would ring.
-    pub fn admit_ambient(&self, session_uid: &str, class: Ambient) -> Option<Ticket> {
-        let mut epochs = self.epochs.lock().unwrap();
-        let mut ambient = self.ambient.lock().unwrap();
-        match ambient.get(session_uid) {
-            Some(last) if *last == class => None,
-            _ => {
-                ambient.insert(session_uid.to_string(), class);
-                Some(quiet_ticket(&mut epochs, session_uid))
-            }
-        }
-    }
-
-    /// The run demonstrably moved — a tool ran, a turn ended, injected text
-    /// landed. The latch opens so a *later* quiet state is news again, and any
-    /// quiet-state push still waiting out its grace is stale and must not
-    /// ring: the wait it announces is over.
+    /// The run demonstrably moved — a Codex turn or thread started. Any
+    /// quiet-state push still waiting out its grace is stale and must not ring:
+    /// the wait it announces is over.
     pub fn note_progress(&self, session_uid: &str) {
         let mut epochs = self.epochs.lock().unwrap();
         epochs.entry(session_uid.to_string()).or_default().1 += 1;
-        self.ambient.lock().unwrap().remove(session_uid);
     }
 
     /// The dispatch step, whole: either the ticket still stands and here are
@@ -178,128 +126,39 @@ impl PushGate {
     /// **A turn ended, and that is both the movement and the news — one
     /// transition.**
     ///
-    /// The completion signal a run gets from watching its wire, rather than from a
-    /// hook that re-fires: it arrives exactly once per turn, so there is no
-    /// repetition for the ambient latch to absorb and the latch must be *reopened*
-    /// by the same event that then closes it on `Done`. Two things follow, both
-    /// wanted — a quiet-state push still sitting out its dispatch grace is
-    /// describing a wait this terminal has ended, and the moved epoch kills it; and
-    /// the next turn to finish is news again rather than a repeat of this one.
+    /// It arrives exactly once per turn. A quiet-state push still sitting out
+    /// its dispatch grace is describing a wait this turn's end has ended, and the
+    /// moved epoch kills it; the next turn to finish is news again.
     ///
     /// Taken under one guard for the reason [`admit_decision`](Self::admit_decision)
     /// is: read apart, a `note_progress` from some other transition landing between
     /// the bump and the admission folds into this ticket, so the progress that
     /// exists to cancel this push arrives just too early to.
     ///
-    /// Returns a [`Ticket`] rather than an `Option`, because reopening the latch
-    /// and then consulting it can have only one answer. What the ticket does *not*
-    /// promise is that this push will ring: a later turn ending inside the dispatch
-    /// grace bumps the epoch again and supersedes it, which is the same coalescing
-    /// every quiet-state push on either agent's path is subject to — see
-    /// [`crate::state::Daemon::push_codex_turn_complete`].
+    /// What the ticket does *not* promise is that this push will ring: a later
+    /// turn ending inside the dispatch grace bumps the epoch again and supersedes
+    /// it, which is the same coalescing every quiet-state push on either agent's
+    /// path is subject to — see [`crate::state::Daemon::push_codex_turn_complete`].
     pub fn admit_turn_end(&self, session_uid: &str) -> Ticket {
         let mut epochs = self.epochs.lock().unwrap();
-        let mut ambient = self.ambient.lock().unwrap();
-        ambient.insert(session_uid.to_string(), Ambient::Done);
         quiet_ticket(&mut epochs, session_uid)
     }
 
     /// **A decision arrived, and the run moved to meet it — one transition.**
     ///
-    /// Recording progress and claiming the prompt are the same event and are
-    /// taken under the same guard. Apart, a notice landing between them reads a
-    /// prompt nobody has claimed *and* mints its ambient ticket at the new
-    /// progress epoch — so the progress that exists to cancel that notice
-    /// arrives just too early to, and the reader gets two notifications for one
-    /// prompt with no guarantee which one APNs keeps.
-    ///
-    /// `None` means this card already rang: its `permission_prompt` twin got
-    /// here first, and one decision deserves one ring.
-    pub fn admit_decision(
-        &self,
-        session_uid: &str,
-        card: &str,
-        prompt_id: Option<&str>,
-    ) -> Option<Ticket> {
+    /// Recording progress and admitting the card are the same event and are
+    /// taken under the same guard, so the progress that cancels an older
+    /// quiet-state push cannot land between them. `None` means this card already
+    /// rang: one decision deserves one ring.
+    pub fn admit_decision(&self, session_uid: &str, card: &str) -> Option<Ticket> {
         let mut epochs = self.epochs.lock().unwrap();
-        let mut ambient = self.ambient.lock().unwrap();
         let mut permission = self.permission.lock().unwrap();
         epochs.entry(session_uid.to_string()).or_default().1 += 1;
-        ambient.remove(session_uid);
-        let rung = permission.entry(session_uid.to_string()).or_default();
-        if let Some(prompt_id) = prompt_id {
-            rung.prompts.insert(prompt_id.to_string());
-        }
-        rung.cards
+        permission
+            .entry(session_uid.to_string())
+            .or_default()
             .insert(card.to_string())
             .then(|| ticket_under_lock(&epochs, session_uid))
-    }
-
-    /// What a `permission_prompt` notice is allowed to say, whole.
-    ///
-    /// Three states, and reading them apart is what lets a decision and a
-    /// notice about the same prompt both ring:
-    ///
-    ///   * **A card is filed for it** (`cards`: the prompt's cards still open).
-    ///     The notice is the twin of a decision, so it takes the first of them
-    ///     that has not rung and *is* that decision — whichever of the two hooks
-    ///     gets here first says the actionable thing once. All of them rung: the
-    ///     twin, silent.
-    ///   * **No card, but a decision of this prompt rang.** It is over and its
-    ///     card is gone. Ringing again would announce something that no longer
-    ///     exists.
-    ///   * **Neither.** A run is waiting on a human, which is what it says.
-    ///
-    /// Taken under one guard with [`admit_decision`](Self::admit_decision), so
-    /// the two hooks for one card cannot interleave into two rings.
-    pub fn admit_notice(
-        &self,
-        session_uid: &str,
-        prompt_id: Option<&str>,
-        cards: &[String],
-    ) -> Option<(Ticket, Notice)> {
-        let mut epochs = self.epochs.lock().unwrap();
-        let mut ambient = self.ambient.lock().unwrap();
-        let mut permission = self.permission.lock().unwrap();
-        let waiting = |epochs: &mut HashMap<String, (u64, u64)>,
-                       ambient: &mut HashMap<String, Ambient>| {
-            match ambient.get(session_uid) {
-                Some(Ambient::Waiting) => None,
-                _ => {
-                    ambient.insert(session_uid.to_string(), Ambient::Waiting);
-                    Some((quiet_ticket(epochs, session_uid), Notice::Waiting))
-                }
-            }
-        };
-        let Some(prompt_id) = prompt_id else {
-            return waiting(&mut epochs, &mut ambient);
-        };
-        let rung = permission.entry(session_uid.to_string()).or_default();
-        if !cards.is_empty() {
-            let card = cards
-                .iter()
-                .find(|card| !rung.cards.contains(*card))?
-                .clone();
-            rung.cards.insert(card.clone());
-            rung.prompts.insert(prompt_id.to_string());
-            // **The same transition a decision makes anywhere else.** This
-            // notice *is* the decision — whichever hook reached the gate first
-            // — so the run has demonstrably moved, and any quiet-state push
-            // still waiting out its grace is describing a wait that is over.
-            // Without this, a `waiting` push admitted moments earlier survives
-            // alongside it, and the reader gets two notifications for one
-            // prompt.
-            epochs.entry(session_uid.to_string()).or_default().1 += 1;
-            ambient.remove(session_uid);
-            return Some((
-                ticket_under_lock(&epochs, session_uid),
-                Notice::Decision(card),
-            ));
-        }
-        if rung.prompts.contains(prompt_id) {
-            return None;
-        }
-        waiting(&mut epochs, &mut ambient)
     }
 
     /// A deleted or pruned run has nothing left to ring about — including any
@@ -310,7 +169,6 @@ impl PushGate {
     pub fn evict_session(&self, session_uid: &str) {
         let mut epochs = self.epochs.lock().unwrap();
         epochs.entry(session_uid.to_string()).or_default().0 += 1;
-        self.ambient.lock().unwrap().remove(session_uid);
         self.permission.lock().unwrap().remove(session_uid);
         for sessions in self.delivered.lock().unwrap().values_mut() {
             sessions.remove(session_uid);
@@ -329,12 +187,7 @@ mod tests {
 
     /// The exclusion list a fresh (still-valid) ticket sees.
     fn saw(gate: &PushGate, run: &str, seq: u64) -> Vec<String> {
-        let ticket = gate
-            .admit_ambient(run, Ambient::Waiting)
-            .unwrap_or_else(|| {
-                gate.note_progress(run);
-                gate.admit_ambient(run, Ambient::Waiting).unwrap()
-            });
+        let ticket = gate.admit_turn_end(run);
         gate.exclusions_if_valid(run, ticket, false, seq).unwrap()
     }
 
@@ -355,141 +208,31 @@ mod tests {
     }
 
     #[test]
-    fn the_ambient_latch_pushes_a_class_once() {
+    fn each_approval_rings_once() {
         let gate = PushGate::new();
         assert!(
-            gate.admit_ambient("run", Ambient::Waiting).is_some(),
-            "first wait is news"
-        );
-        assert!(
-            gate.admit_ambient("run", Ambient::Waiting).is_none(),
-            "idle_prompt re-fires are the same news"
-        );
-        assert!(
-            gate.admit_ambient("run", Ambient::Done).is_some(),
-            "the turn ending is a change"
-        );
-        assert!(
-            gate.admit_ambient("run", Ambient::Waiting).is_some(),
-            "waiting after done is a change"
-        );
-    }
-
-    #[test]
-    fn progress_reopens_the_latch() {
-        let gate = PushGate::new();
-        assert!(gate.admit_ambient("run", Ambient::Waiting).is_some());
-        gate.note_progress("run");
-        assert!(
-            gate.admit_ambient("run", Ambient::Waiting).is_some(),
-            "after a tool ran, a new wait is a new fact"
-        );
-    }
-
-    #[test]
-    fn each_approval_rings_once_including_its_notification_twin() {
-        let gate = PushGate::new();
-        let card = |id: &str| vec![id.to_string()];
-        assert!(
-            gate.admit_decision("run", "card-1", Some("prompt-1"))
-                .is_some(),
+            gate.admit_decision("run", "card-1").is_some(),
             "the request rings"
         );
         assert!(
-            gate.admit_notice("run", Some("prompt-1"), &card("card-1"))
-                .is_none(),
-            "its permission_prompt notification is the same card"
+            gate.admit_decision("run", "card-1").is_none(),
+            "the same card again is the same news"
         );
         assert!(
-            gate.admit_decision("run", "card-2", Some("prompt-1"))
-                .is_some(),
-            "a second decision of the same prompt is second news"
-        );
-        assert!(
-            gate.admit_notice("run", Some("prompt-1"), &card("card-2"))
-                .is_none(),
-            "and its twin is silent too"
+            gate.admit_decision("run", "card-2").is_some(),
+            "a second decision is second news"
         );
     }
 
-    /// **Whichever hook arrives first says it, and only one of them says it.**
-    ///
-    /// The two hooks for one prompt reach the gate in either order and, in
-    /// between, the notice may still believe there is no card. Every ordering
-    /// has to end with exactly one admission — the actionable one where there
-    /// is a card to answer.
+    /// A decision retires its run's quiet-state push still in its grace: the run
+    /// moved to meet it.
     #[test]
-    fn one_prompt_rings_once_however_its_two_hooks_interleave() {
-        // The request first: the notice behind it is silent whether or not it
-        // has caught up with the card.
-        let card = vec!["c".to_string()];
+    fn a_decision_retires_its_runs_waiting_quiet_push() {
         let gate = PushGate::new();
-        assert!(gate.admit_decision("run", "c", Some("p")).is_some());
-        assert!(gate.admit_notice("run", Some("p"), &card).is_none());
-        assert!(
-            gate.admit_notice("run", Some("p"), &[]).is_none(),
-            "a notice still reading the world as cardless must not ring a second time"
-        );
-
-        // The notice first, with the card already filed: it *is* the decision,
-        // and the request behind it adds nothing.
-        let gate = PushGate::new();
-        assert_eq!(
-            gate.admit_notice("run", Some("p"), &card).map(|(_, n)| n),
-            Some(Notice::Decision("c".to_string()))
-        );
-        assert!(gate.admit_decision("run", "c", Some("p")).is_none());
-
-        // The notice first, before the card exists: a run waiting on a human.
-        // The decision that follows is a different, louder fact, and the
-        // progress it records is what cancels the notice mid-grace.
-        let gate = PushGate::new();
-        let (waiting, notice) = gate.admit_notice("run", Some("p"), &[]).unwrap();
-        assert_eq!(notice, Notice::Waiting);
-        assert!(gate.admit_decision("run", "c", Some("p")).is_some());
-        assert_eq!(
-            gate.exclusions_if_valid("run", waiting, true, 1),
-            None,
-            "the weaker notice does not survive the decision"
-        );
-    }
-
-    /// **A decision admitted through the notice supersedes an earlier wait.**
-    ///
-    /// After a restart the card is in the database and the prompt key is
-    /// unclaimed, so the `permission_prompt` is the hook that admits the
-    /// decision. If it does not record the run moving, a `waiting` push
-    /// admitted moments before is still valid when its grace expires and the
-    /// reader gets two notifications for one prompt.
-    #[test]
-    fn a_decision_admitted_through_the_notice_cancels_the_wait_before_it() {
-        let gate = PushGate::new();
-        let waiting = gate.admit_ambient("run", Ambient::Waiting).unwrap();
-        assert_eq!(
-            gate.admit_notice("run", Some("p"), &["c".to_string()])
-                .map(|(_, n)| n),
-            Some(Notice::Decision("c".to_string()))
-        );
-        assert_eq!(
-            gate.exclusions_if_valid("run", waiting, true, 1),
-            None,
-            "the wait it replaced does not also ring"
-        );
-    }
-
-    /// A prompt whose decision already rang and whose card is gone is not news
-    /// again. It is the state between "never heard of it" and "here it is", and
-    /// collapsing it into either one produces a notification about something
-    /// that cannot be acted on.
-    #[test]
-    fn a_notice_for_a_decision_that_is_over_is_silent() {
-        let gate = PushGate::new();
-        assert!(gate.admit_decision("run", "c", Some("p")).is_some());
-        assert!(gate.admit_notice("run", Some("p"), &[]).is_none());
-        assert!(
-            gate.admit_notice("run", None, &[]).is_some(),
-            "a notice naming no prompt is still an ordinary wait"
-        );
+        let quiet = gate.admit_turn_end("run");
+        assert!(gate.exclusions_if_valid("run", quiet, true, 1).is_some());
+        assert!(gate.admit_decision("run", "card").is_some());
+        assert_eq!(gate.exclusions_if_valid("run", quiet, true, 1), None);
     }
 
     /// The admission ticket is *of the admission moment*: progress landing
@@ -501,7 +244,7 @@ mod tests {
         let gate = PushGate::new();
         gate.note_delivered("phone", "run", 10);
 
-        let ticket = gate.admit_ambient("run", Ambient::Waiting).unwrap();
+        let ticket = gate.admit_turn_end("run");
         gate.note_progress("run");
         assert_eq!(
             gate.exclusions_if_valid("run", ticket, true, 5),
@@ -509,7 +252,7 @@ mod tests {
             "progress after admission cancels a quiet-state push"
         );
 
-        let ticket = gate.admit_ambient("run", Ambient::Waiting).unwrap();
+        let ticket = gate.admit_turn_end("run");
         gate.evict_session("run");
         assert_eq!(
             gate.exclusions_if_valid("run", ticket, false, 5),
@@ -517,7 +260,7 @@ mod tests {
             "eviction cancels even an approval push — never an empty exclusion list"
         );
 
-        let ticket = gate.admit_ambient("run", Ambient::Waiting).unwrap();
+        let ticket = gate.admit_turn_end("run");
         gate.note_delivered("phone", "run", 10);
         assert_eq!(
             gate.exclusions_if_valid("run", ticket, true, 5),
@@ -530,16 +273,12 @@ mod tests {
     fn eviction_forgets_a_session_everywhere() {
         let gate = PushGate::new();
         gate.note_delivered("phone", "run", 9);
-        assert!(gate.admit_ambient("run", Ambient::Waiting).is_some());
-        assert!(gate.admit_decision("run", "c1", Some("p1")).is_some());
+        assert!(gate.admit_decision("run", "c1").is_some());
         gate.evict_session("run");
         assert!(
-            gate.admit_ambient("run", Ambient::Waiting).is_some(),
+            gate.admit_decision("run", "c1").is_some(),
             "a fresh run starts fresh"
         );
-        assert!(gate.admit_decision("run", "c1", Some("p1")).is_some());
-        // Last: the helper admits (or forces) a ticket of its own, which
-        // would close the fresh latch the assertions above exist to observe.
         assert!(saw(&gate, "run", 1).is_empty());
     }
 

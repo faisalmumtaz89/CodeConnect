@@ -7,9 +7,9 @@ import XCTest
 /// task's report draws.
 ///
 /// `transcript-user-lines-wire.json` is emitted, not written: every user line of
-/// a recorded Claude Code 2.1.290 transcript, through the daemon's production
-/// tailer and store, as the events a phone is sent (`ccd/src/fixture_replay.rs`
-/// re-derives it). The variations below start from one of those events and
+/// a recorded Claude Code 2.1.290 transcript, through an earlier daemon's
+/// transcript tailer and store, as the events a phone is sent (frozen, as that
+/// daemon emitted it; never regenerated: `fixtures/README.md`). The variations below start from one of those events and
 /// change only the fields named, taking each shape from the owner's own
 /// transcripts as Claude Code 2.1.304 wrote them.
 final class TaskNotificationTests: XCTestCase {

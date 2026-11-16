@@ -12,7 +12,8 @@
 
 use crate::event::{Event, EventKind, Fact, ModelFact, ModelSource, Source};
 
-/// The kind the transcript tailer files Claude's permission-mode line under.
+/// The kind an earlier build's transcript tailer filed Claude's permission-mode line
+/// under, read from a log that build wrote.
 pub const TRANSCRIPT_PERMISSION_MODE: &str = "transcript_permission-mode";
 
 /// A run's facts, each as of the newest event that decided it.

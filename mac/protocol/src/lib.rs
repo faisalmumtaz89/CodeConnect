@@ -1,10 +1,10 @@
 //! Shared CodeConnect wire types.
 //!
-//! Three surfaces live here so `ccd`, `cc` and `cc-hook` can never disagree:
+//! These surfaces live here so `ccd` and `codeconnect` can never disagree:
 //!   * [`event`] — the daemon-assigned event log envelope (source of truth).
-//!   * [`config`] — one config file, shared: the shim generates hooks that
-//!     match exactly what the daemon expects to gate on.
-//!   * [`ipc`]   — unix-socket frames (hook posts + supervisor registration).
+//!   * [`config`] — one config file, shared.
+//!   * [`ipc`]   — unix-socket frames (the CLI, each run's mail server, and
+//!     supervisor registration).
 //!   * [`ws`]    — the tailnet WebSocket protocol the iPhone speaks.
 //!   * [`host`]  — the lines between `ccd` and the agent host of each Claude
 //!     run.
@@ -32,7 +32,6 @@ pub mod facts;
 pub mod fdlimit;
 pub mod fsperm;
 pub mod hash;
-pub mod hook;
 pub mod host;
 pub mod ipc;
 pub mod launch_result;

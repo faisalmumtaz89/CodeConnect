@@ -262,7 +262,7 @@ async fn accept_loop(
 /// Both halves are needed and neither is sufficient. Without the global cap,
 /// anything that can reach the tailnet port holds the daemon's entire
 /// file-descriptor budget open — and the *local* IPC socket, which carries the
-/// hook path and every supervisor link, lives on the same budget. Without the
+/// CLI and every supervisor link, lives on the same budget. Without the
 /// per-peer share, one misbehaving client reaches the global cap by itself and
 /// every other device is refused.
 ///
@@ -3212,8 +3212,8 @@ pub(crate) fn capabilities(
     // and two flags derived independently could tell it to do both or neither.
     let mode = daemon.push.mode();
     Capabilities {
-        // True: an answer reaches the agent through its call's own held hook,
-        // and one that cannot be handed over is refused rather than dropped.
+        // True: an answer reaches the agent through its run's host, and one
+        // that cannot be handed over is refused rather than dropped.
         can_approve_reliably: true,
         // Minor 7. A phone talking to an older daemon finds no such key in the
         // ack and reads that as false, so the swipe is absent rather than
@@ -3226,8 +3226,7 @@ pub(crate) fn capabilities(
         // able to tell those apart without version arithmetic. True in relay
         // mode as well, because a test is exactly how a relay path is proven.
         test_push: mode.is_configured(),
-        // The hook emits nothing when we are unreachable, so a dead daemon is
-        // indistinguishable from no daemon.
+        // The value phones read for how a decision fails with no daemon.
         fail_mode: "fail_open".into(),
         answer_path: AnswerPath::HookReturn,
         // No fixed hold: a card is held for as long as Claude waits on it.
@@ -3429,21 +3428,24 @@ mod tests {
         let now = protocol::time::now_rfc3339();
         daemon
             .store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: uid.to_string(),
-                session_id: "cc-term".into(),
-                tmux_session: "cc-term".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &crate::store::SessionRow {
+                    session_uid: uid.to_string(),
+                    session_id: "cc-term".into(),
+                    tmux_session: "cc-term".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
     }
@@ -3456,8 +3458,6 @@ mod tests {
             .insert_device(&device_id, "iPhone", "not-a-real-hash", &now, None)
             .unwrap();
 
-        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(transcript_rx));
         let daemon = Daemon::new(
             protocol::config::Config::default(),
             store,
@@ -3467,7 +3467,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            transcript_tx,
         );
         (daemon, device_id)
     }
@@ -3739,94 +3738,6 @@ mod tests {
         }
     }
 
-    /// **An answer says which kind of device sent it**, by what its connection's
-    /// hello called itself: the Mac app's is recorded as a Mac's, an iPhone's as
-    /// before, with the iPhone's sentence byte for byte what every app reads.
-    #[tokio::test]
-    async fn an_answer_names_the_kind_of_device_it_came_from() {
-        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
-        for (client_name, answered_on, detail) in [
-            ("CodeConnect Mac", "mac", "Sent to Claude from a phone"),
-            (
-                "CodeConnect iPhone",
-                "iphone",
-                "Sent to Claude from a phone",
-            ),
-        ] {
-            let (server, _device) = live_server(protocol::config::Config::default()).await;
-            let uid = protocol::uid::new().unwrap();
-            let call = "toolu_answered_on";
-            let tool_input = serde_json::json!({ "command": "touch held.txt" });
-            let hook = |event: &str, wait: bool| protocol::ipc::HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.clone()),
-                event: event.into(),
-                payload: serde_json::json!({
-                    "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p1",
-                    "tool_name": "Bash", "tool_input": tool_input, "tool_use_id": call,
-                }),
-                wait,
-                holds_questions: wait,
-                holds_approvals: wait,
-            };
-            server.daemon.handle_hook(hook("PreToolUse", false)).await;
-            let held = {
-                let daemon = Arc::clone(&server.daemon);
-                let request = hook("PermissionRequest", true);
-                tokio::spawn(async move { daemon.handle_hook(request).await })
-            };
-            for _ in 0..200 {
-                let filed = server.daemon.store.list_pending_approvals().unwrap().len() == 1;
-                if filed || held.is_finished() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-
-            let stream = TcpStream::connect(server.addr).await.unwrap();
-            let url = format!("ws://{}/", server.addr);
-            let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
-            let hello = serde_json::json!({
-                "type": "hello",
-                "protocol_version": protocol::PROTOCOL_VERSION,
-                "token": "device-token-for-tests",
-                "client_name": client_name,
-            });
-            socket.send(Message::Text(hello.to_string())).await.unwrap();
-            let ack = next_json(&mut socket).await.expect("a reply to hello");
-            assert_eq!(ack["type"], "hello_ack", "{ack}");
-            let answer = serde_json::json!({
-                "type": "answer",
-                "request_id": call,
-                "payload_hash": protocol::hash::approval_payload_hash("Bash", &tool_input),
-                "decision": { "type": "allow" },
-                "session_id": uid,
-            });
-            socket
-                .send(Message::Text(answer.to_string()))
-                .await
-                .unwrap();
-            let result = loop {
-                let message = next_json(&mut socket).await.expect("an answer_result");
-                if message["type"] == "answer_result" {
-                    break message;
-                }
-            };
-            let outcome = &result["result"]["outcome"];
-            assert_eq!(
-                result["result"]["status"], "applied",
-                "{client_name}: {result}"
-            );
-            assert_eq!(outcome["resolved_by"], "phone", "{client_name}: {result}");
-            assert_eq!(
-                outcome["answered_on"], answered_on,
-                "{client_name}: {result}"
-            );
-            assert_eq!(outcome["detail"], detail, "{client_name}: {result}");
-            let _ = tokio::time::timeout(Duration::from_secs(5), held).await;
-        }
-    }
-
     /// A `hello` at the current protocol, on the device token these tests pair with,
     /// carrying the `features` key no build reads any more. Used for both the
     /// handshake hello and the second one sent down an already-authenticated socket
@@ -3920,36 +3831,29 @@ mod tests {
     /// A Codex run registered the way its coordinator registers it, on a daemon a
     /// test drives; its link reaches no app-server, so a message to it waits.
     async fn codex_run(daemon: &Arc<Daemon>, uid: &str, name: &str) {
-        let (tx, rx) =
-            tokio::sync::mpsc::channel(protocol::config::Config::default().ipc_write_queue);
-        Box::leak(Box::new(rx));
         daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: name.into(),
-                    session_uid: Some(uid.into()),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: Some(
-                        std::env::temp_dir()
-                            .join(format!("ccd-peer-{uid}-nothing-listens.sock"))
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    codex_generation: Some(1),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: name.into(),
+                session_uid: Some(uid.into()),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: Some(
+                    std::env::temp_dir()
+                        .join(format!("ccd-peer-{uid}-nothing-listens.sock"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
             .expect("a Codex registration is accepted");
     }
@@ -4418,8 +4322,6 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(transcript_rx));
         let daemon = Daemon::new(
             config,
             Arc::clone(&store),
@@ -4429,7 +4331,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            transcript_tx,
         );
         (daemon, device_id, store, path)
     }
@@ -5128,8 +5029,8 @@ mod tests {
     fn the_accept_loop_stops_admitting_at_the_global_cap() {
         // The defect: `listener.accept()` spawned unconditionally, so anything
         // that could reach the tailnet port held file descriptors without a
-        // ceiling — and the *local* IPC socket, which carries the hook path and
-        // every supervisor link, lives on the same budget.
+        // ceiling — and the *local* IPC socket, which carries the CLI and every
+        // supervisor link, lives on the same budget.
         let limiter = Arc::new(ConnectionLimiter::new(3, 3));
         let permits: Vec<_> = (0..3)
             .map(|i| limiter.admit(ip(i)).expect("under the cap"))
@@ -5356,36 +5257,30 @@ mod tests {
     ///
     /// One transaction for the lot, because the replay test below needs tens of
     /// thousands of them and a commit each would cost more than the replay it is
-    /// timing. `append_batch_with_cursor` refuses a session it cannot find, so the
-    /// row goes in first and a zero count still proves the seeding worked.
+    /// timing. The batch drops the facts of a session it cannot find, so the run's
+    /// row goes in first, as the engine writes one, and a full count proves the
+    /// seeding worked.
     fn seed_backlog(daemon: &Arc<Daemon>, events: usize) -> String {
         use protocol::event::{Lifecycle, PendingEvent};
 
         let uid = protocol::uid::new().expect("mint a uid");
         let now = protocol::time::now_rfc3339();
-        let written = daemon
-            .store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: uid.clone(),
-                session_id: "cc-backlog".into(),
-                tmux_session: "cc-backlog".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
-            .expect("the session row is written");
-        // A freshly minted uid cannot be tombstoned, but the upsert says so
-        // rather than assuming it: a batch append against a session that is not
-        // there writes nothing at all and would leave the count below to explain
-        // it.
-        assert!(matches!(written, crate::store::SessionUpsert::Present));
+        let row = crate::store::SessionRow {
+            session_uid: uid.clone(),
+            session_id: "cc-backlog".into(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        assert_eq!(daemon.store.begin_run(&row, &uid, None).unwrap(), None);
         let pendings: Vec<PendingEvent> = (0..events)
             .map(|n| PendingEvent {
                 session_uid: uid.clone(),
@@ -5399,17 +5294,9 @@ mod tests {
                 item_id: None,
             })
             .collect();
-        let cursor = crate::store::TailCursor {
-            path: "/dev/null".into(),
-            dev: 0,
-            ino: 0,
-            offset: 0,
-            last_line_start: 0,
-            last_line_sha: String::new(),
-        };
         let written = daemon
             .store
-            .append_batch_with_cursor(&uid, &pendings, &cursor)
+            .append_batch(&pendings)
             .expect("the backlog is written");
         assert_eq!(written.len(), events, "every seeded event landed");
         uid
@@ -6037,9 +5924,10 @@ mod tests {
     async fn a_page_cut_short_by_removing_its_session_ends_with_an_error() {
         let (daemon, _device) = daemon_with_a_device();
         let uid = seed_backlog(&daemon, 10);
-        let mut row = daemon.store.get_session(&uid).unwrap().unwrap();
-        row.lifecycle = protocol::event::Lifecycle::Exited;
-        daemon.store.upsert_session(&row).unwrap().assert_present();
+        daemon
+            .store
+            .set_lifecycle(&uid, protocol::event::Lifecycle::Exited)
+            .unwrap();
 
         let mut sink = CollectSink::default();
         let mut watermarks: HashMap<String, u64> = HashMap::new();
@@ -6131,9 +6019,10 @@ mod tests {
 
         for (removed_after_steps, request_id) in [(0usize, "before-read"), (2, "mid-page")] {
             let uid = seed_backlog(&daemon, 10);
-            let mut row = daemon.store.get_session(&uid).unwrap().unwrap();
-            row.lifecycle = protocol::event::Lifecycle::Exited;
-            daemon.store.upsert_session(&row).unwrap().assert_present();
+            daemon
+                .store
+                .set_lifecycle(&uid, protocol::event::Lifecycle::Exited)
+                .unwrap();
             handle_message(
                 &daemon,
                 &mut sink,
@@ -9058,21 +8947,24 @@ mod tests {
         let now = protocol::time::now_rfc3339();
         daemon
             .store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: uid.clone(),
-                session_id: "cc-1".into(),
-                tmux_session: "cc-1".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Codex,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &crate::store::SessionRow {
+                    session_uid: uid.clone(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Codex,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
 
@@ -9182,25 +9074,23 @@ mod tests {
             (&gone, "2026-11-01T00:00:00.000Z"),
             (&repo, "2026-11-02T00:00:00.000Z"),
         ] {
-            let filed = server
-                .store
-                .upsert_session(&crate::store::SessionRow {
-                    session_uid: protocol::uid::new().unwrap(),
-                    session_id: "cc-1".into(),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd: cwd.display().to_string(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: at.into(),
-                    updated_at: at.into(),
-                    agent: protocol::agent::AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
-                .unwrap();
-            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+            let uid = protocol::uid::new().unwrap();
+            let row = crate::store::SessionRow {
+                session_uid: uid.clone(),
+                session_id: "cc-1".into(),
+                tmux_session: String::new(),
+                tmux_socket: String::new(),
+                cwd: cwd.display().to_string(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Exited,
+                created_at: at.into(),
+                updated_at: at.into(),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            };
+            assert_eq!(server.store.begin_run(&row, &uid, None).unwrap(), None);
         }
         let list = Message::Text(r#"{"type":"list_projects"}"#.into());
 
@@ -9354,21 +9244,24 @@ mod tests {
     /// project list's order and dates are the fixture's own.
     fn register_stub_session(store: &crate::store::Store, cwd: String) {
         let filed = store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
-                session_id: "cc-9".into(),
-                tmux_session: "cc-9".into(),
-                tmux_socket: "codeconnect".into(),
-                cwd,
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Exited,
-                created_at: "2026-01-01T00:00:00.000Z".into(),
-                updated_at: "2026-01-01T00:00:00.000Z".into(),
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &crate::store::SessionRow {
+                    session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                    session_id: "cc-9".into(),
+                    tmux_session: "cc-9".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd,
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: "2026-01-01T00:00:00.000Z".into(),
+                    updated_at: "2026-01-01T00:00:00.000Z".into(),
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap();
         assert!(matches!(filed, crate::store::SessionUpsert::Present));
     }
@@ -9887,21 +9780,24 @@ mod tests {
         for cwd in [at(&app), at(&notes)] {
             let filed = server
                 .store
-                .upsert_session(&crate::store::SessionRow {
-                    session_uid: protocol::uid::new().unwrap(),
-                    session_id: "cc-1".into(),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd,
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: "2026-11-04T09:00:00.000Z".into(),
-                    updated_at: "2026-11-04T09:00:00.000Z".into(),
-                    agent: AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
+                .upsert_session_at_generation(
+                    &crate::store::SessionRow {
+                        session_uid: protocol::uid::new().unwrap(),
+                        session_id: "cc-1".into(),
+                        tmux_session: "cc-1".into(),
+                        tmux_socket: "codeconnect".into(),
+                        cwd,
+                        claude_session_id: None,
+                        transcript_path: None,
+                        lifecycle: protocol::event::Lifecycle::Exited,
+                        created_at: "2026-11-04T09:00:00.000Z".into(),
+                        updated_at: "2026-11-04T09:00:00.000Z".into(),
+                        agent: AgentKind::Claude,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                    },
+                    None,
+                )
                 .unwrap();
             assert!(matches!(filed, crate::store::SessionUpsert::Present));
         }
@@ -10041,21 +9937,24 @@ mod tests {
         ] {
             let filed = server
                 .store
-                .upsert_session(&crate::store::SessionRow {
-                    session_uid: protocol::uid::new().unwrap(),
-                    session_id: "cc-1".into(),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd: cwd.display().to_string(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: at.into(),
-                    updated_at: at.into(),
-                    agent,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
+                .upsert_session_at_generation(
+                    &crate::store::SessionRow {
+                        session_uid: protocol::uid::new().unwrap(),
+                        session_id: "cc-1".into(),
+                        tmux_session: "cc-1".into(),
+                        tmux_socket: "codeconnect".into(),
+                        cwd: cwd.display().to_string(),
+                        claude_session_id: None,
+                        transcript_path: None,
+                        lifecycle: protocol::event::Lifecycle::Exited,
+                        created_at: at.into(),
+                        updated_at: at.into(),
+                        agent,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                    },
+                    None,
+                )
                 .unwrap();
             assert!(matches!(filed, crate::store::SessionUpsert::Present));
         }

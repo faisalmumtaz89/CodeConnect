@@ -3147,8 +3147,7 @@ mod tests {
     /// `fixtures/codex/approval-0.153.jsonl` is a recording, not a mock: two
     /// real `codeconnect codex` sessions driven to a real approval, tapped on
     /// the ccd leg. Replaying it here is what makes a schema drift in a future
-    /// codex release fail this suite instead of failing silently in production —
-    /// the same job `fixture_replay.rs` does for Claude's hooks.
+    /// codex release fail this suite instead of failing silently in production.
     ///
     /// It pins the three things the 0.147 captures cannot show: that
     /// `availableDecisions` is on the **stable** wire, that `reason` is

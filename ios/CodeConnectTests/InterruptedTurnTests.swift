@@ -8,9 +8,9 @@ import XCTest
 /// `transcript-interrupts-wire.json` is emitted, not written: three runs Claude
 /// Code 2.1.304 recorded against a fake model — Esc while the reply streams,
 /// Esc while a tool runs, "No" at a tool's permission prompt — each followed by
-/// a later prompt answered in full, through the daemon's production tailer and
-/// store as the events a phone is sent (`ccd/src/fixture_replay.rs` re-derives
-/// it). An Esc writes Claude's interrupt marker and no turn end at all, ever;
+/// a later prompt answered in full, through an earlier daemon's transcript
+/// tailer and store as the events a phone is sent (frozen, as that daemon
+/// emitted it; never regenerated: `fixtures/README.md`). An Esc writes Claude's interrupt marker and no turn end at all, ever;
 /// the refusal writes the same marker and a `turn_duration` straight after it.
 @MainActor
 final class InterruptedTurnTests: XCTestCase {

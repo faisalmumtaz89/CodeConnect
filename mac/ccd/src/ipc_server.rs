@@ -1,13 +1,11 @@
 //! Unix-socket server at `~/.codeconnect/ccd.sock`.
 //!
-//! Both client kinds are served by one uniform loop: every connection gets a
-//! writer task fed by an mpsc channel, so a hook reply and a supervisor request
-//! travel the same path and nothing has to own the socket exclusively.
+//! Every client is served by one uniform loop: every connection gets a writer
+//! task fed by an mpsc channel, so nothing has to own the socket exclusively.
 //!
 //! Connections are inbound-only. The daemon never dials a session, which is
 //! what keeps it out of the agents' parent chain.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use protocol::ipc::{ClientFrame, DaemonFrame, MAX_FRAME_BYTES};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::state::Daemon;
 
@@ -28,13 +26,13 @@ pub async fn serve(daemon: Arc<Daemon>, socket_path: PathBuf) -> Result<()> {
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("binding {}", socket_path.display()))?;
-    // The socket is the daemon's whole trust boundary for hooks: owner-only.
+    // The socket is the daemon's local trust boundary: owner-only.
     set_owner_only(&socket_path)?;
     crate::log_info!("ipc listening on {}", socket_path.display());
 
     // One permit per live connection. Not a defence against a hostile peer —
     // the socket is `0600`, so reaching it means being this account — but
-    // against a runaway: a shell loop spawning `codeconnect ls`, or a hook storm, used
+    // against a runaway: a shell loop spawning `codeconnect ls` used
     // to spawn a task and hold a descriptor per attempt with no ceiling at all,
     // and exhausting the descriptor budget here takes the *tailnet* listener
     // down with it.
@@ -139,9 +137,6 @@ fn set_owner_only(path: &Path) -> Result<()> {
         .with_context(|| format!("chmod 600 {}", path.display()))
 }
 
-type Inflight =
-    Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<protocol::ipc::SupervisorResult>>>>;
-
 async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     // Bounded, and the bound is the point. This used to be an unbounded
@@ -167,13 +162,12 @@ async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()
     });
 
     let mut reader = BufReader::new(read_half);
-    let inflight: Inflight = Arc::new(std::sync::Mutex::new(HashMap::new()));
     // The *run* this connection registered, not its name: the socket closing is
     // what tells us the supervisor is gone, and detaching by name would detach
     // whichever run currently holds it.
     let mut registered: Option<crate::state::Registration> = None;
 
-    let result = read_loop(&daemon, &mut reader, &tx, &inflight, &mut registered).await;
+    let result = read_loop(&daemon, &mut reader, &tx, &mut registered).await;
 
     if let Some(registration) = registered {
         daemon.unregister_supervisor(&registration).await;
@@ -187,7 +181,6 @@ async fn read_loop(
     daemon: &Arc<Daemon>,
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     tx: &mpsc::Sender<DaemonFrame>,
-    inflight: &Inflight,
     registered: &mut Option<crate::state::Registration>,
 ) -> Result<()> {
     loop {
@@ -225,25 +218,8 @@ async fn read_loop(
         }
 
         match frame {
-            ClientFrame::Hook(post) if post.wait => {
-                // A waiting cc-hook sends this one frame and reads one reply, so
-                // the next thing this connection can do is close — which, while a
-                // question is held, is Claude ending the hook.
-                let mut gone = Box::pin(async {
-                    let _ = read_line_limited(reader, MAX_FRAME_BYTES).await;
-                });
-                let decision = daemon.handle_hook_held(post, &mut gone).await;
-                let _ = tx.send(DaemonFrame::HookReply { decision }).await;
-                return Ok(());
-            }
-            ClientFrame::Hook(post) => {
-                daemon.handle_hook(post).await;
-            }
             ClientFrame::Register(info) => {
-                match daemon
-                    .register_supervisor(info, tx.clone(), Arc::clone(inflight))
-                    .await
-                {
+                match daemon.register_supervisor(info).await {
                     Ok(registration) => {
                         *registered = Some(registration);
                         let _ = tx.send(DaemonFrame::Ack).await;
@@ -309,20 +285,6 @@ async fn read_loop(
                         "ipc: negotiate_support for {} answered supported={supported}",
                         agent.as_str()
                     );
-                }
-            }
-            ClientFrame::SupervisorResponse { id, result } => {
-                let responder = inflight
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&id);
-                match responder {
-                    Some(responder) => {
-                        let _ = responder.send(result);
-                    }
-                    // Late response to a request we already timed out. Dropping
-                    // it is correct: the caller has moved on.
-                    None => crate::log_debug!("ipc: late supervisor response {id}"),
                 }
             }
             ClientFrame::Heartbeat {
@@ -676,11 +638,6 @@ mod tests {
         );
 
         let store = Arc::new(crate::store::Store::open_temp("ccd-ipc"));
-
-        let (tail_tx, tail_rx) = mpsc::unbounded_channel();
-        // Kept alive: a dropped receiver fails every transcript registration,
-        // which is not what these tests are about.
-        Box::leak(Box::new(tail_rx));
         let daemon = Daemon::new(
             protocol::config::Config::default(),
             store,
@@ -690,7 +647,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tail_tx,
         );
 
         let socket = std::env::temp_dir().join(format!("ccd-ipc-{stamp}.sock"));
@@ -1272,272 +1228,6 @@ mod tests {
             lifecycle(&sessions, &uid),
             protocol::event::Lifecycle::Exited,
             "the run's own supervisor reported its own end"
-        );
-    }
-
-    /// **An exit report leaves a run where its agent last was.** The replay is
-    /// the registration the supervisor sent at launch, before `claude --worktree`
-    /// moved into its worktree; the hook that said so is the newer word. An ended
-    /// run stays filed under its worktree, its label and its diff alike.
-    #[tokio::test]
-    async fn an_exit_replay_leaves_the_folder_a_hook_moved_the_run_to() {
-        let (daemon, socket) = served_daemon().await;
-        let uid = protocol::uid::new().unwrap();
-        let worktree = "/tmp/.claude/worktrees/fix-login";
-
-        let a = registered(&socket, &uid, 1111, "2026-08-01T00:00:00Z").await;
-        daemon
-            .handle_hook(protocol::ipc::HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.clone()),
-                event: "SessionStart".into(),
-                payload: serde_json::json!({"hook_event_name": "SessionStart",
-                    "session_id": "uuid", "cwd": worktree}),
-                wait: false,
-                holds_questions: false,
-                holds_approvals: false,
-            })
-            .await;
-        drop(a);
-
-        let mut reporter = Supervisor::connect(&socket).await;
-        reporter
-            .send(&ClientFrame::Register(protocol::ipc::RegisterSession {
-                exit_replay: true,
-                ..registration(&uid, 1111, "2026-08-01T00:00:00Z")
-            }))
-            .await;
-        assert!(matches!(reporter.reply().await, DaemonFrame::Ack));
-        let sessions = reporter
-            .send_then_list(&ClientFrame::SessionExited {
-                session_id: "cc-1".to_string(),
-                session_uid: Some(uid.clone()),
-                exit_code: None,
-                reason: None,
-            })
-            .await;
-        let ended = sessions
-            .iter()
-            .find(|session| session.session_uid == uid)
-            .unwrap();
-        assert_eq!(ended.lifecycle, protocol::event::Lifecycle::Exited);
-        assert_eq!(
-            ended.cwd, worktree,
-            "the exit report filed the run back under the folder it launched in"
-        );
-    }
-
-    /// **A held approval's hook is let go when its run ends.** cc-hook watches
-    /// its parent, but its parent need not be Claude (a shell prefix that does
-    /// not `exec`), so once the run is marked exited the daemon answers the
-    /// hook with no decision and closes its connection, and closes the card:
-    /// a phone answer afterwards sends nothing.
-    #[tokio::test]
-    async fn a_held_approvals_hook_is_let_go_when_its_run_ends() {
-        let (daemon, socket) = served_daemon().await;
-        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-        assert!(matches!(
-            exchange(
-                &socket,
-                &register_frame(uid, "cc-1", protocol::agent::AgentKind::Claude)
-            )
-            .await,
-            DaemonFrame::Ack
-        ));
-        let hook = |event: &str, extra: serde_json::Value, wait: bool| {
-            let mut payload = serde_json::json!({
-                "hook_event_name": event,
-                "prompt_id": "p1",
-                "tool_name": "Bash",
-                "tool_input": {"command": "touch b.txt"},
-            });
-            payload
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            serde_json::to_string(&ClientFrame::Hook(protocol::ipc::HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.into()),
-                event: event.into(),
-                payload,
-                wait,
-                holds_questions: wait,
-                holds_approvals: wait,
-            }))
-            .unwrap()
-        };
-        let send = |line: String| {
-            let socket = socket.clone();
-            async move {
-                let mut stream = UnixStream::connect(&socket).await.unwrap();
-                stream.write_all(line.as_bytes()).await.unwrap();
-                stream.write_all(b"\n").await.unwrap();
-                stream
-            }
-        };
-        drop(
-            send(hook(
-                "PreToolUse",
-                serde_json::json!({"tool_use_id": "toolu_b"}),
-                false,
-            ))
-            .await,
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let held = send(hook("PermissionRequest", serde_json::json!({}), true)).await;
-
-        let events = |kind: &str| {
-            daemon
-                .store
-                .events_after(uid, 0, 100)
-                .unwrap()
-                .into_iter()
-                .filter(|event| event.kind.as_str() == kind)
-                .map(|event| event.payload)
-                .collect::<Vec<_>>()
-        };
-        for _ in 0..200 {
-            if !events("approval_request").is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        let card = events("approval_request")[0]["card"].clone();
-        assert_eq!(card["question_hold"], "held");
-
-        daemon
-            .session_exited("cc-1", Some(uid), Some(0), None, None)
-            .await;
-
-        let mut held = BufReader::new(held);
-        let mut reply = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            held.read_line(&mut reply),
-        )
-        .await
-        .expect("the held hook was never answered")
-        .unwrap();
-        match serde_json::from_str(&reply).unwrap() {
-            DaemonFrame::HookReply { decision } => {
-                assert_eq!(decision, protocol::hook::HookDecision::passthrough())
-            }
-            other => panic!("{other:?}"),
-        }
-        reply.clear();
-        assert_eq!(held.read_line(&mut reply).await.unwrap(), 0, "closed");
-
-        let resolved = events("approval_resolved");
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0]["resolved_by"], "timeout");
-        assert_eq!(
-            resolved[0]["detail"],
-            "the session ended before anyone answered"
-        );
-        match daemon
-            .answer(
-                "toolu_b",
-                card["payload_hash"].as_str().unwrap(),
-                protocol::ws::AnswerDecision::Allow,
-                Some(uid),
-                protocol::ws::AnsweredOn::Iphone,
-            )
-            .await
-        {
-            protocol::ws::AnswerResult::Duplicate { outcome, .. } => {
-                assert_eq!(outcome.resolved_by, protocol::ws::ResolvedBy::Timeout)
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// **A held question learns that Claude ended its hook from the connection
-    /// alone.** cc-hook keeps a waiting connection open until it exits (Claude
-    /// SIGTERMs it on Escape, an interrupt or the session ending), so the daemon
-    /// watches the read side while it holds. Open, the question stays held;
-    /// closed, the card stops offering answers nothing could deliver.
-    #[tokio::test]
-    async fn a_held_question_ends_when_its_hook_connection_closes() {
-        let (daemon, socket) = served_daemon().await;
-        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-        let hook = |event: &str, extra: serde_json::Value, wait: bool| {
-            let mut payload = serde_json::json!({
-                "hook_event_name": event,
-                "prompt_id": "p1",
-                "tool_name": "AskUserQuestion",
-                "tool_input": {"questions": [{"question": "Which?", "header": "H",
-                    "options": [{"label": "A"}, {"label": "B"}]}]},
-            });
-            payload
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            serde_json::to_string(&ClientFrame::Hook(protocol::ipc::HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(uid.into()),
-                event: event.into(),
-                payload,
-                wait,
-                holds_questions: wait,
-                holds_approvals: wait,
-            }))
-            .unwrap()
-        };
-        let send = |line: String| {
-            let socket = socket.clone();
-            async move {
-                let mut stream = UnixStream::connect(&socket).await.unwrap();
-                stream.write_all(line.as_bytes()).await.unwrap();
-                stream.write_all(b"\n").await.unwrap();
-                stream
-            }
-        };
-        drop(
-            send(hook(
-                "PreToolUse",
-                serde_json::json!({"tool_use_id": "toolu_q"}),
-                false,
-            ))
-            .await,
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let held = send(hook("PermissionRequest", serde_json::json!({}), true)).await;
-
-        let events = |kind: &str| {
-            daemon
-                .store
-                .events_after(uid, 0, 100)
-                .unwrap()
-                .into_iter()
-                .filter(|event| event.kind.as_str() == kind)
-                .map(|event| event.payload)
-                .collect::<Vec<_>>()
-        };
-        for _ in 0..200 {
-            if !events("approval_request").is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        let card = &events("approval_request")[0]["card"];
-        assert_eq!(card["request_id"], "toolu_q");
-        assert_eq!(card["question_hold"], "held");
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(
-            events("question_hold").is_empty(),
-            "held while the hook lives"
-        );
-
-        drop(held);
-        for _ in 0..200 {
-            if !events("question_hold").is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        assert_eq!(
-            events("question_hold"),
-            vec![serde_json::json!({"request_id": "toolu_q", "question_hold": "ended"})]
         );
     }
 }

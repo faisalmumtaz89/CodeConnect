@@ -1,36 +1,25 @@
 //! Whether someone is at the Mac: keyboard or mouse input anywhere on it
-//! within a time each caller chooses.
+//! within a time the caller chooses.
 //!
-//! Two callers, one check:
-//!
-//!   * **A background agent's question.** Claude draws it only after its
-//!     `PermissionRequest` hook returns, so while the daemon holds it for the
-//!     phone the Mac shows nothing. It is held only while nobody has touched
-//!     the Mac for [`QUESTION_IDLE`], and input resuming hands it back.
-//!   * **A ring.** The phone is for when the owner is away: a ring raised while
-//!     someone has used the Mac within [`RING_IDLE`] waits, and rings once the
-//!     Mac has been left that long.
+//! The phone is for when the owner is away: a ring raised while someone has
+//! used the Mac within [`RING_IDLE`] waits, and rings once the Mac has been
+//! left that long.
 //!
 //! A Linux machine has no input-idle reading here, so it always counts as
-//! left: its questions and its rings go to the phone straight away.
+//! left: its rings go to the phone straight away.
 
 use std::time::Duration;
-
-/// How recent input must be for a background agent's question to stay at the
-/// Mac.
-pub const QUESTION_IDLE: Duration = Duration::from_secs(10);
 
 /// How long the Mac must be left before a ring reaches the phone.
 pub const RING_IDLE: Duration = Duration::from_secs(120);
 
-/// How often a held question or a held ring checks the Mac again.
+/// How often a held ring checks the Mac again.
 pub const POLL: Duration = Duration::from_millis(100);
 
 /// Time since the last keyboard or mouse input on this Mac, as the HID system
 /// counts it (`IOHIDSystem`'s `HIDIdleTime`). Needs no permission and prompts
-/// for none. `None` when it cannot be read, and each caller reads that so that
-/// nothing is hidden: a background question counts someone as here and goes to
-/// the Mac; a ring counts nobody as here and goes to the phone.
+/// for none. `None` when it cannot be read, and the caller reads that so that
+/// nothing is hidden: a ring counts nobody as here and goes to the phone.
 #[cfg(target_os = "macos")]
 pub fn hid_idle() -> Option<Duration> {
     use std::ffi::{c_char, c_void};
@@ -84,9 +73,8 @@ pub fn hid_idle() -> Option<Duration> {
 }
 
 /// Whether the Mac has had keyboard or mouse input within `within`; `None`
-/// when its idle time cannot be read. What `None` means is the caller's, and
-/// both read it so that nothing is hidden: a question goes to the Mac, a ring
-/// goes to the phone.
+/// when its idle time cannot be read. What `None` means is the caller's: a ring
+/// reads it as nobody here, and goes to the phone.
 pub fn at_the_mac(within: Duration) -> Option<bool> {
     used_within(idle(), within)
 }
@@ -112,8 +100,8 @@ fn machine_idle() -> Option<Duration> {
 }
 
 /// In tests the Mac's idle time is the test's, set per thread with
-/// [`set_idle`]; unset, it cannot be read, so no test hides a question or
-/// holds a ring by accident of how long this machine has been left alone.
+/// [`set_idle`]; unset, it cannot be read, so no test holds a ring by accident
+/// of how long this machine has been left alone.
 #[cfg(test)]
 fn idle() -> Option<Duration> {
     IDLE.with(|idle| idle.get())
@@ -145,12 +133,10 @@ mod tests {
         assert_ne!(idle, again, "the value is computed at read time");
     }
 
-    /// A Linux machine is away for both callers, so a background question and
-    /// a ring both go to the phone at once.
+    /// A Linux machine is always away, so a ring goes to the phone at once.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_linux_machine_always_counts_as_left() {
-        assert_eq!(used_within(machine_idle(), QUESTION_IDLE), Some(false));
         assert_eq!(used_within(machine_idle(), RING_IDLE), Some(false));
     }
 
@@ -175,10 +161,9 @@ mod tests {
         assert_eq!(used_within(None, minute), None);
     }
 
-    /// The owner's two times.
+    /// The owner's time.
     #[test]
-    fn a_question_waits_ten_seconds_and_a_ring_two_minutes() {
-        assert_eq!(QUESTION_IDLE, Duration::from_secs(10));
+    fn a_ring_waits_two_minutes() {
         assert_eq!(RING_IDLE, Duration::from_secs(120));
     }
 }

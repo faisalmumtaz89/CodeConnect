@@ -1792,25 +1792,26 @@ fn live_daemon(
     let store = Arc::new(crate::store::Store::open(db.path()).unwrap());
     let now = protocol::time::now_rfc3339();
     store
-        .upsert_session(&crate::store::SessionRow {
-            session_uid: session.uid.clone(),
-            session_id: session.name.clone(),
-            tmux_session: session.name.clone(),
-            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-            cwd: "/tmp".into(),
-            claude_session_id: None,
-            transcript_path: None,
-            lifecycle: protocol::event::Lifecycle::Live,
-            created_at: now.clone(),
-            updated_at: now,
-            agent: protocol::agent::AgentKind::Codex,
-            codex_thread_id: None,
-            codex_socket: None,
-        })
+        .upsert_session_at_generation(
+            &crate::store::SessionRow {
+                session_uid: session.uid.clone(),
+                session_id: session.name.clone(),
+                tmux_session: session.name.clone(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            },
+            None,
+        )
         .unwrap()
         .assert_present();
-    let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
-    Box::leak(Box::new(tail_rx));
     let push = Arc::new(crate::apns::LoggingPushSender::new());
     let daemon = crate::state::Daemon::new(
         protocol::config::Config::default(),
@@ -1821,7 +1822,6 @@ fn live_daemon(
             port: 8787,
             tls: false,
         },
-        tail_tx,
     );
     (daemon, db, push)
 }
@@ -1947,39 +1947,28 @@ async fn register_the_run_on(
     session: &SessionKey,
     socket: &Path,
 ) -> crate::state::Registration {
-    let (tx, rx) = tokio::sync::mpsc::channel::<protocol::ipc::DaemonFrame>(
-        protocol::config::Config::default().ipc_write_queue,
-    );
-    // The daemon writes to this channel for the life of the session; a receiver that
-    // dropped would turn every such write into an error about a supervisor that is
-    // still, as far as this test is concerned, connected.
-    Box::leak(Box::new(rx));
     daemon
-        .register_supervisor(
-            protocol::ipc::RegisterSession {
-                session_id: session.name.clone(),
-                session_uid: Some(session.uid.clone()),
-                tmux_session: session.name.clone(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                // See this function's doc: the canonical spelling, because that is the
-                // one the coordinator resolves.
-                cwd: sandbox_launch_cwd(),
-                supervisor_pid: std::process::id(),
-                claude_bin: None,
-                agent: protocol::agent::AgentKind::Codex,
-                agent_bin: None,
-                // The launch case: `thread/started` has not been seen yet, so the
-                // registration claims no thread and the link learns one off the wire.
-                codex_thread_id: None,
-                codex_socket: Some(socket.to_string_lossy().into_owned()),
-                codex_generation: Some(1),
-                started_at: protocol::time::now_rfc3339(),
-                protocol_minor: protocol::PROTOCOL_MINOR,
-                exit_replay: false,
-            },
-            tx,
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        )
+        .register_supervisor(protocol::ipc::RegisterSession {
+            session_id: session.name.clone(),
+            session_uid: Some(session.uid.clone()),
+            tmux_session: session.name.clone(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            // See this function's doc: the canonical spelling, because that is the
+            // one the coordinator resolves.
+            cwd: sandbox_launch_cwd(),
+            supervisor_pid: std::process::id(),
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Codex,
+            agent_bin: None,
+            // The launch case: `thread/started` has not been seen yet, so the
+            // registration claims no thread and the link learns one off the wire.
+            codex_thread_id: None,
+            codex_socket: Some(socket.to_string_lossy().into_owned()),
+            codex_generation: Some(1),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        })
         .await
         .expect("a real Codex coordinator's registration frame must be accepted")
 }
@@ -6276,8 +6265,6 @@ async fn measure_what_a_file_change_approval_offers() {
 /// a gate that reused the old `Daemon` would be testing a restart that kept its
 /// memory.
 fn rebuild_the_daemon(store: &Arc<crate::store::Store>) -> Arc<crate::state::Daemon> {
-    let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
-    Box::leak(Box::new(tail_rx));
     crate::state::Daemon::new(
         protocol::config::Config::default(),
         Arc::clone(store),
@@ -6287,7 +6274,6 @@ fn rebuild_the_daemon(store: &Arc<crate::store::Store>) -> Arc<crate::state::Dae
             port: 8787,
             tls: false,
         },
-        tail_tx,
     )
 }
 

@@ -5,9 +5,9 @@ import XCTest
 
 /// Claude's `AskUserQuestion`, against the bytes a minor-21 daemon sends.
 ///
-/// `minor-21-wire.json` is emitted by ccd's own test
-/// (`the_minor_21_wire_fixture_is_what_this_build_emits`) and checked in at
-/// `fixtures/claude/`; the copy in this bundle must stay byte-identical to it.
+/// `minor-21-wire.json` is frozen, as an earlier daemon emitted it; never
+/// regenerated (`fixtures/README.md`). It is checked in at `fixtures/claude/`;
+/// the copy in this bundle must stay byte-identical to it.
 /// Its question is a live Claude 2.1.286 session's four: a single choice,
 /// several choices, "Other", and previews.
 @MainActor

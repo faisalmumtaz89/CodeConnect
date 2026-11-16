@@ -7,8 +7,6 @@
         "generation": 0,
         "identity_bound": true,
         "payload_hash": "fa058fe7528a07ebd614691e27e4c418b85b38be2480839bece1ffeaa7b8865f",
-        "permission_mode": "acceptEdits",
-        "prompt_id": "2815cdf6-f68a-4e3f-afe4-abd479eaf8d6",
         "question_hold": "held",
         "request_id": "toolu_fake_7440824",
         "risk": {
@@ -19,28 +17,12 @@
           "planFilePath": "/tmp/rig/plans/example.md"
         },
         "tool_name": "ExitPlanMode"
-      },
-      "hook": {
-        "cwd": "/scratch/work",
-        "effort": {
-          "level": "medium"
-        },
-        "hook_event_name": "PermissionRequest",
-        "permission_mode": "acceptEdits",
-        "prompt_id": "2815cdf6-f68a-4e3f-afe4-abd479eaf8d6",
-        "session_id": "93aabdcc-a3ba-47a5-9d76-a56a81c8abf0",
-        "tool_input": {
-          "plan": "# Plan\n\n## Context\nUser requested a one-step plan to create a file `plan.txt` containing the word \"hi\".\n\n## Steps\n1. Create `/private/tmp/ccqa.pp47cN/r2t1-g/plan.txt` with the content `hi`.\n\n## Verification\nRead the file and confirm it contains `hi`.\n",
-          "planFilePath": "/tmp/rig/plans/example.md"
-        },
-        "tool_name": "ExitPlanMode",
-        "transcript_path": "/scratch/cfg/projects/-scratch-work/93aabdcc-a3ba-47a5-9d76-a56a81c8abf0.jsonl"
       }
     },
-    "seq": 3,
-    "session_id": "cc-1",
+    "seq": 1,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "source": "hook",
+    "source": "daemon",
     "source_event_id": "perm:toolu_fake_7440824",
     "ts": "2026-10-03T00:00:00.000Z"
   }

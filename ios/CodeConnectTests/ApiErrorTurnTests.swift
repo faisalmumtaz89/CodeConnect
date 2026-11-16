@@ -6,9 +6,10 @@ import XCTest
 /// A Claude turn an API error ended.
 ///
 /// `transcript-api-errors-wire.json` is emitted, not written: Claude Code
-/// 2.1.305, recorded against a fake model, through the daemon's production
-/// tailer and store as the events a phone is sent (`ccd/src/fixture_replay.rs`
-/// re-derives it). Three turns end on an error — an HTTP 400 (prompt 22, error
+/// 2.1.305, recorded against a fake model, through an earlier daemon's
+/// transcript tailer and store as the events a phone is sent (frozen, as that
+/// daemon emitted it; never regenerated: `fixtures/README.md`). Three turns end
+/// on an error — an HTTP 400 (prompt 22, error
 /// 24, end 25), a repeated 529 (34, 36, 37) and a 400 after a tool call (39,
 /// 44, 45) — and the Mac draws its "✻ … done" line after each. One turn carries
 /// on past an error: the stream cut while a tool was being called (prompt 54,

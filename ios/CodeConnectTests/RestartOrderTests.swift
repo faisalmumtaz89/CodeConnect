@@ -3,7 +3,7 @@ import XCTest
 @testable import CodeConnectKit
 
 /// **A daemon restart is not activity, on the phone's side.** `restart-link-state-wire.json` is what a daemon emits
-/// across a restart (re-derived by `ccd/src/state.rs`):
+/// across a restart (frozen, as an earlier daemon emitted it; never regenerated: `fixtures/README.md`):
 /// - runs A and B each start a tool call, A first;
 /// - C does nothing;
 /// - the daemon restarts, and B, C, then A register again, so A's link fact is the newest;

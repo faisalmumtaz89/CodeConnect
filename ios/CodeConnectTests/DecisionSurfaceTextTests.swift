@@ -19,14 +19,14 @@ import XCTest
 ///     prints tokens, and a file change with a rename and a diff. U+202E is in
 ///     the command, the reason, the cwd, both grants, a path, its rename and a
 ///     diff line.
-///   * `question-cards-rlo-wire.json` — two `AskUserQuestion` cards through
-///     `handle_hook` / `handle_hook_held` (`ccd/src/state.rs`, from
-///     `claude/askuq-rlo-inputs.json`), and the held one answered from the
-///     phone (`unchecked_answered`). `everywhere`
+///   * `question-cards-rlo-wire.json` — two `AskUserQuestion` cards from
+///     `claude/askuq-rlo-inputs.json` (`ccd/src/claude_host.rs`), and the held
+///     one answered from the phone (`unchecked_answered`). `everywhere`
 ///     has U+202E in its question, header, label, description and a
-///     2,101-unit preview, and the daemon still sends it, `at_mac`;
-///     `unchecked` has it only where the daemon does not look — header,
-///     description and long preview — and the daemon holds it for the phone.
+///     2,101-unit preview, and is the card an earlier build sent to be answered
+///     at the Mac (`at_mac`), kept as recorded; `unchecked` has it only where
+///     the daemon does not look — header, description and long preview — and a
+///     hosted run's agent host asks it, so the daemon holds it for the phone.
 ///
 /// These tests prove the models hand views mapped text, and that the screens
 /// rendered here — named below — speak no mapped scalar. `DecisionTextSourceTests`
