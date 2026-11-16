@@ -610,7 +610,6 @@ pub const PROTOCOL_MISMATCH: &str =
 ///       - [`ipc::ClientFrame::SendAgentMessage`], [`ipc::ClientFrame::ListAgents`],
 ///         [`ipc::ClientFrame::ReadAgentMessages`] and [`ipc::ClientFrame::MailRead`]
 ///         — the `codeconnect` tool's requests.
-///       - [`ipc::ClientFrame::MailWaiter`] — a Claude session's mail waiter.
 ///       - [`peer`] — one daemon asking another: a frame that is not a phone
 ///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
 ///         [`peer::PeerReply`] and the connection closed. A daemon below 27

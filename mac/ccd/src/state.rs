@@ -316,8 +316,6 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
-    /// Each Claude run's mail waiter: the one hook that can wake it.
-    pub(crate) waiters: crate::claude_waiter::Waiters,
     /// The phone's session starts, by request id.
     pub(crate) starts: crate::start_session::Starts,
     /// Which agents could start, as last checked.
@@ -2077,7 +2075,6 @@ impl Daemon {
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
-            waiters: crate::claude_waiter::Waiters::default(),
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
         })
@@ -29176,67 +29173,23 @@ mod tests {
         assert_eq!(taken, crate::store::MailTaken::Kept);
     }
 
-    /// **Claude is woken for its mail through its waiter, and only between its
-    /// turns** (M-01, M-02 and the T5 rule): mail taken while a turn runs wakes no
-    /// one until that turn's end is read, and the turn the wake starts is not told
-    /// again.
-    #[tokio::test]
-    async fn a_claude_run_is_woken_for_its_mail_only_between_its_turns() {
-        let daemon = test_daemon();
-        let claude = register(&daemon, "cc-1", None).await.session.uid;
-        let (_, mut woken) = daemon.waiters.register(&claude);
-
-        // The person's prompt starts a turn, with no mail yet.
-        assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
-        leave_mail(&daemon, &claude, "hi");
-        daemon.wake_if_due(&claude).await;
-        assert!(woken.try_recv().is_err(), "no wake while the turn runs");
-
-        // Its Stop, then its end in the transcript: the waiter is woken.
-        crate::mail::turn_ended(&daemon, &claude);
-        Transcript::of(&claude).read(&daemon, turns(6..7)).await;
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut woken)
-            .await
-            .expect("woken at the turn's end")
-            .unwrap();
-        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
-        assert_eq!(
-            crate::mail::prompt_submitted(&daemon, &claude).await,
-            None,
-            "the wake's own turn is not told again"
-        );
-    }
-
     /// **A wake that cannot be issued leaves the mail waiting and nothing
-    /// outstanding** (M-12): a Codex run whose `codex` cannot be run, and a Claude
-    /// run with no waiter, are tried again at the next trigger, never handed the
-    /// mail any other way.
+    /// outstanding** (M-12): a Codex run whose `codex` cannot be run is tried again
+    /// at the next trigger, never handed the mail any other way.
     #[tokio::test]
     async fn a_wake_that_cannot_be_issued_leaves_nothing_outstanding() {
         let daemon = test_daemon();
         let codex = protocol::uid::new().unwrap();
         register_codex_session(&daemon, &codex, "cc-1").await;
-        let claude = register(&daemon, "cc-3", None).await.session.uid;
-        for run in [&codex, &claude] {
-            leave_mail(&daemon, run, "hi");
-            daemon.wake_if_due(run).await;
-            assert!(
-                daemon
-                    .store
-                    .claim_mail_wake(run, protocol::time::now_unix_ms(), false)
-                    .unwrap(),
-                "no wake left outstanding for {run}"
-            );
-            daemon.store.release_mail_wake(run).unwrap();
-        }
-        // The waiter that registers later is woken at once.
-        let (_, woken) = daemon.waiters.register(&claude);
-        crate::mail::waiter_registered(&daemon, &claude);
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), woken)
-            .await
-            .expect("woken when its waiter registers")
-            .unwrap();
-        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+        leave_mail(&daemon, &codex, "hi");
+        daemon.wake_if_due(&codex).await;
+        assert!(
+            daemon
+                .store
+                .claim_mail_wake(&codex, protocol::time::now_unix_ms(), false)
+                .unwrap(),
+            "no wake left outstanding"
+        );
     }
 
     /// The turn boundaries of one measured Claude Code 2.1.316 session (round 3,
@@ -29457,9 +29410,9 @@ mod tests {
 
     /// **A restart reads on from the transcript** (rounds 1–3). A turn running when
     /// the daemon stopped is still running (shape M); one that ended while it was
-    /// down is read to have ended (variant B). A Claude wake whose Stop found no
-    /// daemon is dropped (variant W); a Codex wake, which may still be held in
-    /// Codex's queue, is not queued twice.
+    /// down is running until its end is read (variant B). A Claude wake whose Stop
+    /// found no daemon is dropped (variant W); a Codex wake, which may still be held
+    /// in Codex's queue, is not queued twice.
     #[tokio::test]
     async fn a_restart_reads_on_from_the_transcript() {
         let daemon = test_daemon();
@@ -29484,13 +29437,6 @@ mod tests {
             !wakeable(&daemon, &done),
             "B: running until its end is read"
         );
-        let (_, woken_at_its_end) = daemon.waiters.register(&done);
-        done_transcript.read(&daemon, turns(9..13)).await;
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), woken_at_its_end)
-            .await
-            .expect("B: woken once its end, written while ccd was down, is read")
-            .unwrap();
-        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
         assert!(wakeable(&daemon, &woken), "W: the Claude wake is gone");
         assert!(
             !daemon

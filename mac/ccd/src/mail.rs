@@ -21,13 +21,14 @@
 //!
 //! **Waking the agent.** The daemon never hands an agent a message: it wakes the
 //! agent with one fixed line ([`nudge`]), which carries nothing of any message,
-//! and the agent calls `read_messages`. Claude is woken by its mail waiter
-//! ([`crate::claude_waiter`]), only between its turns; Codex through its own queue
-//! ([`crate::codex_wake`]). The wake rule ([`Daemon::wake_if_due`]) decides, from
-//! the mailbox, whenever mail is taken, a turn ends, a waiter registers or a Codex
-//! link adopts its thread, and when the daemon starts: wake iff unread mail waits
-//! and no wake is outstanding. After [`WAKE_MISSES`] turn ends that leave woken mail
-//! unread, wakes stop until the person's next prompt or new mail.
+//! and the agent calls `read_messages`. Claude is woken through its agent host's
+//! link ([`crate::claude_host::wake`]), only between its turns; Codex through its
+//! own queue ([`crate::codex_wake`]). The wake rule ([`Daemon::wake_if_due`])
+//! decides, from the mailbox, whenever mail is taken, a turn ends, an agent host's
+//! link replays what it kept or a Codex link adopts its thread, and when the daemon
+//! starts: wake iff unread mail waits and no wake is outstanding. After
+//! [`WAKE_MISSES`] turn ends that leave woken mail unread, wakes stop until the
+//! person's next prompt or new mail.
 //!
 //! **Who sent it** is never taken from the agent or the message: here it is the run
 //! the tool was started for, and from another computer it is a session of the
@@ -779,9 +780,8 @@ pub(crate) fn turn_ended(daemon: &Arc<Daemon>, run_uid: &str) {
     });
 }
 
-/// **Decide again whether to wake `run_uid`**: its Claude waiter registered, its
-/// agent host's link replayed what it kept, its Codex link adopted a thread, or mail was
-/// taken for it.
+/// **Decide again whether to wake `run_uid`**: its agent host's link replayed what it
+/// kept, its Codex link adopted a thread, or mail was taken for it.
 pub(crate) fn waiter_registered(daemon: &Arc<Daemon>, run_uid: &str) {
     let (daemon, run_uid) = (Arc::clone(daemon), run_uid.to_string());
     tokio::spawn(async move { daemon.wake_if_due(&run_uid).await });
@@ -914,11 +914,9 @@ impl Daemon {
                 return;
             }
         }
-        // A Claude run CodeConnect started is woken through its agent host's link; one in a
-        // terminal, through its waiter.
+        // A Claude run CodeConnect started is woken through its agent host's link.
         let issued = if claude {
             crate::claude_host::wake(self, run_uid, nudge()).await
-                || crate::claude_waiter::wake_claude(self, run_uid)
         } else {
             match crate::codex_wake::wake_codex(self, run_uid).await {
                 Ok(()) => true,

@@ -462,10 +462,9 @@ pub struct Config {
     /// the owner of this account — this bounds a runaway, not an attacker.
     ///
     /// It is also the fleet size. Every live session holds one for its
-    /// supervisor, and a Claude session one more for its mail waiter while it
-    /// waits for you, so `4096` admits about two thousand sessions on one
-    /// computer, inside the raised file limit, while a runaway still holds a
-    /// small fraction of the machine's open files.
+    /// supervisor, so `4096` bounds the sessions one computer admits, inside the
+    /// raised file limit, while a runaway still holds a small fraction of the
+    /// machine's open files.
     #[serde(default = "default_ipc_max_connections")]
     pub ipc_max_connections: usize,
     /// Frames one IPC connection may have queued for writing.

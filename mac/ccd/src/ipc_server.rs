@@ -597,27 +597,6 @@ async fn read_loop(
                     })
                     .await;
             }
-            ClientFrame::MailWaiter { session_uid } => {
-                // A waiter sends this one frame and then only waits, so the next
-                // thing this connection can do is close: the hook has gone.
-                let (generation, outcome) = daemon.waiters.register(&session_uid);
-                crate::mail::waiter_registered(daemon, &session_uid);
-                let gone = read_line_limited(reader, MAX_FRAME_BYTES);
-                tokio::select! {
-                    Ok(outcome) = outcome => {
-                        let frame = match outcome {
-                            crate::claude_waiter::WaiterOutcome::Wake => DaemonFrame::MailWake {
-                                nudge: crate::mail::nudge().into(),
-                            },
-                            crate::claude_waiter::WaiterOutcome::Superseded => DaemonFrame::MailSuperseded,
-                        };
-                        let _ = tx.send(frame).await;
-                    }
-                    _ = gone => {}
-                }
-                daemon.waiters.release(&session_uid, generation);
-                return Ok(());
-            }
             ClientFrame::ListAgents { from_uid } => {
                 let frame = match daemon.list_agents(&from_uid).await {
                     Ok((you, agents, unreachable)) => DaemonFrame::Agents {
