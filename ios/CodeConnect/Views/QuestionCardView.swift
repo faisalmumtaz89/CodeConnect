@@ -52,6 +52,10 @@ struct QuestionCardView: View {
 
     private var attempt: AnswerAttempt? { model.lastAttempt(for: approval) }
 
+    /// The run's agent, as the decision card reads it — a Codex question is
+    /// answered under a different rule than a Claude one.
+    private var sessionAgent: AgentKind? { model.shownSummary(for: approval.sessionKey)?.agent }
+
     private var status: QuestionCardStatus {
         QuestionCardStatus.resolve(
             outcome: DecisionCard.effectiveOutcome(
@@ -59,7 +63,10 @@ struct QuestionCardView: View {
             attempt: attempt, isBacked: live != nil,
             hold: (live ?? approval).questionHold,
             answersQuestions: model.daemonProfile.knownAnswersQuestions,
-            linkReason: model.actionsBlockedReason)
+            linkReason: model.actionsBlockedReason,
+            codex: (live ?? approval).codexResolution,
+            resolvesCodexCards: model.daemonProfile.resolvesCodexCards,
+            agent: sessionAgent)
     }
 
     private var count: Int { questions.questions.count }
@@ -103,7 +110,7 @@ struct QuestionCardView: View {
                     // Why a card cannot be answered is the first thing it says,
                     // in the document beside the questions it is about — not
                     // pinned over them.
-                    if let banner = status.banner {
+                    if let banner = status.banner(on: .current, agent: sessionAgent) {
                         CCBanner(
                             banner.title, message: banner.message, tone: banner.tone.ccTone,
                             icon: banner.icon)
