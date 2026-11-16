@@ -1364,21 +1364,22 @@ user miss its `respond_by`.
 ## How it fits together
 
 ```
-terminal tab ──exec──> tmux -L codeconnect (session cc-1) ──> real claude
-                              │
-                     codeconnect supervise (detached,
-                      own process group,
-                      PPID 1 once the tab closes)
-                              │ unix socket
-                              └──────────► ccd
-                                            │
-                                   SQLite (source of truth)
-                                            │
-                              wss:// tailnet (ws:// fallback) ──► iPhone
+iPhone, Mac app ──wss:// tailnet (ws:// fallback)──► ccd ──► SQLite (source of truth)
+                                                      │
+                     per run, through the login shell, in a session of its own:
+                                                      │
+                 ┌────────────────────────────────────┴─────────────────────────┐
+     cc-agent-host <run folder>                        codex app-server --listen unix://…/as.sock
+     ◄── host.sock ──► ccd                             ◄── as.sock ──► ccd
+                 │                                                               │
+     claude, through the Agent SDK                                         codex's thread
 ```
 
-`ccd` is never an agent's parent. The supervisor **connects out** to it, so
-`kill -9 ccd` costs a reconnect and nothing else.
+`ccd` is never an agent's parent: each run's agent host or app-server starts in a
+session of its own and outlives the daemon, and a restarted `ccd` attaches each
+one still running again, so `kill -9 ccd` costs a reconnect and nothing else. A
+supervisor an earlier build left running can still register over the local
+socket.
 
 One `ccd` per `~/.codeconnect`. Before it opens the database, the token or the
 socket, the daemon takes an exclusive `flock(2)` on `~/.codeconnect/ccd.lock`;
@@ -1658,10 +1659,6 @@ shared `/tmp` is not yours to change.
   node's MagicDNS name. Without it the daemon serves `ws://` and says so; a
   certificate obtained elsewhere and dropped in `~/.codeconnect/tls/` is the way
   round it, and the only route open to a LAN `ws_bind`.
-* **`ResolvedBy::Local` is best-effort by construction.** A prompt that leaves
-  the pane tells us it is gone, not what was chosen; that case is reported with
-  `inferred: true`. The failure mode is deliberately biased towards leaving a
-  card open too long rather than clearing one the human has not answered.
 * **The risk class is a hint, not a gate.** CodeConnect has no permission model;
   `risk_class` changes how a card looks, never what is allowed. The `high` set is
   an enumerated list of destructive shell patterns plus the spellings that reach

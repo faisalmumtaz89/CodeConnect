@@ -5029,8 +5029,8 @@ mod tests {
     fn the_accept_loop_stops_admitting_at_the_global_cap() {
         // The defect: `listener.accept()` spawned unconditionally, so anything
         // that could reach the tailnet port held file descriptors without a
-        // ceiling — and the *local* IPC socket, which carries the hook path and
-        // every supervisor link, lives on the same budget.
+        // ceiling — and the *local* IPC socket, which carries the CLI and every
+        // supervisor link, lives on the same budget.
         let limiter = Arc::new(ConnectionLimiter::new(3, 3));
         let permits: Vec<_> = (0..3)
             .map(|i| limiter.admit(ip(i)).expect("under the cap"))

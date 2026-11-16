@@ -13,15 +13,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
-    /// Claude Code hook — structured, first-hand, highest trust.
+    /// Claude Code hook — structured, first-hand, highest trust. Filed by earlier
+    /// builds; read back from their logs.
     Hook,
     /// Session JSONL transcript tail — authoritative for content, lags slightly.
+    /// Filed by earlier builds; read back from their logs.
     Transcript,
     /// The daemon itself (resync markers, approval resolutions, link state).
     Daemon,
     /// The Codex app-server notification stream — structured, first-hand, the
     /// single authoritative observation of a Codex session, exactly as
-    /// [`Source::Hook`] is for Claude. A Codex session's every timeline fact
+    /// [`Source::Sdk`] is for a hosted Claude run. A Codex session's every timeline fact
     /// carries this source, so the dedup key `(session_uid, source,
     /// source_event_id)` is a clean per-session namespace that can never collide
     /// with a Claude fact (different source *and* different `session_uid`). Its
@@ -33,7 +35,8 @@ pub enum Source {
     /// [`Source::Codex`] are. Its `source_event_id`s come from
     /// [`sdk_event_id`].
     Sdk,
-    /// tmux capture-pane snapshot. Presence checks only, never semantics.
+    /// tmux capture-pane snapshot, from earlier builds. Presence checks only,
+    /// never semantics.
     Pty,
     /// A persisted source string this build does not recognise — a fact written
     /// by a newer daemon and read back by an older one. It carries the **lowest**
@@ -122,10 +125,10 @@ pub enum EventKind {
     /// [`EventKind::TurnComplete`]. Conflating them is what made the phone
     /// render "session ended" after every single reply.
     SessionEnd,
-    /// The agent finished a turn and handed the keyboard back. For Claude it is
-    /// filed from the transcript, after the turn's last reply, or from the Stop
-    /// hook when the run has no transcript. The session is still alive and can
-    /// be typed into.
+    /// The agent finished a turn. For a hosted Claude run it is filed from the
+    /// SDK's `result`, which the run's agent host relays as the turn ends (an
+    /// earlier build filed it from the transcript or the Stop hook). The session
+    /// is still alive and takes the next message.
     TurnComplete,
     /// A tool is about to run (PreToolUse). Observability, never the gate.
     ToolCall,
@@ -135,7 +138,8 @@ pub enum EventKind {
     ApprovalRequest,
     /// An approval reached a terminal state, whoever answered it.
     ApprovalResolved,
-    /// Claude Code Notification hook (permission_prompt, idle_prompt, ...).
+    /// A notice: ccd's own (`model_set`, `mail_nudge`, …), or, from an earlier
+    /// build, Claude Code's Notification hook (permission_prompt, idle_prompt, ...).
     Notification,
     UserMessage,
     AgentMessage,

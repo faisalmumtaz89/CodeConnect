@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::SessionSummary;
 
 /// Frames larger than this are a bug or an attack; the reader drops the
-/// connection rather than growing its buffer without bound. Tool responses of a
-/// few hundred KB are normal, so the ceiling is generous.
+/// connection rather than growing its buffer without bound.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

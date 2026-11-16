@@ -1555,6 +1555,13 @@ impl Store {
                 AND (tmux_session != '' OR tmux_socket != '')",
             [],
         )?;
+        // An earlier build's transcript cursors and name tombstones: nothing reads
+        // them, and a cursor names a run's transcript, so they do not outlive the
+        // code that kept them. Every start, as the fix above: a rolled-back daemon
+        // makes them again, empty.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS tail_cursors; DROP TABLE IF EXISTS deleted_names;",
+        )?;
         // The one-shot push-tuple repair — see [`SCHEMA_VERSION`] on why it is
         // gated where the GLOB fix above is not. Ordered after the column
         // additions so the columns it names are present on a legacy database.
@@ -4936,8 +4943,9 @@ impl Store {
 
     /// Drop a claim that never actuated, so the card can be answered again.
     ///
-    /// Only ever called when the supervisor *refused* — that is, when we know
-    /// nothing was typed. A claim whose fate is unknown is left where it is.
+    /// Only ever called when the answer did not reach the agent — the run's host
+    /// refused it or never took it — that is, when we know nothing was sent. A
+    /// claim whose fate is unknown is left where it is.
     pub fn release_answer_claim(&self, session_uid: &str, request_id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -12908,7 +12916,7 @@ mod tests {
             // The one deliberate exception: tombstones are the record that a
             // deletion happened, so they are precisely the rows that must
             // SURVIVE the deletion they describe.
-            if name == "deleted_sessions" || name == "deleted_names" {
+            if name == "deleted_sessions" {
                 continue;
             }
             let mut info = conn.prepare(&format!("PRAGMA table_info({name})")).unwrap();
@@ -14198,6 +14206,40 @@ mod tests {
 
     fn legacy_path() -> TempDb {
         TempDb::unique("ccd-legacy")
+    }
+
+    /// **What an earlier build kept for its transcript tailer and its hook path
+    /// goes at open.** `tail_cursors` names each run's transcript and the hash of
+    /// its last line read, `deleted_names` the names of deleted runs, and nothing
+    /// reads either now: an upgraded store opens without them, so a deleted run
+    /// leaves neither behind.
+    #[test]
+    fn an_earlier_builds_cursors_and_name_tombstones_are_dropped_at_open() {
+        let path = legacy_path();
+        drop(Store::open(path.path()).unwrap());
+        rusqlite::Connection::open(path.path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tail_cursors(session_uid TEXT PRIMARY KEY, path TEXT NOT NULL);
+                 INSERT INTO tail_cursors VALUES('u-1', '/tmp/one.jsonl');
+                 CREATE TABLE deleted_names(session_id TEXT PRIMARY KEY);
+                 INSERT INTO deleted_names VALUES('cc-1');",
+            )
+            .unwrap();
+
+        let reopened = Store::open(path.path()).unwrap();
+        let conn = rusqlite::Connection::open(path.path()).unwrap();
+        for table in ["tail_cursors", "deleted_names"] {
+            let left: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0, "{table} outlived the open");
+        }
+        drop(reopened);
     }
 
     #[test]

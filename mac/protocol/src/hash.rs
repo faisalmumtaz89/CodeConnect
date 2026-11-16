@@ -225,7 +225,7 @@ pub fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
 /// as sorted-key JSON. `serde_json::Value` maps are BTreeMap-backed only with
 /// the `preserve_order` feature *off*, which is the default — so key order is
 /// already deterministic. We still round-trip through `to_string` on the Value
-/// rather than the raw stdin bytes, because whitespace in the hook's stdin is
+/// rather than the raw bytes the input arrived in, because their whitespace is
 /// not guaranteed stable across Claude Code versions.
 pub fn approval_payload_text(tool_name: &str, tool_input: &serde_json::Value) -> String {
     format!("{tool_name}\n{tool_input}")

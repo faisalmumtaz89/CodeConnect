@@ -1746,7 +1746,7 @@ impl Daemon {
                 if settled > 0 {
                     crate::log_warn!(
                         "recovery: {settled} answer(s) were claimed but never settled; recording \
-                         them as indeterminate rather than typing again"
+                         them as indeterminate rather than sending again"
                     );
                 }
             }
@@ -1767,7 +1767,7 @@ impl Daemon {
             Ok(0) => {}
             Ok(count) => crate::log_warn!(
                 "recovery: {count} send_text mutation(s) were in flight and their outcome is \
-                 unknown; a retry will be told so rather than typing again"
+                 unknown; a retry will be told so rather than sending again"
             ),
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
         }
@@ -5537,8 +5537,8 @@ impl Daemon {
             Ok(row) if !self.shared_ledgers_admit(&row.agent) => {
                 return SendTextResult::Refused {
                     reason: format!(
-                        "{} is a {} session and this daemon only types into Claude sessions; \
-                         nothing was typed",
+                        "{} is a {} session and this daemon only sends messages to Claude \
+                         sessions; nothing was sent",
                         row.session_uid,
                         row.agent.as_str()
                     ),
@@ -9175,7 +9175,7 @@ impl Daemon {
         Ok(removed)
     }
 
-    // ------------------------------------------------- local resolution
+    // ------------------------------------------- resolution without the phone
 
     /// Retire an approval that the phone did not answer.
     ///
@@ -9195,9 +9195,8 @@ impl Daemon {
         // resolution, so a phone answer racing this either finds the entry (and
         // wins) or finds the ledger (and is a well-formed duplicate).
         //
-        // A *claimed* entry is left alone: the phone is mid-injection, and its
-        // answer is the better record. If that injection then fails the entry is
-        // unclaimed again and the next sweep picks it up.
+        // A *claimed* entry is left alone: the phone's answer is in flight, and
+        // it is the better record.
         let id: ApprovalId = (session.uid.clone(), request_id.to_string());
         let taken = {
             let mut inner = self.inner.lock().await;
@@ -20271,7 +20270,7 @@ mod tests {
         // reason says it was the agent gate that refused it.
         match &result {
             SendTextResult::Refused { reason } => assert!(
-                reason.contains("codex session") && reason.contains("nothing was typed"),
+                reason.contains("codex session") && reason.contains("nothing was sent"),
                 "the refusal must name the agent it refused, before the claim: {reason}"
             ),
             other => panic!("a Codex session must not be typed into: {other:?}"),
@@ -23550,7 +23549,7 @@ mod tests {
             panic!("a Codex session is not typed into: {typed:?}")
         };
         assert!(
-            reason.contains("only types into Claude sessions"),
+            reason.contains("only sends messages to Claude sessions"),
             "{reason}"
         );
 

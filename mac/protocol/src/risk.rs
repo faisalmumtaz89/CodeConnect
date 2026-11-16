@@ -110,7 +110,7 @@ const PROTECTED_BRANCHES: &[&str] = &[
 ];
 
 /// How much of a tool input is scanned. Bounds the cost of classifying a
-/// pathological payload; the daemon runs this on the hook's critical path.
+/// pathological payload; the daemon runs this on every card it raises.
 const MAX_SCAN_BYTES: usize = 16 * 1024;
 
 /// The reason a command that could not be read whole is `high`.

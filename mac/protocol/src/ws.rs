@@ -1144,9 +1144,9 @@ pub const MAX_DIFF_BYTES: usize = 512 * 1024;
 pub struct Capabilities {
     /// True when an answer is guaranteed to reach the agent.
     pub can_approve_reliably: bool,
-    /// `fail_open` | `fail_closed`. CodeConnect is fail-open by construction:
-    /// when the daemon is down the hook emits nothing and the session behaves
-    /// exactly like plain `claude`.
+    /// `fail_open` | `fail_closed`: how a decision fails with no daemon, as an
+    /// earlier daemon's hook path did (fail-open: the hook emitted nothing). This
+    /// daemon still says `fail_open`.
     pub fail_mode: String,
     /// How an answer reaches the agent on this build.
     pub answer_path: AnswerPath,
@@ -1294,8 +1294,8 @@ pub struct Capabilities {
     #[serde(default)]
     pub question_card: bool,
     /// **Every Claude card decision this daemon takes reaches the card's own
-    /// call through the hook Claude holds for it, and nothing is ever typed**
-    /// (minor 22). Its Claude cards carry `question_hold`. Absent decodes
+    /// call through the run's agent host (an earlier daemon: the hook Claude held
+    /// for it), and nothing is ever typed** (minor 22). Its Claude cards carry `question_hold`. Absent decodes
     /// `false`: an older daemon
     /// types an approval's answer into whatever prompt is on screen, so a phone
     /// shows its Claude approval cards read-only.
@@ -1389,7 +1389,7 @@ pub enum AnswerDecision {
         index: u32,
     },
     /// Free text. On a Claude approval from minor 22: a denial with this reason,
-    /// returned to the agent that asked through its call's hook.
+    /// returned to the agent that asked through its run's agent host.
     Text {
         text: String,
     },
@@ -1414,8 +1414,7 @@ pub enum AnswerDecision {
         answers: Vec<QuestionAnswer>,
     },
     /// Decline a Claude `AskUserQuestion` card (minor 21): the daemon denies it
-    /// through its held hook, or, for a run started in an agent host, through
-    /// that host. The main conversation's question is denied with an interrupt,
+    /// through the run's agent host. The main conversation's question is denied with an interrupt,
     /// so the turn stops as Escape at its dialog does; a background agent's is
     /// denied without one. A Codex question card declined is answered with no
     /// answers, and Codex's turn goes on.
@@ -1455,8 +1454,8 @@ pub enum QuestionHold {
     /// agent's question while someone is at the Mac, or one released to the Mac
     /// when they came back.
     AtMac,
-    /// The phone's hold on it ended (Claude's hook timed out, or the daemon
-    /// restarted). The question may still be open at the Mac.
+    /// The phone's hold on it ended, as an earlier daemon recorded it (Claude's
+    /// hook timed out, or the daemon restarted). The question may still be open at the Mac.
     Ended,
 }
 
@@ -1475,9 +1474,9 @@ impl QuestionHold {
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedBy {
     Phone,
-    /// Answered at the Mac's keyboard. Detected, not reported: the daemon sees
-    /// the prompt leave the pane without having typed into it, or sees the tool
-    /// run. The phone should render "answered at the keyboard", never a
+    /// Answered at the Mac's keyboard, as an earlier daemon recorded it. Detected,
+    /// not reported: that daemon saw the prompt leave the pane without having typed
+    /// into it, or saw the tool run. The phone should render "answered at the keyboard", never a
     /// rejection — which is the entire point of distinguishing this from
     /// `Timeout`. Best-effort by construction; check `AnswerOutcome::inferred`
     /// before presenting `decision` as fact.
@@ -1530,17 +1529,18 @@ pub struct AnswerOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// True when `decision` is the daemon's *inference* rather than an observed
-    /// answer — the local-resolution path, where all we truly know is that the
-    /// prompt is gone. Recording a guess without labelling it as one would make
+    /// answer — a card an earlier build filed, closed because its run ended, or an
+    /// earlier daemon's local resolution, where all it knew is that the prompt was
+    /// gone. Recording a guess without labelling it as one would make
     /// the ledger lie, and the ledger is the thing a later duplicate tap is
     /// answered from.
     #[serde(default, skip_serializing_if = "is_false")]
     pub inferred: bool,
     /// True when the daemon knows *what* was decided but not whether it landed:
     /// it was killed between claiming the answer and recording its outcome, or
-    /// (from minor 22) it is a phone answer to a Claude approval, sent to the
-    /// call's own hook, which Claude may not use because it takes the first
-    /// answer (detail "Sent to Claude from a phone").
+    /// (from minor 22, on an earlier daemon) it is a phone answer to a Claude
+    /// approval, sent to the call's own hook, which Claude may not use because it
+    /// takes the first answer (detail "Sent to Claude from a phone").
     ///
     /// Distinct from `inferred`, which is uncertainty about the decision. This
     /// is uncertainty about the *actuation*, and it is the reason such a request
@@ -1890,7 +1890,7 @@ pub enum SendTextResult {
     Refused {
         reason: String,
     },
-    /// This exact mutation already ran; nothing was typed a second time.
+    /// This exact mutation already ran; nothing was sent a second time.
     ///
     /// Only ever sent in reply to a request that carried a `request_id`, so a
     /// client below minor 3 — which cannot send one — can never receive a
@@ -1933,13 +1933,13 @@ pub struct ApprovalCard {
     pub risk: Option<crate::risk::RiskAssessment>,
     /// The card's place in its run's sequence of permission requests (minor 3):
     /// per run, monotonic, one per structured permission request. From minor
-    /// 22 a Claude card carries 0: it is answered through its own call's hook
-    /// whatever else is on screen, so its place in the run decides nothing.
+    /// 22 a Claude card carries 0: it is answered through its run's agent host
+    /// (an earlier daemon: its own call's hook), so its place in the run decides nothing.
     #[serde(default)]
     pub generation: u64,
     /// True when the phone can answer this card with an allow or a deny. From
-    /// minor 22, for a Claude card: a held approval, answered through its own
-    /// call's hook (a question takes no allow, so it is never true there).
+    /// minor 22, for a Claude card: a held approval, answered through its run's
+    /// agent host (a question takes no allow, so it is never true there).
     /// Before, it meant the prompt on screen had been fingerprinted for typing.
     ///
     /// False means the card is worth *showing* — a human should know an agent

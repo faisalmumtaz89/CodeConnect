@@ -18,9 +18,8 @@ pub const POLL: Duration = Duration::from_millis(100);
 
 /// Time since the last keyboard or mouse input on this Mac, as the HID system
 /// counts it (`IOHIDSystem`'s `HIDIdleTime`). Needs no permission and prompts
-/// for none. `None` when it cannot be read, and each caller reads that so that
-/// nothing is hidden: a background question counts someone as here and goes to
-/// the Mac; a ring counts nobody as here and goes to the phone.
+/// for none. `None` when it cannot be read, and the caller reads that so that
+/// nothing is hidden: a ring counts nobody as here and goes to the phone.
 #[cfg(target_os = "macos")]
 pub fn hid_idle() -> Option<Duration> {
     use std::ffi::{c_char, c_void};
@@ -74,9 +73,8 @@ pub fn hid_idle() -> Option<Duration> {
 }
 
 /// Whether the Mac has had keyboard or mouse input within `within`; `None`
-/// when its idle time cannot be read. What `None` means is the caller's, and
-/// both read it so that nothing is hidden: a question goes to the Mac, a ring
-/// goes to the phone.
+/// when its idle time cannot be read. What `None` means is the caller's: a ring
+/// reads it as nobody here, and goes to the phone.
 pub fn at_the_mac(within: Duration) -> Option<bool> {
     used_within(idle(), within)
 }
@@ -102,8 +100,8 @@ fn machine_idle() -> Option<Duration> {
 }
 
 /// In tests the Mac's idle time is the test's, set per thread with
-/// [`set_idle`]; unset, it cannot be read, so no test hides a question or
-/// holds a ring by accident of how long this machine has been left alone.
+/// [`set_idle`]; unset, it cannot be read, so no test holds a ring by accident
+/// of how long this machine has been left alone.
 #[cfg(test)]
 fn idle() -> Option<Duration> {
     IDLE.with(|idle| idle.get())
