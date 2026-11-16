@@ -574,6 +574,12 @@ pub struct SessionSummary {
     /// read, and from any older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<DiffStat>,
+    /// The person's next message relaunches this ended run (minor 42): a run CodeConnect
+    /// started whose agent's process ended without anyone stopping it, its end reading
+    /// "Stopped: its process ended". Never a run End run ended or a start that failed.
+    /// Omitted when false, and from an older daemon, whose ended runs stay ended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relaunchable: bool,
 }
 
 /// How much a working tree has changed, in lines. See [`SessionSummary::diff_stat`].
@@ -785,6 +791,7 @@ mod tests {
             menus: None,
             git_branch: None,
             diff_stat: None,
+            relaunchable: false,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

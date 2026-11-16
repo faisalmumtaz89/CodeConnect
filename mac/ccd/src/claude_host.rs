@@ -82,9 +82,9 @@ fn stopped_end() -> serde_json::Value {
     serde_json::json!({ "exit_code": null, "reason": "Stopped" })
 }
 
-/// The end's reason for a `live` run whose host was found gone without ccd stopping it
-/// ([`end_if_host_gone`]): what an engine Codex run's relaunch is read from
-/// ([`crate::codex_host::relaunch`]).
+/// The end's reason for a `live` run whose agent ended without ccd stopping it: its host
+/// found gone ([`end_if_host_gone`]), or a Claude run's claude exiting on its own. What the
+/// person's next message relaunches a run from ([`relaunch`], [`crate::codex_host::relaunch`]).
 pub(crate) const PROCESS_ENDED: &str = "Stopped: its process ended";
 
 /// One Claude start, as the app asked for it and the checks before the row resolved it.
@@ -199,7 +199,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         Err(err) => return failed(format!("could not record the run: {err:#}")),
     }
     let deadline = Instant::now() + timeout;
-    let begun = match bring_up(daemon, &uid, &start_uuid, &start, &run, deadline).await {
+    let begun = match bring_up(daemon, &uid, &start_uuid, &start, &run, deadline, false).await {
         Ok(begun) => begun,
         // Before `start` no claude can exist (the host exits by itself at 30 s), so the
         // run has failed.
@@ -240,7 +240,9 @@ fn failed(detail: String) -> StartSessionResult {
 }
 
 /// The run's folder, its host spawned and admitted, attached, and `start` sent, by
-/// `deadline`: then what the link will commit of the start's outcome.
+/// `deadline`: then what the link will commit of the start's outcome. A relaunch launches
+/// into the run's existing folder: the dead host's `host.json` removed, since a host makes
+/// its own exclusively (it removes a stale `host.sock` itself), and `host.log` appended to.
 async fn bring_up(
     daemon: &Arc<Daemon>,
     uid: &str,
@@ -248,10 +250,26 @@ async fn bring_up(
     start: &ToHost,
     run: &Run<'_>,
     deadline: Instant,
+    relaunch: bool,
 ) -> Result<oneshot::Receiver<Begun>, String> {
     let dir = run_dir(run.root, uid);
-    let log = crate::start_session::make_run_dir(run.root, &dir)
-        .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?;
+    let log = if relaunch {
+        match std::fs::remove_file(dir.join("host.json")) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                return Err(format!("could not remove the run's old host.json: {err}"))
+            }
+            _ => {}
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("host.log"))
+            .map_err(|err| format!("could not open the run's host.log: {err}"))?
+    } else {
+        crate::start_session::make_run_dir(run.root, &dir)
+            .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?
+    };
+    // What the log held before this launch, so a failure reads only this launch's words.
+    let since = log.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut child = crate::start_session::spawn_detached(
         run.environment,
         &[run.host_bin.as_os_str(), dir.as_os_str()],
@@ -262,7 +280,7 @@ async fn bring_up(
     .map_err(|err| format!("could not run the login shell: {err}"))?;
     let spawned = child.id();
     let attached = attach(
-        daemon, uid, start_uuid, run.prompt, start, &dir, spawned, &mut child, deadline,
+        daemon, uid, start_uuid, run.prompt, start, &dir, since, spawned, &mut child, deadline,
     )
     .await;
     crate::start_session::reap(child);
@@ -277,6 +295,7 @@ async fn attach(
     start_prompt: &str,
     start: &ToHost,
     dir: &Path,
+    since: u64,
     spawned: Option<u32>,
     child: &mut tokio::process::Child,
     deadline: Instant,
@@ -287,7 +306,7 @@ async fn attach(
         }
         crate::start_session::give_up_if_ended(
             dir,
-            0,
+            since,
             child,
             deadline,
             "the agent host did not write host.json",
@@ -321,7 +340,7 @@ async fn attach(
     let stream = connect(&dir.join("host.sock"), || {
         crate::start_session::give_up_if_ended(
             dir,
-            0,
+            since,
             child,
             deadline,
             "the agent host did not listen",
@@ -357,6 +376,7 @@ async fn attach(
             turn: None,
             resend: None,
             replayed: true,
+            resumed: resumes(Some(start)),
         },
         Some(begun),
         lines,
@@ -452,6 +472,9 @@ pub(crate) async fn attach_run(
             turn: linked.turn,
             resend,
             replayed: false,
+            // The run's last turn is carried, so no start is stamped here: a ccd restart in
+            // the seconds of a relaunch files its resumed start with no source (a written miss).
+            resumed: false,
         },
         None,
         BufReader::new(read).lines(),
@@ -548,6 +571,8 @@ struct Turns {
     marked: i64,
     /// Whether the host has replayed what it kept ([`Linked::replayed`]).
     replayed: bool,
+    /// Why the launch's first init starts a session: `startup`, or `resume` for a relaunch.
+    launched: &'static str,
 }
 
 /// The mark of a turn's start or end at `now`, strictly after the link's latest one,
@@ -578,14 +603,15 @@ async fn apply_sdk(
 ) -> Result<(), String> {
     let text = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
     // Why a session starts, where ccd knows it, on the init's `session_start` as a terminal
-    // run's SessionStart hook names it: the launch's first init starts the session, and the
-    // first after a `/clear` begins the cleared conversation. A turn's later init starts none.
+    // run's SessionStart hook names it: the launch's first init starts the session, or resumes
+    // it after a relaunch, and the first after a `/clear` begins the cleared conversation. A
+    // turn's later init starts none.
     let mut source = None;
     if text("type") == Some("system") && text("subtype") == Some("init") {
         source = if turns.cleared {
             Some("clear")
         } else if turns.init.is_none() {
-            Some("startup")
+            Some(turns.launched)
         } else {
             None
         };
@@ -675,6 +701,31 @@ struct Linked {
     /// is read before the link begins; a re-attached host's replay ends at the link's first
     /// `state`.
     replayed: bool,
+    /// Whether the run's start resumes claude's session: a relaunch's.
+    resumed: bool,
+}
+
+/// Whether `start` resumes claude's session, as a relaunch's does.
+fn resumes(start: Option<&ToHost>) -> bool {
+    matches!(start, Some(ToHost::Start { options, .. }) if options.resume.is_some())
+}
+
+/// The person's message whose relaunch the run's start `start_uuid` is: the run's claimed send
+/// whose uuid it is ([`send_uuid`]). A first start's uuid names no send.
+async fn relaunched_send(
+    daemon: &Daemon,
+    uid: &str,
+    start_uuid: &str,
+) -> Result<Option<String>, String> {
+    let sends = daemon
+        .db
+        .host_sends(uid.to_string())
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    Ok(sends
+        .into_iter()
+        .map(|(request_id, _)| request_id)
+        .find(|request_id| send_uuid(uid, request_id) == start_uuid))
 }
 
 /// The run's connection to its host: each message committed, then acknowledged, in
@@ -714,12 +765,14 @@ async fn link(
         turn,
         mut resend,
         replayed,
+        resumed,
     } = linked;
     let mut turns = Turns {
         init: turn,
         cleared: false,
         marked: 0,
         replayed,
+        launched: if resumed { "resume" } else { "startup" },
     };
     let (mut live, mut refused) = (
         matches!(lifecycle, Lifecycle::Live | Lifecycle::Stopping),
@@ -772,10 +825,21 @@ async fn link(
                 initialize,
                 ..
             }) if uuid == start_uuid => {
+                // A relaunch's start is the person's message, which its claim names.
+                let relaunched = match relaunched_send(&daemon, &uid, &start_uuid).await {
+                    Ok(relaunched) => relaunched,
+                    Err(why) => break why,
+                };
                 let (lifecycle, said) = match status {
                     OutcomeStatus::Done => (Lifecycle::Live, Ok(())),
+                    // claude never took a refused relaunch's message, so the run stays
+                    // relaunchable rather than failing.
                     OutcomeStatus::Refused => (
-                        Lifecycle::Failed,
+                        if relaunched.is_some() {
+                            Lifecycle::Exited
+                        } else {
+                            Lifecycle::Failed
+                        },
                         Err(detail.unwrap_or_else(|| "the agent host refused the start".into())),
                     ),
                 };
@@ -786,14 +850,22 @@ async fn link(
                     }
                 };
                 // The person's first words, filed as the run goes live.
-                let words = vec![person_row(&uid, &start_uuid, &start_prompt, None, None)];
+                let words = vec![person_row(
+                    &uid,
+                    &start_uuid,
+                    &start_prompt,
+                    relaunched.as_deref(),
+                    None,
+                )];
                 match daemon
-                    .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words)
+                    .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words, relaunched)
                     .await
                 {
                     Ok(true) => {
                         live = lifecycle == Lifecycle::Live;
-                        refused = lifecycle == Lifecycle::Failed;
+                        // From the outcome, not the lifecycle committed: a refused relaunch is
+                        // `exited`, and its host's `exited` is still acknowledged so it ends.
+                        refused = status == OutcomeStatus::Refused;
                         if live {
                             daemon.mail_run_live(&uid).await;
                         }
@@ -860,10 +932,13 @@ async fn link(
                 }
             }
             Ok(FromHost::Exited { seq, code, signal }) if live => {
+                // Claude ended without ccd stopping it, so the person's next message
+                // relaunches it, as when the watch finds its host gone.
                 let (from, payload) = if stopping {
                     (Lifecycle::Stopping, stopped_end())
                 } else {
-                    let mut payload = serde_json::json!({ "exit_code": code });
+                    let mut payload =
+                        serde_json::json!({ "exit_code": code, "reason": PROCESS_ENDED });
                     if let Some(signal) = signal {
                         payload["signal"] = signal.into();
                     }
@@ -1535,7 +1610,7 @@ pub(crate) struct Message {
 /// and a message staged without being sent. `/usage`, `/cost` and `/clear` are messages,
 /// whose output the run's events carry (a clear's "Conversation cleared" notice among it).
 pub(crate) async fn send_text(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     uid: &str,
     lifecycle: Lifecycle,
     message: Message,
@@ -1604,6 +1679,9 @@ pub(crate) async fn send_text(
             return refuse("could not record that this message is being sent; nothing was sent");
         }
     }
+    if lifecycle == Lifecycle::Exited {
+        return relaunch(daemon, uid, &request_id, &text).await;
+    }
     if lifecycle != Lifecycle::Live {
         release_send(daemon, uid, &request_id).await;
         return refuse("This session isn't running, so nothing was sent.");
@@ -1639,6 +1717,201 @@ pub(crate) async fn send_text(
                     .into(),
             }
         }
+    }
+}
+
+/// How long a message's relaunch has, from its send to the host's outcome: inside the apps'
+/// 20 s wait for an answer.
+const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
+
+/// **The person's message `text`, claimed as `request_id`, to the ended hosted Claude run
+/// `uid`, which relaunches it** (decision 210) when its claude ended without ccd stopping it
+/// ([`crate::store::Store::claude_relaunch`]); every other ended run refuses it, as before.
+/// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone
+/// and its group has no member, unless it was recorded in an earlier boot, whose numbers mean
+/// nothing now; then a start's own checks. The start line resumes claude's session in the
+/// folder claude ran in, with the run's model as its menu marks it chosen
+/// ([`Daemon::selected_model`]), else the start's; the kept folder answer, lowered when the
+/// folder has since been answered not trusted; no mode, so a new claude starts in the
+/// person's default; and the message as its prompt under the send's uuid. One write moves the
+/// run `exited` → `starting`, its host cleared, its cursor zeroed and that start line kept
+/// ([`crate::store::Store::begin_claude_relaunch`]), so a second message meets `starting`.
+/// The host is spawned into the run's folder and sent the start ([`bring_up`]); a failure
+/// before that puts the run back `exited` ([`crate::store::Store::undo_relaunch`]) with
+/// nothing sent. The outcome the link commits answers the send: done, the run is `live` and
+/// the words filed once under the request id; refused, it is back `exited` with the host's
+/// detail. No outcome within [`RELAUNCH_WAIT`], or the link ending first, is
+/// `Indeterminate`, left to the link and the watch as a start's is.
+async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str) -> SendTextResult {
+    let deadline = Instant::now() + RELAUNCH_WAIT;
+    let not_running = "This session isn't running, so nothing was sent.";
+    let ended = match daemon.db.claude_relaunch(uid.to_string()).await {
+        Ok(Some(ended)) => ended,
+        Ok(None) => return refuse_relaunch(daemon, uid, request_id, not_running).await,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its run to relaunch it: {err:#}");
+            return refuse_relaunch(daemon, uid, request_id, not_running).await;
+        }
+    };
+    // A daemon that was never told where runs live (a test's) relaunches nothing.
+    let Some((root, launcher)) = daemon.relaunch_from.get() else {
+        return refuse_relaunch(daemon, uid, request_id, not_running).await;
+    };
+    let old = match daemon.db.watched_host(uid.to_string()).await {
+        Ok(old) => old,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its host to relaunch it: {err:#}");
+            return refuse_relaunch(daemon, uid, request_id, not_running).await;
+        }
+    };
+    if let Some(old) = &old {
+        let earlier_boot = matches!(
+            (old.boot, protocol::proc_identity::boot_identity()),
+            (Some(then), Some(now)) if then != now
+        );
+        if !earlier_boot
+            && (liveness(&old.host) != Liveness::Gone || group_has_members(old.host.pid))
+        {
+            let still = "This session is still ending; nothing was sent. Try again in a moment.";
+            return refuse_relaunch(daemon, uid, request_id, still).await;
+        }
+    }
+    let environment = crate::start_session::phone_environment();
+    let checked = async {
+        let ready = crate::start_session::claude_preflight(
+            &environment,
+            daemon.config.claude_bin.as_deref(),
+        )
+        .await
+        .map_err(|refusal| match refusal {
+            StartSessionResult::Failed { detail, .. } => detail,
+            _ => "Claude Code cannot start here".to_string(),
+        })?;
+        let host_bin = host_binary(&daemon.config)?;
+        let codeconnect = launcher.clone()?;
+        let kept = match serde_json::from_str::<ToHost>(&ended.start) {
+            Ok(ToHost::Start { options, .. }) => options,
+            _ => return Err("its start could not be read".to_string()),
+        };
+        Ok::<_, String>((ready.path, host_bin, codeconnect, kept))
+    };
+    let (claude, host_bin, codeconnect, kept) = match checked.await {
+        Ok(checked) => checked,
+        Err(why) => {
+            let reason = format!("This session could not start again ({why}); nothing was sent.");
+            return refuse_relaunch(daemon, uid, request_id, &reason).await;
+        }
+    };
+    let Some(claude_path) = claude.to_str() else {
+        let reason = "This session could not start again (claude's path is not text); nothing \
+                      was sent.";
+        return refuse_relaunch(daemon, uid, request_id, reason).await;
+    };
+    let trust = if kept.trust == Trust::Trusted
+        && crate::start_session::declined(&daemon.db, Path::new(&ended.cwd)).await
+    {
+        Trust::NotTrusted
+    } else {
+        kept.trust
+    };
+    let model = match daemon.selected_model(uid).await {
+        Ok(Some(selected)) => Some(selected),
+        Ok(None) => kept.model.clone(),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its model to relaunch it: {err:#}");
+            kept.model.clone()
+        }
+    };
+    let run = Run {
+        root,
+        request_id,
+        cwd: &ended.cwd,
+        prompt: text,
+        model: model.as_deref(),
+        worktree: None,
+        trust,
+        claude_path,
+        host_bin: &host_bin,
+        codeconnect: &codeconnect,
+        environment: &environment,
+    };
+    let uuid = send_uuid(uid, request_id);
+    let mut options = start_options(uid, &run);
+    options.resume = Some(ended.claude_session_id.clone());
+    let start = ToHost::Start {
+        uuid: uuid.clone(),
+        options,
+        prompt: text.to_string(),
+    };
+    let swapped = match serde_json::to_string(&start) {
+        Ok(line) => daemon.db.begin_claude_relaunch(uid.to_string(), line).await,
+        Err(err) => Err(err.into()),
+    };
+    match swapped {
+        Ok(true) => {}
+        Ok(false) => {
+            let again = "This session is already starting again; nothing was sent.";
+            return refuse_relaunch(daemon, uid, request_id, again).await;
+        }
+        Err(err) => {
+            crate::log_error!("{uid}: could not begin its relaunch: {err:#}");
+            return refuse_relaunch(daemon, uid, request_id, not_running).await;
+        }
+    }
+    let begun = match bring_up(daemon, uid, &uuid, &start, &run, deadline, true).await {
+        Ok(begun) => begun,
+        Err(why) => {
+            // Nothing was sent. Any host now recorded is this launch's own.
+            let launched = daemon
+                .db
+                .watched_host(uid.to_string())
+                .await
+                .ok()
+                .flatten()
+                .map(|watch| watch.host);
+            if let Err(err) = daemon
+                .db
+                .undo_relaunch(uid.to_string(), old, launched)
+                .await
+            {
+                crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
+            }
+            let reason = format!("This session could not start again ({why}); nothing was sent.");
+            return refuse_relaunch(daemon, uid, request_id, &reason).await;
+        }
+    };
+    let lost = "The session is starting again; the message may or may not have reached Claude.";
+    match tokio::time::timeout_at(deadline, begun).await {
+        Ok(Ok(Ok(()))) => SendTextResult::Sent {
+            matched: text.to_string(),
+        },
+        // A refusal the link committed puts the run back `exited` and releases the claim; a
+        // link that ended first leaves it starting, for the watch.
+        Ok(Ok(Err(detail))) => match daemon.db.hosted_link(uid.to_string()).await {
+            Ok(Some(linked)) if linked.lifecycle == Lifecycle::Exited => SendTextResult::Refused {
+                reason: format!("Claude did not start again ({detail}); nothing was sent."),
+            },
+            _ => SendTextResult::Indeterminate {
+                reason: lost.into(),
+            },
+        },
+        Ok(Err(_)) | Err(_) => SendTextResult::Indeterminate {
+            reason: lost.into(),
+        },
+    }
+}
+
+/// A relaunch refused before anything was sent: its claim dropped, so a retry is a fresh
+/// attempt.
+async fn refuse_relaunch(
+    daemon: &Daemon,
+    uid: &str,
+    request_id: &str,
+    reason: &str,
+) -> SendTextResult {
+    release_send(daemon, uid, request_id).await;
+    SendTextResult::Refused {
+        reason: reason.to_string(),
     }
 }
 
@@ -2338,11 +2611,34 @@ mod tests {
 
     /// A daemon on the store in `root`, as a restarted ccd opens it again.
     fn daemon_on(root: &Path) -> Arc<Daemon> {
+        daemon_with(root, Config::default())
+    }
+
+    /// A daemon that relaunches, as a ccd's does: its claude `claude`, which a start's checks
+    /// ask, its agent host `host`, and its runs in `root`, whose `codeconnect` the mail server
+    /// is named by.
+    fn relauncher(root: &Path, claude: &Path, host: &Path) -> Arc<Daemon> {
+        let daemon = daemon_with(
+            root,
+            Config {
+                claude_bin: Some(claude.display().to_string()),
+                agent_host_bin: Some(host.display().to_string()),
+                ..Default::default()
+            },
+        );
+        daemon
+            .relaunch_from
+            .set((root.to_path_buf(), Ok(root.join("codeconnect"))))
+            .unwrap();
+        daemon
+    }
+
+    fn daemon_with(root: &Path, config: Config) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
         let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
         Box::leak(Box::new(transcript_rx));
         Daemon::new(
-            Config::default(),
+            config,
             Arc::new(store),
             Arc::new(crate::apns::LoggingPushSender::new()),
             Endpoint {
@@ -3781,7 +4077,10 @@ mod tests {
         assert_eq!(next(&mut lines).await, None);
         stop(&dir);
         assert_eq!(kept(&rig, &uid).0, "exited");
-        assert_eq!(end_reason(&rig, &uid), Some(serde_json::Value::Null));
+        assert_eq!(
+            end_reason(&rig, &uid),
+            Some(serde_json::json!(PROCESS_ENDED))
+        );
     }
 
     /// **G9, a refused start's end still to come:** the refusal is committed and claude's
@@ -3938,7 +4237,10 @@ mod tests {
             .filter(|event| event["kind"] == "session_end")
             .collect();
         assert_eq!(ends.len(), 1, "{ends:?}");
-        assert_eq!(ends[0]["payload"], serde_json::json!({"exit_code": 0}));
+        assert_eq!(
+            ends[0]["payload"],
+            serde_json::json!({"exit_code": 0, "reason": PROCESS_ENDED})
+        );
         let mut seen = 0;
         while let Ok(event) = broadcast.try_recv() {
             if event.session_uid == played.uid
@@ -4469,7 +4771,7 @@ mod tests {
     /// The app's `send_text` of `text` to the run `uid` as request `request_id`, as the
     /// Kit sends it.
     async fn send_as_app(
-        daemon: &Daemon,
+        daemon: &Arc<Daemon>,
         uid: &str,
         request_id: &str,
         text: &str,
@@ -5491,10 +5793,13 @@ mod tests {
                 "session_end_stopped",
                 serde_json::json!({"exit_code": null, "reason": "Stopped"}),
             ),
-            ("session_end_exited", serde_json::json!({"exit_code": 1})),
+            (
+                "session_end_exited",
+                serde_json::json!({"exit_code": 1, "reason": PROCESS_ENDED}),
+            ),
             (
                 "session_end_signalled",
-                serde_json::json!({"exit_code": null, "signal": "SIGKILL"}),
+                serde_json::json!({"exit_code": null, "signal": "SIGKILL", "reason": PROCESS_ENDED}),
             ),
         ] {
             assert_eq!(end(key).kind, EventKind::SessionEnd, "{key}");
@@ -9862,7 +10167,7 @@ mod tests {
         .collect();
         environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
         let rig = Rig {
-            daemon: daemon_on(&root),
+            daemon: relauncher(&root, &claude, &host),
             root,
             environment,
         };
@@ -10043,6 +10348,774 @@ mod tests {
         );
         let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, host_pid).await;
         println!("G4V: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert_eq!(stopping, StopRunResult::Stopping);
+        assert!(
+            ended && host_gone && left.is_empty(),
+            "ended {ended}, host gone {host_gone}, left in its group {left:?}"
+        );
+    }
+
+    /// A rig whose daemon relaunches, as a ccd's does: its claude the stand-in a start's
+    /// checks pass ([`crate::start_session::test_claude`]), its agent host [`stub_host`], and
+    /// its runs in the rig's folder.
+    /// The recorded session's first init, its folder the rig's own: the folder a relaunch
+    /// resumes claude in is the one claude ran in, which must be there.
+    fn init_in(root: &Path) -> serde_json::Value {
+        let mut init = capture()[2].clone();
+        init["cwd"] = root.to_str().unwrap().into();
+        init
+    }
+
+    fn relaunch_rig() -> Rig {
+        let mut rig = rig();
+        let (claude, _) = crate::start_session::test_claude(&rig.root);
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        rig.daemon = relauncher(&rig.root, &claude, &host);
+        rig
+    }
+
+    /// Wait until no process has `pid`, gone and reaped.
+    async fn gone(pid: i32) {
+        for _ in 0..200 {
+            // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("{pid} did not end");
+    }
+
+    /// A run [`ended_on_its_own`] left: its uid, its folder and its start's uuid.
+    struct Ended {
+        uid: String,
+        dir: PathBuf,
+        start: String,
+    }
+
+    impl Ended {
+        fn start_uuid(&self) -> String {
+            self.start.clone()
+        }
+    }
+
+    /// A live run on `rig` whose claude named its session (the recorded session's first init),
+    /// then ended without ccd stopping it: its host reported claude's exit, code 1, and is gone,
+    /// its socket closed as the kernel closes a dead host's, so the run's link is detached.
+    async fn ended_on_its_own(rig: &Rig) -> Ended {
+        let mut played = live_run_on(rig, &rig.root.join("stub-host")).await;
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let pid = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(pid).await;
+        let start = played.start_uuid();
+        let Played { uid, dir, .. } = played;
+        for _ in 0..200 {
+            if serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap()["link"] == "detached"
+            {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        Ended { uid, dir, start }
+    }
+
+    /// The relaunched host's side of the run's socket in `dir`, once the relaunch has spawned
+    /// it there (its `host.json` names a pid other than `old`): the dead host's socket file
+    /// removed, as a host removes it, then ccd's attach, the first state and its ack, and the
+    /// relaunch's `start`.
+    async fn play_relaunched(dir: &Path, old: i32) -> Played {
+        let waited = Instant::now() + Duration::from_secs(20);
+        let record = loop {
+            match read_host_file(&dir.join("host.json")) {
+                Some(record) if record.host_pid != old => break record,
+                _ if Instant::now() >= waited => panic!("the relaunch spawned no host"),
+                _ => tokio::time::sleep(POLL).await,
+            }
+        };
+        let _ = std::fs::remove_file(dir.join("host.sock"));
+        let listener = UnixListener::bind(dir.join("host.sock")).unwrap();
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+            .await
+            .expect("ccd connected")
+            .unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 0 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 1, "pending": []}),
+        )
+        .await;
+        assert_eq!(
+            next(&mut lines).await,
+            Some(ToHost::Ack { seq: 1 }),
+            "the relaunched host's first message is committed: the run's cursor went back to 0"
+        );
+        let start = next(&mut lines)
+            .await
+            .expect("ccd sent the relaunch's start");
+        Played {
+            uid: dir.file_name().unwrap().to_str().unwrap().to_string(),
+            dir: dir.to_path_buf(),
+            lines,
+            write,
+            record,
+            start,
+        }
+    }
+
+    /// The run's stored `session_end` payloads, oldest first.
+    fn ends(rig: &Rig, uid: &str) -> Vec<serde_json::Value> {
+        stored(rig, uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"].clone())
+            .collect()
+    }
+
+    /// **Decision 210 G1 (i), G2, G4, G5: a run whose claude ended on its own is relaunched by
+    /// the person's next message.** Its host's `exited` ends it with the reason, so the fleet
+    /// says `relaunchable`. A message then spawns a new host in the run's folder that reads
+    /// `start` resuming claude's session, under the send's uuid, with the message as its
+    /// prompt and no mode; its first message is committed (the cursor went back to 0). Done,
+    /// the run is `live`, the send `Sent`, the words filed once with the request id, a retry
+    /// `Duplicate`, and the new init says `resume`. Its next end is filed as a second end.
+    #[tokio::test]
+    async fn a_message_relaunches_a_run_whose_claude_ended_on_its_own() {
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        let session_id = capture()[2]["session_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            ends(&rig, &uid),
+            [serde_json::json!({"exit_code": 1, "reason": PROCESS_ENDED})]
+        );
+        assert!(summary(&rig.daemon, &uid).await.relaunchable);
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (sent, mut played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
+            async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let ToHost::Start {
+                    uuid,
+                    options,
+                    prompt,
+                } = played.start.clone()
+                else {
+                    panic!("not a start: {:?}", played.start);
+                };
+                assert_eq!(uuid, send_uuid(&uid, "r-again"));
+                assert_eq!(prompt, "carry on");
+                assert_eq!(options.resume.as_deref(), Some(session_id.as_str()));
+                assert_eq!(
+                    options.permission_mode, None,
+                    "a new claude starts in the default"
+                );
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert_eq!(
+            sent,
+            SendTextResult::Sent {
+                matched: "carry on".into()
+            }
+        );
+        assert_eq!(kept(&rig, &uid).0, "live");
+        assert!(!summary(&rig.daemon, &uid).await.relaunchable);
+        assert_eq!(words(&rig, &uid), ["fix the tests", "carry on"]);
+        assert!(matches!(
+            send_as_app(&rig.daemon, &uid, "r-again", "carry on").await,
+            SendTextResult::Duplicate { .. }
+        ));
+        // The resumed claude's own init, which names its session afresh.
+        let mut resumed = init_in(&rig.root);
+        resumed["uuid"] = "9d1f0000-0000-4000-8000-0000000002a1".into();
+        sdk(&mut played.write, 3, resumed).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let starts: Vec<serde_json::Value> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_start")
+            .map(|event| event["payload"]["source"].clone())
+            .collect();
+        assert_eq!(starts, ["startup", "resume"]);
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "signal": "SIGKILL"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(
+            ends(&rig, &uid).len(),
+            2,
+            "the relaunched run's end is filed beside the first"
+        );
+        stop(&played.dir);
+    }
+
+    /// **Decision 210: a host recorded before this boot is not consulted.** A run whose host was
+    /// recorded in an earlier boot, whose numbers mean nothing now, ends on its own while that
+    /// host's pid still runs here; the next message relaunches it all the same.
+    #[tokio::test]
+    async fn a_host_recorded_before_this_boot_is_not_consulted() {
+        let rig = relaunch_rig();
+        let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET boot_sec = 1, boot_usec = 0 WHERE session_uid = ?1",
+                [&uid],
+            )
+            .unwrap();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        assert!(running(old), "the old host's pid still runs");
+        let dir = played.dir.clone();
+        drop(played);
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-boot", "hello"), async {
+                let mut played = play_relaunched(&dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        // SAFETY: kill(2) of the old stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(old, libc::SIGTERM) };
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+    }
+
+    /// **Decision 210: two messages at once relaunch the run once.** Both read the run as one
+    /// to relaunch; one write lets only one of them move it to `starting`, so exactly one is
+    /// sent, the other refused with nothing sent, and only the sent one's words are filed.
+    #[tokio::test]
+    async fn two_messages_at_once_relaunch_the_run_once() {
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (a, b, played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-a", "one"),
+            send_as_app(&rig.daemon, &uid, "r-b", "two"),
+            async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        stop(&played.dir);
+        let sent: Vec<&str> = [(&a, "one"), (&b, "two")]
+            .into_iter()
+            .filter(|(answer, _)| matches!(answer, SendTextResult::Sent { .. }))
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(sent.len(), 1, "{a:?}; {b:?}");
+        assert_eq!(words(&rig, &uid), ["fix the tests", sent[0]]);
+    }
+
+    /// The run's uid in `fixtures/claude/hosted-relaunch-wire.json`, written in place of the
+    /// one ccd minted.
+    const RELAUNCH_UID: &str = "01K1B3XQ8ZC0DE5FGH7RE1A0CH";
+    const HOSTED_RELAUNCH: &str =
+        include_str!("../../../fixtures/claude/hosted-relaunch-wire.json");
+    const REGENERATE_HOSTED_RELAUNCH: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_hosted_relaunch_fixture";
+
+    /// **Decision 210 G2: a run a message relaunched, as the apps are sent it, and this file is
+    /// what this build sends.** `fixtures/claude/hosted-relaunch-wire.json` is the apps' pin:
+    /// the run once its claude ended on its own (`session_hosted_relaunchable`, `relaunchable`
+    /// true), the run live again after the person's message (`session_hosted_relaunched`, the
+    /// field left out), and its events across both launches (`session_hosted_relaunched_events`:
+    /// the end with its reason, the message with its request id, the resumed start). Gate one
+    /// reads the committed bytes; gate two re-derives the file and requires the same bytes.
+    #[tokio::test]
+    async fn the_hosted_relaunch_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(HOSTED_RELAUNCH).expect("the fixture must be JSON");
+        let summary = |key: &str| -> protocol::event::SessionSummary {
+            serde_json::from_value(committed[key].clone()).expect("a summary the apps decode")
+        };
+        assert!(summary("session_hosted_relaunchable").relaunchable);
+        assert_eq!(
+            committed["session_hosted_relaunched"].get("relaunchable"),
+            None,
+            "left out when false"
+        );
+        let events: Vec<protocol::event::Event> =
+            serde_json::from_value(committed["session_hosted_relaunched_events"].clone())
+                .expect("Events the apps decode");
+        let payloads = |kind: EventKind, key: &str| -> Vec<serde_json::Value> {
+            events
+                .iter()
+                .filter(|event| event.kind == kind)
+                .map(|event| event.payload[key].clone())
+                .collect()
+        };
+        assert_eq!(
+            payloads(EventKind::SessionEnd, "reason"),
+            [serde_json::json!(PROCESS_ENDED)]
+        );
+        assert_eq!(
+            payloads(EventKind::SessionStart, "source"),
+            [serde_json::json!("startup"), serde_json::json!("resume")]
+        );
+        assert!(events
+            .iter()
+            .any(|event| event.kind == EventKind::UserMessage
+                && event.payload["text"] == "carry on"
+                && event.payload["request_id"] == "r-again"));
+        let derived = hosted_relaunch().await;
+        assert_eq!(
+            derived, committed,
+            "the committed hosted relaunch no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_HOSTED_RELAUNCH}"
+        );
+        assert_eq!(
+            HOSTED_RELAUNCH,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate it: {REGENERATE_HOSTED_RELAUNCH}"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/hosted-relaunch-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_hosted_relaunch_fixture() {
+        let wire = serde_json::to_string_pretty(&hosted_relaunch().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/hosted-relaunch-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A run on a stand-in host whose claude ended on its own ([`ended_on_its_own`]), then
+    /// relaunched by the person's message "carry on" (`r-again`), its resumed claude's init
+    /// played: the fleet's summary at each, and the run's events as the wire delivers them.
+    /// Pinned: the run's uid [`RELAUNCH_UID`], the start's uuid [`CLEAR_START`], the message's
+    /// [`CLEAR_SAY`], the dead host's pid in its end's id, and each clock read [`CLEAR_AT`].
+    async fn hosted_relaunch() -> serde_json::Value {
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        let start = ended.start_uuid();
+        let relaunchable = pinned_summary(
+            &summary(&rig.daemon, &uid).await,
+            &uid,
+            RELAUNCH_UID,
+            &rig.root,
+        );
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (sent, mut played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
+            async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let mut resumed = init_in(&rig.root);
+        resumed["uuid"] = "9d1f0000-0000-4000-8000-0000000002a1".into();
+        sdk(&mut played.write, 3, resumed).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let relaunched = pinned_summary(
+            &summary(&rig.daemon, &uid).await,
+            &uid,
+            RELAUNCH_UID,
+            &rig.root,
+        );
+        let events = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap();
+        stop(&played.dir);
+        let message = send_uuid(&uid, "r-again");
+        let rendered = serde_json::to_string(&events)
+            .unwrap()
+            .replace(&uid, RELAUNCH_UID)
+            .replace(&start, CLEAR_START)
+            .replace(&message, CLEAR_SAY);
+        let mut events: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let ended_as = format!("exit:{RELAUNCH_UID}:");
+        for event in events.as_array_mut().unwrap() {
+            let ts = &mut event["ts"];
+            assert!(
+                ts.as_str()
+                    .and_then(protocol::time::unix_ms_from_rfc3339)
+                    .is_some(),
+                "ts was expected to be a clock read, and is {ts}"
+            );
+            *ts = CLEAR_AT.into();
+            let id = event["source_event_id"].as_str().unwrap_or_default();
+            if let Some(pid) = id.strip_prefix(&ended_as) {
+                assert!(
+                    !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()),
+                    "{id}"
+                );
+                event["source_event_id"] = format!("{ended_as}4242").into();
+            }
+        }
+        serde_json::json!({
+            "session_hosted_relaunchable": relaunchable,
+            "session_hosted_relaunched": relaunched,
+            "session_hosted_relaunched_events": events,
+        })
+    }
+
+    /// **Decision 210 G1 (ii): a run that was live when the Mac restarted is relaunched.** Its
+    /// host, recorded in a boot before this one, is gone; the watch ends the run with the
+    /// reason, and the next message relaunches it without consulting the old group, whose
+    /// number means nothing now.
+    #[tokio::test]
+    async fn a_run_live_before_a_restart_is_relaunched_by_a_message() {
+        let rig = relaunch_rig();
+        let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET boot_sec = 1, boot_usec = 0 WHERE session_uid = ?1",
+                [&uid],
+            )
+            .unwrap();
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        drop(played.lines);
+        end_if_host_gone(&rig.daemon, &uid).await;
+        assert_eq!(
+            ends(&rig, &uid),
+            [serde_json::json!({"exit_code": null, "reason": PROCESS_ENDED})]
+        );
+        let (sent, played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-after", "where were we"),
+            async {
+                let mut played = play_relaunched(&played.dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        stop(&played.dir);
+    }
+
+    /// **Decision 210 G3: the runs a message does not relaunch, each with nothing spawned.**
+    /// A run End run ended refuses it as before; a run whose old host still has its group
+    /// refuses it as still ending and stays `exited`; a relaunch whose host cannot be spawned
+    /// is put back `exited`, nothing sent.
+    #[tokio::test]
+    async fn a_message_relaunches_no_other_ended_run() {
+        let rig = relaunch_rig();
+        let not_running = SendTextResult::Refused {
+            reason: "This session isn't running, so nothing was sent.".into(),
+        };
+        let mut stopped = live_run_on(&rig, &rig.root.join("stub-host")).await;
+        sdk(&mut stopped.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut stopped.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            rig.daemon.stop_run(&stopped.uid).await,
+            StopRunResult::Stopping
+        );
+        assert!(matches!(
+            next(&mut stopped.lines).await,
+            Some(ToHost::Stop { .. })
+        ));
+        say(
+            &mut stopped.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut stopped.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert!(!summary(&rig.daemon, &stopped.uid).await.relaunchable);
+        assert_eq!(
+            send_as_app(&rig.daemon, &stopped.uid, "r-1", "hello").await,
+            not_running
+        );
+        stop(&stopped.dir);
+
+        let rig = relaunch_rig();
+        let mut alive = live_run_on(&rig, &rig.root.join("stub-host")).await;
+        sdk(&mut alive.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut alive.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(
+            &mut alive.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut alive.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(
+            send_as_app(&rig.daemon, &alive.uid, "r-2", "hello").await,
+            SendTextResult::Refused {
+                reason: "This session is still ending; nothing was sent. Try again in a moment."
+                    .into()
+            },
+            "its host still runs"
+        );
+        assert_eq!(kept(&rig, &alive.uid).0, "exited");
+        let old = pid_in(&alive.dir, "stub.pid");
+        stop(&alive.dir);
+        gone(old).await;
+        std::fs::remove_file(rig.root.join("stub-host")).unwrap();
+        let refused = send_as_app(&rig.daemon, &alive.uid, "r-3", "hello").await;
+        assert!(
+            matches!(&refused, SendTextResult::Refused { reason }
+                if reason.starts_with("This session could not start again")),
+            "{refused:?}"
+        );
+        assert_eq!(kept(&rig, &alive.uid).0, "exited", "put back as it was");
+        assert!(summary(&rig.daemon, &alive.uid).await.relaunchable);
+    }
+
+    /// **Decision 210 G3: a relaunch claude refuses leaves the run relaunchable.** The host's
+    /// refusal puts the run back `exited` with the host's detail in the answer, and the host's
+    /// own `exited` is acknowledged so it ends; the next message relaunches again.
+    #[tokio::test]
+    async fn a_refused_relaunch_leaves_the_run_relaunchable() {
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (refused, mut played) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-no", "carry on"), async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "refused", "detail": "no such session"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        assert_eq!(
+            refused,
+            SendTextResult::Refused {
+                reason: "Claude did not start again (no such session); nothing was sent.".into()
+            }
+        );
+        assert_eq!(kept(&rig, &uid).0, "exited");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+        )
+        .await;
+        assert_eq!(
+            next(&mut played.lines).await,
+            Some(ToHost::Ack { seq: 3 }),
+            "the refused relaunch's host is let end"
+        );
+        let again = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(again).await;
+        assert!(summary(&rig.daemon, &uid).await.relaunchable);
+        let (sent, played) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-yes", "carry on"), async {
+                let mut played = play_relaunched(&played.dir, again).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        stop(&played.dir);
+    }
+
+    /// **Decision 210: a second message while a relaunch runs is refused**, so a run is
+    /// relaunched exactly once.
+    #[tokio::test]
+    async fn a_second_message_meets_the_relaunch_starting() {
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (first, second) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-a", "one"), async {
+            let mut played = play_relaunched(&ended.dir, old).await;
+            let second = send_as_app(&rig.daemon, &uid, "r-b", "two").await;
+            let uuid = played.start_uuid();
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+            stop(&played.dir);
+            second
+        });
+        assert!(matches!(first, SendTextResult::Sent { .. }), "{first:?}");
+        assert_eq!(
+            second,
+            SendTextResult::Refused {
+                reason: "This session isn't running, so nothing was sent.".into()
+            }
+        );
+    }
+
+    /// **Decision 210 G6: a real claude killed with a card open is relaunched by the person's
+    /// next message** (app-qa's rig, two prompts). Prompt 1 asks claude to remember a word and
+    /// to write a file, so a card is open; claude's own process, its host's child, is then
+    /// killed with the card open, its host still connected. Prompt 2, sent as the app sends it,
+    /// relaunches the run; the card the relaunched claude asks is filed and allowed from the
+    /// app, so its file is written if the answer reaches claude. Printed (`G6R:`): the end, the
+    /// send's answer and how long it took, the relaunched card and its file, whether claude's
+    /// reply names the word, the session ids and the mode after. Then End run, as G2.
+    #[tokio::test]
+    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
+    async fn a_real_claude_killed_with_a_card_open_is_relaunched_by_the_next_message() {
+        let word = "heliotrope";
+        let first = format!(
+            "Remember the word {word}. Then use the Bash tool to run exactly one command, then say \
+             done. The command, once: echo one > g6r-first.txt"
+        );
+        let (rig, uid, host_pid) = real_claude_run("g6r", &first).await;
+        let card = first_card(&rig, &uid).await;
+        let before = summary(&rig.daemon, &uid).await.claude_session_id;
+        let claude = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-P", &host_pid.to_string()])
+            .output()
+            .ok()
+            .and_then(|listed| {
+                String::from_utf8_lossy(&listed.stdout)
+                    .lines()
+                    .next()?
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+            });
+        if let Some(claude) = claude {
+            // SAFETY: kill(2) of the claude this test's run started, its host's child.
+            unsafe { libc::kill(claude, libc::SIGKILL) };
+        }
+        for _ in 0..200 {
+            if kept(&rig, &uid).0 == "exited" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let host_gone = gone_within(host_pid, Duration::from_secs(10)).await;
+        println!(
+            "G6R: a card {}; claude {claude:?} killed; the end {:?}; relaunchable {}; host gone {host_gone}",
+            card.is_some(),
+            ends(&rig, &uid).last(),
+            summary(&rig.daemon, &uid).await.relaunchable
+        );
+        let second = "What was the word I asked you to remember? Reply with it, then use the Bash \
+                      tool to run exactly one command, then say done. The command, once: echo two \
+                      > g6r-second.txt";
+        let asked = Instant::now();
+        let sent = send_as_app(&rig.daemon, &uid, "g6r-2", second).await;
+        println!(
+            "G6R: prompt 2 {sent:?} in {:.1} s",
+            asked.elapsed().as_secs_f64()
+        );
+        let mut relaunched_card = None;
+        for _ in 0..1200 {
+            let open = cards(&rig.daemon, &uid).await.1;
+            relaunched_card = stored(&rig, &uid).into_iter().rev().find_map(|event| {
+                let card = &event["payload"]["card"];
+                let id = card["request_id"].as_str()?;
+                let hash = card["payload_hash"].as_str()?;
+                (event["kind"] == "approval_request" && open.iter().any(|open| open == id))
+                    .then(|| (id.to_string(), hash.to_string()))
+            });
+            if relaunched_card.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let allowed = allow_from_app(&rig, &uid, &relaunched_card).await;
+        let mut written = false;
+        for _ in 0..600 {
+            written = rig.root.join("g6r-second.txt").exists();
+            if written {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let replied = stored(&rig, &uid).iter().any(|event| {
+            event["kind"] == "agent_message"
+                && event["payload"].to_string().to_lowercase().contains(word)
+        });
+        let after = summary(&rig.daemon, &uid).await;
+        println!(
+            "G6R: the relaunched card {:?} (the first {:?}); allowed {allowed:?}; g6r-second.txt written {written}",
+            relaunched_card.as_ref().map(|card| &card.0),
+            card.as_ref().map(|card| &card.0)
+        );
+        println!(
+            "G6R: the reply names the word {replied}; session {before:?} → {:?}; mode after {:?}",
+            after.claude_session_id,
+            after.permission_mode.map(|fact| fact.value)
+        );
+        let new_host = read_host_file(&run_dir(&rig.root, &uid).join("host.json"))
+            .map_or(host_pid, |record| record.host_pid);
+        let (stopping, ended, host_gone, left) = end_real_run(&rig, &uid, new_host).await;
+        println!("G6R: End run {stopping:?}; ended {ended}; host gone {host_gone}; left in its group {left:?}");
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
         assert_eq!(stopping, StopRunResult::Stopping);
         assert!(
             ended && host_gone && left.is_empty(),

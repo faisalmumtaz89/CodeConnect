@@ -9612,6 +9612,7 @@ mod tests {
             menus: None,
             git_branch: None,
             diff_stat: None,
+            relaunchable: false,
         };
         serde_json::json!({
             "hello_ack_capabilities": ack["capabilities"],
@@ -9675,6 +9676,8 @@ mod tests {
                 git_branch: tree.map(|(branch, _, _)| branch.to_string()),
                 diff_stat: tree
                     .map(|(_, added, removed)| protocol::event::DiffStat { added, removed }),
+
+                relaunchable: false,
             }
         };
         serde_json::json!({

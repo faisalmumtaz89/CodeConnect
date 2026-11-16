@@ -7624,7 +7624,7 @@ impl Daemon {
     /// * The mutation is **claimed durably before anything is typed**, so a
     ///   retry after a crash is told "unknown" rather than typing again.
     pub async fn send_text(
-        &self,
+        self: &Arc<Self>,
         session_ref: &str,
         text: String,
         request_id: Option<&str>,
@@ -10039,11 +10039,10 @@ impl Daemon {
                 choosing.push((row.session_uid.clone(), models, receipt));
             }
         }
-        // An ended engine Codex run the person's next message relaunches.
+        // An ended run the person's next message relaunches, of either agent.
         let mut relaunchable: HashSet<String> = HashSet::new();
         for row in &rows {
-            if row.agent == protocol::agent::AgentKind::Codex
-                && row.lifecycle == Lifecycle::Exited
+            if row.lifecycle == Lifecycle::Exited
                 && self.db.relaunchable(row.session_uid.clone()).await?
             {
                 relaunchable.insert(row.session_uid.clone());
@@ -10578,8 +10577,10 @@ impl Daemon {
 
     /// Commit the run's start outcome with its cursor and, when it makes the run live,
     /// `events`, the person's first words, then fan them out
-    /// ([`crate::store::Store::commit_outcome`]). `false` when the cursor did not move:
-    /// nothing was written, and the outcome must not be acknowledged.
+    /// ([`crate::store::Store::commit_outcome`]); a relaunch's start settles the person's
+    /// message `send` with it. `false` when the cursor did not move: nothing was written, and
+    /// the outcome must not be acknowledged.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_start_outcome(
         &self,
         session_uid: &str,
@@ -10588,6 +10589,7 @@ impl Daemon {
         lifecycle: Lifecycle,
         initialize: Option<String>,
         events: Vec<PendingEvent>,
+        send: Option<String>,
     ) -> Result<bool> {
         let gate = self.publish_gate(session_uid).await;
         let events = {
@@ -10601,6 +10603,7 @@ impl Daemon {
                     lifecycle,
                     initialize,
                     events,
+                    send,
                 )
                 .await?
             else {
@@ -10613,6 +10616,26 @@ impl Daemon {
         };
         self.published(session_uid, &events).await;
         Ok(true)
+    }
+
+    /// The hosted Claude run `uid`'s model as its menu marks it chosen
+    /// ([`crate::claude_host::selected_model`], what the fleet's `menus.selected_model` is): from
+    /// its start's kept models, its model fact and its newest receipt of a model change, which
+    /// all outlive the run's end. `None` when it has no kept models or no model fact, or the
+    /// fact names none of them.
+    pub(crate) async fn selected_model(&self, uid: &str) -> Result<Option<String>> {
+        let Some(models) = self.db.hosted_models(uid.to_string()).await? else {
+            return Ok(None);
+        };
+        let receipt = self.db.newest_model_receipt(uid.to_string()).await?;
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .session_facts
+            .get(uid)
+            .and_then(|facts| facts.model.as_ref())
+            .and_then(|fact| {
+                crate::claude_host::selected_model(&models, &fact.value, receipt.as_deref())
+            }))
     }
 
     /// Commit one of a hosted run's card lines with its cursor ([`Db::commit_host_card`])
@@ -11100,6 +11123,7 @@ impl Daemon {
                 inner.host_links.get(&row.session_uid),
                 Some(HostLink::Codex(..))
             ) && row.lifecycle == Lifecycle::Live;
+            let codex = row.agent == protocol::agent::AgentKind::Codex;
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
@@ -11161,7 +11185,7 @@ impl Daemon {
                 // it. Both apps offer Stop and the composer on this field.
                 codex_link: if engine_link {
                     protocol::event::CodexLink::Subscribed
-                } else if relaunchable.contains(&row.session_uid) {
+                } else if codex && relaunchable.contains(&row.session_uid) {
                     protocol::event::CodexLink::BoundNotStarted
                 } else {
                     addressee.wire_link()
@@ -11175,6 +11199,7 @@ impl Daemon {
                 // this listing is answered on every fleet refresh.
                 git_branch: tree.and_then(|tree| tree.branch.clone()),
                 diff_stat: tree.and_then(|tree| tree.diff_stat),
+                relaunchable: relaunchable.contains(&row.session_uid),
             });
         }
         out

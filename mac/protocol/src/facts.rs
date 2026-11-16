@@ -21,6 +21,11 @@ pub struct SessionFacts {
     pub model: Option<ModelFact>,
     pub permission_mode: Option<Fact>,
     pub effort: Option<Fact>,
+    /// The seq of the run's newest `session_end`, 0 before one. An effort is the ended
+    /// process's own: a relaunched claude starts at the person's default and its init
+    /// restates the model and the mode but not the effort, so an effort decided before
+    /// the end no longer holds.
+    pub ended: u64,
 }
 
 impl SessionFacts {
@@ -41,8 +46,19 @@ impl SessionFacts {
                 self.permission_mode = Some(fact);
             }
         }
+        if event.kind == EventKind::SessionEnd && event.seq > self.ended {
+            self.ended = event.seq;
+            if self
+                .effort
+                .as_ref()
+                .is_some_and(|held| held.seq < self.ended)
+            {
+                self.effort = None;
+            }
+        }
         if let Some(fact) = effort_fact(event) {
-            if self.effort.as_ref().is_none_or(|held| held.seq < fact.seq) {
+            if fact.seq > self.ended && self.effort.as_ref().is_none_or(|held| held.seq < fact.seq)
+            {
                 self.effort = Some(fact);
             }
         }
@@ -526,6 +542,50 @@ mod tests {
             json!({"permission_mode": "bypassPermissions"}),
         );
         assert_eq!(permission_mode_fact(&quoted), None);
+    }
+
+    /// **The effort ends with the run's process** (decision 210): an effort before the run's
+    /// end no longer holds, and one after it does, folded in any order.
+    #[test]
+    fn the_effort_ends_with_the_run() {
+        let events = [
+            event(
+                3,
+                EventKind::Notification,
+                Source::Daemon,
+                json!({"notification_type": "model_set", "effort": "high"}),
+            ),
+            event(
+                5,
+                EventKind::SessionEnd,
+                Source::Daemon,
+                json!({"exit_code": 1, "reason": "Stopped: its process ended"}),
+            ),
+        ];
+        for order in [[0, 1], [1, 0]] {
+            let mut facts = SessionFacts::default();
+            for index in order {
+                facts.observe(&events[index]);
+            }
+            assert_eq!(facts.effort, None, "{order:?}");
+        }
+        let mut facts = SessionFacts::default();
+        for event in &events {
+            facts.observe(event);
+        }
+        facts.observe(&event(
+            8,
+            EventKind::Notification,
+            Source::Daemon,
+            json!({"notification_type": "model_set", "effort": "low"}),
+        ));
+        assert_eq!(
+            facts.effort,
+            Some(Fact {
+                value: "low".into(),
+                seq: 8
+            })
+        );
     }
 
     /// Folded in any order, each fact is the newest event's, and a background

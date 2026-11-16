@@ -681,6 +681,7 @@ impl Run {
             menus: None,
             git_branch: None,
             diff_stat: None,
+            relaunchable: false,
         }
     }
 

@@ -478,7 +478,7 @@ async fn run_folder(
 /// Whether `folder` has its own kept `not_trusted` answer: by its real path, or by the path
 /// itself while it is not there yet (a new worktree's). A folder whose answer cannot be
 /// read counts as declined: it runs not trusted.
-async fn declined(db: &crate::db::Db, folder: &Path) -> bool {
+pub(crate) async fn declined(db: &crate::db::Db, folder: &Path) -> bool {
     let real = match std::fs::canonicalize(folder) {
         Ok(real) => real,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => folder.to_path_buf(),
