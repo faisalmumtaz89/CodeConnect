@@ -1347,8 +1347,7 @@ async fn apply_setting_outcome(
 /// each from its screen, and the run's command menu ([`catalog`]) leaves out exactly
 /// these, because the daemon is the one that knows what it refuses, so an app offers
 /// nothing it would be refused and keeps no list of its own in step with this one.
-const REFUSED_SCREENS: [(&str, &str); 3] = [
-    ("clear", "This isn't available for this session yet."),
+const REFUSED_SCREENS: [(&str, &str); 2] = [
     (
         "model",
         "Changing the model isn't available for this session yet.",
@@ -1361,8 +1360,8 @@ const REFUSED_SCREENS: [(&str, &str); 3] = [
 
 /// Why ccd refuses `text`, sent from an app, as the screen of a command in
 /// [`REFUSED_SCREENS`]: the Model and Effort sheets send theirs with the native
-/// confirmation (`confirmed`), and the Clear dialog sends `/clear` alone. Typed with an
-/// argument (`/effort low`), such a command is a message, as at claude's keyboard.
+/// confirmation (`confirmed`). Typed with an argument (`/effort low`), such a command is a
+/// message, as at claude's keyboard.
 fn refused_screen(text: &str, confirmed: bool) -> Option<&'static str> {
     let mut words = text.split_whitespace();
     let command = words.next()?.strip_prefix('/')?;
@@ -1423,9 +1422,9 @@ pub(crate) struct Message {
 /// The send's claim keeps its text, so a restarted ccd still files them from the host's
 /// replay. A retry is answered from that claim first, as a typed send's is; only a new
 /// message meets the run's state. The screens of [`REFUSED_SCREENS`] (the model and effort
-/// confirmations, `/clear`) are refused, as are `/status`, which claude does not offer
-/// such a run, and a message staged without being sent. `/usage` and `/cost` are
-/// messages, whose output the run's events carry.
+/// confirmations) are refused, as are `/status`, which claude does not offer such a run,
+/// and a message staged without being sent. `/usage`, `/cost` and `/clear` are messages,
+/// whose output the run's events carry (a clear's "Conversation cleared" notice among it).
 pub(crate) async fn send_text(
     daemon: &Daemon,
     uid: &str,
@@ -5067,6 +5066,173 @@ mod tests {
         .unwrap();
     }
 
+    /// **Decision 212 G1: the app's Clear reaches claude.** `/clear` alone, as the Clear
+    /// dialog sends it and as typed, is a message: the host reads it as a `say`, and the app
+    /// is told `sent`.
+    #[tokio::test]
+    async fn a_clear_from_the_app_reaches_the_host() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let (result, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-clear", "/clear"),
+            host_takes(&mut played, 3, "done")
+        );
+        assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
+        assert_eq!(text, "/clear");
+        stop(&played.dir);
+    }
+
+    // ------------------------------- a /clear, as the apps are sent it
+
+    /// The run the clear fixture is emitted for, written in place of the run's own uid.
+    const CLEAR_UID: &str = "01K1B3XQ8ZC0DE5FGH7C1EAR00";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const CLEAR_AT: &str = "2026-11-16T00:00:00.000Z";
+    /// The start's uuid, written in place of the one ccd minted.
+    const CLEAR_START: &str = "6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b";
+    /// The session claude names after the recorded `/clear` (its line 135).
+    const AFTER_CLEAR: &str = "23412b6b-2af7-41d0-bbc4-0679c536ae99";
+    const HOSTED_CLEAR: &str = include_str!("../../../fixtures/claude/hosted-clear-wire.json");
+    const REGENERATE_HOSTED_CLEAR: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_hosted_clear_fixture";
+
+    /// **Decision 212 G2**: the recorded session's `/clear` and the turn after it (its lines
+    /// 130-143, a real claude's) played on a live run as its host relays them. Checked on the
+    /// way: the clear's own end leaves the run idle for the mail rule. Checked after: the run's
+    /// session is claude's new one, and its model and mode facts read on. Returned: the run's
+    /// fleet summary and its events, as the wire delivers them to an app, the run's uid written
+    /// [`CLEAR_UID`], the start's uuid [`CLEAR_START`] and each clock read [`CLEAR_AT`].
+    async fn hosted_clear() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        for (seq, message) in (3u64..).zip(capture().into_iter().skip(129).take(14)) {
+            let ends_the_clear = message["type"] == "result"
+                && message["session_id"] == AFTER_CLEAR
+                && message["num_turns"] == 0;
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+            if ends_the_clear {
+                let (started, ended) = marks(&rig, &uid);
+                assert!(
+                    started <= ended,
+                    "a turn reads running after the clear's own end: {started} > {ended}"
+                );
+            }
+        }
+        let session = summary(&rig.daemon, &uid).await;
+        assert_eq!(session.claude_session_id.as_deref(), Some(AFTER_CLEAR));
+        assert_eq!(
+            session.model.as_ref().map(|fact| fact.value.as_str()),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(
+            session
+                .permission_mode
+                .as_ref()
+                .map(|fact| fact.value.as_str()),
+            Some("default")
+        );
+        let events = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap();
+        let live = pinned_summary(&session, &uid, CLEAR_UID, &rig.root);
+        let start = played.start_uuid();
+        stop(&played.dir);
+        let rendered = serde_json::to_string(&events)
+            .unwrap()
+            .replace(&uid, CLEAR_UID)
+            .replace(&start, CLEAR_START);
+        let mut events: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        for event in events.as_array_mut().unwrap() {
+            let ts = &mut event["ts"];
+            assert!(
+                ts.as_str()
+                    .and_then(protocol::time::unix_ms_from_rfc3339)
+                    .is_some(),
+                "ts was expected to be a clock read, and is {ts}"
+            );
+            *ts = CLEAR_AT.into();
+        }
+        serde_json::json!({ "session_hosted_live": live, "session_hosted_live_events": events })
+    }
+
+    /// **Decision 212: a hosted run's `/clear` reaches the apps as claude makes it, and this
+    /// file is what this build sends for it.** `fixtures/claude/hosted-clear-wire.json` is the
+    /// apps' pin for drawing a clear on such a run: the earlier history, one "Conversation
+    /// cleared" notice, then the next turn, and the run's session claude's new one. Gate one
+    /// reads the committed bytes; gate two re-derives the file and requires the same bytes.
+    #[tokio::test]
+    async fn the_hosted_clear_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(HOSTED_CLEAR).expect("the fixture must be JSON");
+        let session: protocol::event::SessionSummary =
+            serde_json::from_value(committed["session_hosted_live"].clone())
+                .expect("a summary the apps decode");
+        assert_eq!(session.claude_session_id.as_deref(), Some(AFTER_CLEAR));
+        let events: Vec<protocol::event::Event> =
+            serde_json::from_value(committed["session_hosted_live_events"].clone())
+                .expect("Events the apps decode");
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            (1..=events.len() as u64).collect::<Vec<_>>(),
+            "the daemon's own numbering, in order, with no holes"
+        );
+        let cleared: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::Notification
+                    && event.payload["notification_type"]
+                        == protocol::event::notice::CONVERSATION_CLEARED
+            })
+            .collect();
+        assert_eq!(cleared.len(), 1, "one clear");
+        assert_eq!(cleared[0].payload["message"], "Conversation cleared");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == EventKind::UserMessage && event.seq < cleared[0].seq),
+            "the history before the clear (the person's first words) is kept"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == EventKind::TurnComplete && event.seq > cleared[0].seq),
+            "the next turn follows the clear"
+        );
+        let derived = hosted_clear().await;
+        assert_eq!(
+            derived, committed,
+            "the committed hosted clear no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_HOSTED_CLEAR}"
+        );
+        assert_eq!(
+            HOSTED_CLEAR,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate it: {REGENERATE_HOSTED_CLEAR}"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/hosted-clear-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_hosted_clear_fixture() {
+        let wire = serde_json::to_string_pretty(&hosted_clear().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/hosted-clear-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
     /// **B5 G2: retries.** The same request asked again while its first send waits for
     /// the host is not sent twice; once the host has taken it, it is answered `duplicate`,
     /// with nothing sent and no second row; the same id with other words is refused;
@@ -5114,9 +5280,8 @@ mod tests {
     }
 
     /// **B5 G3, B8 G4: what a run started in a host does not take.** The Model and Effort
-    /// sheets' confirmations, the Clear dialog's `/clear` and `/status` are refused, and
-    /// nothing is sent, claimed or filed; a message that only mentions a command, `/usage`
-    /// and `/cost` are messages.
+    /// sheets' confirmations and `/status` are refused, and nothing is sent, claimed or
+    /// filed; a message that only mentions a command, `/usage` and `/cost` are messages.
     #[tokio::test]
     async fn what_a_hosted_run_does_not_take_is_refused_and_nothing_is_sent() {
         let rig = rig();
@@ -5157,10 +5322,6 @@ mod tests {
                     .await
             ),
             "Changing the effort isn't available for this session yet."
-        );
-        assert_eq!(
-            refused(send_as_app(&rig.daemon, &uid, "c", "/clear").await),
-            "This isn't available for this session yet."
         );
         assert_eq!(
             refused(send_as_app(&rig.daemon, &uid, "st", "/status").await),
@@ -6983,9 +7144,9 @@ mod tests {
         })
     }
 
-    /// The commands of a `commands_changed` as claude gives them: a refused screen's
-    /// (`clear`, `model`, `effort`), a screen-only one (`doctor`), and two it offers
-    /// (`usage` with no argument hint, `compact` with one).
+    /// The commands of a `commands_changed` as claude gives them: the refused screens'
+    /// (`model`, `effort`), a screen-only one (`doctor`), and three it offers (`clear` and
+    /// `usage` with no argument hint, `compact` with one).
     fn commands_changed() -> serde_json::Value {
         serde_json::json!({"type": "system", "subtype": "commands_changed",
         "uuid": "9d1f0000-0000-4000-8000-000000000021", "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
@@ -7078,6 +7239,11 @@ mod tests {
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
         let changed = rig.daemon.command_catalog(&uid).await;
         let expected = [
+            CommandEntry {
+                name: "clear".into(),
+                description: "Clear conversation history and free up context".into(),
+                argument_hint: None,
+            },
             CommandEntry {
                 name: "usage".into(),
                 description: "Show plan usage limits".into(),

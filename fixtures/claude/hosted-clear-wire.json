@@ -1,0 +1,389 @@
+{
+  "session_hosted_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "23412b6b-2af7-41d0-bbc4-0679c536ae99",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-sdk-rig/qa/capture/repo",
+    "effort": {
+      "seq": 4,
+      "value": "low"
+    },
+    "last_seq": 15,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ]
+    },
+    "model": {
+      "at": "2026-11-15T09:00:00.000Z",
+      "seq": 11,
+      "source": "session_start",
+      "value": "claude-sonnet-5-5"
+    },
+    "permission_mode": {
+      "seq": 11,
+      "value": "default"
+    },
+    "project_label": "repo",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_live_events": [
+    {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 1,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "daemon",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "fix the tests"
+      },
+      "seq": 2,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "daemon",
+      "source_event_id": "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "item_id": "c8d66b4f-da57-4304-b104-39f415718163",
+      "kind": "session_start",
+      "payload": {
+        "model": "claude-sonnet-5-5",
+        "permissionMode": "default"
+      },
+      "seq": 3,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "c8d66b4f-da57-4304-b104-39f415718163/session_start/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
+    },
+    {
+      "item_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7",
+      "kind": "user_message",
+      "payload": {
+        "message": {
+          "content": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"
+        }
+      },
+      "seq": 4,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "8dc1c6d2-105c-40ad-9449-7fb9ed62d4d7/user_message/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
+    },
+    {
+      "item_id": "33e78ae0-9d51-4c99-83ca-f7e6ded51377",
+      "kind": "turn_complete",
+      "payload": {
+        "is_error": false,
+        "num_turns": 0,
+        "subtype": "success"
+      },
+      "seq": 5,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "33e78ae0-9d51-4c99-83ca-f7e6ded51377/turn_complete/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
+    },
+    {
+      "item_id": "33e78ae0-9d51-4c99-83ca-f7e6ded51377",
+      "kind": "usage",
+      "payload": {
+        "total_cost_usd": 0.9355947999999998,
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "",
+          "input_tokens": 0,
+          "iterations": [],
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        }
+      },
+      "seq": 6,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "33e78ae0-9d51-4c99-83ca-f7e6ded51377/usage/1",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
+    },
+    {
+      "item_id": "3130f667-a648-46f9-8345-7f27cc7b9d31",
+      "kind": "notification",
+      "payload": {
+        "message": "Conversation cleared",
+        "notification_type": "conversation_cleared"
+      },
+      "seq": 7,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "3130f667-a648-46f9-8345-7f27cc7b9d31/notification/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "c8d66b4f-da57-4304-b104-39f415718163"
+    },
+    {
+      "item_id": "e74908e5-53c2-4eca-9e17-042f933a7abf",
+      "kind": "session_start",
+      "payload": {
+        "model": "claude-sonnet-5-5",
+        "permissionMode": "default"
+      },
+      "seq": 8,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "e74908e5-53c2-4eca-9e17-042f933a7abf/session_start/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "e74908e5-53c2-4eca-9e17-042f933a7abf"
+    },
+    {
+      "item_id": "139fa370-fbe9-4723-a534-5c9041d76b84",
+      "kind": "turn_complete",
+      "payload": {
+        "is_error": false,
+        "num_turns": 0,
+        "subtype": "success"
+      },
+      "seq": 9,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "139fa370-fbe9-4723-a534-5c9041d76b84/turn_complete/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "e74908e5-53c2-4eca-9e17-042f933a7abf"
+    },
+    {
+      "item_id": "139fa370-fbe9-4723-a534-5c9041d76b84",
+      "kind": "usage",
+      "payload": {
+        "total_cost_usd": 0,
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "",
+          "input_tokens": 0,
+          "iterations": [],
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        }
+      },
+      "seq": 10,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "139fa370-fbe9-4723-a534-5c9041d76b84/usage/1",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "e74908e5-53c2-4eca-9e17-042f933a7abf"
+    },
+    {
+      "item_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126",
+      "kind": "session_start",
+      "payload": {
+        "model": "claude-sonnet-5-5",
+        "permissionMode": "default"
+      },
+      "seq": 11,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126/session_start/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126"
+    },
+    {
+      "item_id": "63583e20-b3bb-4bc0-9148-7aa84d059abf",
+      "kind": "agent_message",
+      "payload": {
+        "message": {
+          "content": [
+            {
+              "signature": "CAQShgcKEAgTGAI4AUIIdGhpbmtpbmcSDFkmIk/76xuNo46+4xoMVVTGDrCaxlh1NCoGIjAvP5R8/AbI2rXl+DEWa/bU64VggMS23wKRg+rUlYF/6bBGWjxlkz3mE83ud7VPAVwqowb1n1eA3wx416vcDJLrohXJ4cVRv7lr2g/47B6oSWABx4hD/XQvrTrChXSTf0oW9SWOT9mR9w2qZngF9bGIBrddgckRfyKujgI/p6utiyZDTPLaqIAcOQUC02BvsMQmZLJkFfEMNBockr0f/B1zuwum5GFL8zqkvy+FgSPE2S8iLXqCnjG9EHP33QRhJrrlt6mAXQirANeYARlb5U7Il5L5ISlXQWI8bJ38tlInZQXGJvT60idl7sO48XQ2KpHA+JPNCaYAfGEJzA1B9Sedny2l1C3Lxa+hbZw5i9ih8nqoKDEP6oGHXdy7IHqr05JaF8UDxlzdy0vM01hPvWFsFVD2x0s21goGNysbfm/LjgyjoWBZvcvg3igX+SpUU8zOOPWEZdPNvoxa3Le2+t5e0o+gtzUjVITHIcLSJhF/tNs5RILW2yf1t9Sxfll/ZK5rptCdwp+seBoEMevrGQC1B/ZjO6lZwf665mv8w1VJuSc9GXPzS4zejTd3n5ECC10R16anXES54kx/d9fTacGLNB9lxm8EN8xKgaYGHJ7RKEamF/y8NZfGFAHPQd/sR9hsBUyNyUp/VYxuggZksXPBxxmmi7MukhmNnQKihCYtmLqSe7FpupxgNY6ip5QmBD+LDAVyOEGCp7MGOPwEabl0Id6LbBQoJ2MANWGO5xrP3kplMBhhZD3UHnemLyI4BWMz6wp9WI7DyHh/D9LCxg00iE8Wy1/o9P1urHu1S6D1CrKRKVhxUmjE5XuTYDn0shb4cYMMp6Rj7flDQX+RNkI+adAk+UHMXoEZVGa01vZmo5AkroqLhPGvQ/gU7RJuKpo+WfAVN3H9TEfIqjxwsHPX7400Ga3q1u8cC9Fh95RchurqkwI33+2OnMlRiDhNw+GFuKdWlfmkqAI/88Wa4yOeCuEyheurU71ZRimyGzDIo2npvcrYoadBAyh9nmuUq4fc9vpz69sgKwb8WH3Mid7Ej1gkHEZiHnRqieJTMkg9bNdWIdhiETtLi66yzfl8sbQV7rx8EAl2uVtt1Js6TuLvUlR+Pz5UqRkRiIKg3JPTHi7K36D61RgB",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "model": "claude-sonnet-5-5"
+        }
+      },
+      "seq": 12,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "63583e20-b3bb-4bc0-9148-7aa84d059abf/agent_message/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126"
+    },
+    {
+      "item_id": "5bc3c914-dcad-4fb5-a7a4-47196e8aaf80",
+      "kind": "agent_message",
+      "payload": {
+        "message": {
+          "content": [
+            {
+              "text": "I have no saved memories for this folder. All I know is that it's a git repo on `main` with one commit (\"Start\") and an uncommitted change to `calc.py`.",
+              "type": "text"
+            }
+          ],
+          "model": "claude-sonnet-5-5"
+        }
+      },
+      "seq": 13,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "5bc3c914-dcad-4fb5-a7a4-47196e8aaf80/agent_message/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126"
+    },
+    {
+      "item_id": "4619615a-1338-425d-a67b-c835e570262b",
+      "kind": "turn_complete",
+      "payload": {
+        "is_error": false,
+        "num_turns": 1,
+        "subtype": "success"
+      },
+      "seq": 14,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "4619615a-1338-425d-a67b-c835e570262b/turn_complete/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126"
+    },
+    {
+      "item_id": "4619615a-1338-425d-a67b-c835e570262b",
+      "kind": "usage",
+      "payload": {
+        "total_cost_usd": 0.0697623,
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 16739,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 16739,
+          "cache_read_input_tokens": 14923,
+          "fallback_credit": null,
+          "inference_geo": "global",
+          "input_tokens": 2,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 16739,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 16739,
+              "cache_read_input_tokens": 14923,
+              "input_tokens": 2,
+              "output_tokens": 131,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 131,
+          "output_tokens_details": {
+            "thinking_tokens": 77
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        }
+      },
+      "seq": 15,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "4619615a-1338-425d-a67b-c835e570262b/usage/1",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "4e6a54bb-4e24-4dac-ac7e-68c3c23aa126"
+    }
+  ]
+}
