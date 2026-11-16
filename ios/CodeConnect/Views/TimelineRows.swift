@@ -974,7 +974,7 @@ struct QuestionRow: View {
         let state =
             status.summary(of: questions)
             ?? "waiting \(Format.spokenDuration(now.timeIntervalSince(approval.requestedAt)))"
-        return "\(title) from Claude. \(questions.questions[0].text). \(state)."
+        return "\(title) from \(agent?.displayName ?? "Claude"). \(questions.questions[0].text). \(state)."
     }
 }
 

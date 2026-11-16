@@ -110,6 +110,40 @@ final class WaitingLabelTests: XCTestCase {
         XCTAssertTrue(found.contains { $0.hasSuffix(". waiting 1 minute.") }, "\(found)")
     }
 
+    /// X7b (change 5, the agent named): the question row's VoiceOver label names the run's agent,
+    /// not a hard-coded "Claude". Built from the daemon-emitted Codex card.
+    private func codexApproval() throws -> ApprovalItem {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "question-card-wire", withExtension: "json"))
+        let root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+        let frames = try XCTUnwrap(root["answered"]?["frames"]?.arrayValue, "answered.frames")
+        var request: [String: JSONValue]?
+        for frame in frames where frame["event"]?["kind"]?.stringValue == "approval_request" {
+            request = frame["event"]?.objectValue
+        }
+        var req = try XCTUnwrap(request, "no approval_request in question-card-wire")
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        req["ts"] = .string(stamp.string(from: Date().addingTimeInterval(-72)))
+        let event = try XCTUnwrap(JSONValue.object(req).decoded(Event.self))
+        var built: ApprovalItem?
+        for item in TimelineBuilder.build([event]) {
+            if case .approval(let approval) = item.content { built = approval }
+        }
+        return try XCTUnwrap(built, "no approval row was built")
+    }
+
+    func testACodexQuestionRowNamesCodexToVoiceOver() throws {
+        let approval = try codexApproval()
+        let questions = try XCTUnwrap(QuestionCard(card: approval.card))
+        let found = try spoken(
+            QuestionRow(
+                approval: approval, questions: questions, risk: .low, answersQuestions: true,
+                linkReason: nil, agent: .codex, resolvesCodexCards: true, onOpen: {}))
+        XCTAssertTrue(found.contains { $0.contains("from Codex.") }, "\(found)")
+        XCTAssertFalse(found.contains { $0.contains("from Claude") }, "\(found)")
+    }
+
     func testTheWaitClockSpeaksHowLongItHasWaited() throws {
         let now = Date()
         for prefix in ["waiting", nil] {

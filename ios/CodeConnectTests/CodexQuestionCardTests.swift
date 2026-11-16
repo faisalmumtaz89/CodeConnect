@@ -127,6 +127,25 @@ final class CodexQuestionCardTests: XCTestCase {
         XCTAssertEqual(QuestionCard.heading(agent: .claude, count: 1), "Claude asks")
     }
 
+    // MARK: 5b — a recorded outcome names the resolving device, not the viewer's
+
+    func testAnAnsweredCodexCardNamesTheResolverNotTheViewer() throws {
+        let status = codexStatus(codex: try resolution("answered"))
+        let onMac = try XCTUnwrap(status.banner(on: .mac, agent: .codex))
+        XCTAssertTrue(onMac.message.contains("from an iPhone"), onMac.message)
+        XCTAssertFalse(onMac.message.contains("the Mac"), onMac.message)
+        let onPhone = try XCTUnwrap(status.banner(on: .iPhone, agent: .codex))
+        XCTAssertTrue(onPhone.message.contains("from the phone"), onPhone.message)
+    }
+
+    func testADeclinedCodexCardDoesNotNameTheViewer() throws {
+        let status = codexStatus(codex: try resolution("declined"))
+        for host in [HostDevice.mac, HostDevice.iPhone] {
+            let banner = try XCTUnwrap(status.banner(on: host, agent: .codex))
+            XCTAssertFalse(banner.message.contains("Declined from"), "\(host): \(banner.message)")
+        }
+    }
+
     // MARK: 97's constraint — "Other" sends `other` only, no notes beside a chosen option
 
     func testOtherSendsOtherWithNoNotes() throws {

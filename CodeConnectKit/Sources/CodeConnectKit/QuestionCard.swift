@@ -320,8 +320,11 @@ public enum QuestionCardStatus: Sendable, Hashable {
     private static func endedByCodex(_ resolution: CodexResolution) -> QuestionCardStatus {
         switch resolution {
         case .answered(let by, let decision):
+            // `by` names a phone or the Mac, not a device kind; a phone's answer is
+            // recorded as an iPhone's, so the banner names the resolver (an iPhone to
+            // the Mac) rather than whoever is reading it.
             switch (by, decision) {
-            case (.phone, .some(.answers(let answers))): return .answeredOnPhone(answers, from: nil)
+            case (.phone, .some(.answers(let answers))): return .answeredOnPhone(answers, from: .iphone)
             case (.phone, .some(.decline)): return .declined
             case (.local, _): return .answeredAtMac
             default: return .closed
@@ -381,8 +384,10 @@ public enum QuestionCardStatus: Sendable, Hashable {
                 .info, "desktop"
             )
         case .declined:
+            // `.declined` carries no device, so the sentence stays neutral rather than
+            // naming whoever is reading it.
             return (
-                "Declined", "Declined from the \(host.noun), as Escape does at \(host.computer("the computer")).",
+                "Declined", "Declined, as Escape does at \(host.computer("the computer")).",
                 .info,
                 "x-circle"
             )
