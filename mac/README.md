@@ -1051,8 +1051,8 @@ indeterminate and the relaunch goes on. The effort chosen for the old process is
 over: the run's effort reads unset from its end until one is set again. A ccd restart in the
 seconds of a relaunch files the resumed start with no `source`.
 For such a run the Model and Effort screens are refused, as a sheet's typed confirmation or
-typed alone (`/model`, `/effort`) ("Changing the model isn't available for this session
-yet.", the same for the effort: the sheets set them with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude
+typed alone (`/model`, `/effort`) ("/model's screen isn't available in this session;
+nothing was changed.", the same for the effort: the sheets set them with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude
 doesn't offer /status in this session."); `/usage`, `/cost` and `/clear` are messages. A
 clear goes on in the same run, as at claude's keyboard: claude starts its new session, the
 run's events carry a "Conversation cleared" notice with the earlier history above it, and a
@@ -1083,7 +1083,10 @@ turned on stays open and answerable; the mode applies from claude's next request
 the same process, and a new claude starts in the person's own default. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it
 (`setModel`, `applyFlagSettings`, `setPermissionMode`), one line at a time. The answer is
-`applied`, from `now` between turns or from the `next_turn` while one runs; `refused` with
+`applied` `now`, as claude takes a model or a mode from its next request, the running turn's
+next step included, and an effort set while a turn runs `next_turn`, as nothing yet shows when
+claude applies one (a model and an effort in one change, which no app sends, is answered by
+its effort); `refused` with
 claude's reason, saying so when the model was changed and the effort was not; or
 `indeterminate` when no answer came within 10 s or the run's link ended first. The model and
 the mode then show as claude reports them, its `Set model to …` receipt and its permission-mode

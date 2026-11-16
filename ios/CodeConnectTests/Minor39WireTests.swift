@@ -61,7 +61,7 @@ final class Minor39WireTests: XCTestCase {
     func testEachSettingAnswerDecodesAsTheDaemonSentIt() throws {
         let answers: [(String, String, SettingResult)] = [
             ("applied_now", "model-1", .applied(applies: .now)),
-            ("applied_next_turn", "mode-1", .applied(applies: .nextTurn)),
+            ("applied_mode_during_a_turn", "mode-1", .applied(applies: .now)),
             ("applied_effort", "effort-1", .applied(applies: .nextTurn)),
             ("indeterminate", "mode-3",
                 .indeterminate(reason: "Claude didn't answer, so the change may or may not have been made.")),

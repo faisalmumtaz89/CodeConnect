@@ -805,6 +805,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         ended", so a message to it relaunches it and continues the conversation. Never a run
 ///         End run ended or a start that failed. A daemon below 42 sends no such field and keeps
 ///         every ended Claude run ended.
+///
+///     What changed for every client, including older ones: a model or a mode set on a
+///     Claude run while a turn runs is answered `applied {applies: now}`, as claude takes it
+///     from its next request, the running turn's next step included; an effort set while a
+///     turn runs is still answered `next_turn`. `/model` or `/effort` sent alone, or as its
+///     screen's confirmation, is refused with "/model's screen isn't available in this
+///     session; nothing was changed." (or `/effort`'s).
 pub const PROTOCOL_MINOR: u32 = 42;
 
 #[cfg(test)]

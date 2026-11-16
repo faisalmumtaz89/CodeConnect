@@ -96,8 +96,8 @@ final class RunSettingsTests: XCTestCase {
             SettingOutcome.of(setting: .model, label: "Sonnet", result: try result("applied_now")),
             SettingOutcome(text: "Model set to Sonnet.", tone: .success))
         XCTAssertEqual(
-            SettingOutcome.of(setting: .mode, label: "Plan", result: try result("applied_next_turn")),
-            SettingOutcome(text: "Mode changes to Plan from your next message.", tone: .neutral))
+            SettingOutcome.of(setting: .mode, label: "Plan", result: try result("applied_mode_during_a_turn")),
+            SettingOutcome(text: "Mode set to Plan.", tone: .success))
         XCTAssertEqual(
             SettingOutcome.of(setting: .effort, label: "High", result: try result("applied_effort")),
             SettingOutcome(text: "Effort changes to High from your next message.", tone: .neutral))
