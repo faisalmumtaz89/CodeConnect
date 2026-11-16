@@ -922,7 +922,7 @@ private struct HistoryHead: View {
 /// answer a card, or say something.
 ///
 /// The bar is the header: its title is the project and the path, its one
-/// trailing item the "…" menu with the terminal, the changes and the link.
+/// trailing item the "…" menu with the changes and the link.
 /// Handed the model of the machine the session is on, so everything done here
 /// goes to that machine.
 struct SessionDetailView: View {
@@ -963,6 +963,7 @@ struct SessionDetailView: View {
     @State private var showModelSheet = false
     @State private var modelSheetPrefill = ""
     @State private var showEffortSheet = false
+    @State private var showHostedSettingsSheet = false
     @State private var showCompactSheet = false
     @State private var compactSheetPrefill = ""
     @State private var showClearConfirm = false
@@ -1049,9 +1050,7 @@ struct SessionDetailView: View {
                         SessionTimeline(
                             key: key, tailWatch: tailWatch,
                             openApproval: $openApproval, showLinkDetail: $showLinkDetail,
-                            composerFocused: $composerFocused,
-                            // The sample fleet has no terminal to open.
-                            openTerminal: model.sampleFleetActive ? nil : { surfaceBinding.wrappedValue = .terminal }
+                            composerFocused: $composerFocused
                         )
                         .onAppear { openWantedApproval() }
                     } else {
@@ -1153,6 +1152,11 @@ struct SessionDetailView: View {
                 .environment(model)
                 .ccResizableSheet()
         }
+        .sheet(isPresented: $showHostedSettingsSheet) {
+            HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
+                .environment(model)
+                .ccResizableSheet()
+        }
         .sheet(isPresented: $showCompactSheet) {
             CompactSheet(sessionKey: key, prefill: compactSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
@@ -1161,11 +1165,7 @@ struct SessionDetailView: View {
         .sheet(item: $snapshotCommand) { command in
             SnapshotSheet(
                 sessionKey: key, command: command,
-                onLanded: consumeDraft,
-                onOpenTerminal: {
-                    snapshotCommand = nil
-                    surfaceBinding.wrappedValue = .terminal
-                }
+                onLanded: consumeDraft
             )
             .environment(model)
             // **One detent, and it is the tall one.** This sheet carries a
@@ -1289,24 +1289,12 @@ struct SessionDetailView: View {
         Task { endRunNote = await model.endRun(summary) }
     }
 
-    /// **Everything the bar does not show, one tap away.** First the terminal,
-    /// the most used: on the terminal the same item reads Timeline, so the way
-    /// back is the same place. Then the session's changes, whose sheet counts
-    /// them, and the link's health under the name of the computer the session
-    /// is on, which is a heading, not an action. Last, on a live run
-    /// CodeConnect started, End run.
+    /// **Everything the bar does not show, one tap away.** First the session's
+    /// changes, whose sheet counts them, and the link's health under the name
+    /// of the computer the session is on, which is a heading, not an action.
+    /// Last, on a live run CodeConnect started, End run.
     private var moreMenu: some View {
-        let onTerminal = surface == .terminal
         return Menu {
-            // The terminal and the link are absent in the sample fleet: there
-            // is no connection to open one on or to report on.
-            if !model.sampleFleetActive {
-                Button {
-                    surfaceBinding.wrappedValue = onTerminal ? .timeline : .terminal
-                } label: {
-                    Label(onTerminal ? "Timeline" : "Terminal", image: onTerminal ? "chat-text" : "terminal-window")
-                }
-            }
             Button {
                 showDiff = true
             } label: {
@@ -1573,15 +1561,27 @@ struct SessionDetailView: View {
     private func route(_ action: CommandAction) {
         switch action {
         case .nativeModel(let prefillArgs):
-            modelSheetPrefill = prefillArgs
-            showModelSheet = true
+            // A hosted run offers structured menus the daemon validates — model, effort and mode in one
+            // sheet; a terminal run has only the typed path and keeps its legacy picker.
+            switch model.runSettings(for: key) {
+            case .hostedLive, .hostedReadOnly:
+                showHostedSettingsSheet = true
+            case .deferToOtherPath:
+                modelSheetPrefill = prefillArgs
+                showModelSheet = true
+            }
         case .nativeDiff:
             // The app renders the working tree itself; typing the Mac's own
             // `/diff` would open a view of something already on this screen.
             composeText = ""
             showDiff = true
         case .nativeEffort:
-            showEffortSheet = true
+            switch model.runSettings(for: key) {
+            case .hostedLive, .hostedReadOnly:
+                showHostedSettingsSheet = true
+            case .deferToOtherPath:
+                showEffortSheet = true
+            }
         case .nativeCompact(let prefillInstructions):
             compactSheetPrefill = prefillInstructions
             showCompactSheet = true
@@ -1753,8 +1753,6 @@ private struct SessionTimeline: View {
     @Binding var openApproval: ApprovalItem?
     @Binding var showLinkDetail: Bool
     var composerFocused: FocusState<Bool>.Binding
-    /// Nil where there is no terminal to open.
-    var openTerminal: (() -> Void)?
 
     @Environment(AppModel.self) private var model
     /// Every tool label's width in this timeline, so every command beside one
@@ -2018,17 +2016,11 @@ private struct SessionTimeline: View {
 
     private var emptyTimeline: some View {
         // Anchored rather than centred, so the compose bar stays reachable —
-        // you can always talk to an agent. An agent's own first screen (sign
-        // in, trust this folder) records nothing; it is answered in the
-        // terminal, which is offered here rather than two taps away.
+        // you can always talk to an agent.
         CCEmptyState(
             glyph: "clock",
             title: "Nothing recorded yet",
-            message: openTerminal == nil
-                ? "Events appear here as the agent works."
-                : "Events appear here as the agent works. If it is asking something first, answer it in the terminal.",
-            actionTitle: openTerminal == nil ? nil : "Open the terminal",
-            action: openTerminal)
+            message: "Events appear here as the agent works.")
             // 96pt from the top of the list, counting the empty state's own
             // 32pt of vertical padding.
             .padding(.top, CC.space.xxxl + CC.space.md)

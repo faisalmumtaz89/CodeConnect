@@ -101,6 +101,11 @@ enum Fixtures {
         /// `timeline` on a computer whose name is longer than the session
         /// header's line, as a Mac's default name can be.
         case timelineLongName
+        /// **A live hosted Claude run offering its minor-39 menus in their worst shapes** — the longest
+        /// model detail, all five efforts, the three permission modes — so the unified settings sheet
+        /// (`HostedSettingsSheet`) can be photographed at the smallest phone and the largest type. One
+        /// run, no cards.
+        case hostedSettings
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -112,7 +117,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .longOutput: return deckCards
             case .stacked, .wideTool, .mcpApproval: return deckCards + [stackedCard]
             case .spoofedCommand: return [spoofedCard]
-            case .empty, .timeline, .timelineLongName: return []
+            case .empty, .timeline, .timelineLongName, .hostedSettings: return []
             case .single: return deckCards.filter { $0.sessionID == "fx-1" }
             }
         }
@@ -128,7 +133,7 @@ enum Fixtures {
             case .ended: return 8
             case .ended45: return 45
             case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand, .empty,
-                .single, .timeline, .timelineLongName:
+                .single, .timeline, .timelineLongName, .hostedSettings:
                 return 0
             }
         }
@@ -143,6 +148,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .spoofedCommand, .single: return 4
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             case .empty: return 0
+            case .hostedSettings: return 1
             case .timeline, .timelineLongName: return 7
             }
         }
@@ -230,6 +236,9 @@ enum Fixtures {
         if let sessions = decode(sessionsJSON(now: now, variant: variant, cards: cards + held)) {
             messages.append(sessions)
         }
+        // The hosted-settings fixture is one run and its summary — no cards, turns or receipt events;
+        // everything the sheet draws is on the summary's menus and facts.
+        if variant == .hostedSettings { return messages }
         for (index, card) in cards.enumerated() {
             if let event = decode(approvalEventJSON(card, seq: UInt64(index + 2), now: now)) {
                 messages.append(event)
@@ -627,6 +636,7 @@ enum Fixtures {
     /// Every other session omits the key, which `SessionSummary` decodes as Claude.
     private static func sessionsJSON(now: Date, variant: Variant, cards: [Card]) -> String {
         let stamp = rfc3339(now)
+        if variant == .hostedSettings { return hostedSettingsSessionsJSON(stamp: stamp) }
         let summaries = (0..<variant.sessionCount).map { $0 + 1 }.map { index in
             let id = "fx-\(index)"
             let blocked = cards.filter { $0.sessionID == id }.map { quoted($0.requestID) }
@@ -657,6 +667,33 @@ enum Fixtures {
         }
         let all = (summaries + endedRuns).joined(separator: ",")
         return "{\"type\":\"sessions\",\"sessions\":[\(all)]}"
+    }
+
+    /// The one run the `hostedSettings` fixture carries: live, started by this app (empty
+    /// `tmux_session`), with minor-39's menus in their worst shapes — the longest model detail, all
+    /// five efforts, the three permission modes — and the facts that select "sonnet", "high" and
+    /// "plan". Decoded like every other frame, so the sheet draws it through `runSettings` as it would
+    /// a daemon's own summary.
+    private static func hostedSettingsSessionsJSON(stamp: String) -> String {
+        """
+        {"type":"sessions","sessions":[\
+        {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"fx-1","tmux_session":"",\
+        "agent":"claude","cwd":"/Users/dev/app","project_label":"app",\
+        "lifecycle":"live","link":"attached","last_seq":5,\
+        "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[],\
+        "model":{"value":"sonnet (claude-sonnet-5-5)","seq":2,"source":"command","at":"\(stamp)"},\
+        "permission_mode":{"value":"plan","seq":4},"effort":{"value":"high","seq":5},\
+        "menus":{"selected_model":"sonnet","models":[\
+        {"value":"default","label":"Default (recommended)",\
+        "detail":"Use the default model (currently Opus 5.5) · $4/$20 per Mtok",\
+        "efforts":["low","medium","high","xhigh","max"]},\
+        {"value":"sonnet","label":"Sonnet",\
+        "detail":"Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",\
+        "efforts":["low","medium","high","xhigh","max"]}],\
+        "modes":[{"value":"default","label":"Ask before edits"},\
+        {"value":"acceptEdits","label":"Accept edits"},{"value":"plan","label":"Plan"}]}}\
+        ]}
+        """
     }
 
     private static func approvalEventJSON(_ card: Card, seq: UInt64, now: Date) -> String {

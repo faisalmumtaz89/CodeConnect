@@ -33,7 +33,7 @@ final class ComposeProseTests: XCTestCase {
                     + "confirmed it returned. The command's outcome was not confirmed.", .warning, "question-fill"
             ),
             (
-                "/effort high was typed, but the computer's composer did not come back. Open Terminal to recover.",
+                "/effort high was typed, but the computer's composer did not come back.",
                 .danger, "warning-fill"
             ),
         ]

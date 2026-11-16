@@ -10129,17 +10129,34 @@ impl Daemon {
                 requests.insert((uid, request_id), filed);
             }
         }
-        // A live Claude run CodeConnect started offers its settings from its start's answer.
+        // A live Claude run CodeConnect started offers its settings from its start's answer,
+        // with the one its model fact names marked (its newest receipt read for that here).
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
+        let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
         for row in &rows {
             if row.agent != protocol::agent::AgentKind::Claude || row.lifecycle != Lifecycle::Live {
                 continue;
             }
             if let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? {
                 menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
+                let receipt = self
+                    .db
+                    .newest_model_receipt(row.session_uid.clone())
+                    .await?;
+                choosing.push((row.session_uid.clone(), models, receipt));
             }
         }
         let inner = self.inner.lock().await;
+        for (uid, models, receipt) in &choosing {
+            let fact = inner
+                .session_facts
+                .get(uid)
+                .and_then(|facts| facts.model.as_ref());
+            if let (Some(fact), Some(menu)) = (fact, menus.get_mut(uid)) {
+                menu.selected_model =
+                    crate::claude_host::selected_model(models, &fact.value, receipt.as_deref());
+            }
+        }
         Ok(Self::assemble_sessions(
             &inner,
             rows,

@@ -142,11 +142,24 @@ private struct Composer: View {
                 }
                 Spacer()
                 if !isCodex {
-                    CommandsButton(
-                        model: model, key: key, help: blocked ?? "Model, effort and compact", open: $commandsOpen,
-                        choose: run
-                    ) { compact(prefill: "") }
-                    .disabled(blocked != nil || busy)
+                    // Which model control this run has is Kit's to say: a run in a terminal keeps the list that types
+                    // into it, a run started from the app gets its own menus, or its model as a fact when it has none.
+                    switch model.runSettings(for: key) {
+                    case .deferToOtherPath:
+                        CommandsButton(
+                            model: model, key: key, help: blocked ?? "Model, effort and compact", open: $commandsOpen,
+                            choose: run
+                        ) { compact(prefill: "") }
+                        .disabled(blocked != nil || busy)
+                    case .hostedReadOnly(let fact):
+                        ModelFactLabel(fact: fact)
+                    case .hostedLive(let settings):
+                        HostedSettingsButton(
+                            model: model, key: key, settings: settings,
+                            help: blocked ?? "Model, effort, mode and compact", open: $commandsOpen, chose: takeOpener
+                        ) { compact(prefill: "") }
+                        .disabled(blocked != nil || busy)
+                    }
                 }
                 sendButton
             }
@@ -178,12 +191,18 @@ private struct Composer: View {
         let tone: ComposeProse.Tone
     }
 
-    /// The command typed last, while it stands and sending can work; else what became of the last send (a Codex run's
-    /// own outcome first, as Kit ranks it); else why sending cannot work, or that answers are given at the computer.
+    /// The command typed last, while it stands and sending can work; else, on a run started from the app, the answer
+    /// to its last model, effort or mode change; else what became of the last send (a Codex run's own outcome first, as
+    /// Kit ranks it); else why sending cannot work, or that answers are given at the computer.
     /// A command's line never hides why Send is disabled: the watch for its receipt stays armed underneath.
     private var line: Line? {
         if blocked == nil, let running, let status = model.commandStatus(running.command, running.phase) {
             return Line(text: status.text, tone: status.tone)
+        }
+        // A model, effort or mode call on a run started from the app: its answer, kept by Kit until that setting's fact
+        // moves or the next call starts.
+        if case .hostedLive(let settings) = model.runSettings(for: key), let outcome = settings.lastOutcome {
+            return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }
         if let kit = model.outcomeNote(for: key, lastSend: result) ?? model.standingNote(for: key, draft: kept.reply) {
             return Line(text: kit.text, tone: kit.tone)
@@ -304,7 +323,14 @@ private struct Composer: View {
     }
 
     private func takesComposer(_ command: String) -> String {
-        "\(command) opens a view on \(computer) and would take over this composer. Use the Terminal tab to run it."
+        "\(command) opens a view on \(computer) and would take over this composer."
+    }
+
+    /// A choice in a hosted run's list answers the `/model` or `/effort` that opened it: those words leave the box, as a
+    /// landed command's do.
+    private func takeOpener() {
+        if let opener, kept.reply == opener { kept.reply = "" }
+        opener = nil
     }
 
     private func compact(prefill: String) {

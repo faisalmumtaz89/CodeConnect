@@ -654,6 +654,16 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The permission mode the main agent last reported, with the event that
     /// reported it (minor 23). `nil` until something has said.
     public let permissionMode: SessionFact?
+    /// The effort this run last took, with the seq of the event that recorded it
+    /// (minor 39). `nil` until something has said.
+    public let effort: SessionFact?
+    /// The model, effort and mode menus an app may set this run to (minor 39):
+    /// present on a **live hosted Claude run this app started, once its start is
+    /// answered**, and `nil` for every other run — a terminal or Codex run, one
+    /// that has ended or detached, before its start is answered, and from a daemon
+    /// below minor 39. The one field that decides whether the model/effort/mode
+    /// controls are drawn at all.
+    public let menus: RunMenus?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -683,6 +693,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case pending
         case model
         case permissionMode = "permission_mode"
+        case effort
+        case menus
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
     }
@@ -708,6 +720,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         pending = try c.decodeIfPresent([PendingRef].self, forKey: .pending) ?? []
         model = try c.decodeIfPresent(ModelFact.self, forKey: .model)
         permissionMode = try c.decodeIfPresent(SessionFact.self, forKey: .permissionMode)
+        effort = try c.decodeIfPresent(SessionFact.self, forKey: .effort)
+        menus = try c.decodeIfPresent(RunMenus.self, forKey: .menus)
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
     }
@@ -821,6 +835,42 @@ extension ModelSource: Codable {
         var container = encoder.singleValueContainer()
         try container.encode(wire)
     }
+}
+
+/// The settings an app may choose for a live hosted Claude run (minor 39), as its agent offers
+/// them — see `SessionSummary.menus`. Drawn exactly as the daemon sends it; no family list of this
+/// app's own, so a model the agent adds or drops needs no release here.
+public struct RunMenus: Codable, Sendable, Hashable {
+    public let models: [MenuModel]
+    public let modes: [MenuMode]
+    /// The menu model `value` the daemon says is chosen now (minor 39). The daemon states it because
+    /// only it and claude know which alias a run's model fact resolves to — the fact at every turn's
+    /// init is claude's full id, not a menu value. Absent from an older daemon, or when the fact
+    /// matches no entry. **Display only** — it changes nothing on the run. Effort and mode need no such
+    /// field: their facts already carry the menu's own words.
+    public let selectedModel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case models, modes
+        case selectedModel = "selected_model"
+    }
+}
+
+/// One model of a run's menu: the agent's own `value` (what a `set_model` carries), the label and
+/// detail line it shows, and the efforts this model takes.
+public struct MenuModel: Codable, Sendable, Hashable {
+    public let value: String
+    public let label: String
+    /// A line under the name — the agent's own words. Absent when it gives none.
+    public let detail: String?
+    public let efforts: [String]
+}
+
+/// One permission mode of a run's menu: the `value` a `set_mode` carries and the label it shows.
+/// **The labels are the agent's** — this app hard-codes no mode names.
+public struct MenuMode: Codable, Sendable, Hashable {
+    public let value: String
+    public let label: String
 }
 
 // MARK: - Capabilities
@@ -1667,6 +1717,72 @@ public enum ComposeResult: Decodable, Sendable, Hashable {
     }
 }
 
+/// What became of a `set_model` or `set_mode` (minor 39) — tagged on `status`, like every other
+/// result on this wire. **Decode-only.** `effort` rides `set_model`, so its answer is one of these too.
+public enum SettingResult: Decodable, Sendable, Hashable {
+    /// The agent took it; `applies` says from when. Carries no sentence — the app words the applied
+    /// case itself, naming the setting and the value.
+    case applied(applies: SettingApplies)
+    /// Nothing more was changed, and `reason` says why (verbatim, the agent's own words). When the
+    /// model changed and the effort did not, `reason` says that.
+    case refused(reason: String)
+    /// Sent, and no answer came: it may or may not have been applied. Shown verbatim; **never**
+    /// silently retried, exactly as `InterruptResult.indeterminate`.
+    case indeterminate(reason: String)
+    /// A status this build has never seen — see `InterruptResult.unknown`. Claims neither applied
+    /// nor not.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey { case status, applies, reason }
+
+    /// The agent's own sentence, where one was carried — refusals and the indeterminate case. `nil`
+    /// on `applied` (the app words that) and on `unknown`.
+    var reason: String? {
+        switch self {
+        case .refused(let reason), .indeterminate(let reason): return reason
+        case .applied, .unknown: return nil
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .status) {
+        case "applied": self = .applied(applies: try c.decode(SettingApplies.self, forKey: .applies))
+        case "refused": self = .refused(reason: try c.decode(String.self, forKey: .reason))
+        case "indeterminate":
+            self = .indeterminate(reason: try c.decode(String.self, forKey: .reason))
+        case let other:
+            self = .unknown(status: other)
+        }
+    }
+}
+
+/// When a setting takes hold. A type of its own, decoded through `init(wire:)`, so a value this
+/// build has not seen is read — as `.nextTurn` at the rendering, the conservative reading — rather
+/// than refused.
+public enum SettingApplies: Sendable, Hashable {
+    /// The turn running now already reflects it.
+    case now
+    /// It applies from the next message.
+    case nextTurn
+    /// A value this build has never seen.
+    case unknown(String)
+
+    init(wire: String) {
+        switch wire {
+        case "now": self = .now
+        case "next_turn": self = .nextTurn
+        default: self = .unknown(wire)
+        }
+    }
+}
+
+extension SettingApplies: Decodable {
+    public init(from decoder: Decoder) throws {
+        self.init(wire: try decoder.singleValueContainer().decode(String.self))
+    }
+}
+
 public enum SendTextResult: Sendable, Hashable {
     /// `matched` is the prompt-presence needle that authorised the keystrokes.
     case sent(matched: String)
@@ -2047,6 +2163,12 @@ public enum ClientMessage: Sendable {
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(session: String, requestID: String, text: String, payloadHash: String)
+    /// **Set a hosted Claude run's model and/or effort** (minor 39). `effort` rides this message, so
+    /// a change to effort alone sends `model: nil, effort: X`. At least one of the two is present —
+    /// the daemon refuses a change naming neither.
+    case setModel(session: String, requestID: String, model: String?, effort: String?)
+    /// **Set a hosted Claude run's permission mode** (minor 39), to one its menu lists.
+    case setMode(session: String, requestID: String, mode: String)
     /// The folders sessions have run in on this computer. Minor 28, sent only
     /// when `Capabilities.startsSessions`.
     case listProjects
@@ -2107,6 +2229,8 @@ extension ClientMessage: Encodable {
         case prompt
         case worktree
         case model
+        case effort
+        case mode
         case showHidden = "show_hidden"
         case parent
         case name
@@ -2257,6 +2381,19 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(text, forKey: .text)
             try c.encode(payloadHash, forKey: .payloadHash)
+        case .setModel(let session, let requestID, let model, let effort):
+            try c.encode("set_model", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(requestID, forKey: .requestID)
+            // Omitted, never null: the daemon reads `Option<String>` with
+            // `skip_serializing_if`, and a change naming neither is refused by name.
+            try c.encodeIfPresent(model, forKey: .model)
+            try c.encodeIfPresent(effort, forKey: .effort)
+        case .setMode(let session, let requestID, let mode):
+            try c.encode("set_mode", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(mode, forKey: .mode)
         case .listProjects:
             try c.encode("list_projects", forKey: .type)
         case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model, let trust):
@@ -2577,6 +2714,7 @@ public enum ServerMessage: Sendable {
     case stopRunResult(sessionID: String, requestID: String, result: StopRunResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
+    case settingResult(sessionID: String, requestID: String, result: SettingResult)
     /// The answer to `list_projects`: most recent first, and which agents the
     /// computer has.
     case projects(projects: [StartProject], agents: [StartAgentStatus])
@@ -2743,6 +2881,11 @@ extension ServerMessage: Decodable {
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 requestID: try c.decode(String.self, forKey: .requestID),
                 result: try c.decode(ComposeResult.self, forKey: .result))
+        case "setting_result":
+            self = .settingResult(
+                sessionID: try c.decode(String.self, forKey: .sessionID),
+                requestID: try c.decode(String.self, forKey: .requestID),
+                result: try c.decode(SettingResult.self, forKey: .result))
         case "projects":
             self = .projects(
                 projects: try c.decode([StartProject].self, forKey: .projects),

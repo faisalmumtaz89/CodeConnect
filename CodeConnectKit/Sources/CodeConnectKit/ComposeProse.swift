@@ -52,8 +52,7 @@ public enum ComposeProse {
         case .composerLost(let command):
             let computer = HostDevice.current.computer("the computer")
             return Note(
-                text: "\(command) was typed, but \(computer)'s composer did not come back. "
-                    + "Open Terminal to recover.",
+                text: "\(command) was typed, but \(computer)'s composer did not come back.",
                 tone: .danger, icon: "warning-fill")
         }
     }

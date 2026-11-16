@@ -3031,6 +3031,24 @@ impl Store {
         Ok(Some(filed))
     }
 
+    /// The model claude's newest receipt of a model change names for the run `session_uid`
+    /// (its `Set model to …` line, as [`protocol::facts::model_fact`] reads it), whatever the
+    /// inits filed since; `None` when it has none.
+    pub fn newest_model_receipt(&self, session_uid: &str) -> Result<Option<String>> {
+        let conn = self.read();
+        Ok(newest_decided(
+            &conn,
+            session_uid,
+            "kind = ?2",
+            &[EventKind::UserMessage.as_str()],
+            |event| {
+                protocol::facts::model_fact(event)
+                    .filter(|fact| fact.source == protocol::event::ModelSource::Command)
+            },
+        )?
+        .map(|fact| fact.value))
+    }
+
     /// The models of the hosted run `session_uid`'s start's answer, each as claude gives
     /// it; `None` when the run has no `run_hosts` row or its start is not answered.
     pub fn hosted_models(&self, session_uid: &str) -> Result<Option<Vec<serde_json::Value>>> {

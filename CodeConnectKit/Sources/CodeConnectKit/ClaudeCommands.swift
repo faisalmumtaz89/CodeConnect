@@ -160,8 +160,7 @@ public enum ClaudeCommandPolicy {
                 return .blocked(
                     command: command,
                     reason:
-                        "This app supports /clear without arguments. "
-                        + "Remove the extra text or use Terminal.")
+                        "This app supports /clear without arguments. Remove the extra text.")
             }
             return .nativeClear
         }
@@ -178,8 +177,7 @@ public enum ClaudeCommandPolicy {
                     command: command,
                     reason:
                         "This session cannot recover slash-command views "
-                        + "safely yet. Restart it after updating "
-                        + "CodeConnect, or use Terminal.")
+                        + "safely yet. Restart it after updating CodeConnect.")
             }
             return .nativeSnapshot(snapshot)
         }
@@ -188,22 +186,20 @@ public enum ClaudeCommandPolicy {
                 command: command,
                 reason:
                     "/\(command) opens a view on \(HostDevice.current.computer("the computer")) that Esc does not close, so "
-                    + "CodeConnect cannot recover the composer for you. "
-                    + "Use the Terminal tab to run it.")
+                    + "CodeConnect cannot recover the composer for you.")
         }
         if dialogCommands.contains(command) {
             return .blocked(
                 command: command,
                 reason:
                     "/\(command) opens a view on \(HostDevice.current.computer("the computer")) and would take over this "
-                    + "composer. Use the Terminal tab to run it.")
+                    + "composer.")
         }
         if unobservableCommands.contains(command) {
             return .blocked(
                 command: command,
                 reason:
-                    "/\(command) changes something CodeConnect cannot yet observe. "
-                    + "Use the Terminal tab until \(HostDevice.current.computer("the computer")) reports it back to the app.")
+                    "/\(command) changes something CodeConnect cannot yet observe.")
         }
         // Everything else — a measured-inline built-in, a custom skill, a
         // project command, a typo — is typed. The supervisor's recovery

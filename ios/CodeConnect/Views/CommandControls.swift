@@ -134,7 +134,7 @@ struct CommandPalette: View {
                     // scanned the whole list starts wondering where the rest of
                     // the commands went.
                     if content.showsCaption {
-                        Text("Run other commands on the computer from the Terminal tab.")
+                        Text("Run other commands on the computer.")
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -231,10 +231,6 @@ struct ModelSheet: View {
                             .foregroundStyle(CC.text.secondary)
                         chooserCard
                         customEntry
-                        Text("For this session only, use the model picker in the Terminal tab.")
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(CC.space.md)
                 }

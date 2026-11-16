@@ -2670,7 +2670,7 @@ struct CapabilitySheet: View {
 
                     CCSectionHeader("What still works")
                     Text(
-                        "Everything on this screen is still true. You can read the timeline, open the diff and attach the terminal, you just answer at the computer."
+                        "Everything on this screen is still true. You can read the timeline and open the diff, you just answer at the computer."
                     )
                     .ccType(CC.type.callout)
                     .foregroundStyle(CC.text.secondary)
