@@ -115,7 +115,7 @@ public enum NativeCommand: Sendable, Hashable {
                 return .waiting(request: request, quietly: false)
             }
         case .composerLost:
-            return .failed("Couldn’t restore the composer. Open Terminal to recover.")
+            return .failed("Couldn’t restore the composer.")
         }
     }
 
