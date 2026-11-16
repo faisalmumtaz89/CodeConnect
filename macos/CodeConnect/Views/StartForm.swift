@@ -15,8 +15,20 @@ struct StartForm: View {
     @Environment(\.dismiss) private var dismiss
     /// The run is in the list: the list shows Active.
     let started: () -> Void
+    /// Why no computer can start one now, said in the form while its computer's link is down.
+    let whyNone: String
 
     @State private var computerID: String?
+    /// What was chosen on each computer, by its id: coming back to a computer, after its link dropped or a switch,
+    /// finds its own choices.
+    @State private var choicesByComputer: [String: Choices] = [:]
+
+    /// One computer's choices in the form.
+    private struct Choices {
+        var query = ""
+        var folderPath: String?
+        var chosen: StartModelChoice?
+    }
     @State private var query = ""
     @State private var folderPath: String?
     @State private var chosen: StartModelChoice?
@@ -28,8 +40,9 @@ struct StartForm: View {
     @State private var thisMac: String?
 
     /// `resuming`: a start this Mac sent with no answer yet, which the sheet opens on instead of a fresh form.
-    init(resuming: String?, started: @escaping () -> Void) {
+    init(resuming: String?, whyNone: String, started: @escaping () -> Void) {
         _requestID = State(initialValue: resuming)
+        self.whyNone = whyNone
         self.started = started
     }
 
@@ -112,12 +125,15 @@ struct StartForm: View {
                 }
             }
         #endif
-        // A selection is the computer's it was made on: it goes when the form's computer changes, whether chosen or,
-        // with none chosen, the one used last changing under it.
-        .onChange(of: context?.id) {
-            query = ""
-            folderPath = nil
-            chosen = nil
+        // A selection is the computer's it was made on. Leaving a computer, for another or because its link dropped,
+        // files its choices under it; arriving at one brings back that computer's own, so no choice reaches another
+        // computer and none is lost to a link that drops and comes back.
+        .onChange(of: context?.id) { old, new in
+            if let old { choicesByComputer[old] = Choices(query: query, folderPath: folderPath, chosen: chosen) }
+            let back = new.flatMap { choicesByComputer[$0] } ?? Choices()
+            query = back.query
+            folderPath = back.folderPath
+            chosen = back.chosen
         }
     }
 
@@ -130,6 +146,14 @@ struct StartForm: View {
                     folderRows(context)
                     AgentNotice(context: context, elsewhere: !isThisMac(context))
                     composer(context)
+                } else {
+                    // Its computer's link is down: why, where the rows stand. What was typed and chosen stays in the
+                    // form, and the rows come back with the computer.
+                    Text(whyNone)
+                        .font(Theme.ui(13.5))
+                        .foregroundStyle(Theme.text2)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.horizontal, 18)

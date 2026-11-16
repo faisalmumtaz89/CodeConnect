@@ -3,86 +3,56 @@ import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
-/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. Lazy, so
-/// a run thousands of rows long builds only what is near the screen. It opens at the newest row and follows new rows
-/// until the reader scrolls away from the end; a reader who went up stays where they are as rows land below, and is
-/// followed again once they come back to the end. When a page of earlier history lands above, the row they were at is
-/// brought back to the top. Reaching the top pages back on its own, as the iPhone does.
+/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. A List,
+/// which measures the rows it shows and builds only those near the screen. It opens at the newest row and follows new
+/// rows until the reader scrolls away from the end (`Tail`); a reader who went up stays where they are as rows land
+/// below, and is followed again once they come back to the end. When a page of earlier history lands above, the row
+/// they were at is put back where it was (`PageAnchor`). Reaching the top pages back on its own, as the iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
-    /// The place (`TimelineItem.places`) of the first row on screen as the reader left it, and the column's first place
-    /// when it was taken. A tool call's row keeps its place when a page brings the call.
-    @State private var heldRow: String?
-    @State private var heldFirst: String?
-    @State private var follow = Follow()
+    @State private var tail = Tail()
 
     var body: some View {
         let items = model.shown(for: key)?.timeline ?? []
         let places = TimelineItem.places(items)
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Earlier(model: model, key: key)
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(Array(zip(places, items)), id: \.0) { _, item in
-                            ConversationRow(item: item, model: model)
-                        }
-                    }
-                    .scrollTargetLayout()
-                    // The end, as a place of its own that no row's change rebuilds: following scrolls here, as the
-                    // iPhone does, never to the newest row.
-                    Color.clear.frame(height: 1).id(Self.end)
+            List {
+                Earlier(model: model, key: key).columnRow()
+                ForEach(Array(zip(places, items)), id: \.0) { _, item in
+                    ConversationRow(item: item, model: model).columnRow()
                 }
-                .padding(.horizontal, 28)
+                // The tail: the follow's target, and the row whose probe finds the scroll view.
+                Color.clear.frame(height: 1).background(TailProbe(tail: tail)).id(Self.end).columnRow()
             }
-            // The first row on screen, however the reader scrolled. At a landing this reports the page's rows before the
-            // column's first place changes, so a report made while that place differs from the one held is not taken.
-            .onScrollTargetVisibilityChange(idType: String.self) { visible in
-                guard heldFirst == nil || heldFirst == places.first else { return }
-                heldRow = visible.first
-                heldFirst = places.first
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .environment(\.conversationTail, tail)
+            // The follow: any change of the last item, a new row or a grown one, scrolls to the end for a reader who
+            // has not left it, as the iPhone's does. Nothing else scrolls for it but `Tail`'s re-pin, so the List's
+            // own corrections can start no scroll. While a row is held for a page, the hold's placement is the move.
+            .onChange(of: items.last) {
+                guard !tail.isAway, !tail.anchor.isPlacing else { return }
+                noteFollow("FOLLOW")
+                proxy.scrollTo(Self.end, anchor: .bottom)
             }
-            // When the column's first place changes (a page of earlier history landed, the window was set afresh, or
-            // Kit's rebuild changed the first row) and the held row is still there, it is brought back to the top. A
-            // page landing takes the reader to the end; the restore is dispatched past this update and has run after
-            // that move in every measured landing, an order SwiftUI does not promise.
-            .onChange(of: places.first) {
-                if let heldRow, places.contains(heldRow) {
-                    DispatchQueue.main.async { proxy.scrollTo(heldRow, anchor: .top) }
-                }
-                heldFirst = places.first
+            .onChange(of: model.isReadyToPage(key)) { _, ready in
+                if ready { tail.wake() }
             }
-            // The column's top and bottom margin, kept by the scroll view, so a row scrolled to the bottom shows the end.
-            .contentMargins(.vertical, 18, for: .scrollContent)
-            // At the bottom from the first frame, so nothing above the newest row is passed over on the way.
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.bottom, for: .alignment)
-            // While following, the column growing or the scroll view shrinking scrolls to the end: one scroll each time,
-            // which, unlike a bottom anchor, does not come back as rows change. A move up while the column keeps its
-            // height stops it, unless it is the first change reported after that scroll, which is taken as the scroll
-            // settling, whoever made it: during a burst that scroll can stop short of the end, and the view stays there,
-            // still following, until the column grows again. Reaching the end starts it again; that is tested first, so
-            // a taller scroll view that moves the view up to its new end keeps following. Rows or a page landing leave
-            // it as it is.
-            .onScrollGeometryChange(for: ScrollGeometry.self) { $0 } action: { old, new in
-                let settling = follow.settling
-                follow.settling = false
-                if new.contentSize.height == old.contentSize.height, new.contentOffset.y != old.contentOffset.y {
-                    if Self.atEnd(new) {
-                        follow.following = true
-                    } else if new.contentOffset.y < old.contentOffset.y, !settling {
-                        follow.following = false
-                    }
-                }
-                let endMoved = new.contentSize.height > old.contentSize.height
-                    || new.containerSize.height < old.containerSize.height
-                if follow.following, endMoved {
-                    follow.settling = true
-                    proxy.scrollTo(Self.end, anchor: .bottom)
+            .onAppear {
+                proxy.scrollTo(Self.end, anchor: .bottom)
+                tail.reachedTop = { [weak model, key] in model?.reachedTop(key: key) }
+                tail.anchor.timeline = { [weak model, key] in model?.shown(for: key)?.timeline ?? [] }
+                tail.anchor.pageBackOnItsOwn = { [weak model, key] in model?.pageBackOnItsOwn(key: key) }
+                model.onWindowChange(of: key) { [weak tail] shown, next, change in
+                    tail?.willChange(shown: shown, next: next, change: change)
                 }
             }
-            .accessibilityIdentifier("session.conversation")
+            .onDisappear {
+                model.onWindowChange(of: key, nil)
+                tail.detach()
+            }
         }
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
@@ -90,30 +60,23 @@ struct Conversation: View {
     }
 
     private static let end = "session.conversation.end"
+}
 
-    /// The end of the column is on screen. From the scroll view's own geometry, whose top inset is the column's margin or
-    /// the space above a column shorter than the pane: a lazy row that scrolled far away is gone, and never says so.
-    private static func atEnd(_ geometry: ScrollGeometry) -> Bool {
-        geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height
-            >= geometry.contentSize.height - 2
+private extension View {
+    /// A row of the column: no separator, no background of its own, the column's side margins, and half the gap
+    /// between rows above and below it.
+    func columnRow() -> some View {
+        listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 7, leading: 28, bottom: 7, trailing: 28))
+            .listRowBackground(Color.clear)
     }
 }
 
-/// Whether the column follows new rows, kept in a reference so its writes, many in one scroll, never update the view.
-private final class Follow {
-    var following = true
-    /// The follow's own scroll to the end is under way: the first change reported after it is taken as that scroll
-    /// settling, whoever made it.
-    var settling = false
-}
-
-/// The row above the first: once it is really on screen and Kit can page, it asks for the page before; while that
-/// page is on its way it says so. Kit decides whether there is anything earlier and guards a page already in flight.
-/// One height whether it says so or not: a row above the reader that grows moves them to the end.
+/// The row above the first: while a page of earlier history is on its way it says so, at one height either way.
+/// Reaching the top is what asks for the page (`Tail`).
 private struct Earlier: View {
     let model: AppModel
     let key: String
-    @State private var onScreen = false
 
     var body: some View {
         let loading = model.isLoadingEarlier(key)
@@ -124,10 +87,6 @@ private struct Earlier: View {
             .opacity(loading ? 1 : 0)
             .accessibilityHidden(!loading)
             .accessibilityIdentifier("session.earlier")
-            .onScrollVisibilityChange { onScreen = $0 }
-            .task(id: [onScreen, model.isReadyToPage(key)]) {
-                if onScreen, model.isReadyToPage(key) { model.reachedTop(key: key) }
-            }
     }
 }
 
@@ -295,25 +254,32 @@ private struct TableBlock: View {
     }
 }
 
-/// A tool call folded to one line: how it ended, its name, what it was given and how long it took. One with output
-/// opens to show it.
+/// A tool call folded to one line: how it ended, its name, what it was given and how long it took. One with what it was
+/// sent or what came back opens to show them, in that order, as the iPhone does.
 private struct ToolLine: View {
     let tool: ToolItem
     let id: String
     @State private var open = false
+    @Environment(\.conversationTail) private var tail
+
+    /// What it was sent, what came back, or that the computer cut it short: something to open.
+    private var opens: Bool { tool.input?.isNull == false || tool.output?.isEmpty == false || tool.isTruncated }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let output = tool.output, !output.isEmpty {
-                Button { open.toggle() } label: { line(opens: true) }
+            if opens {
+                Button { toggle() } label: { line(opens: true) }
                     .buttonStyle(.hover(outset: 4, id: "session.tool.\(id)"))
                     .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")
                 if open {
-                    CodeBlock(text: output)
+                    if let input = tool.input, !input.isNull { CodeBlock(text: input.prettyJSONString) }
+                    if let output = tool.output, !output.isEmpty { CodeBlock(text: output) }
+                    // Kit marks the call or its result cut whole by the computer: which one, the row cannot tell.
                     if tool.isTruncated {
-                        Text("The rest of the output was cut").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                        Text("Too large to send whole: \(HostDevice.current.computer("the computer")) cut it short")
+                            .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                     }
                 }
             } else {
@@ -324,6 +290,12 @@ private struct ToolLine: View {
                     .accessibilityIdentifier("session.tool.\(id)")
             }
         }
+    }
+
+    /// Opening the row is choosing to read it: the follow hears first, before the row grows.
+    private func toggle() {
+        if !open { tail?.leave() }
+        open.toggle()
     }
 
     /// How the call reads aloud: how it stands, the tool, what it was given and how long it took.

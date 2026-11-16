@@ -140,10 +140,14 @@ private struct AgentSide: View {
     @Environment(\.dismiss) private var dismiss
     let addComputer: () -> Void
     let started: () -> Void
+    /// The form has been shown. It stays when its computer's link drops, which empties the computers that can start,
+    /// so what was typed and chosen is there when the link is back.
+    @State private var formShown = false
 
     var body: some View {
-        if !machines.startContexts.isEmpty || machines.outstandingStart != nil {
-            StartForm(resuming: machines.outstandingStart?.requestID, started: started)
+        if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
+            StartForm(resuming: machines.outstandingStart?.requestID, whyNone: why, started: started)
+                .onAppear { formShown = true }
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 10) {
