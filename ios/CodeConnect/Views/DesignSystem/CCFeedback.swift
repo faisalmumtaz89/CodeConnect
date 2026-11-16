@@ -132,7 +132,7 @@ struct CCEmptyState<Detail: View>: View {
         // An empty state is a **centred** composition — mark, title, measure-
         // bounded message — so it has no leading gutter, and a nested surface in
         // the `detail` slot must not step out to a column or hang its border
-        // into one. `codeconnect claude` inside a 280pt block sits on the screen's centre
+        // into one. `codeconnect codex` inside a 280pt block sits on the screen's centre
         // line; 12pt of hang would put it 6pt off it.
         .ccCentredContent()
         .accessibilityElement(children: .contain)

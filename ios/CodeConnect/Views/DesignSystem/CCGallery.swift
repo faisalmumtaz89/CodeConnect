@@ -886,7 +886,7 @@ import SwiftUI
                                 .ccType(CC.type.callout)
                                 .foregroundStyle(CC.text.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
-                            CCMonoBlock("codeconnect claude --resume", isSmall: true)
+                            CCMonoBlock("claude --resume", isSmall: true)
                         }
                     }
                 }
@@ -1378,7 +1378,7 @@ import SwiftUI
                             actionTitle: "Pair a Mac",
                             action: { lastAction = "pair" },
                             detail: {
-                                CCMonoBlock("codeconnect claude")
+                                CCMonoBlock("codeconnect codex")
                                     .frame(maxWidth: 280)
                             })
                     }
