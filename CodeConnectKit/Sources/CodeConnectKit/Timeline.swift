@@ -292,7 +292,11 @@ public enum TimelineBuilder {
         /// minute the reader took to answer.
         var questionToolUseIDs: Set<String> = []
         var lastTurnEndSeq: UInt64 = 0
-        var lastUserMessageSeq: UInt64 = 0
+        // Each user message by (seq, send request_id), so after the loop the newest
+        // one that was actually sent can be found: a send the daemon reports not-sent
+        // never reached the agent, so it must not retire "Claude is waiting for your
+        // input".
+        var userMessages: [(seq: UInt64, sendRequestID: String?)] = []
         // The sends a Stop cancelled, by request_id: their person-message rows read
         // "Not sent: stopped" and the `send_not_sent` notice itself draws no row.
         var stoppedSends: Set<String> = []
@@ -300,7 +304,7 @@ public enum TimelineBuilder {
         for event in events {
             switch event.kind {
             case .userMessage:
-                lastUserMessageSeq = max(lastUserMessageSeq, event.seq)
+                userMessages.append((event.seq, event.sendRequestID))
             case .toolCall:
                 if let id = event.toolUseID { hookToolCallIDs.insert(id) }
             case .agentMessage:
@@ -347,6 +351,15 @@ public enum TimelineBuilder {
                 break
             }
         }
+
+        // The newest user message that was sent. A `send_not_sent {stopped}` send —
+        // the only not-sent the daemon reports — does not count, so an idle notice it
+        // precedes stays; an in-flight send not yet reported not-sent does count, so
+        // the idle hides, because the agent is about to work on it.
+        let lastUserMessageSeq =
+            userMessages
+            .filter { $0.sendRequestID.map { !stoppedSends.contains($0) } ?? true }
+            .map(\.seq).max() ?? 0
 
         var items: [TimelineItem] = []
         items.reserveCapacity(events.count)
