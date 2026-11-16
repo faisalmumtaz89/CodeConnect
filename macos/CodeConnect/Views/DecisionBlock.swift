@@ -279,7 +279,7 @@ struct DecisionBlock: View {
             words = DecisionCard.unsupportedAgentReason(raw, computer: model.machineName)
         case .claude:
             words = DecisionCard.claudeUnanswerableReason(
-                isQuestion: approval.card.toolName == QuestionCard.toolName,
+                isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
                 linkReason: model.actionsBlockedReason, hold: (live ?? approval).questionHold,
                 computer: model.machineName)

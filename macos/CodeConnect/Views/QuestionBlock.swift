@@ -1,9 +1,9 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Claude's question where it was asked: each question with its choices, picked here and sent as Claude reads them,
-/// or declined. Kit decides whether this Mac may answer (`QuestionCardStatus`), what the picks mean
-/// (`QuestionDraft`). At the pane's foot the questions are read in their own scroll and Decline and Submit take the
+/// The agent's question (Claude's or Codex's) where it was asked: each question with its choices, picked here and sent
+/// as the agent reads them, or declined. Kit decides whether this Mac may answer (`QuestionCardStatus`), what the picks
+/// mean (`QuestionDraft`). At the pane's foot the questions are read in their own scroll and Decline and Submit take the
 /// reply box's place, with their keys (⌘D, ⌘↩); in the conversation it is what was asked and what became of it.
 struct QuestionBlock: View {
     let approval: ApprovalItem
@@ -27,12 +27,16 @@ struct QuestionBlock: View {
     private var inFlight: Bool { sending != nil || model.isAnswering(approval) }
     private var blocked: String? { model.answerBlockedReason(for: approval, inFlight: inFlight) }
     private var id: String { "question.\(approval.card.requestID)" }
+    /// The run's agent: a Codex question is answered under its own rule, and the card names who asks.
+    private var agent: AgentKind? { model.shownSummary(for: approval.sessionKey)?.agent }
 
     private var status: QuestionCardStatus {
         QuestionCardStatus.resolve(
             outcome: DecisionCard.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome),
             attempt: attempt, isBacked: live != nil, hold: (live ?? approval).questionHold,
-            answersQuestions: model.daemonProfile.knownAnswersQuestions, linkReason: model.actionsBlockedReason)
+            answersQuestions: model.daemonProfile.knownAnswersQuestions, linkReason: model.actionsBlockedReason,
+            codex: (live ?? approval).codexResolution, resolvesCodexCards: model.daemonProfile.resolvesCodexCards,
+            agent: agent)
     }
 
     /// Picks may change only while the card can be answered and no answer is on its way.
@@ -75,13 +79,13 @@ struct QuestionBlock: View {
         .accessibilityIdentifier(id)
     }
 
-    /// What Claude asks: each question with its choices while it can be answered here; once it can't, what was asked
-    /// and, when known, what was answered. Then what became of it.
+    /// What the agent asks: each question with its choices while it can be answered here; once it can't, what was
+    /// asked and, when known, what was answered. Then what became of it.
     private var asked: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 if status.isAnswerable { StateIcon(status: .blocked) }
-                Text(questions.questions.count == 1 ? "Claude asks" : "Claude asks \(questions.questions.count) questions")
+                Text(QuestionCard.heading(agent: agent, count: questions.questions.count))
                     .font(Theme.ui(12.5, .medium))
                     .foregroundStyle(status.isAnswerable ? Theme.text : Theme.text2)
                 Spacer(minLength: 8)
@@ -102,7 +106,7 @@ struct QuestionBlock: View {
                         .accessibilityIdentifier("\(id).summary")
                 }
             }
-            if let banner = status.banner {
+            if let banner = status.banner(on: .current, agent: agent) {
                 BannerLine(title: banner.title, message: banner.message, tone: banner.tone)
                     .accessibilityIdentifier("\(id).banner")
             } else if let attempt, !attempt.isTerminal {
