@@ -196,7 +196,9 @@
     {
       "item_id": "9d1f0000-0000-4000-8000-000000000011",
       "kind": "session_start",
-      "payload": {},
+      "payload": {
+        "source": "startup"
+      },
       "seq": 3,
       "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
       "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

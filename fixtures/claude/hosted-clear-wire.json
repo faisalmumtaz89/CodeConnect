@@ -125,7 +125,8 @@
       "kind": "session_start",
       "payload": {
         "model": "claude-sonnet-5-5",
-        "permissionMode": "default"
+        "permissionMode": "default",
+        "source": "clear"
       },
       "seq": 5,
       "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",

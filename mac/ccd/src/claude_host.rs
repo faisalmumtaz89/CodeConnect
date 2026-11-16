@@ -534,6 +534,9 @@ async fn commit_and_ack(
 struct Turns {
     /// The uuid of the run's latest `system/init`, which its turn's later events carry.
     init: Option<String>,
+    /// Whether a `/clear` reset the conversation since that init, so the next init begins
+    /// the cleared one.
+    cleared: bool,
     /// The link's latest mark of a turn for the mail wake rule ([`next_mark`]).
     marked: i64,
     /// Whether the host has replayed what it kept ([`Linked::replayed`]).
@@ -567,12 +570,35 @@ async fn apply_sdk(
     write: &mut OwnedWriteHalf,
 ) -> Result<(), String> {
     let text = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
+    // Why a session starts, where ccd knows it, on the init's `session_start` as a terminal
+    // run's SessionStart hook names it: the launch's first init starts the session, and the
+    // first after a `/clear` begins the cleared conversation. A turn's later init starts none.
+    let mut source = None;
     if text("type") == Some("system") && text("subtype") == Some("init") {
+        source = if turns.cleared {
+            Some("clear")
+        } else if turns.init.is_none() {
+            Some("startup")
+        } else {
+            None
+        };
+        turns.cleared = false;
         if let Some(uuid) = text("uuid") {
             turns.init = Some(uuid.to_string());
         }
     }
-    let mapped = protocol::sdk_map::map(&SessionKey::new(uid, uid), turns.init.as_deref(), message);
+    if text("type") == Some("conversation_reset") && text("trigger") == Some("clear") {
+        turns.cleared = true;
+    }
+    let mut mapped =
+        protocol::sdk_map::map(&SessionKey::new(uid, uid), turns.init.as_deref(), message);
+    if let Some(source) = source {
+        for event in &mut mapped.events {
+            if event.kind == EventKind::SessionStart {
+                event.payload["source"] = source.into();
+            }
+        }
+    }
     let mut notes = RunNotes::default();
     for signal in mapped.signals {
         match signal {
@@ -581,8 +607,8 @@ async fn apply_sdk(
             Signal::ScreenOnly { names } => notes.screen_only = Some(names),
             Signal::Commands { commands } => notes.commands = Some(commands),
             // A send is settled by its host's outcome ([`apply_send_outcome`]), not by
-            // claude's deliveries or command lifecycles; `/clear` keeps the session id,
-            // which the next init names.
+            // claude's deliveries or command lifecycles; a `/clear`'s reset is read above, and
+            // its new session id is the one the next init names.
             Signal::Delivered { .. } | Signal::Lifecycle { .. } | Signal::Reset { .. } => {}
         }
     }
@@ -684,6 +710,7 @@ async fn link(
     } = linked;
     let mut turns = Turns {
         init: turn,
+        cleared: false,
         marked: 0,
         replayed,
     };
@@ -3160,8 +3187,9 @@ mod tests {
     /// 150 messages, each filed with the run's cursor in one transaction, then
     /// acknowledged: by each ack the cursor is that message's seq. The first, a
     /// command's `queued`, files nothing. After the link's attach and the person's first
-    /// words, the run's events are the mapper's, each turn's carrying its init's uuid, each
-    /// broadcast once and in order. The session id stays
+    /// words, the run's events are the mapper's, each turn's carrying its init's uuid, the
+    /// first init's start and the first after the `/clear` saying why (212b), each broadcast
+    /// once and in order. The session id stays
     /// through the `/clear` (line 133) and is the next init's from line 135. A message
     /// sent again with its seq files nothing and is not acknowledged: the link ends.
     #[tokio::test]
@@ -3195,7 +3223,25 @@ mod tests {
             "after the next init"
         );
         assert_ne!(ids[134], first_id);
-        let committed: serde_json::Value = serde_json::from_str(WIRE).unwrap();
+        // The mapper's events, with the two starts whose cause ccd knows stamped as it
+        // stamps them (212b): the launch's first init, and the first after the `/clear`.
+        let mut committed: serde_json::Value = serde_json::from_str(WIRE).unwrap();
+        let events = committed.as_array_mut().unwrap();
+        let first = events
+            .iter()
+            .position(|event| event["kind"] == "session_start")
+            .unwrap();
+        events[first]["payload"]["source"] = "startup".into();
+        let reset = events
+            .iter()
+            .position(|event| event["payload"]["notification_type"] == "conversation_cleared")
+            .unwrap();
+        let cleared = reset
+            + events[reset..]
+                .iter()
+                .position(|event| event["kind"] == "session_start")
+                .unwrap();
+        events[cleared]["payload"]["source"] = "clear".into();
         assert_eq!(
             serde_json::Value::Array(after_words(&rig, &played.uid)),
             committed
@@ -5135,6 +5181,39 @@ mod tests {
         stop(&played.dir);
     }
 
+    /// **212b G1: a session's start says why, as a terminal run's SessionStart does.** A
+    /// launch's first init files its `session_start` with `source: "startup"`; a turn's later
+    /// init files one with no `source`, since it starts no session.
+    #[tokio::test]
+    async fn a_launchs_first_init_starts_the_session_and_a_later_turns_starts_none() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        for (seq, uuid) in [
+            (3u64, "9d1f0000-0000-4000-8000-0000000000a1"),
+            (4, "9d1f0000-0000-4000-8000-0000000000a2"),
+        ] {
+            sdk(
+                &mut played.write,
+                seq,
+                serde_json::json!({"type": "system", "subtype": "init", "uuid": uuid,
+                    "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                    "model": "claude-sonnet-5-5", "permissionMode": "default"}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let sources: Vec<serde_json::Value> = stored(&rig, &played.uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_start")
+            .map(|event| event["payload"]["source"].clone())
+            .collect();
+        assert_eq!(
+            sources,
+            [serde_json::json!("startup"), serde_json::Value::Null]
+        );
+        stop(&played.dir);
+    }
+
     // ------------------------------- a /clear, as the apps are sent it
 
     /// The run the clear fixture is emitted for, written in place of the run's own uid.
@@ -5222,8 +5301,8 @@ mod tests {
     /// **Decision 212: a hosted run's `/clear` reaches the apps as claude makes it, and this
     /// file is what this build sends for it.** `fixtures/claude/hosted-clear-wire.json` is the
     /// apps' pin for drawing a clear on such a run: the person's words, their `/clear` last,
-    /// one "Conversation cleared" notice, then the clear's own end, and the run's session
-    /// claude's new one. Gate one reads the committed bytes; gate two re-derives the file and
+    /// one "Conversation cleared" notice, then the cleared conversation's start (`source:
+    /// "clear"`) and the clear's own end, and the run's session claude's new one. Gate one reads the committed bytes; gate two re-derives the file and
     /// requires the same bytes.
     #[tokio::test]
     async fn the_hosted_clear_fixture_is_what_this_build_emits() {
@@ -5259,6 +5338,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["fix the tests", "/clear"],
             "the person's words before the clear, their /clear last, are kept above it"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .find(|event| event.kind == EventKind::SessionStart && event.seq > cleared[0].seq)
+                .map(|event| event.payload["source"].clone()),
+            Some(serde_json::json!("clear")),
+            "212b G2: the cleared conversation's start says so, so the apps draw no second start"
         );
         assert!(
             events
