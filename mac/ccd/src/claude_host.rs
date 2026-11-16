@@ -5607,15 +5607,61 @@ mod tests {
     const REGENERATE_HOSTED_CLEAR: &str =
         "cargo test -p ccd --bin ccd -- --ignored regenerate_the_hosted_clear_fixture";
 
+    /// The three commands the cleared run then takes, each the app's words, the uuid its
+    /// message is written as in place of the one ccd minted, the fields claude's line for it
+    /// carries besides its output, its output, and the command its end names. What claude
+    /// 2.1.325 did with each in machine's fenced probes (2026-11-16): the fields and the
+    /// text the probes kept, set on the recorded `/effort` line (line 131) and the clear's own
+    /// end (line 136), as the probes kept no whole line. `/help`, which claude declines in an
+    /// SDK session (its sentence, `unavailable_headless`, an end naming no command); `/cost`,
+    /// which runs as `usage` and whose end names `cost`, its text a stand-in, as no fixture
+    /// keeps a usage output; and `/config key=value`, which changes a setting and whose end
+    /// names `config`.
+    fn commands_after_clear() -> [(
+        &'static str,
+        &'static str,
+        serde_json::Value,
+        &'static str,
+        Option<&'static str>,
+    ); 3] {
+        [
+            (
+                "/help",
+                "4b7e1d2a-6c3f-4e8a-9b51-0d2f4a6c8e1b",
+                serde_json::json!({"local_command_outcome": {"kind": "unavailable_headless"}}),
+                "/help isn't available in this environment.",
+                None,
+            ),
+            (
+                "/cost",
+                "5c8f2e3b-7d4a-4f9b-8c62-1e3a5b7d9f2c",
+                serde_json::json!({"local_command_run": {"command": "usage"}}),
+                "Total cost: $0.0000\nTotal duration (API): 0s",
+                Some("cost"),
+            ),
+            (
+                "/config autoCompact=false",
+                "6d9a3f4c-8e5b-4a1c-9d73-2f4b6c8e0a3d",
+                serde_json::json!(
+                    {"local_command_run": {"command": "config", "args": "autoCompact=false"}}
+                ),
+                "Set Auto-compact to false",
+                Some("config"),
+            ),
+        ]
+    }
+
     /// **Decision 212 G2**: claude's command list as the recorded session's claude last
     /// reported it before its clear (its line 125), `/clear` sent from the app as its Clear
     /// dialog sends it, then what that claude emitted for it (its lines 133-136: the reset, the
     /// new session's init and the clear's own end) played on a live run as its host relays them.
-    /// Checked after: the clear's own end leaves the run idle for the mail rule, the run's
-    /// session is claude's new one, and its model and mode facts read on. Returned: the run's
-    /// fleet summary and its events, as the wire delivers them to an app, the run's uid written
-    /// [`CLEAR_UID`], the start's uuid [`CLEAR_START`], the message's [`CLEAR_SAY`] and each
-    /// clock read [`CLEAR_AT`].
+    /// Then the [`commands_after_clear`], each sent as the app sends a message and taken by the
+    /// host, claude's init for its turn (line 135's), its line and its end. Checked after: the
+    /// last end leaves the run idle for the mail rule, the run's session is claude's new one,
+    /// and its model and mode facts read on. Returned: the run's fleet summary and its events,
+    /// as the wire delivers them to an app, the run's uid written [`CLEAR_UID`], the start's
+    /// uuid [`CLEAR_START`], the messages' [`CLEAR_SAY`] and the commands' own, and each clock
+    /// read [`CLEAR_AT`].
     async fn hosted_clear() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
@@ -5632,10 +5678,54 @@ mod tests {
             sdk(&mut played.write, seq, message).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
         }
+        let mut says = Vec::new();
+        for (n, (words, pinned, fields, output, command)) in
+            commands_after_clear().into_iter().enumerate()
+        {
+            let seq = 9 + 4 * n as u64;
+            let request = format!("r-command-{n}");
+            let (result, (say, text)) = tokio::join!(
+                send_as_app(&rig.daemon, &uid, &request, words),
+                host_takes(&mut played, seq, "done")
+            );
+            assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
+            assert_eq!(text, words);
+            says.push((say, pinned));
+            let mut init = capture()[134].clone();
+            init["uuid"] = format!("7e0b4c5d-9f6c-4b2d-8e84-3a5c7d9f1b{n:02}").into();
+            let mut line = capture()[130].clone();
+            let object = line.as_object_mut().unwrap();
+            object.remove("local_command_run");
+            object.extend(fields.as_object().unwrap().clone());
+            object.insert(
+                "local_command_source".into(),
+                format!("<local-command-stdout>{output}</local-command-stdout>").into(),
+            );
+            object.insert("session_id".into(), AFTER_CLEAR.into());
+            object.insert(
+                "uuid".into(),
+                format!("8f1c5d6e-0a7d-4c3e-9f95-4b6d8e0a2c{n:02}").into(),
+            );
+            line["message"]["id"] = format!("9a2d6e7f-1b8e-4d4f-8a06-5c7e9f1b3d{n:02}").into();
+            line["message"]["content"][0]["text"] = output.into();
+            let mut end = capture()[135].clone();
+            end["uuid"] = format!("ab3e7f80-2c9f-4e5a-9b17-6d8f0a2c4e{n:02}").into();
+            end["result"] = output.into();
+            match command {
+                Some(command) => end["local_command"] = command.into(),
+                None => {
+                    end.as_object_mut().unwrap().remove("local_command");
+                }
+            }
+            for (seq, message) in (seq + 1..).zip([init, line, end]) {
+                sdk(&mut played.write, seq, message).await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+            }
+        }
         let (started, ended) = marks(&rig, &uid);
         assert!(
             started <= ended,
-            "a turn reads running after the clear's own end: {started} > {ended}"
+            "a turn reads running after the last command's own end: {started} > {ended}"
         );
         let session = summary(&rig.daemon, &uid).await;
         assert_eq!(session.claude_session_id.as_deref(), Some(AFTER_CLEAR));
@@ -5659,11 +5749,14 @@ mod tests {
         let live = pinned_summary(&session, &uid, CLEAR_UID, &rig.root);
         let start = played.start_uuid();
         stop(&played.dir);
-        let rendered = serde_json::to_string(&events)
-            .unwrap()
-            .replace(&uid, CLEAR_UID)
-            .replace(&start, CLEAR_START)
-            .replace(&say, CLEAR_SAY);
+        let rendered = says.iter().fold(
+            serde_json::to_string(&events)
+                .unwrap()
+                .replace(&uid, CLEAR_UID)
+                .replace(&start, CLEAR_START)
+                .replace(&say, CLEAR_SAY),
+            |rendered, (minted, pinned)| rendered.replace(minted.as_str(), pinned),
+        );
         let mut events: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         for event in events.as_array_mut().unwrap() {
             let ts = &mut event["ts"];
@@ -5683,8 +5776,9 @@ mod tests {
     /// apps' pin for drawing a clear on such a run: the person's words, their `/clear` last,
     /// naming the command, one "Conversation cleared" notice, then the cleared conversation's
     /// start (`source: "clear"`) and the clear's own end, naming it too, and the run's session
-    /// claude's new one. Gate one reads the committed bytes; gate two re-derives the file and
-    /// requires the same bytes.
+    /// claude's new one; then each of the [`commands_after_clear`]: the person's words, its
+    /// output as an output row, and its end naming the command claude names. Gate one reads
+    /// the committed bytes; gate two re-derives the file and requires the same bytes.
     #[tokio::test]
     async fn the_hosted_clear_fixture_is_what_this_build_emits() {
         let committed: serde_json::Value =
@@ -5735,8 +5829,50 @@ mod tests {
                 .filter(|event| event.kind == EventKind::TurnComplete)
                 .map(|event| event.payload["local_command"].clone())
                 .collect::<Vec<_>>(),
-            [serde_json::json!("clear")],
-            "the clear's own end names its command"
+            [
+                serde_json::json!("clear"),
+                serde_json::Value::Null,
+                serde_json::json!("cost"),
+                serde_json::json!("config"),
+            ],
+            "the clear's own end names its command, as do /cost's and /config's; the declined \
+             /help's names none"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::UserMessage && event.seq > cleared[0].seq)
+                .filter_map(|event| {
+                    event.payload["text"]
+                        .as_str()
+                        .map(|text| (text, event.payload.get("command").cloned()))
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("/help", None),
+                ("/cost", None),
+                (
+                    "/config autoCompact=false",
+                    Some(serde_json::json!("config"))
+                ),
+            ],
+            "the person's commands after the clear: one claude does not list (/help) or lists \
+             only as another's alias (/cost) names none"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.payload.pointer("/message/content")?.as_str())
+                .filter(|content| content.starts_with("<local-command-stdout>"))
+                .collect::<Vec<_>>(),
+            commands_after_clear()
+                .iter()
+                .map(|(.., output, _)| format!(
+                    "<local-command-stdout>{output}</local-command-stdout>"
+                ))
+                .collect::<Vec<_>>(),
+            "each command's output is a terminal run's output row, the declined /help's \
+             sentence among them"
         );
         assert_eq!(
             events
