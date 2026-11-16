@@ -125,7 +125,8 @@ impl DaemonLink {
     }
 }
 
-#[cfg(test)]
+/// Its one test is the macOS folder question, so the module is macOS's alone.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
@@ -142,7 +143,6 @@ mod tests {
 
     /// The folder question is answered once a person has clicked each dialog,
     /// which takes longer than the round trip every other request is held to.
-    #[cfg(target_os = "macos")]
     #[test]
     fn the_folder_question_waits_for_the_person_answering_it() {
         const FOLDERS: &str = "{\"type\":\"folders\",\"folders\":[{\"folder\":\"Desktop\",\
