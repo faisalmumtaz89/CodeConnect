@@ -1048,7 +1048,8 @@ the run is `live` and the message `sent`; claude's refusal leaves the run `exite
 relaunchable, with claude's reason; a launch that fails first puts it back `exited`, nothing
 sent. With no answer within 15 s, inside the apps' 20 s wait, the message reads
 indeterminate and the relaunch goes on. The effort chosen for the old process is not carried
-over.
+over: the run's effort reads unset from its end until one is set again. A ccd restart in the
+seconds of a relaunch files the resumed start with no `source`.
 For such a run the Model and Effort screens are refused, as a sheet's typed confirmation or
 typed alone (`/model`, `/effort`) ("Changing the model isn't available for this session
 yet.", the same for the effort: the sheets set them with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude

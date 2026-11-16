@@ -8,7 +8,7 @@
     "cwd": "/tmp/cc-rig",
     "last_seq": 4,
     "lifecycle": "exited",
-    "link": "attached",
+    "link": "detached",
     "model": {
       "at": "2026-11-15T09:00:00.000Z",
       "seq": 3,

@@ -450,7 +450,6 @@ pub(crate) async fn attach_run(
         Some(ToHost::Start { uuid, prompt, .. }) => (uuid.clone(), prompt.clone()),
         _ => (String::new(), String::new()),
     };
-    let resumed = resumes(start.as_ref());
     let resend = match linked.lifecycle {
         Lifecycle::Starting => start,
         Lifecycle::Stopping => match protocol::uid::uuid_v4() {
@@ -473,7 +472,9 @@ pub(crate) async fn attach_run(
             turn: linked.turn,
             resend,
             replayed: false,
-            resumed,
+            // The run's last turn is carried, so no start is stamped here: a ccd restart in
+            // the seconds of a relaunch files its resumed start with no source (a written miss).
+            resumed: false,
         },
         None,
         BufReader::new(read).lines(),
@@ -10385,9 +10386,23 @@ mod tests {
         panic!("{pid} did not end");
     }
 
+    /// A run [`ended_on_its_own`] left: its uid, its folder and its start's uuid.
+    struct Ended {
+        uid: String,
+        dir: PathBuf,
+        start: String,
+    }
+
+    impl Ended {
+        fn start_uuid(&self) -> String {
+            self.start.clone()
+        }
+    }
+
     /// A live run on `rig` whose claude named its session (the recorded session's first init),
-    /// then ended without ccd stopping it: its host reported claude's exit, code 1, and is gone.
-    async fn ended_on_its_own(rig: &Rig) -> Played {
+    /// then ended without ccd stopping it: its host reported claude's exit, code 1, and is gone,
+    /// its socket closed as the kernel closes a dead host's, so the run's link is detached.
+    async fn ended_on_its_own(rig: &Rig) -> Ended {
         let mut played = live_run_on(rig, &rig.root.join("stub-host")).await;
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
@@ -10400,7 +10415,16 @@ mod tests {
         let pid = pid_in(&played.dir, "stub.pid");
         stop(&played.dir);
         gone(pid).await;
-        played
+        let start = played.start_uuid();
+        let Played { uid, dir, .. } = played;
+        for _ in 0..200 {
+            if serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap()["link"] == "detached"
+            {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        Ended { uid, dir, start }
     }
 
     /// The relaunched host's side of the run's socket in `dir`, once the relaunch has spawned
@@ -10541,6 +10565,87 @@ mod tests {
             "the relaunched run's end is filed beside the first"
         );
         stop(&played.dir);
+    }
+
+    /// **Decision 210: a host recorded before this boot is not consulted.** A run whose host was
+    /// recorded in an earlier boot, whose numbers mean nothing now, ends on its own while that
+    /// host's pid still runs here; the next message relaunches it all the same.
+    #[tokio::test]
+    async fn a_host_recorded_before_this_boot_is_not_consulted() {
+        let rig = relaunch_rig();
+        let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET boot_sec = 1, boot_usec = 0 WHERE session_uid = ?1",
+                [&uid],
+            )
+            .unwrap();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        assert!(running(old), "the old host's pid still runs");
+        let dir = played.dir.clone();
+        drop(played);
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-boot", "hello"), async {
+                let mut played = play_relaunched(&dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            });
+        // SAFETY: kill(2) of the old stand-in host this test started, by its recorded pid.
+        unsafe { libc::kill(old, libc::SIGTERM) };
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+    }
+
+    /// **Decision 210: two messages at once relaunch the run once.** Both read the run as one
+    /// to relaunch; one write lets only one of them move it to `starting`, so exactly one is
+    /// sent, the other refused with nothing sent, and only the sent one's words are filed.
+    #[tokio::test]
+    async fn two_messages_at_once_relaunch_the_run_once() {
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (a, b, played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-a", "one"),
+            send_as_app(&rig.daemon, &uid, "r-b", "two"),
+            async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        stop(&played.dir);
+        let sent: Vec<&str> = [(&a, "one"), (&b, "two")]
+            .into_iter()
+            .filter(|(answer, _)| matches!(answer, SendTextResult::Sent { .. }))
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(sent.len(), 1, "{a:?}; {b:?}");
+        assert_eq!(words(&rig, &uid), ["fix the tests", sent[0]]);
     }
 
     /// The run's uid in `fixtures/claude/hosted-relaunch-wire.json`, written in place of the
@@ -10753,9 +10858,9 @@ mod tests {
     }
 
     /// **Decision 210 G3: the runs a message does not relaunch, each with nothing spawned.**
-    /// A run End run ended and a start that failed refuse it as before; a run whose old host
-    /// still has its group refuses it as still ending and stays `exited`; a relaunch whose
-    /// host cannot be spawned is put back `exited`, nothing sent.
+    /// A run End run ended refuses it as before; a run whose old host still has its group
+    /// refuses it as still ending and stays `exited`; a relaunch whose host cannot be spawned
+    /// is put back `exited`, nothing sent.
     #[tokio::test]
     async fn a_message_relaunches_no_other_ended_run() {
         let rig = relaunch_rig();

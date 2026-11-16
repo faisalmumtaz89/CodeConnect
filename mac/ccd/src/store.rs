@@ -2244,16 +2244,24 @@ impl Store {
                 ],
                 protocol::facts::permission_mode_fact,
             )?,
+            // An effort is the ended process's own ([`protocol::facts::SessionFacts::ended`]).
             effort: newest_decided(
                 &conn,
                 session_uid,
-                "kind IN (?2, ?3)",
+                "kind IN (?2, ?3) AND seq > COALESCE((SELECT MAX(seq) FROM events
+                                                       WHERE session_uid = ?1 AND kind = ?4), 0)",
                 &[
                     EventKind::Notification.as_str(),
                     EventKind::UserMessage.as_str(),
+                    EventKind::SessionEnd.as_str(),
                 ],
                 protocol::facts::effort_fact,
             )?,
+            ended: conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?2",
+                params![session_uid, EventKind::SessionEnd.as_str()],
+                |row| row.get::<_, i64>(0),
+            )? as u64,
         })
     }
 
@@ -13564,6 +13572,39 @@ mod tests {
         transcript.source = Source::Transcript;
         assert!(store.append_event(&hook).unwrap().is_some());
         assert!(store.append_event(&transcript).unwrap().is_some());
+    }
+
+    /// **The effort ends with the run's process, read back after a restart** (decision 210):
+    /// an effort filed before the run's `session_end` is not the run's effort, one after it is.
+    #[test]
+    fn a_runs_effort_is_read_back_only_from_after_its_end() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let effort = |level: &str| {
+            let mut notice = pending(&session, EventKind::Notification, None);
+            notice.payload = serde_json::json!({"notification_type": "model_set", "effort": level});
+            notice
+        };
+        store.append_event(&effort("high")).unwrap();
+        let mut end = pending(&session, EventKind::SessionEnd, None);
+        end.payload = serde_json::json!({"exit_code": 1, "reason": "Stopped: its process ended"});
+        store.append_event(&end).unwrap();
+        let facts = store.session_facts(&session.uid).unwrap();
+        assert_eq!(facts.effort, None);
+        assert_eq!(facts.ended, 2);
+        store.append_event(&effort("low")).unwrap();
+        assert_eq!(
+            store
+                .session_facts(&session.uid)
+                .unwrap()
+                .effort
+                .map(|fact| fact.value),
+            Some("low".to_string())
+        );
     }
 
     #[test]
