@@ -15,7 +15,7 @@ codeconnect codex                 # in any project directory
 ```
 
 That is the whole command. Everything after `codex` is passed through to the real `codex`
-binary, the same way `codeconnect claude` passes arguments to `claude`:
+binary:
 
 ```sh
 codeconnect codex -m <model> "start on the parser"
@@ -135,7 +135,7 @@ once the tool's answer has been handed to the agent, which says nothing of what 
 with it.
 
 Whether an agent acts on another agent's message is one switch per computer. The first
-`codeconnect claude` or `codeconnect codex` that starts a session in a terminal asks once:
+`codeconnect codex` that starts a session in a terminal asks once:
 "Let your agents act on messages from your other agents?" With yes, `read_messages` tells the
 agent to handle each message as its sender asks, as a teammate's request within its own
 permissions, never as your approval and never to change settings; with no, or before you have

@@ -29,14 +29,14 @@ Terminal bytes are read for exactly one purpose: confirming that the prompt we a
                                 │      └──────▲───────┘            │
                                 │             │ Claude Code hooks  │
                                 │   ┌─────────┴──────────┐         │
-                                │   │  claude, in tmux   │◄── codeconnect claude
+                                │   │  claude, in tmux   │         │
                                 │   └────────────────────┘         │
                                 └──────────────────────────────────┘
 ```
 
 **`ccd`** is the daemon. It ingests hook events and transcript lines, assigns each a monotonic sequence number per session, and writes them to SQLite before anything is published. The log is the source of truth: reconnection, backfill, deduplication and crash recovery are all one mechanism — ask for everything after sequence *N*.
 
-**`codeconnect`** launches an agent inside a private tmux server. For Claude Code it generates the settings that wire the hooks; for Codex it starts the broker described below. The terminal is unchanged either way; the session survives a closed tab, and a per-session supervisor connects *outward* to the daemon. The agent runs as a job of the pane's own process, so Ctrl+Z stops it for real and the terminal's shell takes over as it would for the agent run directly; the attachment tells that process when `fg` resumes it.
+**`codeconnect codex`** launches Codex inside a private tmux server and starts the broker described below. The terminal is unchanged; the session survives a closed tab, and a per-session supervisor connects *outward* to the daemon. The agent runs as a job of the pane's own process, so Ctrl+Z stops it for real and the terminal's shell takes over as it would for the agent run directly; the attachment tells that process when `fg` resumes it.
 
 **`cc-hook`** is what the hooks actually invoke. It is tiny, and it fails safe: if the daemon cannot be reached, the decision returns to the keyboard rather than being answered or silently allowed.
 
@@ -95,7 +95,7 @@ Push notifications ring only for a decision the phone can answer — an approval
 
 Codex is the second agent, and it arrived through the seam below rather than around it. Five pieces carry it. [`codex.md`](codex.md) is the operator page and has the detail for each.
 
-**The launcher.** `codeconnect codex` runs the real `codex` binary in the same private tmux server `codeconnect claude` uses, passing your arguments through as native `codex` would read them — the sandbox, the approval policy, profiles and config overrides included; CodeConnect sets none of its own. `--cd <dir>` becomes the session's folder, a flag it does not know is passed on unchanged, and `--help`/`--version` run `codex` itself with no session. Only the transport flags (the terminal UI must be the broker's client) and every `codex` subcommand but the interactive TUI are refused, *before* anything is created, with a message naming what was refused and why.
+**The launcher.** `codeconnect codex` runs the real `codex` binary in CodeConnect's private tmux server, passing your arguments through as native `codex` would read them — the sandbox, the approval policy, profiles and config overrides included; CodeConnect sets none of its own. `--cd <dir>` becomes the session's folder, a flag it does not know is passed on unchanged, and `--help`/`--version` run `codex` itself with no session. Only the transport flags (the terminal UI must be the broker's client) and every `codex` subcommand but the interactive TUI are refused, *before* anything is created, with a message naming what was refused and why.
 
 **The broker, on two sockets.** Between Codex's terminal UI and Codex's own app server sits a broker, listening on two separate sockets — one for the keyboard, one for the daemon — and which socket a message arrived on is what decides what it may do. **The keyboard's socket is a passthrough**: the person at the Mac is as trusted as in native Codex, so every frame the terminal UI sends reaches Codex unchanged and every request Codex sends reaches the terminal UI. The broker watches that traffic to follow which thread the keyboard is on and whether a turn is running, and holds back exactly one kind of keyboard frame: an answer to a command or file-change approval whose one answer is already taken — by the phone, or by the keyboard's own earlier answer to it. **The daemon's socket refuses by default**: any method, and any *parameter*, not explicitly admitted is refused with a numeric code and never reaches Codex. Four code-execution methods are refused there, always.
 

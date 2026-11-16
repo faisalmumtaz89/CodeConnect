@@ -6,7 +6,7 @@ Three shipped binaries and two shared libraries in one cargo workspace.
 |---|---|
 | `protocol` | Shared wire types: event envelope, unix-socket frames, WebSocket protocol, session identity, config. |
 | `ccd` | The daemon: SQLite event log, hook gate, transcript tailer, tailnet WebSocket server, push. |
-| `codeconnect` | The shim: `codeconnect claude` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
+| `codeconnect` | The shim: `codeconnect codex` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
 | `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
 | `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. It runs in-process inside `codeconnect internal-codex-host`, the host the launcher spawns. |
 
@@ -20,7 +20,6 @@ This builds from source. To install the signed release instead, follow
 export PATH="$HOME/.codeconnect/bin:$PATH"
 
 codeconnect daemon install                 # start the daemon now and at login, restart it on crash
-codeconnect claude                         # in any project directory
 ```
 
 A source build runs on the Mac's own tmux (`brew install tmux`); only a release
@@ -30,15 +29,13 @@ system tmux. Both install the agent host, `cc-agent-host`, beside the binaries:
 ccd runs it for every Claude run started from the app. A source build builds it
 with `agent-host/build.sh`, which fetches the Bun it pins.
 
-`codeconnect claude` passes every argument through to the real `claude`, so
-`codeconnect claude --permission-mode default --resume` works exactly as expected.
-With no terminal to show a session in — a script, a pipe, `ssh` without `-t` — it hosts
-nothing and runs the `claude` it would have hosted directly, so its output and exit
-status are Claude Code's. A hosted session's `codeconnect claude` or `codeconnect codex`
-exits 0 whatever the agent exited with; a script that needs that status runs the agent
+With no terminal to show a session in — a script, a pipe, `ssh` without `-t` —
+`codeconnect codex` hosts nothing and runs the `codex` it would have hosted directly, so
+its output and exit status are Codex's. A hosted session's `codeconnect codex` exits 0
+whatever the agent exited with; a script that needs that status runs the agent
 directly.
 
-Claude and Codex sessions get the environment of the shell that launched them — API
+Codex sessions get the environment of the shell that launched them — API
 keys, a virtualenv or direnv `PATH` — not the one the tmux server was started with.
 `TERM` is `tmux-256color` for Codex where macOS describes it (`screen-256color` on macOS
 13) and the calling terminal's for Claude, and the variables
@@ -49,7 +46,7 @@ agents do not see `TMUX` or `TMUX_PANE`: their output reaches your terminal unch
 so they behave as they do run there directly (told it is inside tmux, Claude caps itself
 at 256 colours). CodeConnect's own processes in the pane keep them.
 
-The local attachment (`codeconnect claude`, `codeconnect codex`, `codeconnect attach`)
+The local attachment (`codeconnect codex`, `codeconnect attach`)
 is a tmux control-mode client built into `codeconnect` (`codeconnect/src/attach.rs`):
 it writes the pane's output to your terminal unchanged, types your keys into the pane
 with `send-keys -H`, and follows the terminal's size. tmux itself answers some terminal
@@ -62,15 +59,8 @@ screen from `capture-pane`, restores the cursor, the pane title and the modes tm
 tracks, and never replays earlier output. It also sets `scroll-on-clear off` on the
 pane, so a screen the agent clears is not kept in the history a later attach paints.
 
-The one replay: `codeconnect claude` keeps a private copy of what the agent prints until
-its own attach has painted the pane, so an agent that ends first — `--version`, a
-mistyped flag, a startup error, or one that finishes during the note shown when no phone
-can reach the Mac — is not lost. The copy is written to the terminal as the agent drew
-it, less every question it asked the terminal (whose asker is gone, and whose answer would
-reach your shell), and the command exits 0 as it always does.
-
 Ctrl+Z stops the agent as it does run directly. The agent runs as a job of the pane's
-own process (`codeconnect internal-job` for Claude, the host for Codex), so its stop is
+own process (the host, for Codex), so its stop is
 real; the attachment then stops too, and your shell prints its own job line. `fg`
 resumes the attachment, which asks the pane's process to continue the agent, and the
 agent repaints itself. Every attachment showing a stopped agent stops with it, and one
@@ -103,7 +93,7 @@ turn, and say something — a new turn when the session is idle, joining the run
 when it is busy.
 
 Both kinds of session get one MCP server of CodeConnect's own, `codeconnect`
-(`--mcp-config` before `--settings` for Claude Code; `-c mcp_servers.codeconnect.…` on
+(the Agent SDK's `mcpServers` option for Claude Code; `-c mcp_servers.codeconnect.…` on
 Codex's app server), with which an agent lists the other running sessions, sends one a
 message, and reads its own. `ccd` keeps a message until the receiving session reads it, on
 this computer or, carried over Tailscale to that computer's `ccd`, on another of the same
@@ -168,7 +158,7 @@ codeconnect token                 # the static fallback token
 
 A session has two names and they do different jobs.
 
-`session_id` is the tmux name — `cc-1` — and it is **reused**. `codeconnect claude` takes
+`session_id` is the tmux name — `cc-1` — and it is **reused**. `codeconnect codex` takes
 the lowest free number, so when a session exits the next one is called `cc-1`
 again. That is deliberate: the name is what a human types into `codeconnect attach`.
 
@@ -177,9 +167,9 @@ never reused. It is what the event log, the tail cursors and the answers ledger
 are keyed by.
 
 tmux's own ids — `$0`, `%0` — are reused as well: once a server exits with its last
-session, the next server hands them out again. So `codeconnect claude` and
-`codeconnect attach` pin what they attach to — its server's pid and start time, the
-session's creation time and `session_uid` — and tmux checks the pin and attaches on
+session, the next server hands them out again. So `codeconnect attach` pins what it
+attaches to — its server's pid and start time, the session's creation time and
+`session_uid` — and tmux checks the pin and attaches on
 one connection. A session that has gone is never swapped for one another terminal
 started under the same ids.
 
@@ -434,27 +424,17 @@ codeconnect 0.3.0 (227f6d4e1791-dirty)   # built from an edited tree
 codeconnect 0.3.0 (build unknown)        # built outside a git checkout
 ```
 
-`daemon status` shows the running daemon's build the same way. On every
-`codeconnect claude` or `codeconnect codex` launch, the installed version is compared against the
-newest GitHub Release, and one line can appear:
+`daemon status` shows the running daemon's build the same way.
 
-```
-CodeConnect update available · 0.2.0 → 0.3.0
-```
-
-It ends with the one fix: `codeconnect update`, which downloads that release,
-proves it is signed by CodeConnect's Apple team, and replaces the three
-binaries, their tmux and the agent host in a single directory exchange — so an
-interrupted update leaves the complete old set or the complete new one, never a
-mixture. Where CodeConnect.app
-installed the binaries (it leaves `~/.codeconnect/bin/.installed-by-app`), the
-app keeps them current: there is no background check and no advisory, and
+`codeconnect update` downloads the newest GitHub Release, proves it is signed
+by CodeConnect's Apple team, and replaces the three binaries, their tmux and
+the agent host in a single directory exchange — so an interrupted update leaves
+the complete old set or the complete new one, never a mixture. Where
+CodeConnect.app installed the binaries (it leaves
+`~/.codeconnect/bin/.installed-by-app`), the app keeps them current, and
 `codeconnect update` refuses with "CodeConnect.app keeps these up to date;
 update the app.", followed by the way back: delete that file if
-CodeConnect.app was removed. A failed check
-renders as silence: an advisory that can be wrong is worse than none. The
-`update_check` config switch disables the background check; identity stays
-visible through `--version` and `daemon status`.
+CodeConnect.app was removed.
 
 ## Upgrading
 
@@ -1358,7 +1338,7 @@ and Downloads are read with ccd's own permission, asked for once while someone i
 at the Mac: `codeconnect daemon folders`, which the codeconnect.sh installer
 (1.7.7 or later) runs once the daemon is up, at a terminal and not over SSH,
 has ccd itself read each one, so a dialog names ccd and the answer is kept for
-its path, which updates keep. Until it has run once, a `codeconnect claude` or `codex`
+its path, which updates keep. Until it has run once, a `codeconnect codex`
 typed at a terminal on the Mac, not an SSH login, runs it first; ccd keeps the
 note that it has (`folders-asked`), and every later typed start is as before.
 Only CodeConnect's own launchd job answers either. An `Operation not permitted` in
@@ -1417,8 +1397,8 @@ See `protocol/src/lib.rs` for the authoritative ledger.
 **`delete_session` is the only verb that removes a run's record.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
 run, so it is not an identity a destructive request may be pointed at. For a
-hosted run — launched by `codeconnect claude`, or started from the app in an
-agent host the daemon spawned — the daemon refuses anything whose lifecycle has
+hosted run — started from the app in an agent host the daemon spawned — the
+daemon refuses anything whose lifecycle has
 not ended (`exited`, or `failed` for an app start that never started), and
 anything it still holds a supervisor or an open approval for. An **adopted**
 run — CodeConnect never launched it, so it has neither tmux nor an agent host,
@@ -1426,7 +1406,7 @@ and no probe can ever prove it ended — is deletable at any lifecycle. Only an 
 recorded such runs: this one reports only for a run its launcher started.
 A refusal is a `delete_session_result`, not an error. It deletes the daemon's own record only:
 Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
-`codeconnect claude --resume <id>` still works afterwards.
+`claude --resume <id>` still works afterwards.
 
 **`protocol_version` is now enforced.** A client on a different *major* is
 refused with `error{code: "protocol_mismatch"}` and disconnected, before its
@@ -1981,10 +1961,6 @@ fails the suite instead of failing silently in production.
   recorded before session uids existed are keyed by name, so a name that held
   two runs becomes *one* migrated run — the log never recorded where one stopped
   and the next began. The guarantee starts from the migration forwards.
-* **`codeconnect claude --resume` in a reused name re-reads the transcript.** The new run
-  has its own cursor, so it ingests the file into its own log rather than
-  finding a cursor that says the bytes are consumed. That costs one backfill and
-  is the honest reading: the resumed history genuinely belongs to the new run.
 * **`answer` without a `session_id` is resolved by request id.** A client on
   protocol minor 1 cannot say which run it means; the daemon matches the live
   approvals, then the ledger's most recent entry. Two runs holding the same

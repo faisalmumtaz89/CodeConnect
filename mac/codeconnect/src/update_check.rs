@@ -1,44 +1,20 @@
-//! The "a newer CodeConnect exists" notice, and the machinery behind it.
+//! `codeconnect update` and `codeconnect install-staged`, and what they share: the published GitHub Release they
+//! install, read through a trust boundary, and the styles and the reading hold their output uses.
 //!
-//! A user who runs `codeconnect claude` every day has no reason to think
-//! about upgrading, so the launch tells them — under three rules that keep
-//! the telling honest and the launch fast:
+//!   * **"Newer" means a published GitHub Release**, semantically greater than this binary's own version — never "a
+//!     commit exists". The ship contract: bump the workspace version, tag that exact commit `vX.Y.Z`, publish the
+//!     Release, versions strictly increasing, never retag.
+//!   * **The tag is a trust boundary.** It comes from a third-party API response, so nothing from that response is
+//!     compared or printed until it has survived a full-match semver validation; every other response field is
+//!     discarded unread.
 //!
-//!   * **The launch path never touches the network.** The notice is read
-//!     from a cache file; the cache is refreshed by a fully detached child
-//!     spawned just before the attach, at most once per 24 hours. A slow or
-//!     absent network costs the launch nothing.
-//!   * **"Newer" means a published GitHub Release**, semantically greater
-//!     than this binary's own version — never "a commit exists". The feature
-//!     is deliberately dormant until the project starts cutting releases;
-//!     the ship contract from then on is: bump the workspace version, tag
-//!     that exact commit `vX.Y.Z`, publish the Release, versions strictly
-//!     increasing, never retag.
-//!   * **The tag is a trust boundary.** It comes from a third-party API
-//!     response, so nothing from that response is compared or printed until
-//!     it has survived a full-match semver validation; every other response
-//!     field is discarded unread. An error — 404, rate limit, timeout,
-//!     malformed JSON — is not evidence and produces silence, preserving
-//!     whatever validated answer the cache already held.
-//!
-//! `update_check: false` in the config disables both the network attempt
-//! and the cached notice. The daemon never phones home either way.
+//! The daemon never phones home.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::update_release::Archive;
-
-/// Where the checker's answer lives between launches.
-fn cache_path() -> PathBuf {
-    cache_path_at(&protocol::root_dir())
-}
-
-fn cache_path_at(root: &std::path::Path) -> PathBuf {
-    root.join("update-check.json")
-}
 
 /// Written into `bin` by CodeConnect.app when it installs these binaries. The
 /// app keeps them current, so neither `codeconnect update` nor its advisory
@@ -63,36 +39,9 @@ fn updated_by_the_app(root: &std::path::Path) -> String {
     )
 }
 
-/// The claim that makes the 24-hour throttle hold across processes — two
-/// `codeconnect claude` launches in the same second must produce at most one
-/// GitHub request. The atom is `flock(2)`, and the kernel is the whole
-/// protocol: a lock dies with its holder, so there are no corpses to detect,
-/// no birth-times to compare, and no takeover race between two would-be
-/// breakers. A file-content lock needs all three, and each is its own race:
-/// a created-then-written lock is momentarily empty and reads as a corpse,
-/// and two breakers judging one corpse can each delete the other's fresh
-/// claim. The lock file itself is permanent and contentless.
-fn lock_path() -> PathBuf {
-    protocol::root_dir().join(".update-check.lock")
-}
-
-const ATTEMPT_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// A Releases response is a few hundred bytes of interest; a response bigger
 /// than this is not one we read further.
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UpdateCache {
-    /// When the checker last *tried*, successful or not — the 24h throttle.
-    #[serde(default)]
-    pub last_attempt_unix: u64,
-    /// The last validated answer to "what is the latest release", kept
-    /// verbatim (`1.2.3`, no `v`). Mirrors the server: each validated fetch
-    /// replaces it, whatever it says; only *failures* preserve the previous
-    /// answer. The notice, not the cache, decides what counts as newer.
-    #[serde(default)]
-    pub latest: Option<String>,
-}
 
 // ---------------------------------------------------------------- versions
 
@@ -163,40 +112,6 @@ pub fn may_install(candidate: &str, running: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ------------------------------------------------------------------ cache
-
-/// Read the cache, revalidating the stored version — a cache written by
-/// anything, including a future or corrupted build, gets the same trust
-/// boundary as the network response.
-fn read_cache_from(path: &std::path::Path) -> UpdateCache {
-    let Ok(bytes) = std::fs::read(path) else {
-        return UpdateCache::default();
-    };
-    let Ok(mut cache) = serde_json::from_slice::<UpdateCache>(&bytes) else {
-        return UpdateCache::default();
-    };
-    if let Some(latest) = &cache.latest {
-        if parse_version(latest).is_none() {
-            cache.latest = None;
-        }
-    }
-    cache
-}
-
-/// Atomic write: unique temp file beside the target, then rename, so an
-/// interrupted write leaves the previous record readable rather than half a
-/// JSON document.
-fn write_cache_to(path: &std::path::Path, cache: &UpdateCache) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("the cache path has no parent directory")?;
-    std::fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(".update-check.{}.tmp", std::process::id()));
-    std::fs::write(&temp, serde_json::to_vec(cache)?)?;
-    std::fs::rename(&temp, path)?;
-    Ok(())
-}
-
 /// Holds the kernel lock for as long as it lives; dropping — or dying, in
 /// any way — is what releases it. `flock` locks belong to the open file
 /// description, and the kernel cleans up when that closes.
@@ -237,69 +152,12 @@ fn claim_throttle_at(path: &std::path::Path) -> Option<ThrottleClaim> {
         .open(path)
         .ok()?;
     use std::os::fd::AsRawFd;
-    // Non-blocking exclusive: the loser leaves rather than queues — a
-    // second simultaneous launch has nothing to wait for, the winner is
-    // already doing the day's one check.
+    // Non-blocking exclusive: the loser leaves rather than queues.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
         return None;
     }
     Some(ThrottleClaim { file })
-}
-
-/// Whether the 24-hour throttle permits an attempt now. A future
-/// `last_attempt` is a clock that moved backwards; treating it as "recently
-/// attempted" would silence the checker for however far forward the clock
-/// had wandered, so it reads as due.
-pub fn attempt_due(cache: &UpdateCache, now_unix: u64) -> bool {
-    cache.last_attempt_unix > now_unix
-        || now_unix - cache.last_attempt_unix >= ATTEMPT_INTERVAL_SECS
-}
-
-// ----------------------------------------------------------------- notice
-
-/// The fact an update surface renders: what is installed, what exists.
-/// Semantic on purpose — the pre-attach slot and `daemon status` style for
-/// different streams, so the *data* is shared and the rendering is not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdateAdvisory {
-    pub installed: (u64, u64, u64),
-    pub latest: String,
-}
-
-/// The advisory, or `None` while this binary is current (or nothing
-/// validated is known). Pure, so the comparison is pinned.
-pub fn update_advisory(cache: &UpdateCache, installed: (u64, u64, u64)) -> Option<UpdateAdvisory> {
-    let latest_raw = cache.latest.as_deref()?;
-    let latest = parse_version(latest_raw)?;
-    if latest <= installed {
-        return None;
-    }
-    Some(UpdateAdvisory {
-        installed,
-        latest: latest_raw.to_string(),
-    })
-}
-
-/// The advisory for the current install, from the cache on disk; none where the
-/// app installed the binaries, because the command it names would refuse.
-pub fn cached_advisory() -> Option<UpdateAdvisory> {
-    cached_advisory_at(&protocol::root_dir())
-}
-
-fn cached_advisory_at(root: &std::path::Path) -> Option<UpdateAdvisory> {
-    if installed_by_app(root) {
-        return None;
-    }
-    update_advisory(&read_cache_from(&cache_path_at(root)), installed_version())
-}
-
-// -------------------------------------------------------- update advisory
-
-/// The one advisory a launch can carry: a newer release exists. Rendered here
-/// so the caller has a single thing to print or not print.
-pub fn select_update_note(release: Option<UpdateAdvisory>, style: Style) -> Option<String> {
-    release.map(|advisory| render_update(&advisory, style))
 }
 
 /// stdout, and each answers for its own.
@@ -340,163 +198,6 @@ pub fn style_from_env(is_tty: bool, env: impl Fn(&str) -> Option<std::ffi::OsStr
 /// The production adapter: the real environment for a given stream.
 pub fn style_for_stream(is_tty: bool) -> Style {
     style_from_env(is_tty, |name| std::env::var_os(name))
-}
-
-const BOLD: &str = "\u{1b}[1m";
-const RESET: &str = "\u{1b}[0m";
-
-/// The `daemon status` block for the advisory: rendered for *stdout*'s own
-/// styling signals, and by construction free of any countdown — status is a
-/// listing, not a doorway, and it never holds anyone.
-pub fn status_update_block(
-    advisory: &UpdateAdvisory,
-    stdout_is_tty: bool,
-    term: Option<&str>,
-    no_color_present: bool,
-) -> String {
-    render_update(advisory, style_for(stdout_is_tty, term, no_color_present))
-}
-
-/// Render the update advisory for one stream.
-///
-/// The block is margin-free and label-free: a fact line, a blank line, and
-/// the command alone — nothing for the eye to climb over. Bold is the only
-/// emphasis; an available update is news, not a warning, so no colour.
-pub fn render_update(advisory: &UpdateAdvisory, style: Style) -> String {
-    let (a, b, c) = advisory.installed;
-    let latest = &advisory.latest;
-    match style {
-        Style::Styled => format!(
-            "{BOLD}CodeConnect update available{RESET} \u{b7} {a}.{b}.{c} \u{2192} {latest}\n\n\
-             {BOLD}codeconnect update{RESET}"
-        ),
-        Style::PlainUnicode => format!(
-            "CodeConnect update available \u{b7} {a}.{b}.{c} \u{2192} {latest}\n\n\
-             codeconnect update"
-        ),
-        Style::Ascii => {
-            format!("CodeConnect update available: {a}.{b}.{c} -> {latest}\n\ncodeconnect update")
-        }
-    }
-}
-
-// ---------------------------------------------------------------- checker
-
-/// Spawn the detached checker if one is due ([`checker_due_at`]). Fire-and-forget:
-/// null stdio, its own process group, never waited on — the attach that follows
-/// replaces this process, and the child must outlive it without owning the
-/// terminal.
-pub fn spawn_checker_if_due() {
-    if !checker_due_at(&protocol::root_dir(), unix_now()) {
-        return;
-    }
-    let Ok(current) = std::env::current_exe() else {
-        return;
-    };
-    use std::os::unix::process::CommandExt;
-    let _ = std::process::Command::new(current)
-        .arg("__update-check")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn();
-}
-
-/// Whether a check is due: never where the app installed the binaries, which
-/// shows no advisory ([`cached_advisory_at`]), so GitHub is not asked; elsewhere
-/// when the 24-hour throttle permits.
-fn checker_due_at(root: &std::path::Path, now_unix: u64) -> bool {
-    !installed_by_app(root) && attempt_due(&read_cache_from(&cache_path_at(root)), now_unix)
-}
-
-/// The hidden child: ask GitHub for the latest release and update the cache.
-///
-/// Every failure path still advances `last_attempt` — a flaky network must
-/// throttle like a healthy one — and preserves the previously validated
-/// `latest`. Config is consulted here too, so a child spawned an instant
-/// before the operator wrote `update_check: false` still obeys it.
-pub fn run_checker() -> Result<()> {
-    if !protocol::config::Config::load().update_check {
-        return Ok(());
-    }
-    run_checker_with(
-        &cache_path(),
-        &lock_path(),
-        unix_now(),
-        fetch_latest_release_tag,
-    )
-}
-
-/// The checker's whole discipline, fetch injected so a test can prove the
-/// ordering without a network:
-///
-///   1. take the cross-process lock, or leave — two simultaneous launches
-///      spawn two children, and at most one may go to GitHub;
-///   2. re-check the throttle *under* the lock — the parent's check was
-///      against a cache another child may have advanced since;
-///   3. claim the attempt (persist `last_attempt`) **before** fetching, so a
-///      child that dies mid-fetch still throttled — a crashing checker must
-///      not retry every launch;
-///   4. fetch, and only a validated answer replaces `latest`.
-fn run_checker_with(
-    cache_file: &std::path::Path,
-    lock_file: &std::path::Path,
-    now_unix: u64,
-    fetch: impl FnOnce() -> Option<String>,
-) -> Result<()> {
-    let Some(_claim) = claim_throttle_at(lock_file) else {
-        return Ok(());
-    };
-    let mut cache = read_cache_from(cache_file);
-    if !attempt_due(&cache, now_unix) {
-        return Ok(());
-    }
-    cache.last_attempt_unix = now_unix;
-    write_cache_to(cache_file, &cache)?;
-    if let Some(tag) = fetch() {
-        // Normalized without the `v`, so the cache holds exactly what the
-        // notice prints.
-        let normalized = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-        cache.latest = Some(normalized);
-        write_cache_to(cache_file, &cache)?;
-    }
-    Ok(())
-}
-
-/// The latest published release's tag, if the network, the API and the
-/// validation all cooperate. `None` is silence, never evidence.
-fn fetch_latest_release_tag() -> Option<String> {
-    let output = std::process::Command::new("/usr/bin/curl")
-        .args([
-            // First, always: without it curl reads ~/.curlrc, which can add
-            // URLs, redirect output or attach headers — and the README's
-            // promise is one documented request, not one plus whatever a
-            // dotfile says.
-            "-q",
-            "-fsS",
-            "--max-time",
-            "5",
-            "--max-filesize",
-            "65536",
-            "-H",
-            "Accept: application/vnd.github+json",
-            // The only GitHub request CodeConnect makes on its own —
-            // documented in the README's privacy note and disabled by
-            // `update_check: false`. (`codeconnect update` also talks to
-            // GitHub, but only ever when the user types it; the daemon's
-            // APNs pushes are the other autonomous traffic, to Apple.)
-            // GitHub's "latest" is the newest published non-draft,
-            // non-prerelease Release.
-            "https://api.github.com/repos/faisalmumtaz89/CodeConnect/releases/latest",
-        ])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_release_tag(&output.stdout)
 }
 
 /// Extract and validate `tag_name` — the only field this feature is allowed
@@ -1365,13 +1066,6 @@ fn fetch_release(path: &str, what: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,17 +1123,6 @@ mod tests {
             "html_url": "https://evil.example"
         }"#;
         assert_eq!(parse_release_tag(body).as_deref(), Some("v0.2.0"));
-
-        let cache = UpdateCache {
-            last_attempt_unix: 0,
-            latest: Some("0.2.0".into()),
-        };
-        let advisory = update_advisory(&cache, (0, 1, 0)).unwrap();
-        for style in [Style::Styled, Style::PlainUnicode, Style::Ascii] {
-            let text = render_update(&advisory, style);
-            assert!(!text.contains("PWNED"));
-            assert!(!text.contains("evil.example"));
-        }
     }
 
     #[test]
@@ -1456,30 +1139,6 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------- cache
-
-    #[test]
-    fn the_throttle_is_a_day_and_a_backwards_clock_reads_as_due() {
-        let cache = |at: u64| UpdateCache {
-            last_attempt_unix: at,
-            latest: None,
-        };
-        assert!(
-            attempt_due(&cache(0), 1_700_000_000),
-            "never attempted (epoch zero) is always at least a day ago"
-        );
-        assert!(
-            !attempt_due(&cache(1_000), 1_000 + 86_399),
-            "inside the day"
-        );
-        assert!(attempt_due(&cache(1_000), 1_000 + 86_400), "the day is up");
-        assert!(
-            attempt_due(&cache(2_000_000), 1_000),
-            "a future stamp means the clock moved; silence until it catches \
-             up again would be unbounded"
-        );
-    }
-
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cc-uchk-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1487,36 +1146,11 @@ mod tests {
         dir
     }
 
-    /// Through `read_cache_from` on a real file — the seam the revalidation
-    /// lives behind. The first version of this test built the struct in
-    /// memory and never touched the read path; deleting the revalidation
-    /// did not fail it.
-    #[test]
-    fn a_garbage_cached_version_is_dropped_on_read() {
-        let dir = temp_dir("reval");
-        let path = dir.join("update-check.json");
-        std::fs::write(
-            &path,
-            br#"{"last_attempt_unix":5,"latest":"not-a-version"}"#,
-        )
-        .unwrap();
-        let cache = read_cache_from(&path);
-        assert_eq!(cache.latest, None, "garbage must not survive the read");
-        assert_eq!(
-            cache.last_attempt_unix, 5,
-            "the throttle stamp is untainted"
-        );
-        assert_eq!(update_advisory(&cache, (0, 1, 0)), None);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     // ------------------------------------------------------------- update
 
     /// **Two updates cannot interleave.** Each stages into the same
     /// `bin.incoming` and finishes with a directory exchange; two of those
-    /// overlapping could exchange the wrong set into place. The lock is a
-    /// separate one from the advisory throttle because losing that one is
-    /// harmless and losing this one is not.
+    /// overlapping could exchange the wrong set into place.
     #[test]
     fn only_one_update_may_run_at_a_time() {
         let dir = temp_dir("update-lock");
@@ -1531,68 +1165,6 @@ mod tests {
         assert!(
             claim_throttle_at(&lock).is_some(),
             "and the lock is free again once the first finishes"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // ------------------------------------------------------------ checker
-
-    /// The claim-before-fetch ordering, observed from inside the fetch: by
-    /// the time the network runs, the attempt is already on disk, so a
-    /// checker that dies mid-fetch has still throttled.
-    #[test]
-    fn the_attempt_is_claimed_before_the_fetch_runs() {
-        let dir = temp_dir("claim");
-        let cache_file = dir.join("update-check.json");
-        let lock_file = dir.join(".update-check.lock");
-        let seen = std::cell::Cell::new(0u64);
-        run_checker_with(&cache_file, &lock_file, 1_700_000_000, || {
-            seen.set(read_cache_from(&cache_file).last_attempt_unix);
-            None
-        })
-        .unwrap();
-        assert_eq!(
-            seen.get(),
-            1_700_000_000,
-            "the fetch must find the attempt already persisted"
-        );
-        let after = read_cache_from(&cache_file);
-        assert_eq!(after.latest, None, "a failed fetch adds no version");
-        assert_eq!(after.last_attempt_unix, 1_700_000_000);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The lock is the kernel's cross-process atom: while one open file
-    /// description holds it, a second claim loses without waiting.
-    #[test]
-    fn the_kernel_lock_admits_one_holder_and_frees_on_release() {
-        let dir = temp_dir("lock");
-        let cache_file = dir.join("update-check.json");
-        let lock_file = dir.join(".update-check.lock");
-        let now = 1_700_000_000u64;
-
-        let claim = claim_throttle_at(&lock_file).expect("first claim wins");
-        let mut fetched = false;
-        run_checker_with(&cache_file, &lock_file, now, || {
-            fetched = true;
-            None
-        })
-        .unwrap();
-        assert!(
-            !fetched,
-            "a held lock means another checker owns the window"
-        );
-
-        // Release — by drop here, by death anywhere — frees the next claim
-        // against the same path immediately. No staleness protocol exists to
-        // test, because no corpse can exist: the lock lives in the kernel,
-        // not in the file, and dies with its holder. That property is what
-        // deleted the publish/judge/break steps a file-content lock needed,
-        // each of which carried a measured race.
-        drop(claim);
-        assert!(
-            claim_throttle_at(&lock_file).is_some(),
-            "release frees the next claimant; nothing to time out, nothing to break"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1621,77 +1193,6 @@ mod tests {
             "a descriptor a child still holds must not keep the lock past the drop"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The child re-checks the throttle under the lock: the parent judged a
-    /// cache another child may have advanced in the meantime.
-    #[test]
-    fn the_child_rechecks_the_throttle_under_the_lock() {
-        let dir = temp_dir("recheck");
-        let cache_file = dir.join("update-check.json");
-        let lock_file = dir.join(".update-check.lock");
-        let now = 1_700_000_000u64;
-        std::fs::write(
-            &cache_file,
-            format!(r#"{{"last_attempt_unix":{},"latest":null}}"#, now - 60),
-        )
-        .unwrap();
-        let mut fetched = false;
-        run_checker_with(&cache_file, &lock_file, now, || {
-            fetched = true;
-            None
-        })
-        .unwrap();
-        assert!(!fetched, "another child attempted a minute ago; not due");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // ------------------------------------------------------------- notice
-
-    fn advisory() -> UpdateAdvisory {
-        UpdateAdvisory {
-            installed: (0, 1, 0),
-            latest: "0.2.0".into(),
-        }
-    }
-
-    /// The exact styled payload, byte for byte: bold on the headline and on
-    /// the lone command, typographic separators, nothing else.
-    #[test]
-    fn the_styled_rendering_is_exact() {
-        assert_eq!(
-            render_update(&advisory(), Style::Styled),
-            "\u{1b}[1mCodeConnect update available\u{1b}[0m \u{b7} 0.1.0 \u{2192} 0.2.0\n\n\
-             \u{1b}[1mcodeconnect update\u{1b}[0m"
-        );
-    }
-
-    /// `NO_COLOR` kills every escape — bold included — and touches nothing
-    /// typographic.
-    #[test]
-    fn no_color_keeps_the_typography_and_drops_all_sgr() {
-        let text = render_update(&advisory(), Style::PlainUnicode);
-        assert_eq!(
-            text,
-            "CodeConnect update available \u{b7} 0.1.0 \u{2192} 0.2.0\n\ncodeconnect update"
-        );
-        assert!(!text.contains('\u{1b}'));
-    }
-
-    /// Logs, pipes and dumb terminals get pure ASCII: no escapes, no
-    /// multi-byte characters, no trailing spaces, everything under 80 cols.
-    #[test]
-    fn the_ascii_rendering_is_pure_ascii() {
-        let text = render_update(&advisory(), Style::Ascii);
-        assert_eq!(
-            text,
-            "CodeConnect update available: 0.1.0 -> 0.2.0\n\ncodeconnect update"
-        );
-        assert!(text.is_ascii());
-        for line in text.lines() {
-            assert!(line.len() < 80);
-            assert_eq!(line, line.trim_end());
-        }
     }
 
     /// The one styling decision: not-a-TTY or `TERM=dumb` forces ASCII;
@@ -1951,21 +1452,6 @@ mod tests {
         }
     }
 
-    /// `daemon status` renders for stdout's own signals and never counts
-    /// down — the block cannot contain the countdown sentence by
-    /// construction, and this pins it.
-    #[test]
-    fn the_status_block_styles_for_stdout_and_never_counts_down() {
-        let advisory = advisory();
-        let styled = status_update_block(&advisory, true, Some("xterm"), false);
-        assert!(styled.contains("\u{1b}[1m"));
-        let piped = status_update_block(&advisory, false, Some("xterm"), false);
-        assert!(piped.is_ascii());
-        for text in [styled, piped] {
-            assert!(!text.contains("Continuing in"), "status never holds anyone");
-        }
-    }
-
     /// The boundary races, pinned: a wake 1ms *before* a whole second
     /// recomputes the same number and must write nothing; landing exactly
     /// on the boundary, and 1ms after it, each produce their frame exactly
@@ -2016,30 +1502,6 @@ mod tests {
             "10 once (early wake writes nothing), 9 at the boundary, 8 after"
         );
         assert_eq!(sink.flushes, 4, "three frames and the clear");
-    }
-
-    #[test]
-    fn equal_and_older_releases_stay_silent() {
-        let cache = |latest: &str| UpdateCache {
-            last_attempt_unix: 0,
-            latest: Some(latest.into()),
-        };
-        assert_eq!(
-            update_advisory(&cache("0.1.0"), (0, 1, 0)),
-            None,
-            "equal is current"
-        );
-        assert_eq!(
-            update_advisory(&cache("0.0.9"), (0, 1, 0)),
-            None,
-            "older is not news"
-        );
-        assert!(update_advisory(&cache("0.1.1"), (0, 1, 0)).is_some());
-        assert_eq!(
-            update_advisory(&UpdateCache::default(), (0, 1, 0)),
-            None,
-            "no validated answer, no claim"
-        );
     }
 
     /// The downgrade every other check in the updater would walk straight
@@ -2476,38 +1938,6 @@ mod tests {
             !update_lock_path(&fixture.root).exists(),
             "no lock was taken"
         );
-    }
-
-    /// The advisory names `codeconnect update`, so where the app installed the
-    /// binaries there is none, however new the release the cache knows.
-    #[test]
-    fn an_app_install_is_advised_nothing() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
-        let cache = UpdateCache {
-            last_attempt_unix: 0,
-            latest: Some(newer()),
-        };
-        std::fs::write(
-            cache_path_at(&fixture.root),
-            serde_json::to_vec(&cache).unwrap(),
-        )
-        .unwrap();
-        assert!(cached_advisory_at(&fixture.root).is_some());
-        std::fs::write(fixture.live.join(INSTALLED_BY_APP), "").unwrap();
-        assert!(cached_advisory_at(&fixture.root).is_none());
-    }
-
-    /// With no advisory to show, an app install asks GitHub nothing either.
-    #[test]
-    fn an_app_install_asks_github_nothing() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
-        let now = 2_000_000_000;
-        assert!(
-            checker_due_at(&fixture.root, now),
-            "no check yet: one is due"
-        );
-        std::fs::write(fixture.live.join(INSTALLED_BY_APP), "").unwrap();
-        assert!(!checker_due_at(&fixture.root, now));
     }
 
     #[test]

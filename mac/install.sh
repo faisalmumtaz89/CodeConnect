@@ -72,6 +72,5 @@ else
     echo "next:"
     echo "  export PATH=\"$bin:\$PATH\""
     echo "  codeconnect daemon install   # start the daemon now and at login (restarts on crash)"
-    echo "  codeconnect claude          # run a session in the current directory"
     echo "  codeconnect pair            # QR code to pair the phone"
 fi
