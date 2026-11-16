@@ -15,8 +15,10 @@ struct DecisionBlock: View {
     @State private var sending: String?
     @State private var sentAt: Date?
     @FocusState private var reasonFocused: Bool
-    @State private var showAllChanges = false
-    @State private var showInput = false
+    @State private var ownAllChanges = false
+    @State private var ownInput = false
+    /// In the column, what was opened is the row's, kept as the row is made again.
+    @Environment(RowOpenings.self) private var openings: RowOpenings?
     /// How tall what is asked is, for its own scroll at the foot.
     @State private var askedHeight: CGFloat = 0
     /// How tall its answers are (the box, or the row held above the reply box): what is asked scrolls in what they
@@ -35,6 +37,8 @@ struct DecisionBlock: View {
     private var outcome: AnswerOutcome? { DecisionCard.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome) }
     private var codexEnding: CodexResolution? { live?.codexResolution ?? approval.codexResolution }
     private var inFlight: Bool { sending != nil || model.isAnswering(approval) }
+    private var showInput: Bool { openings?.input ?? ownInput }
+    private var showAllChanges: Bool { openings?.allChanges ?? ownAllChanges }
     private var id: String { "decision.\(approval.card.requestID)" }
 
     private var surface: DecisionCard.AnswerSurface {
@@ -224,12 +228,12 @@ struct DecisionBlock: View {
     /// the card grows.
     private func toggleInput() {
         if !showInput { tail?.leave() }
-        showInput.toggle()
+        if let openings { openings.input.toggle() } else { ownInput.toggle() }
     }
 
     private func openAllChanges() {
         tail?.leave()
-        showAllChanges = true
+        if let openings { openings.allChanges = true } else { ownAllChanges = true }
     }
 
     /// Every field a Claude tool was called with, as the iPhone offers it under "Full tool input", and the ids the
