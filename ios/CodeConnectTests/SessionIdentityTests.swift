@@ -6,10 +6,10 @@ import XCTest
 /// Protocol minor 2: a session has an identity (`session_uid`) as well as a name
 /// (`session_id`), and the app keys everything by the identity.
 ///
-/// The bug all of this exists to prevent, stated once: `codeconnect codex` takes the
-/// lowest free tmux name, so when a run exits the next one is called `cc-1`
-/// again. Keying by that name made one `cc-1` timeline out of two unrelated
-/// agent runs — and made an answer to one of them addressable by the other.
+/// The bug all of this exists to prevent, stated once: a run's name is not unique
+/// over time, so two runs can both be called `cc-1`. Keying by that name made one
+/// `cc-1` timeline out of two unrelated agent runs — and made an answer to one of
+/// them addressable by the other.
 ///
 /// Frames here are hand-written JSON decoded by the app's real decoders, for the
 /// same reason as `ProtocolTests`: a round trip through this app's own encoder

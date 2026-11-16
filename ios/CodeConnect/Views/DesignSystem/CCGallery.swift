@@ -1374,11 +1374,11 @@ import SwiftUI
                         CCEmptyState(
                             glyph: "terminal-window",
                             title: "No agents running",
-                            message: "Start one on the Mac:",
+                            message: "Run this on the Mac:",
                             actionTitle: "Pair a Mac",
                             action: { lastAction = "pair" },
                             detail: {
-                                CCMonoBlock("codeconnect codex")
+                                CCMonoBlock("codeconnect pair")
                                     .frame(maxWidth: 280)
                             })
                     }
