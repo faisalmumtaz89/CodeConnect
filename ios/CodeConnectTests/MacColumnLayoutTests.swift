@@ -223,4 +223,20 @@ final class MacColumnLayoutTests: XCTestCase {
         XCTAssertEqual(reading.dy, readerMove)
         XCTAssertEqual(reading.grown, 0)
     }
+
+    // MARK: A row the reader opened at the end
+
+    func test11ARowOpenedAtTheEndKeepsItsTop() {
+        var c = fixture(at: 331)
+        let top = c.minY(of: "r9")! - c.origin
+        let m = c.apply(.init(heights: ["r9": 400]), readerAway: true)
+        check(c, m, origin: 331, height: 881, dy: 0, grown: 350)
+        XCTAssertEqual(c.minY(of: "r9")! - c.origin, top, "the opened row's top on screen")
+    }
+
+    func test11bAReaderAtTheEndWhoHasNotLeftFollowsALanding() {
+        var c = fixture(at: 331)
+        let m = c.apply(.init(rows: [earlier] + rs(1...11) + [tail]), readerAway: false)
+        check(c, m, origin: 381, height: 581, dy: 50, grown: 50)
+    }
 }

@@ -202,7 +202,8 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     /// A row near the screen reports its own height (its content, an expansion, a banner's age); one the table prepared
-    /// further out is measured when it comes near. Applied on the next turn, outside any table call.
+    /// further out is measured when it comes near. Applied on the next turn, outside any table call; a row the reader
+    /// opened to read (they left the end: `Tail.readerLeft`) grows below its top.
     private func reported(_ place: String, _ height: CGFloat) {
         guard let index = entries.firstIndex(where: { $0.place == place }), nearScreen().contains(index),
             abs(layout.rows[index].height - ceil(height)) > 0.5
@@ -216,7 +217,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
                 guard let self else { return }
                 let heights = self.reports
                 self.reports = [:]
-                self.apply("report \(heights.count)", .init(heights: heights))
+                self.apply("report \(heights.count)", .init(heights: heights), readerAway: self.tail.readerLeft)
             }
         }
     }
@@ -226,14 +227,14 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     /// The layout decides (the reader's place kept), then the table is told in the same call, with no animation, and
     /// the origin set. Never re-entered; what it moved is handed to `Tail`.
     private func apply(
-        _ why: String, _ change: MacColumnLayout.Change, entries next: [Entry]? = nil,
+        _ why: String, _ change: MacColumnLayout.Change, entries next: [Entry]? = nil, readerAway: Bool = false,
         table update: (NSTableView) -> Void = { _ in }
     ) {
         guard !applying else { return }
         applying = true
         defer { applying = false }
         let before = (origin: layout.origin, height: layout.height)
-        let moved = layout.apply(change)
+        let moved = layout.apply(change, readerAway: readerAway)
         if let next { entries = next }
         NSAnimationContext.beginGrouping()
         NSAnimationContext.current.duration = 0

@@ -45,6 +45,10 @@ final class Tail {
     /// Away from the newest rows: rows land below without moving the reader.
     var isAway: Bool { handAway || !following }
 
+    /// The reader left the newest rows themselves and no reading has found them back at the end: a row's own size
+    /// report keeps their row, not the end, even within its slack (a row opened at the end grows below its top).
+    var readerLeft: Bool { handAway }
+
     /// The reader left the newest rows, or opened a row to read it (a tool's output, a card's full input or the rest
     /// of its files): away before the row grows.
     func leave() {

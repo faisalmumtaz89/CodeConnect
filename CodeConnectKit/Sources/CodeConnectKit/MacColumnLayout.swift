@@ -3,9 +3,10 @@ import CoreGraphics
 /// The Mac conversation column's geometry, kept by the app: its rows top to bottom (the Earlier row, the timeline's
 /// rows by `TimelineItem.places`, the tail), each row's height, the pane's height and where its top stands in the
 /// column (`origin`, flipped). Every height and every change of rows goes through `apply`, which keeps the reader's place
-/// in the same call: a reader at the end stays at the end; a reader away keeps the first timeline row on screen that the
-/// change keeps exactly where its top was; with none kept, the end. The reader's own scroll is the other way the origin
-/// moves (`scrolled`). Nothing here reads the screen: the table is told what this decided.
+/// in the same call: a reader at the end stays at the end, unless they left it themselves; a reader away keeps the
+/// first timeline row on screen that the change keeps exactly where its top was; with none kept, the end. The reader's
+/// own scroll is the other way the origin moves (`scrolled`). Nothing here reads the screen: the table is told what
+/// this decided.
 public struct MacColumnLayout: Sendable, Equatable {
     public struct Row: Sendable, Hashable {
         public let place: String
@@ -79,11 +80,12 @@ public struct MacColumnLayout: Sendable, Equatable {
         origin = clamped(y)
     }
 
-    /// Makes `change` and keeps the reader's place in the same step; returns what moved.
+    /// Makes `change` and keeps the reader's place in the same step; returns what moved. `readerAway`: the reader left
+    /// the end themselves (opened a row to read it), so their row is kept even within the end's slack.
     @discardableResult
-    public mutating func apply(_ change: Change) -> Moved {
+    public mutating func apply(_ change: Change, readerAway: Bool = false) -> Moved {
         let before = (origin: origin, height: height)
-        let anchor = isAtEnd ? nil : firstOnScreen(keptBy: change.rows.map { Set($0.map(\.place)) })
+        let anchor = isAtEnd && !readerAway ? nil : firstOnScreen(keptBy: change.rows.map { Set($0.map(\.place)) })
         var next = change.rows ?? rows
         if !change.heights.isEmpty {
             next = next.map { row in
