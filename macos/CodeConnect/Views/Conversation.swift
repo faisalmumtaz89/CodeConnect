@@ -3,78 +3,35 @@ import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
-/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. A List,
-/// which measures the rows it shows and builds only those near the screen. It opens at the newest row and follows new
-/// rows until the reader scrolls away from the end (`Tail`); a reader who went up stays where they are as rows land
-/// below, and is followed again once they come back to the end. When a page of earlier history lands above, the row
-/// they were at is put back where it was (`PageAnchor`). Reaching the top pages back on its own, as the iPhone does.
+/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. A table the
+/// app drives (`ConversationTable`): the app measures every row, keeps the reader's place through every change in the
+/// same step, and builds only the rows near the screen. It opens at the newest row and follows new rows until the
+/// reader scrolls away from the end (`Tail`); a reader who went up stays where they are as rows land below or a page of
+/// earlier history lands above, and is followed again once they come back to the end. Reaching the top pages back on
+/// its own, as the iPhone does.
 struct Conversation: View {
     let model: AppModel
     let key: String
     @State private var tail = Tail()
 
     var body: some View {
-        let items = model.shown(for: key)?.timeline ?? []
-        let places = TimelineItem.places(items)
-        ScrollViewReader { proxy in
-            List {
-                Earlier(model: model, key: key).columnRow()
-                ForEach(Array(zip(places, items)), id: \.0) { _, item in
-                    ConversationRow(item: item, model: model).columnRow()
-                }
-                // The tail: the follow's target, and the row whose probe finds the scroll view.
-                Color.clear.frame(height: 1).background(TailProbe(tail: tail)).id(Self.end).columnRow()
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, 0)
-            .environment(\.conversationTail, tail)
-            // The follow: any change of the last item, a new row or a grown one, scrolls to the end for a reader who
-            // has not left it, as the iPhone's does. Nothing else scrolls for it but `Tail`'s re-pin, so the List's
-            // own corrections can start no scroll. While a row is held for a page, the hold's placement is the move.
-            .onChange(of: items.last) {
-                guard !tail.isAway, !tail.anchor.isPlacing else { return }
-                noteFollow("FOLLOW")
-                proxy.scrollTo(Self.end, anchor: .bottom)
-            }
+        ConversationTable(model: model, key: key, items: model.shown(for: key)?.timeline ?? [], tail: tail)
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { tail.wake() }
             }
             .onAppear {
-                proxy.scrollTo(Self.end, anchor: .bottom)
                 tail.reachedTop = { [weak model, key] in model?.reachedTop(key: key) }
-                tail.anchor.timeline = { [weak model, key] in model?.shown(for: key)?.timeline ?? [] }
-                tail.anchor.pageBackOnItsOwn = { [weak model, key] in model?.pageBackOnItsOwn(key: key) }
-                model.onWindowChange(of: key) { [weak tail] shown, next, change in
-                    tail?.willChange(shown: shown, next: next, change: change)
-                }
+                tail.pageBackOnItsOwn = { [weak model, key] in model?.pageBackOnItsOwn(key: key) }
             }
-            .onDisappear {
-                model.onWindowChange(of: key, nil)
-                tail.detach()
-            }
-        }
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
         #endif
-    }
-
-    private static let end = "session.conversation.end"
-}
-
-private extension View {
-    /// A row of the column: no separator, no background of its own, the column's side margins, and half the gap
-    /// between rows above and below it.
-    func columnRow() -> some View {
-        listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 7, leading: 28, bottom: 7, trailing: 28))
-            .listRowBackground(Color.clear)
     }
 }
 
 /// The row above the first: while a page of earlier history is on its way it says so, at one height either way.
 /// Reaching the top is what asks for the page (`Tail`).
-private struct Earlier: View {
+struct Earlier: View {
     let model: AppModel
     let key: String
 
@@ -90,7 +47,7 @@ private struct Earlier: View {
     }
 }
 
-private struct ConversationRow: View {
+struct ConversationRow: View {
     let item: TimelineItem
     let model: AppModel
 
