@@ -1,7 +1,6 @@
 # CodeConnect — Mac side
 
-Three shipped binaries and two shared libraries in one cargo workspace, plus a chaos
-harness that is not shipped.
+Three shipped binaries and two shared libraries in one cargo workspace.
 
 | Crate | What it is |
 |---|---|
@@ -10,7 +9,6 @@ harness that is not shipped.
 | `codeconnect` | The shim: `codeconnect claude` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
 | `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
 | `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. It runs in-process inside `codeconnect internal-codex-host`, the host the launcher spawns. |
-| `soak` | Not shipped. The chaos gauntlet — see [Soaking it](#soaking-it). |
 
 ## Run it
 
@@ -683,42 +681,6 @@ Then, as that user, `curl -fsSL https://codeconnect.sh | sh`: with no systemd, i
 A `ccd` started before `tailscale up` stays on loopback and says in its log when the address
 appears; restart it by stopping it (`codeconnect daemon status` shows its pid) and running that
 line again. Nothing starts tailscaled or `ccd` again after either stops or the machine restarts.
-
-## Soaking it
-
-`soak/` is a repeatable gauntlet against the **installed** daemon — the same
-socket the hooks use, the same database the phone reads.
-
-```sh
-soak/run.sh              # start a real session, run every scenario, tear down
-soak/run.sh --keep       # …and leave the session running
-soak/run.sh --session cc-1 -- wsflap
-```
-
-| Scenario | What it attacks |
-|---|---|
-| `kill` | `kill -9 ccd` five times during traffic; asserts `max_seq == count` and no `(source, source_event_id)` duplicates afterwards, and that the supervisor re-attached. |
-| `hookstorm` | The same hook payload 50× concurrently; asserts exactly one event and no burnt sequence number. |
-| `answerstorm` | 20 concurrent answers for one `request_id`; asserts one applied and nineteen duplicates carrying the *original* outcome. |
-| `wsflap` | 30 connect/subscribe/disconnect cycles from spread watermarks; asserts every replay is contiguous and monotonic. |
-| `tailtorture` | Truncates, rewrites and tears a transcript under the tailer; asserts the cursor recovers with no duplicate ingest. |
-| `ingestkill` | `kill -9 ccd` timed *inside* the tail poll, five times; asserts every transcript line written is in the log exactly once. The loss it hunts is silent by construction — no gap in `seq`, no duplicate — so only "is every line I wrote there?" can see it. |
-| `commitorder` | 40 concurrent commits on one session while a socket watches; asserts the socket receives strictly successive seqs and gets no resync marker. The database is consistent either way, so the connection is the only vantage point the defect is visible from. |
-| `commands` | `/status`, `/usage` and `/cost` through the phone's own path; asserts each comes back `composer_recovered` carrying the pane the daemon saved while the Mac's view was up, and that an ordinary send lands **immediately** after each one with nobody touching the Mac. The last clause is the whole feature: these three commands take Claude's composer away, and while it is gone the interlock refuses every send, so a phone that opens one and cannot close it has locked itself out of its own session. |
-
-`run.sh` restarts the daemon after installing, and `ccsoak` refuses to run
-against a daemon whose `protocol_minor` is below the one the harness was built
-with. Both exist for the same reason: `install.sh` replaces the binaries on
-disk, launchd keeps executing the process it already started, and a gauntlet
-that attacks the previous build reports passes for code that was never loaded.
-
-It connects over `ws://127.0.0.1:8787` rather than the tailnet address. Reaching
-one's own tailnet IP leaves the machine through the utun interface, where a
-third-party network filter gets a vote — measured here, Little Snitch cannot
-identify a freshly `cargo build`-ed binary and holds its connection open and
-silent for 70 seconds before a reset, while leaving loopback alone. Set
-`CCSOAK_HOST` to prove the tailnet path instead, and `"ws_loopback": false` to
-turn the loopback listener off.
 
 ## Pairing
 
@@ -1816,9 +1778,7 @@ other device, so no single remote address may hold more than `ws_max_per_peer`.
 It is half the global cap, which guarantees room for somebody else. Generous
 rather than tight for two reasons: every connection on the loopback listener
 shares one peer address, so a small share would act as a global cap on all local
-tooling; and a client may legitimately open several sockets at once — the soak
-harness's answer storm opens twenty deliberately, because pipelining them down
-one socket would not test the race it exists to test.
+tooling; and a client may legitimately open several sockets at once.
 
 **Queues.** Each IPC connection's writer is fed by a bounded channel. A client
 that stops reading — a `codeconnect ls` suspended with ctrl-Z, a supervisor whose process
@@ -1852,7 +1812,6 @@ for](#what-the-phone-can-ask-for).
 
 ```sh
 cargo test                        # the workspace suite, including fixture replay
-soak/run.sh                       # the live gauntlet, against a real session
 ```
 
 On Linux, run the suite with `TMPDIR` set to a folder you own: the tests make

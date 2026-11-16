@@ -210,22 +210,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ccsoak"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "base64",
- "futures-util",
- "libc",
- "protocol",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

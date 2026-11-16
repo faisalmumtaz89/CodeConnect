@@ -13,9 +13,9 @@ prefix="${CODECONNECT_HOME:-$HOME/.codeconnect}"
 bin="$prefix/bin"
 
 echo "building release binaries…"
-# Named explicitly rather than building the whole workspace: `soak/` is a test
-# harness, and there is no reason for `./install.sh` to spend a minute of LTO on
-# something that never ships.
+# Named explicitly rather than building the whole workspace, which also builds
+# binaries that never ship (demo-daemon, push-relay): no reason for
+# `./install.sh` to spend LTO on them.
 cargo build --release --manifest-path "$here/Cargo.toml" \
     --bin codeconnect --bin ccd --bin cc-hook
 

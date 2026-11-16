@@ -9,7 +9,6 @@ members = [
     "demo-daemon",
     "push-core",
     "push-relay",
-    "soak",
 ]
 
 [workspace.package]
