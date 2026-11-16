@@ -173,7 +173,7 @@
         {
           "kind": "session_end",
           "link": null,
-          "source_event_id": "exit:{uid}",
+          "source_event_id": "exit:{uid}:{leader}",
           "turn_id": null
         }
       ],
@@ -249,6 +249,38 @@
     "last_seq": 0,
     "lifecycle": "live",
     "link": "attached",
+    "project_label": "project",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T00:00:00Z"
+  },
+  "session_summary_ended_by_end_run": {
+    "agent": "codex",
+    "blocked_on": [],
+    "codex_link": "none",
+    "codex_thread_id": "01a01282-ba87-7660-9f8d-05e2219cd505",
+    "created_at": "2026-11-15T00:00:00Z",
+    "cwd": "/Users/person/project",
+    "last_seq": 0,
+    "lifecycle": "exited",
+    "link": "detached",
+    "project_label": "project",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T00:00:00Z"
+  },
+  "session_summary_relaunchable": {
+    "agent": "codex",
+    "blocked_on": [],
+    "codex_link": "bound_not_started",
+    "codex_thread_id": "thr-relaunchable",
+    "created_at": "2026-11-15T00:00:00Z",
+    "cwd": "/Users/person/project",
+    "last_seq": 0,
+    "lifecycle": "exited",
+    "link": "detached",
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

@@ -36,6 +36,11 @@
 //! later messages and End run reach the run through its link too ([`LinkCommand`]). A message
 //! is a `turn/start` under its own uuid, which Codex runs as a new turn or adds to the running
 //! one; it is settled by what Codex then records of it ([`compose`], [`heard`]).
+//!
+//! A run whose app-server ended without ccd stopping it ("Stopped: its process ended": a crash,
+//! or a Mac restart) is relaunched by the person's next message, never at ccd start
+//! ([`relaunch`], P3 R4): its app-server is launched again into the run's folder, its thread
+//! resumed as a reconnect resumes it, and the message sent on the new link.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -72,7 +77,9 @@ const POLL: Duration = Duration::from_millis(50);
 /// noclobber lets only one writer do, then become codex.
 const CLAIM: &str = r#"cd "$1" || exit 1; set -C; echo $$ > as.pid || exit 1; shift; exec "$@""#;
 
-/// One Codex start, as the app asked for it and the checks before the row resolved it.
+/// One Codex start, as the app asked for it and the checks before the row resolved it. A
+/// relaunch's launch is one too, asked for by the message that relaunches the run
+/// ([`relaunch`]).
 pub(crate) struct Run<'a> {
     /// This daemon's state folder, which holds `runs/`.
     pub root: &'a Path,
@@ -165,7 +172,15 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     }
     let deadline = Instant::now() + timeout;
     let mut launched = None;
-    match bring_up(daemon, &uid, &run, &folders, deadline, &mut launched).await {
+    let dir = crate::claude_host::run_dir(run.root, &uid);
+    let brought_up = match crate::start_session::make_run_dir(run.root, &dir) {
+        Ok(log) => bring_up(daemon, &uid, &run, &folders, log, deadline, &mut launched).await,
+        Err(err) => Err(format!(
+            "could not make the run's folder {}: {err}",
+            dir.display()
+        )),
+    };
+    match brought_up {
         Ok(client) => {
             let (leader, boot) = launched.expect("an app-server that answered was recorded");
             let send = FirstSend {
@@ -274,7 +289,17 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
         Ok(thread) if advanced => {
             daemon.mail_run_live(&uid).await;
             let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
-            link(daemon, uid, thread, client, adapter, None, HashMap::new()).await;
+            link(
+                daemon,
+                uid,
+                thread,
+                client,
+                adapter,
+                None,
+                HashMap::new(),
+                None,
+            )
+            .await;
         }
         Ok(_) => {}
     }
@@ -366,7 +391,9 @@ const TOOL_SCAN: Duration = Duration::from_secs(1);
 ///
 /// The daemon's other asks come on the link's command channel ([`LinkCommand`]): a phone's
 /// Interrupt for the turn the link is running, a phone's message for the run's `thread`, and
-/// End run's graceful step. The running turn is the one Codex's last `turn/started` named, or
+/// End run's graceful step. A relaunch's message, `first`, is put on the channel before the
+/// link is in place, so no other ask reaches Codex ahead of it. The running turn is the one
+/// Codex's last `turn/started` named, or
 /// the one a resume found still running, until its `turn/completed`, or until Codex answers an
 /// interrupt of it: Codex answers just before the turn's end. A phone's Stop that Codex has
 /// taken waits for that end; a phone's message that Codex has taken waits for Codex to record
@@ -381,6 +408,7 @@ const TOOL_SCAN: Duration = Duration::from_secs(1);
 /// runs, at each turn's end, and before ccd's own SIGTERM. Once the leader is gone, each
 /// recorded group that still has members and that the warrant allows is sent SIGKILL
 /// ([`end_tools`]).
+#[allow(clippy::too_many_arguments)]
 async fn link(
     daemon: Arc<Daemon>,
     uid: String,
@@ -389,9 +417,13 @@ async fn link(
     mut adapter: CodexAdapter,
     mut owed: Option<Owed>,
     mut cards: HashMap<String, Card>,
+    first: Option<ComposeAsk>,
 ) {
     let (answers, mut asked) = crate::codex_link::answer_channel();
     let (commands, mut commanded) = tokio::sync::mpsc::unbounded_channel();
+    if let Some(ask) = first {
+        let _ = commands.send(LinkCommand::Compose(ask));
+    }
     daemon
         .host_link_attached(&uid, HostLink::Codex(answers, commands))
         .await;
@@ -408,6 +440,7 @@ async fn link(
         .ok()
         .flatten()
         .map(|watch| watch.host);
+    let launch = host.as_ref().map_or(0, launch_generation);
     let mut tools: Vec<ProcessIdentity> = Vec::new();
     record_tools(host.as_ref(), &mut tools);
     let mut scan = tokio::time::interval(TOOL_SCAN);
@@ -418,7 +451,7 @@ async fn link(
             frame = client.server_frame() => {
                 let Some(frame) = frame else { break };
                 if frame.get("id").is_some() {
-                    request(&daemon, &session, &client, &adapter, &mut cards, &frame).await;
+                    request(&daemon, &session, &client, &adapter, &mut cards, &frame, launch).await;
                     continue;
                 }
                 let (thread, turn) = (
@@ -626,9 +659,9 @@ enum Answer {
 /// (`acceptWithExecpolicyAmendment`), nor any other decision that writes Codex's settings.
 const OFFERED_DECISIONS: [&str; 4] = ["accept", "acceptForSession", "decline", "cancel"];
 
-/// A card's id (X7's row): the run, its thread and the request's JSON-RPC id, which a
-/// replay keeps (P7-2).
-fn card_id(uid: &str, thread: &str, wire: &Value) -> Option<String> {
+/// A card's id (X7's row): the run, its thread, the request's JSON-RPC id, which a replay keeps
+/// (P7-2), and the `launch` of the app-server that asked ([`launch_generation`]).
+fn card_id(uid: &str, thread: &str, wire: &Value, launch: u64) -> Option<String> {
     let server_request_id = match wire {
         Value::Number(number) => ServerRequestId::Number(number.as_i64()?),
         Value::String(text) => ServerRequestId::Text(text.clone()),
@@ -638,17 +671,26 @@ fn card_id(uid: &str, thread: &str, wire: &Value) -> Option<String> {
         session_uid: uid.to_string(),
         thread_id: thread.to_string(),
         server_request_id,
-        generation: 0,
+        generation: launch,
     }
     .encode()
     .ok()
+}
+
+/// The generation a card id carries: the launch of the run's app-server, by its leader's
+/// start. Codex numbers its requests from 0 in each app-server, so a relaunched one asks again
+/// under ids an earlier launch used on the same thread, and only the launch tells their cards
+/// apart; a ccd that connects again to the same app-server reads the same leader, and finds the
+/// cards standing from before its restart under the same ids.
+fn launch_generation(leader: &ProcessIdentity) -> u64 {
+    leader.birth.start_sec.unsigned_abs() * 1_000_000 + leader.birth.start_usec.unsigned_abs()
 }
 
 /// One of Codex's requests: a card for a command, a file change or an MCP tool call to
 /// approve, or for Plan mode's questions to answer, and an error answer for anything else,
 /// so no turn waits on a request nobody will answer. A request whose card a restart found
 /// standing is bound to it again, and an answer claimed for it before the restart is sent
-/// once more (R6).
+/// once more (R6). Its card's id carries `launch`, the app-server's ([`launch_generation`]).
 async fn request(
     daemon: &Arc<Daemon>,
     session: &SessionKey,
@@ -656,6 +698,7 @@ async fn request(
     adapter: &CodexAdapter,
     cards: &mut HashMap<String, Card>,
     frame: &Value,
+    launch: u64,
 ) {
     let uid = &session.uid;
     let (method, params, wire) = (
@@ -665,7 +708,7 @@ async fn request(
     );
     let id = crate::codex_approval::card_family(method, params).and_then(|family| {
         let thread = params["threadId"].as_str()?;
-        Some((family, card_id(uid, thread, wire)?))
+        Some((family, card_id(uid, thread, wire, launch)?))
     });
     let Some((family, id)) = id else {
         crate::log_info!("{uid}: Codex asked {method}, which has no card; answered with an error");
@@ -1532,7 +1575,7 @@ pub(crate) async fn reconnect(
     .await;
     match resumed {
         Ok(Ok((client, adapter, owed, cards))) => {
-            link(daemon, uid, run.thread, client, adapter, owed, cards).await
+            link(daemon, uid, run.thread, client, adapter, owed, cards, None).await
         }
         Ok(Err(why)) => crate::log_info!("{uid}: not reconnected: {why}"),
         Err(_) => crate::log_info!(
@@ -1557,6 +1600,21 @@ async fn resume(
         .initialize()
         .await
         .map_err(|err| format!("Codex's app-server did not initialize: {err}"))?;
+    let (adapter, owed, cards) = resume_thread(daemon, &client, run, codeconnect).await?;
+    Ok((client, adapter, owed, cards))
+}
+
+/// The run's thread resumed on `client`, connected and initialized: a fresh skills scan, then
+/// `thread/resume` with the preset and the run's thread config, its answer filed. The adapter
+/// told what was filed, the turn the answer reports running owed its follow-up, and the run's
+/// standing cards.
+async fn resume_thread(
+    daemon: &Arc<Daemon>,
+    client: &Client,
+    run: &LiveCodexRun,
+    codeconnect: &Path,
+) -> Result<(CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
+    let uid = &run.host.session_uid;
     let folders = folders(&run.cwd, daemon.config.git_bin.as_deref()).await?;
     let skills = client
         .call(
@@ -1591,6 +1649,170 @@ async fn resume(
         turn,
         resume: params,
     });
+    Ok((adapter, owed, cards))
+}
+
+/// **The person's message `ask` to the engine run `uid`, relaunching it when its app-server
+/// ended without ccd stopping it** (P3 R4): a run `exited` "Stopped: its process ended"
+/// ([`crate::claude_host::PROCESS_ENDED`]), on a message only, never at ccd start; not one End
+/// run ended, nor a failed start. In one write the run moves to `starting` with its recorded
+/// app-server cleared ([`crate::store::Store::begin_relaunch`]), so a second message meets
+/// `starting` and is refused, and the watch never reads the old app-server as this launch's.
+/// Under the warrant that the old app-server's group, its leader with it, has no member, or
+/// that it was recorded in a boot before this one ([`launch_again`]), its `as.pid` and
+/// `as.sock` are removed; the codex a start would find, with the environment a
+/// start reads, is launched into the run's folder with the run's kept folder answer, appending
+/// to its `host.log` ([`bring_up`]); and the thread is resumed on that connection as a
+/// reconnect resumes it ([`resume_thread`]). The run is then `live`, before its link is in
+/// place, its start is filed under this launch so the apps' timeline reopens, and its [`link`]
+/// takes `ask` as its first command.
+///
+/// Whether the run was one to relaunch; when it was not, nothing was done. Any failure before
+/// the link runs the ladder on what was launched, puts the run back to `exited`
+/// ([`crate::store::Store::undo_relaunch`]), also when the watch found the new app-server gone
+/// first and failed the run for it, and drops `ask` with nothing claimed or sent.
+pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -> bool {
+    let Some((root, launcher)) = daemon.relaunch_from.get() else {
+        return false;
+    };
+    let run = match daemon.db.begin_relaunch(uid.to_string()).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return false,
+        Err(err) => {
+            crate::log_error!("{uid}: could not begin its relaunch: {err:#}");
+            return false;
+        }
+    };
+    let mut launched = None;
+    let relaunched = tokio::time::timeout(
+        crate::start_session::START_TIMEOUT,
+        launch_again(daemon, root, launcher, &run, &ask, &mut launched),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "not relaunched within {} s",
+            crate::start_session::START_TIMEOUT.as_secs()
+        ))
+    });
+    let live = match relaunched {
+        Ok(resumed) => match daemon
+            .db
+            .advance_lifecycle(uid.to_string(), Lifecycle::Starting, Lifecycle::Live)
+            .await
+        {
+            Ok(true) => Ok(resumed),
+            Ok(false) => Err("the run left `starting` while it was relaunched".to_string()),
+            Err(err) => Err(format!("could not mark the run live: {err:#}")),
+        },
+        Err(why) => Err(why),
+    };
+    match live {
+        Ok((client, adapter, owed, cards)) => {
+            let (leader, _) = launched.expect("an app-server that answered was recorded");
+            crate::log_info!(
+                "{uid}: relaunched; its app-server's leader is {}",
+                leader.pid
+            );
+            let start = PendingEvent::new(
+                &SessionKey::new(uid, uid),
+                EventKind::SessionStart,
+                json!({"source": "resume"}),
+                Source::Daemon,
+            )
+            .with_source_event_id(format!("start:{uid}:{}", leader.pid));
+            file(daemon, uid, vec![start]).await;
+            tokio::spawn(link(
+                Arc::clone(daemon),
+                uid.to_string(),
+                run.thread,
+                client,
+                adapter,
+                owed,
+                cards,
+                Some(ask),
+            ));
+        }
+        Err(why) => {
+            crate::log_info!("{uid}: not relaunched: {why}");
+            if let Some((leader, boot)) = launched {
+                stop(uid, leader, boot).await;
+            }
+            let launched = launched.map(|(leader, _)| leader);
+            if let Err(err) = daemon
+                .db
+                .undo_relaunch(uid.to_string(), run.host, launched)
+                .await
+            {
+                crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
+            }
+        }
+    }
+    true
+}
+
+/// [`relaunch`]'s steps from its warrant to its resume: the old app-server's group without a
+/// member, `as.pid` and `as.sock` removed, the codex and environment a start reads and
+/// `launcher` as the `codeconnect`, the launch into the run's folder in `root` recorded in
+/// `launched`, and the thread resumed on it.
+///
+/// The group's emptiness is the leader's absence too: ccd launched the leader in a session of
+/// its own, and a session leader cannot leave its group. A group the kernel cannot be asked
+/// about counts as one with a member. When the run's recorded boot is not this boot, the old
+/// leader and its group cannot have survived the restart and their numbers mean nothing now, so
+/// the group is not consulted; a boot that could not be read, then or now, is no proof of a
+/// restart, and the group is asked.
+async fn launch_again(
+    daemon: &Arc<Daemon>,
+    root: &Path,
+    launcher: &Result<PathBuf, String>,
+    run: &LiveCodexRun,
+    ask: &ComposeAsk,
+    launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
+) -> Result<(Client, CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
+    let uid = &run.host.session_uid;
+    let old = run.host.host.pid;
+    let restarted = matches!(
+        (run.host.boot, protocol::proc_identity::boot_identity()),
+        (Some(then), Some(now)) if then != now
+    );
+    if !restarted && group_has_members(old) {
+        return Err(format!("its app-server's group {old} still has a member"));
+    }
+    let dir = crate::claude_host::run_dir(root, uid);
+    for name in ["as.pid", "as.sock"] {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("could not remove its {name}: {err}")),
+        }
+    }
+    let environment = crate::start_session::phone_environment();
+    let codex = crate::start_session::codex_probe(&environment, daemon.config.codex_bin.as_deref())
+        .await
+        .map_err(|(_, why)| why)?;
+    let codeconnect = launcher.clone()?;
+    let git_bin = daemon.config.git_bin.as_deref();
+    let folders = folders(&run.cwd, git_bin).await?;
+    let log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("host.log"))
+        .map_err(|err| format!("could not open its host.log: {err}"))?;
+    let launch = Run {
+        root,
+        request_id: &ask.request_id,
+        cwd: &run.cwd,
+        prompt: &ask.text,
+        model: None,
+        codex: &codex.path,
+        codeconnect: &codeconnect,
+        git_bin,
+        environment: &environment,
+        trust: run.trust,
+    };
+    let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
+    let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
+    let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect).await?;
     Ok((client, adapter, owed, cards))
 }
 
@@ -1771,22 +1993,34 @@ fn trust_level(trust: Trust) -> &'static str {
     }
 }
 
-/// The run's folder, its app-server launched and recorded in `launched`, connected and
-/// initialized, by `deadline`.
+/// The run's app-server launched into the run's folder, its output going to `log`, recorded
+/// in `launched`, connected and initialized, by `deadline`. A start makes the folder and its
+/// `host.log` first; a relaunch launches into the folder the run already has, `log` its
+/// `host.log` opened to append ([`relaunch`]).
+///
+/// **What a launch reads in the run's folder**, so a relaunch reads nothing of an earlier
+/// launch's as its own: `as.pid`, which only the claim reads, its noclobber refusing the launch
+/// while one exists (ccd's leader is the pid it spawned, never the file); `as.sock`, which codex
+/// listens on and ccd dials until it answers; and `host.log`, whose last line is the launch's
+/// failure when it ends before listening, read only past the length it had at the launch. A
+/// relaunch removes `as.pid` and `as.sock` first, by exact path, under the warrant that the
+/// launch before it is gone; nothing else in the folder is read.
 async fn bring_up(
     daemon: &Arc<Daemon>,
     uid: &str,
     run: &Run<'_>,
     folders: &[PathBuf],
+    log: std::fs::File,
     deadline: Instant,
     launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
 ) -> Result<Client, String> {
     let dir = crate::claude_host::run_dir(run.root, uid);
-    let log = crate::start_session::make_run_dir(run.root, &dir)
-        .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?;
-    let socket = dir.join("as.sock");
+    let since = log
+        .metadata()
+        .map_err(|err| format!("could not read the run's host.log: {err}"))?
+        .len();
     let mut listen = OsString::from("unix://");
-    listen.push(&socket);
+    listen.push(dir.join("as.sock"));
     let projects = format!("projects={}", launch_projects(folders, run.trust));
     let mut child = crate::start_session::spawn_detached(
         run.environment,
@@ -1808,20 +2042,23 @@ async fn bring_up(
         log,
     )
     .map_err(|err| format!("could not run the login shell: {err}"))?;
-    let attached = attach(daemon, uid, &dir, &socket, &mut child, deadline, launched).await;
+    let attached = attach(daemon, uid, &dir, since, &mut child, deadline, launched).await;
     crate::start_session::reap(child);
     attached
 }
 
+/// [`bring_up`]'s launch recorded, then its `as.sock` dialled and initialized; `since` is where
+/// the launch's own output begins in `host.log`.
 async fn attach(
     daemon: &Arc<Daemon>,
     uid: &str,
     dir: &Path,
-    socket: &Path,
+    since: u64,
     child: &mut tokio::process::Child,
     deadline: Instant,
     launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
 ) -> Result<Client, String> {
+    let socket = dir.join("as.sock");
     let pid = child
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
@@ -1839,11 +2076,12 @@ async fn attach(
         .map_err(|err| format!("could not record the app-server: {err:#}"))?;
 
     let client = loop {
-        match tokio::time::timeout_at(deadline, crate::codex_client::connect(socket)).await {
+        match tokio::time::timeout_at(deadline, crate::codex_client::connect(&socket)).await {
             Ok(Ok(client)) => break client,
             Ok(Err(err)) if not_listening(&err) => {
                 crate::start_session::give_up_if_ended(
                     dir,
+                    since,
                     child,
                     deadline,
                     "Codex's app-server did not listen",
@@ -1967,12 +2205,17 @@ mod tests {
     /// `/usr/bin/false` for codex (config.json's `codex_bin`), so a test whose wake rule fires
     /// never runs a real codex.
     fn daemon_on(root: &Path) -> Arc<Daemon> {
+        daemon_with(root, "/usr/bin/false")
+    }
+
+    /// [`daemon_on`], with `codex` as config.json's `codex_bin`.
+    fn daemon_with(root: &Path, codex: &str) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
         let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
         Box::leak(Box::new(transcript_rx));
         Daemon::new(
             Config {
-                codex_bin: Some("/usr/bin/false".into()),
+                codex_bin: Some(codex.into()),
                 ..Config::default()
             },
             Arc::new(store),
@@ -1988,13 +2231,15 @@ mod tests {
 
     /// A stand-in codex running `script`, launched as codex is: in the run's folder, after
     /// the claim, with codex's arguments. It keeps its arguments in the run's `argv` and
-    /// counts its launches in `<root>/launches`.
+    /// counts its launches in `<root>/launches`. Asked its version, as a start's check asks
+    /// codex, it answers 0.167.0 and does nothing else.
     fn stand_in(rig: &Rig, script: &str) -> PathBuf {
         let path = rig.root.join("stand-in-codex");
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\nprintf '%s\\0' \"$@\" > argv\necho launch >> '{}'\n{script}\n",
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'codex-cli 0.167.0'; exit 0; }}\n\
+                 printf '%s\\0' \"$@\" > argv\necho launch >> '{}'\n{script}\n",
                 rig.root.join("launches").display()
             ),
         )
@@ -3575,9 +3820,17 @@ mod tests {
         tell(&mut ws, &asked_once).await;
         assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
         let (restarted, ws) = restarted_under(&rig, ws).await;
+        let host = restarted
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host;
         restarted
             .end_hosted_run(
                 &uid,
+                host,
                 None,
                 Lifecycle::Live,
                 Lifecycle::Exited,
@@ -3957,6 +4210,9 @@ mod tests {
     const QUESTION_CARD_UID: &str = "01K1B3XQ8ZC0DE5FGH7QCARD00";
     /// The one clock read in the file, replaced with a fixed stamp.
     const QUESTION_CARD_AT: &str = "2026-11-16T00:00:00.000Z";
+    /// The launch the file's card id names ([`launch_generation`]): an app-server whose leader
+    /// started at [`QUESTION_CARD_AT`], 1794787200 s.
+    const QUESTION_CARD_LAUNCH: u64 = 1_794_787_200_000_000;
     const QUESTION_CARD: &str = include_str!("../../../fixtures/codex/question-card-wire.json");
     const REGENERATE_QUESTION_CARD: &str =
         "cargo test -p ccd --bin ccd -- --ignored regenerate_the_codex_question_card_fixture";
@@ -3979,8 +4235,8 @@ mod tests {
     /// [`PLAN_QUESTION`], answered from an app with `decision` and then resolved by Codex, as the
     /// `event` frames a subscribed app is sent, in seq order: the link's `attached`, the card
     /// (`approval_request`), its resolution (`approval_resolved`). The run's uid is written
-    /// [`QUESTION_CARD_UID`], the card's request id the one the daemon derives under that uid,
-    /// and each clock read [`QUESTION_CARD_AT`].
+    /// [`QUESTION_CARD_UID`], the card's request id the one the daemon derives under that uid
+    /// and [`QUESTION_CARD_LAUNCH`], and each clock read [`QUESTION_CARD_AT`].
     async fn question_card_run(decision: AnswerDecision) -> serde_json::Value {
         let rig = rig();
         let (asked, thread, turn) = plan_question();
@@ -4014,7 +4270,13 @@ mod tests {
             .collect();
         drop(ws);
         end_run(&rig, &uid).await;
-        let pinned = card_id(QUESTION_CARD_UID, &thread, &asked["id"]).unwrap();
+        let pinned = card_id(
+            QUESTION_CARD_UID,
+            &thread,
+            &asked["id"],
+            QUESTION_CARD_LAUNCH,
+        )
+        .unwrap();
         let mut out: serde_json::Value = serde_json::from_str(
             &json!({ "frames": frames })
                 .to_string()
@@ -5222,7 +5484,7 @@ mod tests {
     }
 
     /// The run `uid`'s events filed after the seq `after`, each as a phone reads its kind, source event id and turn,
-    /// the run's uid written `{uid}`; and the last seq among them.
+    /// the run's uid written `{uid}` and an end's launch `{leader}`; and the last seq among them.
     async fn events_after_as_sent(
         daemon: &Daemon,
         uid: &str,
@@ -5237,9 +5499,13 @@ mod tests {
         let sent = events
             .into_iter()
             .map(|event| {
+                let id = event.source_event_id.map(|id| match id.replace(uid, "{uid}") {
+                    end if end.starts_with("exit:{uid}:") => "exit:{uid}:{leader}".to_string(),
+                    id => id,
+                });
                 json!({
                     "kind": event.kind.as_str(),
-                    "source_event_id": event.source_event_id.map(|id| id.replace(uid, "{uid}")),
+                    "source_event_id": id,
                     "turn_id": event.turn_id,
                     "link": event.payload.get("link").filter(|_| event.kind == EventKind::LinkState),
                 })
@@ -5332,12 +5598,23 @@ mod tests {
         json!(steps)
     }
 
+    /// The summary, as the fleet sends it, of a run started on the engine whose app-server ended
+    /// without ccd stopping it: one the person's next message relaunches.
+    async fn relaunchable_summary() -> serde_json::Value {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-relaunchable", "thr-relaunchable", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        summary_as_sent(&rig.daemon, &uid).await
+    }
+
     /// **A message to a run started on the engine, then Stop, as this build files them**: the
     /// person's row with its request id, and the `send_not_sent` notice for it, under
     /// `fixtures/claude/minor-37-wire.json`'s keys and in its shape. Beside them, what the apps
     /// decide on whether to offer the composer and Stop: the capabilities a paired phone is
-    /// offered, the run's summary as the fleet sends it while it is live and while it is
-    /// stopping, and the fleet over a run's whole life ([`derived_fleet_over_a_run`]).
+    /// offered, the run's summary as the fleet sends it while it is live, while it is stopping
+    /// and once End run has ended it, the summary of a run a message relaunches
+    /// ([`relaunchable_summary`]), and the fleet over a run's whole life
+    /// ([`derived_fleet_over_a_run`]).
     async fn derived_compose_stop_wire() -> serde_json::Value {
         let fleet_over_a_run = derived_fleet_over_a_run().await;
         let rig = rig();
@@ -5365,12 +5642,16 @@ mod tests {
         );
         let ending = summary_as_sent(&rig.daemon, &uid).await;
         drop(ws);
+        row_once(&rig, &uid, Lifecycle::Exited).await;
+        let ended = summary_as_sent(&rig.daemon, &uid).await;
         end_run(&rig, &uid).await;
         assert_eq!((person_row.len(), send_not_sent.len()), (1, 1));
         json!({
             "hello_ack_capabilities": crate::ws_server::capabilities(&rig.daemon, false, false, true),
             "session_summary": live,
             "session_summary_stopping": ending,
+            "session_summary_ended_by_end_run": ended,
+            "session_summary_relaunchable": relaunchable_summary().await,
             "fleet_over_a_run": fleet_over_a_run,
             "person_row": person_row[0],
             "send_not_sent": send_not_sent[0].1,
@@ -5981,5 +6262,788 @@ mod tests {
         );
         end_tools("warrant", &[recorded], boot);
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    // ------------------------------- a message's relaunch (X5-2)
+
+    /// A daemon on the rig's store whose codex is the rig's stand-in and whose runs are in the
+    /// rig's folder: one a message's relaunch runs on, as a ccd does after an app-server's end.
+    fn relauncher(rig: &Rig) -> Arc<Daemon> {
+        let codex = rig.root.join("stand-in-codex").display().to_string();
+        let daemon = daemon_with(&rig.root, &codex);
+        daemon
+            .relaunch_from
+            .set((rig.root.clone(), Ok(PathBuf::from(CODECONNECT))))
+            .unwrap();
+        daemon
+    }
+
+    /// The run `uid`'s app-server ended without ccd stopping it: its recorded group killed, the
+    /// stand-in's end of its link closed, and the run `exited`. The leader that ended.
+    async fn app_server_ended(rig: &Rig, uid: &str, ws: Socket) -> i32 {
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.to_string())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        // SAFETY: kill(2) of the group the run's stand-in leads.
+        unsafe { libc::kill(-leader, libc::SIGKILL) };
+        drop(ws);
+        assert_eq!(
+            row_once(rig, uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+        leader
+    }
+
+    /// The live run `uid` ended "Stopped: its process ended" while its app-server's group still
+    /// has a member, which only the warrant then stands against: its recorded app-server.
+    async fn ended_alive(rig: &Rig, uid: &str) -> crate::store::WatchedHost {
+        let watch = rig
+            .daemon
+            .db
+            .watched_host(uid.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        let ended = rig
+            .daemon
+            .end_hosted_run(
+                uid,
+                watch.host,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                json!({"exit_code": null, "reason": crate::claude_host::PROCESS_ENDED}),
+            )
+            .await
+            .unwrap();
+        assert!(ended);
+        watch
+    }
+
+    /// The stand-in's side of the `n`th launch: once codex is launched that many times, it
+    /// listens where the app-server would, takes ccd's connection, and answers `initialize`,
+    /// `skills/list` and `thread/resume`, the last with `resume_answer`. The connection, and the
+    /// `thread/resume` ccd sent.
+    async fn relaunch_served(
+        rig: &Rig,
+        n: usize,
+        resume_answer: serde_json::Value,
+    ) -> (Socket, serde_json::Value) {
+        let dir = run_folder(rig).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while launches(rig) < n {
+            assert!(Instant::now() < deadline, "codex was not launched again");
+            tokio::time::sleep(POLL).await;
+        }
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+            .await
+            .expect("ccd connected to the new launch")
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let init = asked(&mut ws, "initialize").await;
+        answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+        let skills = asked(&mut ws, "skills/list").await;
+        answer(&mut ws, &skills, json!({"data": []})).await;
+        let resumed = asked(&mut ws, "thread/resume").await;
+        answer(&mut ws, &resumed, resume_answer).await;
+        (ws, resumed)
+    }
+
+    /// A phone's message to the run `uid` on `daemon`, answered within 20 s.
+    async fn said_now(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+    ) -> protocol::ws::ComposeResult {
+        let text = "are you still there";
+        let hash = protocol::hash::compose_hash(uid, text);
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            daemon.compose(uid, request_id, text.into(), &hash),
+        )
+        .await
+        .expect("the message was answered at once")
+    }
+
+    fn engine_no_connection() -> protocol::ws::ComposeResult {
+        protocol::ws::ComposeResult::Rejected {
+            reason: crate::codex_refusals::ENGINE_NO_CONNECTION.into(),
+        }
+    }
+
+    /// The source ids of the run's filed ends, in order.
+    async fn ends_of(daemon: &Daemon, uid: &str) -> Vec<String> {
+        daemon
+            .db
+            .events_after(uid.to_string(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::SessionEnd)
+            .filter_map(|event| event.source_event_id)
+            .collect()
+    }
+
+    /// **X5-2 G1: a message relaunches an engine run whose app-server ended without ccd
+    /// stopping it**, into the folder and the log the run kept. The run reads
+    /// `bound_not_started`. The message launches codex again with codex's arguments and the
+    /// run's own folder answer, its claim the new leader ccd records, resumes the run's thread
+    /// with that answer on the new connection, and is sent there once: `Started`, the run `live`
+    /// and `subscribed`, its start filed under the new launch. When the new launch's app-server
+    /// ends in turn, its end is filed beside the first, under its own id.
+    #[tokio::test]
+    async fn a_message_relaunches_an_engine_run_whose_app_server_ended() {
+        use protocol::event::CodexLink;
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let after = capture["answerAfter"]["result"].clone();
+        let thread = after["thread"]["id"].as_str().unwrap().to_string();
+        let first = after["thread"]["turns"][0]["id"].as_str().unwrap();
+        let (uid, ws) = engine_run_as(
+            &rig,
+            "req-relaunch",
+            &thread,
+            first,
+            "exec sleep 30",
+            Trust::Trusted,
+        )
+        .await;
+        let ended = app_server_ended(&rig, &uid, ws).await;
+        let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        let earlier_log = std::fs::read(dir.join("host.log")).unwrap();
+        let daemon = relauncher(&rig);
+        assert_eq!(
+            summary_of(&daemon, &uid).await.codex_link,
+            CodexLink::BoundNotStarted
+        );
+
+        let mut said = saying(&daemon, &uid, "say-again", "are you still there");
+        let (mut ws, resumed) = tokio::select! {
+            served = relaunch_served(&rig, 2, after.clone()) => served,
+            refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let sent = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-relaunched"}})).await;
+        assert_eq!(
+            said.await.unwrap(),
+            protocol::ws::ComposeResult::Started {
+                turn_id: "turn-relaunched".into()
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next_frame(&mut ws))
+                .await
+                .is_err(),
+            "ccd sent the app-server more than the one message"
+        );
+
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let argv: Vec<String> = std::fs::read(dir.join("argv"))
+            .unwrap()
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+            .collect();
+        assert_eq!(
+            argv,
+            [
+                "-c".to_string(),
+                format!(r#"projects={{ "{real}" = {{ trust_level = "trusted" }} }}"#),
+                "app-server".into(),
+                "--listen".into(),
+                format!("unix://{}", dir.join("as.sock").display()),
+            ]
+        );
+        assert_eq!(resumed["params"]["threadId"], thread);
+        assert_eq!(
+            resumed["params"]["config"]["projects"],
+            json!({real: {"trust_level": "trusted"}})
+        );
+        assert_eq!(sent["params"]["threadId"], thread);
+        assert_eq!(
+            sent["params"]["input"],
+            json!([{"type": "text", "text": "are you still there"}])
+        );
+        let relaunched = daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        let claimed: i32 = std::fs::read_to_string(dir.join("as.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_ne!(relaunched, ended);
+        assert_eq!(claimed, relaunched, "the new claim is the recorded leader");
+        assert!(
+            std::fs::read(dir.join("host.log"))
+                .unwrap()
+                .starts_with(&earlier_log),
+            "the run's log was not kept"
+        );
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Live).await.lifecycle,
+            Lifecycle::Live
+        );
+        assert_eq!(
+            summary_of(&daemon, &uid).await.codex_link,
+            CodexLink::Subscribed
+        );
+        let start = format!("start:{uid}:{relaunched}");
+        assert_eq!(count(&filed_until(&daemon, &uid, &start).await, &start), 1);
+
+        let again = app_server_ended(&rig, &uid, ws).await;
+        assert_eq!(
+            ends_of(&daemon, &uid).await,
+            [format!("exit:{uid}:{ended}"), format!("exit:{uid}:{again}")]
+        );
+        assert_eq!(
+            summary_of(&daemon, &uid).await.codex_link,
+            CodexLink::BoundNotStarted
+        );
+    }
+
+    /// **X5-2 G2: a run ended by End run is not relaunched.** It reads `none`, and a message to
+    /// it is refused with nothing launched.
+    #[tokio::test]
+    async fn a_run_ended_by_end_run_is_not_relaunched_by_a_message() {
+        use protocol::event::CodexLink;
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-ended", "thr-ended", "turn-1").await;
+        assert_eq!(
+            rig.daemon.stop_run(&uid).await,
+            protocol::ws::StopRunResult::Stopping
+        );
+        drop(ws);
+        row_once(&rig, &uid, Lifecycle::Exited).await;
+        let daemon = relauncher(&rig);
+        assert_eq!(summary_of(&daemon, &uid).await.codex_link, CodexLink::None);
+        assert_eq!(
+            said_now(&daemon, &uid, "say-ended").await,
+            engine_no_connection()
+        );
+        assert_eq!(launches(&rig), 1);
+    }
+
+    /// A message refused by the warrant on the run `uid`, whose recorded app-server `watch`
+    /// still has a member: nothing launched, `as.pid` and `as.sock` left, and the run `exited`
+    /// again with `watch`'s app-server recorded.
+    async fn refused_by_the_warrant(rig: &Rig, uid: &str, watch: &crate::store::WatchedHost) {
+        let daemon = relauncher(rig);
+        assert_eq!(
+            said_now(&daemon, uid, "say-warrant").await,
+            engine_no_connection()
+        );
+        let dir = crate::claude_host::run_dir(&rig.root, uid);
+        let claimed: i32 = std::fs::read_to_string(dir.join("as.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(launches(rig), 1);
+        assert_eq!(claimed, watch.host.pid);
+        assert!(dir.join("as.sock").exists());
+        let back = daemon
+            .db
+            .watched_host(uid.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((back.lifecycle, back.host), (Lifecycle::Exited, watch.host));
+    }
+
+    /// **X5-2 G2: a run whose recorded app-server still runs is not relaunched.**
+    #[tokio::test]
+    async fn a_run_whose_app_server_still_runs_is_not_relaunched() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-alive", "thr-alive", "turn-1").await;
+        let watch = ended_alive(&rig, &uid).await;
+        refused_by_the_warrant(&rig, &uid, &watch).await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **X5-2 G2: a run whose app-server's leader is gone while its group lives on is not
+    /// relaunched.**
+    #[tokio::test]
+    async fn a_run_whose_app_servers_group_outlived_its_leader_is_not_relaunched() {
+        let rig = rig();
+        let (uid, ws) =
+            engine_run_on(&rig, "req-group", "thr-group", "turn-1", "sleep 30 &\nwait").await;
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host;
+        // SAFETY: kill(2) of the stand-in's leader alone; its child stays in its group.
+        unsafe { libc::kill(leader.pid, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while liveness(&leader) != Liveness::Gone {
+            assert!(Instant::now() < deadline, "the leader did not end");
+            tokio::time::sleep(POLL).await;
+        }
+        assert!(group_alive(leader.pid));
+        let watch = ended_alive(&rig, &uid).await;
+        refused_by_the_warrant(&rig, &uid, &watch).await;
+        // SAFETY: kill(2) of the group the stand-in's child is left in.
+        unsafe { libc::kill(-leader.pid, libc::SIGKILL) };
+        drop(ws);
+    }
+
+    /// **X5-2 G2: a relaunch whose launch fails puts the run back**: the message is refused,
+    /// nothing is claimed, and the run is `exited` and relaunchable again.
+    #[tokio::test]
+    async fn a_relaunch_that_fails_puts_the_run_back_with_nothing_claimed() {
+        use protocol::event::CodexLink;
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-fails", "thr-fails", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        stand_in(&rig, "echo codex did not start >&2\nexit 1");
+        let daemon = relauncher(&rig);
+        assert_eq!(
+            said_now(&daemon, &uid, "say-fails").await,
+            engine_no_connection()
+        );
+        assert_eq!(launches(&rig), 2);
+        assert_eq!(said(&daemon, &uid, "say-fails").await, None);
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+        assert_eq!(
+            summary_of(&daemon, &uid).await.codex_link,
+            CodexLink::BoundNotStarted
+        );
+    }
+
+    /// **DC4: a launch into a folder whose `host.log` holds an earlier launch's output reads only
+    /// its own.** A launch that ends without a word is told so, never the earlier launch's last
+    /// line.
+    #[tokio::test]
+    async fn a_launch_into_a_kept_folder_reads_only_its_own_log() {
+        use std::io::Write;
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-log", "thr-log", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        std::fs::remove_file(dir.join("as.pid")).unwrap();
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("host.log"))
+            .unwrap();
+        writeln!(log, "an earlier launch's last words").unwrap();
+        let codex = stand_in(&rig, "exit 1");
+        let mut launched = None;
+        let failed = bring_up(
+            &rig.daemon,
+            &uid,
+            &run(&rig, "req-log", &codex),
+            &[],
+            log,
+            Instant::now() + Duration::from_secs(20),
+            &mut launched,
+        )
+        .await;
+        let why = failed.err().expect("the launch ended at once");
+        assert!(!why.contains("earlier launch"), "{why}");
+        assert!(why.starts_with("the agent host ended"), "{why}");
+    }
+
+    /// **X5-2 G2, in the store: two messages meet one swap.** The first message's swap moves
+    /// the run to `starting`; a second message is refused with nothing launched, and its own
+    /// swap finds nothing to relaunch.
+    #[tokio::test]
+    async fn a_second_message_during_a_relaunch_is_refused() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-two", "thr-two", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        let daemon = relauncher(&rig);
+        assert!(daemon
+            .db
+            .begin_relaunch(uid.clone())
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            said_now(&daemon, &uid, "say-second").await,
+            engine_no_connection()
+        );
+        assert_eq!(daemon.db.begin_relaunch(uid.clone()).await.unwrap(), None);
+        assert_eq!(launches(&rig), 1);
+    }
+
+    /// **X5-2 G2, in the store: a delete and a relaunch meet in one order or the other.** A run
+    /// deleted first leaves nothing to relaunch; a run whose relaunch has begun is not deleted.
+    #[tokio::test]
+    async fn a_delete_before_or_after_the_swap_leaves_one_of_the_two() {
+        use crate::store::DeleteOutcome;
+        let deleted_first = rig();
+        let (uid, ws) = engine_run(&deleted_first, "req-del-1", "thr-del-1", "turn-1").await;
+        app_server_ended(&deleted_first, &uid, ws).await;
+        let db = &deleted_first.daemon.db;
+        assert!(matches!(
+            db.delete_exited_session(uid.clone()).await.unwrap(),
+            DeleteOutcome::Deleted { .. }
+        ));
+        assert_eq!(db.begin_relaunch(uid).await.unwrap(), None);
+
+        let swapped_first = rig();
+        let (uid, ws) = engine_run(&swapped_first, "req-del-2", "thr-del-2", "turn-1").await;
+        app_server_ended(&swapped_first, &uid, ws).await;
+        let db = &swapped_first.daemon.db;
+        assert!(db.begin_relaunch(uid.clone()).await.unwrap().is_some());
+        assert_eq!(
+            db.delete_exited_session(uid).await.unwrap(),
+            DeleteOutcome::NotExited {
+                lifecycle: "starting".into()
+            }
+        );
+    }
+
+    /// **X5-2 G2, DC1: the watch between the swap and the new leader's record leaves the
+    /// relaunch alone.** With the old app-server cleared at the swap, the watch finds no host to
+    /// check, and the run stays `starting` with no end filed.
+    #[tokio::test]
+    async fn the_watch_between_the_swap_and_the_record_leaves_the_relaunch_alone() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-watch", "thr-watch", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        assert!(rig
+            .daemon
+            .db
+            .begin_relaunch(uid.clone())
+            .await
+            .unwrap()
+            .is_some());
+        crate::claude_host::end_if_host_gone(&rig.daemon, &uid).await;
+        let row = rig
+            .daemon
+            .db
+            .get_session(uid.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.lifecycle, Lifecycle::Starting);
+        assert_eq!(ends_of(&rig.daemon, &uid).await.len(), 1);
+    }
+
+    /// **X5-2 G2, a Mac restart: a run whose app-server was recorded in an earlier boot is
+    /// relaunched, whatever now holds its old group's number.** A live process group of another
+    /// process has that number; it is not consulted, and nothing of it is signalled.
+    #[tokio::test]
+    async fn a_run_recorded_in_an_earlier_boot_is_relaunched_whatever_holds_its_old_group_number() {
+        use std::os::unix::process::CommandExt;
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-boot", "thr-boot", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        let mut stranger = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = stranger.id() as i32;
+        let now = protocol::proc_identity::boot_identity().unwrap();
+        let earlier = BootIdentity {
+            boot_sec: now.boot_sec - 3600,
+            ..now
+        };
+        let recorded = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        rig.daemon
+            .db
+            .record_host(uid.clone(), recorded, Some(earlier))
+            .await
+            .unwrap();
+        assert!(group_alive(pid), "the old number leads a live group");
+
+        let daemon = relauncher(&rig);
+        let mut said = saying(&daemon, &uid, "say-boot", "are you still there");
+        let resume = json!({"thread": {"id": "thr-boot", "turns": []}});
+        let (mut ws, _) = tokio::select! {
+            served = relaunch_served(&rig, 2, resume) => served,
+            refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let sent = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-after-boot"}})).await;
+        assert_eq!(
+            said.await.unwrap(),
+            protocol::ws::ComposeResult::Started {
+                turn_id: "turn-after-boot".into()
+            }
+        );
+        assert!(
+            stranger.try_wait().unwrap().is_none(),
+            "the process holding the old number was signalled"
+        );
+        stranger.kill().unwrap();
+        stranger.wait().unwrap();
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// The run `uid` on `thread`, whose app-server ended, relaunched by a message whose turn is
+    /// `turn`: the daemon it was relaunched on, and the stand-in's end of the new link.
+    async fn relaunched(rig: &Rig, uid: &str, thread: &str, turn: &str) -> (Arc<Daemon>, Socket) {
+        let launch = launches(rig) + 1;
+        let daemon = relauncher(rig);
+        let mut said = saying(&daemon, uid, "say-relaunched", "are you still there");
+        let resume = json!({"thread": {"id": thread, "turns": []}});
+        let (mut ws, _) = tokio::select! {
+            served = relaunch_served(rig, launch, resume) => served,
+            refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let sent = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &sent, json!({"turn": {"id": turn}})).await;
+        let said = said.await.unwrap();
+        assert!(
+            matches!(said, protocol::ws::ComposeResult::Started { .. }),
+            "{said:?}"
+        );
+        (daemon, ws)
+    }
+
+    /// A process group whose leader is gone while one member, which notes each SIGTERM in
+    /// `<dir>/term` and lives on, keeps the group: the leader, as a launch's recorded host. The
+    /// leader is ended only once the member says it is up, in `<dir>/up`.
+    fn group_without_its_leader(dir: &Path) -> ProcessIdentity {
+        use std::os::unix::process::CommandExt;
+        let script = format!(
+            "(trap 'echo term >> {dir}/term' TERM; echo up > {dir}/up; while :; do sleep 0.2; done) & wait",
+            dir = dir.display()
+        );
+        let mut leader = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id() as i32;
+        let host = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !dir.join("up").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the member did not start"
+            );
+            std::thread::sleep(POLL);
+        }
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        host
+    }
+
+    /// A process that ran and has been reaped, its group with it: a launch's recorded host that
+    /// died at once.
+    fn host_gone_with_its_group() -> ProcessIdentity {
+        use std::os::unix::process::CommandExt;
+        let mut leader = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id() as i32;
+        let host = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        host
+    }
+
+    /// **A relaunch whose new app-server dies leaves the run `exited` and relaunchable,
+    /// whichever of the watch and the relaunch's put-back runs first.** The watch
+    /// that read the run `starting` before the put-back changes nothing after it; a watch that
+    /// failed the run first for the relaunch's own app-server is undone by the put-back.
+    #[tokio::test]
+    async fn a_dead_relaunch_ends_exited_whichever_of_the_watch_and_its_undo_runs_first() {
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-r1", "thr-r1", "turn-1").await;
+        app_server_ended(&rig, &uid, ws).await;
+        let db = &rig.daemon.db;
+        let boot = protocol::proc_identity::boot_identity();
+        let lifecycle = || async {
+            db.get_session(uid.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle
+        };
+
+        // The watch reads the run while it is starting, then the relaunch puts it back.
+        let old = db.begin_relaunch(uid.clone()).await.unwrap().unwrap().host;
+        let noted = rig.root.join("term");
+        let dying = group_without_its_leader(&rig.root);
+        db.record_host(uid.clone(), dying, boot).await.unwrap();
+        let watch = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { crate::claude_host::end_if_host_gone(&daemon, &uid).await })
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !noted.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the watch did not reach the ladder"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        assert!(db
+            .undo_relaunch(uid.clone(), old, Some(dying))
+            .await
+            .unwrap());
+        watch.await.unwrap();
+        assert_eq!(
+            lifecycle().await,
+            Lifecycle::Exited,
+            "after the watch ended"
+        );
+
+        // The watch fails the run first, for the relaunch's own app-server, then the put-back.
+        let old = db.begin_relaunch(uid.clone()).await.unwrap().unwrap().host;
+        let dead = host_gone_with_its_group();
+        db.record_host(uid.clone(), dead, boot).await.unwrap();
+        crate::claude_host::end_if_host_gone(&rig.daemon, &uid).await;
+        assert_eq!(
+            lifecycle().await,
+            Lifecycle::Failed,
+            "the watch's own write"
+        );
+        assert!(db
+            .undo_relaunch(uid.clone(), old, Some(dead))
+            .await
+            .unwrap());
+        assert_eq!(lifecycle().await, Lifecycle::Exited);
+        assert!(db.relaunchable(uid.clone()).await.unwrap());
+    }
+
+    /// **After a relaunch, an end found for the old app-server writes nothing.** A watch
+    /// that inspected the dead leader and commits only now, with the run
+    /// relaunched and live on another, is rejected: the run stays `live`, its new link attached,
+    /// and no end is filed.
+    #[tokio::test]
+    async fn a_stale_end_for_the_old_app_server_leaves_a_relaunched_run_live() {
+        use protocol::event::CodexLink;
+        let rig = rig();
+        let (uid, ws) = engine_run(&rig, "req-r2", "thr-r2", "turn-1").await;
+        let old = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host;
+        app_server_ended(&rig, &uid, ws).await;
+        let (daemon, ws) = relaunched(&rig, &uid, "thr-r2", "turn-2").await;
+        let stale = daemon
+            .end_hosted_run(
+                &uid,
+                old,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                json!({"exit_code": null, "reason": crate::claude_host::PROCESS_ENDED}),
+            )
+            .await
+            .unwrap();
+        assert!(!stale, "the stale end was taken");
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Live).await.lifecycle,
+            Lifecycle::Live
+        );
+        assert_eq!(ends_of(&daemon, &uid).await.len(), 1);
+        assert_eq!(
+            summary_of(&daemon, &uid).await.codex_link,
+            CodexLink::Subscribed
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A relaunched run's first approval is a card of its own.** The first
+    /// launch's app-server asked under JSON-RPC id 0 and was answered; the relaunched one, which
+    /// numbers its requests from 0 again, asks under id 0 too. Its card is a new one, filed for
+    /// the apps, and an answer to it reaches Codex.
+    #[tokio::test]
+    async fn a_relaunched_runs_first_approval_is_a_new_card_an_answer_reaches() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[1]["params"]["thread"]["id"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-k1", thread, turn).await;
+        for frame in &frames[1..=17] {
+            tell(&mut ws, frame).await;
+        }
+        let first = cards_of(&rig.daemon, &uid, 1).await.remove(0);
+        let id = &frames[17]["id"];
+        let (result, _) = tokio::join!(answered(&rig.daemon, &uid, &first, "cancel"), async {
+            response_to(&mut ws, id, Duration::from_secs(20)).await;
+            tell(&mut ws, &frames[18]).await;
+        });
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        app_server_ended(&rig, &uid, ws).await;
+
+        let again = "turn-after-relaunch";
+        let (daemon, mut ws) = relaunched(&rig, &uid, thread, again).await;
+        let mut started = frames[16].clone();
+        let mut asked = frames[17].clone();
+        let item = format!("{}-again", asked["params"]["itemId"].as_str().unwrap());
+        started["params"]["turnId"] = json!(again);
+        started["params"]["item"]["id"] = json!(item);
+        asked["params"]["turnId"] = json!(again);
+        asked["params"]["itemId"] = json!(item);
+        assert_eq!(
+            &asked["id"], id,
+            "the relaunched app-server asks under the same id"
+        );
+        tell(&mut ws, &turn_started(thread, again)).await;
+        tell(&mut ws, &started).await;
+        tell(&mut ws, &asked).await;
+        let card = cards_of(&daemon, &uid, 1).await.remove(0);
+        assert_ne!(
+            card.request_id, first.request_id,
+            "the card took the first launch's id"
+        );
+        let perm = format!("perm:{}", card.request_id);
+        assert_eq!(count(&filed_until(&daemon, &uid, &perm).await, &perm), 1);
+        let (result, response) = tokio::join!(answered(&daemon, &uid, &card, "cancel"), async {
+            let response = response_to(&mut ws, id, Duration::from_secs(20)).await;
+            tell(&mut ws, &resolved(&json!(thread), id)).await;
+            response
+        });
+        assert_eq!(
+            response,
+            Some(json!({"id": id, "result": {"decision": "cancel"}}))
+        );
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 }

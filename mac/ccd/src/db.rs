@@ -292,21 +292,14 @@ impl Db {
     pub async fn end_hosted_run(
         &self,
         session_uid: String,
-        cursor: Option<(protocol::proc_identity::ProcessIdentity, u64)>,
+        host: protocol::proc_identity::ProcessIdentity,
+        cursor: Option<u64>,
         from: Lifecycle,
         to: Lifecycle,
         end: PendingEvent,
     ) -> Result<Option<Vec<Event>>> {
-        self.run(move |store| {
-            store.end_hosted_run(
-                &session_uid,
-                cursor.as_ref().map(|(host, seq)| (host, *seq)),
-                from,
-                to,
-                &end,
-            )
-        })
-        .await
+        self.run(move |store| store.end_hosted_run(&session_uid, &host, cursor, from, to, &end))
+            .await
     }
 
     pub async fn watched_hosts(&self) -> Result<Vec<crate::store::WatchedHost>> {
@@ -338,6 +331,38 @@ impl Db {
 
     pub async fn codex_live_runs(&self) -> Result<Vec<crate::store::LiveCodexRun>> {
         self.run(|store| store.codex_live_runs()).await
+    }
+
+    pub async fn relaunchable(&self, session_uid: String) -> Result<bool> {
+        self.run(move |store| store.relaunchable(&session_uid))
+            .await
+    }
+
+    pub async fn begin_relaunch(
+        &self,
+        session_uid: String,
+    ) -> Result<Option<crate::store::LiveCodexRun>> {
+        self.run(move |store| store.begin_relaunch(&session_uid))
+            .await
+    }
+
+    pub async fn undo_relaunch(
+        &self,
+        session_uid: String,
+        old: crate::store::WatchedHost,
+        launched: Option<protocol::proc_identity::ProcessIdentity>,
+    ) -> Result<bool> {
+        self.run(move |store| store.undo_relaunch(&session_uid, &old, launched.as_ref()))
+            .await
+    }
+
+    pub async fn fail_hosted_start(
+        &self,
+        session_uid: String,
+        host: protocol::proc_identity::ProcessIdentity,
+    ) -> Result<bool> {
+        self.run(move |store| store.fail_hosted_start(&session_uid, &host))
+            .await
     }
 
     pub async fn hosted_link(

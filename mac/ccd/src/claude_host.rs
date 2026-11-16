@@ -82,6 +82,11 @@ fn stopped_end() -> serde_json::Value {
     serde_json::json!({ "exit_code": null, "reason": "Stopped" })
 }
 
+/// The end's reason for a `live` run whose host was found gone without ccd stopping it
+/// ([`end_if_host_gone`]): what an engine Codex run's relaunch is read from
+/// ([`crate::codex_host::relaunch`]).
+pub(crate) const PROCESS_ENDED: &str = "Stopped: its process ended";
+
 /// One Claude start, as the app asked for it and the checks before the row resolved it.
 pub(crate) struct Run<'a> {
     /// This daemon's state folder, which holds `runs/`.
@@ -282,6 +287,7 @@ async fn attach(
         }
         crate::start_session::give_up_if_ended(
             dir,
+            0,
             child,
             deadline,
             "the agent host did not write host.json",
@@ -315,6 +321,7 @@ async fn attach(
     let stream = connect(&dir.join("host.sock"), || {
         crate::start_session::give_up_if_ended(
             dir,
+            0,
             child,
             deadline,
             "the agent host did not listen",
@@ -863,7 +870,7 @@ async fn link(
                     (Lifecycle::Live, payload)
                 };
                 match daemon
-                    .end_hosted_run(&uid, Some((host, seq)), from, Lifecycle::Exited, payload)
+                    .end_hosted_run(&uid, host, Some(seq), from, Lifecycle::Exited, payload)
                     .await
                 {
                     Ok(true) => {
@@ -988,9 +995,12 @@ pub(crate) fn term_group(host: &ProcessIdentity, boot: BootIdentity) -> bool {
 /// H7: when the run `uid` has not ended and its recorded host is gone, the ladder on the
 /// host's group, then the run ends. `starting` → `failed`, as a refused start, with no end
 /// in its timeline, which the apps would read as a session that ran and finished; `live` →
-/// `exited` ("Stopped: its process ended"); `stopping` → `exited` ("Stopped"). A host
-/// alive, or one the kernel cannot be asked about, leaves the run as it is; so does one
-/// still a zombie after [`ZOMBIE_WAIT`], for the next sweep.
+/// `exited` ("Stopped: its process ended"); `stopping` → `exited` ("Stopped"). Each write holds
+/// only while the run is still in the lifecycle read and its recorded host is still the one
+/// found gone, so a sweep that read the run before something else moved it (a relaunch's own
+/// put-back, or its new launch) changes nothing. A host alive, or one the kernel cannot be
+/// asked about, leaves the run as it is; so does one still a zombie after [`ZOMBIE_WAIT`],
+/// for the next sweep.
 pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
     let watch = match daemon.db.watched_host(uid.to_string()).await {
         Ok(Some(watch)) => watch,
@@ -1029,7 +1039,7 @@ pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
     if watch.lifecycle == Lifecycle::Starting {
         if let Err(err) = daemon
             .db
-            .set_lifecycle(uid.to_string(), Lifecycle::Failed)
+            .fail_hosted_start(uid.to_string(), watch.host)
             .await
         {
             crate::log_error!("{uid}: could not mark the run failed: {err:#}");
@@ -1039,10 +1049,17 @@ pub(crate) async fn end_if_host_gone(daemon: &Daemon, uid: &str) {
     let payload = if watch.lifecycle == Lifecycle::Stopping {
         stopped_end()
     } else {
-        serde_json::json!({ "exit_code": null, "reason": "Stopped: its process ended" })
+        serde_json::json!({ "exit_code": null, "reason": PROCESS_ENDED })
     };
     if let Err(err) = daemon
-        .end_hosted_run(uid, None, watch.lifecycle, Lifecycle::Exited, payload)
+        .end_hosted_run(
+            uid,
+            watch.host,
+            None,
+            watch.lifecycle,
+            Lifecycle::Exited,
+            payload,
+        )
         .await
     {
         crate::log_error!("{uid}: could not end the run: {err:#}");

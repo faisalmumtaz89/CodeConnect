@@ -215,6 +215,13 @@ pub struct Daemon {
     /// `codeconnect pair` is refused with that reason instead of being handed a
     /// code no phone could use.
     pub listener_refusal: std::sync::OnceLock<String>,
+    /// What a message relaunches an engine Codex run with ([`crate::codex_host::relaunch`]),
+    /// told by `main`: the state folder whose `runs/` holds the runs ccd starts (the one
+    /// [`protocol::root_dir`] names), and the `codeconnect` a run's thread config names for its
+    /// mail server ([`codex_launcher`]), or why there is none. A `OnceLock` for `bind_ip`'s
+    /// reason: a test that never tells it relaunches nothing.
+    pub relaunch_from:
+        std::sync::OnceLock<(std::path::PathBuf, Result<std::path::PathBuf, String>)>,
     /// When this process started, and which job it belongs to. Captured once at
     /// construction: [`SERVICE_LABEL_VAR`] is set by launchd, or by CodeConnect's
     /// systemd unit, at exec, and reading it later would be reading whatever the
@@ -2058,6 +2065,7 @@ impl Daemon {
             machine_id: std::sync::OnceLock::new(),
             exe_identity: std::sync::OnceLock::new(),
             listener_refusal: std::sync::OnceLock::new(),
+            relaunch_from: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
@@ -6214,7 +6222,7 @@ impl Daemon {
     /// earlier than the write is not knowing it. See
     /// [`crate::codex_link::ComposeRequest`].
     pub async fn compose(
-        &self,
+        self: &Arc<Self>,
         session_ref: &str,
         request_id: &str,
         text: String,
@@ -6286,9 +6294,11 @@ impl Daemon {
 
         // **A run started on the engine is spoken to through its own link**, which claims the
         // message, sends it and settles it on Codex's evidence ([`crate::codex_host`]). With
-        // its link not attached, nothing is sent and the person is told so; a message already
-        // sent is answered from the ledger, since startup records it unknown and never sends
-        // it again.
+        // its link not attached, a message already sent is answered from the ledger, since
+        // startup records it unknown and never sends it again; a run whose app-server ended
+        // without ccd stopping it is relaunched by the message, which its new link then sends
+        // ([`crate::codex_host::relaunch`]); otherwise nothing is sent and the person is told
+        // so.
         let engine = match self.inner.lock().await.host_links.get(&session.uid) {
             Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
             _ => None,
@@ -6321,6 +6331,18 @@ impl Daemon {
                 return ComposeResult::Indeterminate {
                     reason: crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
                 };
+            }
+            let (reply, told) = tokio::sync::oneshot::channel();
+            let ask = crate::codex_host::ComposeAsk {
+                request_id: request_id.to_string(),
+                text,
+                claimed_hash,
+                reply,
+            };
+            if crate::codex_host::relaunch(self, &session.uid, ask).await {
+                return Daemon::compose_result(
+                    self.engine_report(&session.uid, request_id, told).await,
+                );
             }
             return refuse(crate::codex_refusals::ENGINE_NO_CONNECTION.into());
         }
@@ -6474,9 +6496,8 @@ impl Daemon {
     }
 
     /// An engine run's message, handed to its link
-    /// ([`crate::codex_host::LinkCommand::Compose`]). A link that ended before answering is
-    /// reported by what the ledger then holds: no claim means nothing was sent, and a claim
-    /// means the message may have reached Codex.
+    /// ([`crate::codex_host::LinkCommand::Compose`]) and reported as [`Daemon::engine_report`]
+    /// says.
     async fn compose_on_engine(
         &self,
         commands: &tokio::sync::mpsc::UnboundedSender<crate::codex_host::LinkCommand>,
@@ -6485,9 +6506,9 @@ impl Daemon {
         text: String,
         claimed_hash: String,
     ) -> crate::codex_link::ComposeReport {
-        use crate::codex_link::ComposeReport;
         let (reply, told) = tokio::sync::oneshot::channel();
-        let asked = commands.send(crate::codex_host::LinkCommand::Compose(
+        // A link that has gone drops the ask, and with it `reply`.
+        let _ = commands.send(crate::codex_host::LinkCommand::Compose(
             crate::codex_host::ComposeAsk {
                 request_id: request_id.to_string(),
                 text,
@@ -6495,10 +6516,21 @@ impl Daemon {
                 reply,
             },
         ));
-        if asked.is_ok() {
-            if let Ok(report) = told.await {
-                return report;
-            }
+        self.engine_report(uid, request_id, told).await
+    }
+
+    /// What an engine run's link `told` of the message `request_id` it was handed. One that
+    /// ended, or never took it, is reported by what the ledger then holds: no claim means
+    /// nothing was sent, and a claim means the message may have reached Codex.
+    async fn engine_report(
+        &self,
+        uid: &str,
+        request_id: &str,
+        told: tokio::sync::oneshot::Receiver<crate::codex_link::ComposeReport>,
+    ) -> crate::codex_link::ComposeReport {
+        use crate::codex_link::ComposeReport;
+        if let Ok(report) = told.await {
+            return report;
         }
         match self
             .db
@@ -9529,15 +9561,18 @@ impl Daemon {
         }
     }
 
-    /// End the hosted run `session_uid` (H6, H7): in one transaction, with `cursor`
-    /// the host's message that reports it, the row from `from` to `to` and its
-    /// `SessionEnd` with `payload`, published as `ingest_host_message` publishes; then
-    /// what follows any run's end. `false` when the cursor did not move: nothing was
-    /// written, and the message must not be acknowledged.
+    /// End the hosted run `session_uid`'s launch whose leader is `host` (H6, H7): in one
+    /// transaction, with `seq` the host's message that reports it, the row from `from` to
+    /// `to` and its `SessionEnd` with `payload`, published as `ingest_host_message`
+    /// publishes; then what follows any run's end. The end's id names the launch,
+    /// `exit:{uid}:{leader pid}`, so a run a message relaunched files each of its ends. `false`
+    /// when `host` is no longer the run's recorded host, or the cursor did not move: nothing
+    /// was written, and the message must not be acknowledged.
     pub(crate) async fn end_hosted_run(
         &self,
         session_uid: &str,
-        cursor: Option<(protocol::proc_identity::ProcessIdentity, u64)>,
+        host: protocol::proc_identity::ProcessIdentity,
+        seq: Option<u64>,
         from: Lifecycle,
         to: Lifecycle,
         payload: serde_json::Value,
@@ -9547,13 +9582,13 @@ impl Daemon {
         let gate = self.registration_gate(session_uid).await;
         let commit = gate.lock_owned().await;
         let end = PendingEvent::new(&session, EventKind::SessionEnd, payload, Source::Daemon)
-            .with_source_event_id(format!("exit:{session_uid}"));
+            .with_source_event_id(format!("exit:{session_uid}:{}", host.pid));
         let publish = self.publish_gate(session_uid).await;
         let events = {
             let _ordered = publish.lock().await;
             let Some(events) = self
                 .db
-                .end_hosted_run(session_uid.to_string(), cursor, from, to, end)
+                .end_hosted_run(session_uid.to_string(), host, seq, from, to, end)
                 .await?
             else {
                 return Ok(false);
@@ -10146,6 +10181,16 @@ impl Daemon {
                 choosing.push((row.session_uid.clone(), models, receipt));
             }
         }
+        // An ended engine Codex run the person's next message relaunches.
+        let mut relaunchable: HashSet<String> = HashSet::new();
+        for row in &rows {
+            if row.agent == protocol::agent::AgentKind::Codex
+                && row.lifecycle == Lifecycle::Exited
+                && self.db.relaunchable(row.session_uid.clone()).await?
+            {
+                relaunchable.insert(row.session_uid.clone());
+            }
+        }
         let inner = self.inner.lock().await;
         for (uid, models, receipt) in &choosing {
             let fact = inner
@@ -10163,6 +10208,7 @@ impl Daemon {
             &last_seqs,
             &requests,
             &menus,
+            &relaunchable,
             &self.config,
         ))
     }
@@ -11138,6 +11184,7 @@ impl Daemon {
         last_seqs: &HashMap<String, u64>,
         requests: &HashMap<ApprovalId, (u64, Option<String>)>,
         menus: &HashMap<String, protocol::event::RunMenus>,
+        relaunchable: &HashSet<String>,
         config: &Config,
     ) -> Vec<SessionSummary> {
         let now = protocol::time::now_unix_ms();
@@ -11249,10 +11296,15 @@ impl Daemon {
                 // independently true rather than one derived from the other.
                 //
                 // A run started on the engine reads `subscribed` while its link is attached and
-                // it is live, and `none` otherwise: before its reconnect, after one that failed,
-                // and while it is stopping. Both apps offer Stop and the composer on this field.
+                // it is live; `bound_not_started` once its app-server ended without ccd stopping
+                // it, which the person's next message relaunches ([`crate::codex_host::relaunch`]),
+                // so the apps offer the composer and not Stop; and `none` otherwise: before its
+                // reconnect, after one that failed, while it is stopping and once End run ended
+                // it. Both apps offer Stop and the composer on this field.
                 codex_link: if engine_link {
                     protocol::event::CodexLink::Subscribed
+                } else if relaunchable.contains(&row.session_uid) {
+                    protocol::event::CodexLink::BoundNotStarted
                 } else {
                     addressee.wire_link()
                 },

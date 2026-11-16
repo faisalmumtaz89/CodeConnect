@@ -1085,7 +1085,7 @@ async fn claude_probe(
 /// Find the codex a start runs ([`codex_path`]) and ask it its version, from the
 /// user's login shell in `environment`, run itself, never through `codeconnect`. An
 /// error is the refusal's reason and its sentence.
-async fn codex_probe(
+pub(crate) async fn codex_probe(
     environment: &HashMap<OsString, OsString>,
     codex_bin: Option<&str>,
 ) -> Result<ReadyCodex, (StartFailure, String)> {
@@ -1629,17 +1629,20 @@ pub(crate) fn make_run_dir(root: &Path, dir: &Path) -> std::io::Result<std::fs::
 }
 
 /// An error once the run's [`spawn_detached`] child has ended (with what it last said
-/// in the run's `host.log`) or the start's time is up.
+/// in the run's `host.log` past `since`, the log's length when it was launched, so a
+/// launch into a folder that held one before reads only its own) or the start's time is up.
 pub(crate) fn give_up_if_ended(
     dir: &Path,
+    since: u64,
     child: &mut tokio::process::Child,
     deadline: tokio::time::Instant,
     waiting: &str,
 ) -> Result<(), String> {
     if let Ok(Some(status)) = child.try_wait() {
-        let said = std::fs::read(dir.join("host.log"))
-            .ok()
-            .and_then(|log| last_line(&log));
+        let said = std::fs::read(dir.join("host.log")).ok().and_then(|log| {
+            let own = usize::try_from(since).ok().and_then(|at| log.get(at..));
+            last_line(own.unwrap_or_default())
+        });
         return Err(said.unwrap_or_else(|| format!("the agent host ended ({status})")));
     }
     if tokio::time::Instant::now() >= deadline {

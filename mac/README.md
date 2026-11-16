@@ -1258,6 +1258,26 @@ listen, or does not take the first message within 80 s, before or after the answ
 `failed`, and so is its run, whose process group then gets SIGTERM, and SIGKILL 5 s
 later only while members remain, under the same warrant. A `live` run whose app-server
 dies ends `exited`, "Stopped: its process ended", as a Claude run does.
+The person's next message relaunches such a run (it crashed, or the Mac restarted), never
+ccd's own start; a run ended by End run, and a start that failed, are not relaunched. The
+message moves the run to `starting` and clears its recorded app-server in one write, so a
+second message meanwhile is refused and only one relaunch runs. Once the old app-server's
+process group has no member (after a Mac restart the group is not asked: nothing of it survived,
+and another process may hold its number now), ccd removes the run's `as.pid` and `as.sock`,
+launches the codex
+a start would find, with the environment a start reads and the run's own folder answer, into
+the run's folder, its output added to the run's `host.log`, and resumes the run's thread on
+that connection as a reconnect does. The run is then `live`, its timeline gets a
+`session_start` under the new launch ("Session resumed"), and the message is sent on the new
+link before any other. A relaunch that fails before that stops what it launched, puts the
+run back to `exited` and relaunchable, and refuses the message with "CodeConnect has no
+connection to this run right now, so nothing was sent." That holds when ccd's own watch found
+the new app-server gone first and failed the run for it; a ccd that dies during the relaunch
+is a known limit below. Each end of a hosted run is filed under its launch
+(`exit:<uid>:<leader pid>`), so a relaunched run's next end is recorded too, and an end ccd
+found for a launch the run no longer has, an app-server a relaunch has replaced, changes
+nothing. A relaunched app-server numbers its requests from 0 again, so a card's id names the
+launch that asked (its leader's start) and never an earlier launch's card.
 An app ends a live Codex run with `stop_run` as it ends a Claude run: the run becomes
 `stopping`, and its link interrupts the turn Codex is running and sends the app-server's
 process group SIGTERM, so Codex finishes and exits, and the run ends `exited`, "Stopped".
@@ -1276,8 +1296,10 @@ turn was waiting on closes. A retry with the same request id is answered from th
 and a Stop for a turn whose stop is already on its way is refused at once.
 Both apps offer Stop and the composer on the run's `codex_link` in the fleet. For a run
 started on the engine it reads `subscribed` while the run's link is attached and the run is
-`live`, and `none` otherwise: before its reconnect, after one that failed, and while it is
-stopping. A run started from an app, of either agent, files a `link_state` fact when its link
+`live`; `bound_not_started` once its app-server died without ccd stopping it, so the apps
+offer the composer, whose message relaunches the run, and not Stop; and `none` otherwise:
+before its reconnect, after one that failed, while it is stopping, and once End run has ended
+it. A run started from an app, of either agent, files a `link_state` fact when its link
 attaches (`attached`, "agent host linked"), once the link is in place, and when its link ends
 while the run is live (`detached`, "agent host disconnected"); End run and a ccd restart
 file no `detached` fact.
@@ -1894,6 +1916,12 @@ fails the suite instead of failing silently in production.
   appear after the run starts, and again after ccd restarts.** The apps learn that the run is
   ready from the fleet, which ccd sends only when asked and the apps ask for every 15 s. Until
   then they say there is no live link to the session.
+* **On a Codex run started from an app, a message that relaunches the run can outlast the
+  app's wait for its answer on a slow install.** The app waits 20 s for a message's answer. A
+  relaunch first finds codex and asks its version through the login shell, as a start does,
+  then launches Codex and resumes the thread. That took under a second on a test Mac, but each
+  login-shell step may take up to 10 s. Past 20 s the app says the message got no answer; the
+  relaunch still finishes and sends the message once, and its turn shows in the run.
 * **A message ccd took but could not hand to Claude before it stopped is not
   confirmed.** If ccd stops in the instant between recording a message to a session
   started from an app and passing it to that session's agent host, the app says the
@@ -1998,7 +2026,12 @@ fails the suite instead of failing silently in production.
   The app-server's identity is recorded right after the launch, in one database
   write. A daemon that dies in those few milliseconds leaves the run with no recorded
   identity: the restarted daemon fails the run, but has nothing it may signal, and
-  Codex's app-server never exits by itself, so it runs until logout or reboot.
+  Codex's app-server never exits by itself, so it runs until logout or reboot. A
+  message's relaunch of a Codex run has the same few milliseconds.
+* **A daemon that dies while a message relaunches a Codex run fails the run.** The
+  restarted daemon fails every Codex run still `starting`, the relaunched one among them,
+  and a failed run is not relaunched again: the person starts a new run, as before this
+  relaunch existed.
 * **Whether a trusted folder's allow rules skip the approval card is not
   measured.** In a Claude Code run that loads its folder's project, that
   project's hooks run; whether its `permissions.allow` rules also let a tool run
