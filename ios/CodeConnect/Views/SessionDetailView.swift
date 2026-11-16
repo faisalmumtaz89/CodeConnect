@@ -1355,7 +1355,7 @@ struct SessionDetailView: View {
                 // Resume happens at the Mac by design: the phone starting
                 // processes on your machine is a different product, and the
                 // daemon spawns nothing today.
-                if let resumeID, !resumeID.isEmpty, let cwd = summary?.cwd, !cwd.isEmpty {
+                if let resumeID, !resumeID.isEmpty, let cwd = summary?.shownCwd, !cwd.isEmpty {
                     VStack(alignment: .leading, spacing: CC.rhythm.text) {
                         Text("Pick this conversation up at the computer")
                             .ccType(CC.type.footnote)
