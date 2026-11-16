@@ -1750,6 +1750,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "local_command": "compact",
       "num_turns": 0,
       "subtype": "success"
     },
@@ -1987,6 +1988,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "local_command": "effort",
       "num_turns": 0,
       "subtype": "success"
     },
@@ -2053,6 +2055,7 @@
     "kind": "turn_complete",
     "payload": {
       "is_error": false,
+      "local_command": "clear",
       "num_turns": 0,
       "subtype": "success"
     },

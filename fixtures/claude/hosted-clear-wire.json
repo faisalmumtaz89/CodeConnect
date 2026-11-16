@@ -101,6 +101,7 @@
     {
       "kind": "user_message",
       "payload": {
+        "command": "clear",
         "request_id": "r-clear",
         "text": "/clear"
       },
@@ -146,6 +147,7 @@
       "kind": "turn_complete",
       "payload": {
         "is_error": false,
+        "local_command": "clear",
         "num_turns": 0,
         "subtype": "success"
       },

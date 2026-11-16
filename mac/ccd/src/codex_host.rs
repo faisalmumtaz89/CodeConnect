@@ -1495,7 +1495,7 @@ async fn compose(
     } else {
         crate::store::COMPOSE_ROUTE_START
     };
-    let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id));
+    let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id), None);
     file(daemon, uid, vec![words]).await;
     let send = WaitingSend {
         request_id: ask.request_id.clone(),

@@ -1105,7 +1105,11 @@ exits. A host gone meanwhile is the liveness tick's, as above. A starting Claude
 died before it recorded the run's host becomes `failed`.
 An app's message to a live Claude run (`send_text`) goes into claude's input through the run's
 host, as one more message from the person; the person's words, the start's prompt
-included, are filed once the host has taken them. A message sent while one of Claude's
+included, are filed once the host has taken them. A later message whose first word is
+`/<name>`, `<name>` one of claude's commands as the run last had them, is filed naming it
+(`command`: `/effort low` is `effort`); any other text, and the start's prompt, names none.
+A command's own turn ends naming it too, with claude's own `local_command` on the
+`turn_complete`, which an agent turn's end never carries. A message sent while one of Claude's
 tools is running reaches Claude with that tool's result; one sent at any other time in a
 turn runs as Claude's next turn. A retry with the same request id is answered from its
 first send, so nothing is sent twice.
@@ -1137,7 +1141,8 @@ which names no mode: a start takes the person's own `defaultMode`, so a person w
 settings default to `bypassPermissions` now gets it on a run started from the app without
 the app's confirmation, as when they run claude directly, and a project's settings cannot
 set it (claude drops an escalating `defaultMode` from repo-committed settings); the run's
-mode fact says so from its first turn. A ccd restart keeps the mode the person confirmed for
+mode fact says so from its first turn. A card already open when Bypass permissions is
+turned on stays open and answerable; the mode applies from claude's next request. A ccd restart keeps the mode the person confirmed for
 the same process, and a new claude starts in the person's own default. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it
 (`setModel`, `applyFlagSettings`, `setPermissionMode`), one line at a time. The answer is

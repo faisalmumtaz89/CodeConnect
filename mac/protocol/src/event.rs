@@ -102,8 +102,6 @@ pub mod notice {
     /// An app's effort change on a Claude run CodeConnect started, which claude took
     /// (`{effort}`, minor 39): claude echoes nothing for that change, so this records it.
     pub const MODEL_SET: &str = "model_set";
-    /// The agent host confirmed a permission-mode change.
-    pub const MODE_SET: &str = "mode_set";
     /// Claude compacted the conversation (`/compact`, or on its own).
     pub const COMPACTED: &str = "compacted";
     /// A Stop cancelled the person's message `request_id` before claude ran it
