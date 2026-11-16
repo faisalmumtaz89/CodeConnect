@@ -881,6 +881,25 @@ public struct MenuModel: Codable, Sendable, Hashable {
 public struct MenuMode: Codable, Sendable, Hashable {
     public let value: String
     public let label: String
+    /// Whether choosing this mode needs the person's confirmation first (minor 40), because it lets the
+    /// agent work without asking. Absent reads false — a daemon below minor 40 marks nothing, and every
+    /// mode is set without a confirmation, as before.
+    public let confirm: Bool
+
+    public init(value: String, label: String, confirm: Bool = false) {
+        self.value = value
+        self.label = label
+        self.confirm = confirm
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        value = try c.decode(String.self, forKey: .value)
+        label = try c.decode(String.self, forKey: .label)
+        confirm = try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey { case value, label, confirm }
 }
 
 // MARK: - Capabilities
@@ -2178,7 +2197,7 @@ public enum ClientMessage: Sendable {
     /// the daemon refuses a change naming neither.
     case setModel(session: String, requestID: String, model: String?, effort: String?)
     /// **Set a hosted Claude run's permission mode** (minor 39), to one its menu lists.
-    case setMode(session: String, requestID: String, mode: String)
+    case setMode(session: String, requestID: String, mode: String, confirmed: Bool)
     /// The folders sessions have run in on this computer. Minor 28, sent only
     /// when `Capabilities.startsSessions`.
     case listProjects
@@ -2241,6 +2260,7 @@ extension ClientMessage: Encodable {
         case model
         case effort
         case mode
+        case confirmed
         case showHidden = "show_hidden"
         case parent
         case name
@@ -2399,11 +2419,14 @@ extension ClientMessage: Encodable {
             // `skip_serializing_if`, and a change naming neither is refused by name.
             try c.encodeIfPresent(model, forKey: .model)
             try c.encodeIfPresent(effort, forKey: .effort)
-        case .setMode(let session, let requestID, let mode):
+        case .setMode(let session, let requestID, let mode, let confirmed):
             try c.encode("set_mode", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(mode, forKey: .mode)
+            // The person's confirmation of a mode the menu marks `confirm`; a bare request omits it,
+            // which the daemon refuses for a mode that needs it.
+            if confirmed { try c.encode(true, forKey: .confirmed) }
         case .listProjects:
             try c.encode("list_projects", forKey: .type)
         case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model, let trust):

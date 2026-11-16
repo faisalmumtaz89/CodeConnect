@@ -1232,14 +1232,15 @@ public final class DaemonConnection {
 
     /// **Set a hosted Claude run's permission mode** (minor 39), to one its menu lists. Gated and
     /// checked as `setModel`.
-    public func setMode(session: String, requestID: String, mode: String) async throws -> SettingResult
+    public func setMode(session: String, requestID: String, mode: String, confirmed: Bool = false)
+        async throws -> SettingResult
     {
         mutationSessions[requestID] = session
         defer { mutationSessions.removeValue(forKey: requestID) }
         return try await request(
             key: requestID,
             store: \.settingWaiters,
-            send: .setMode(session: session, requestID: requestID, mode: mode))
+            send: .setMode(session: session, requestID: requestID, mode: mode, confirmed: confirmed))
     }
 
     /// **Say something to a Codex session.**
