@@ -3,10 +3,15 @@
     "result": {
       "claude_version": "2.1.322",
       "commands": [
+        "clear",
         "usage",
         "compact"
       ],
       "entries": [
+        {
+          "description": "Clear conversation history and free up context",
+          "name": "clear"
+        },
         {
           "description": "Show plan usage limits",
           "name": "usage"
