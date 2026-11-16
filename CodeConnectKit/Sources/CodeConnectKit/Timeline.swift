@@ -105,6 +105,9 @@ public struct NoticeItem: Sendable, Hashable {
     public var title: String
     public var detail: String?
     public var severity: NoticeSeverity
+    /// A turn end that closes a command's own turn (`local_command`). The item stays, for the fleet's status; the
+    /// session screen draws no row for it (`TimelineBuilder.drawn`), as a terminal run files no turn end there.
+    public var endsCommand = false
 
     init(kind: NoticeKind, symbol: String, title: String, detail: String?, severity: NoticeSeverity) {
         self.kind = kind
@@ -244,19 +247,26 @@ public enum TimelineBuilder {
     }
 
     /// **The rows the session screen draws: every item, less a "Turn complete"
-    /// that Claude's own reply already ends.**
+    /// that something on screen already ends.**
     ///
-    /// A turn that ends on Claude's words needs no second line saying so. One
+    /// A turn that ends on Claude's words needs no second line saying so, nor
+    /// one that ends on "Interrupted", which says where the turn ended. A
+    /// command's own turn end (`/clear`, `/compact`, `/effort low` on a run
+    /// CodeConnect started) draws none either, as a terminal run files none. One
     /// that ends on a tool call, a card or nothing at all has no other end on
     /// screen until Claude Code's `idle_prompt` — a minute later — so its line
     /// stays. Only the row goes: the item stays in the timeline, where fleet
     /// status reads it.
     public static func drawn(_ items: [TimelineItem]) -> [TimelineItem] {
         items.enumerated().compactMap { index, item in
-            guard case .notice(let notice) = item.content, notice.kind == .turnComplete,
-                index > 0, case .agentMessage = items[index - 1].content
-            else { return item }
-            return nil
+            guard case .notice(let notice) = item.content, notice.kind == .turnComplete else { return item }
+            if notice.endsCommand { return nil }
+            guard index > 0 else { return item }
+            switch items[index - 1].content {
+            case .agentMessage: return nil
+            case .notice(let before) where before.kind == .turnInterrupted: return nil
+            default: return item
+            }
         }
     }
 
@@ -458,10 +468,15 @@ public enum TimelineBuilder {
                     // turn-start event, so the wake line is the only activity until the
                     // agent's first reply.
                     items.append(event.item(.notice(.mailWake)))
+                } else if event.sentCommand == "clear" {
+                    // A `/clear` an app sent a run CodeConnect started draws no row of its own: ccd's
+                    // `conversation_cleared` notice is the row, as a terminal run's clear draws the notice alone.
                 } else if event.isPersonsWords, let text = event.userText {
+                    // A command an app sent (`command`) draws as a command row, as a terminal run's invocation
+                    // does; it starts its turn by `Event.startsTurn`, so the run reads Running until that turn ends.
                     items.append(
                         event.item(
-                            .userMessage(text),
+                            .userMessage(text, isCommand: event.sentCommand != nil),
                             notSent: event.sendRequestID.map(stoppedSends.contains) ?? false))
                 }
 
@@ -608,7 +623,9 @@ public enum TimelineBuilder {
                 items.append(event.item(.notice(endNotice(for: event))))
 
             case .turnComplete:
-                items.append(event.item(.notice(endNotice(for: event))))
+                var end = endNotice(for: event)
+                end.endsCommand = event.endedCommand != nil
+                items.append(event.item(.notice(end)))
 
             case .sessionStart:
                 runEnded = false

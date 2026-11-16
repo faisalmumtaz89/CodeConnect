@@ -690,6 +690,13 @@ function of the events:
   are ccd's own notices, and an effort set from the app is drawn in the effort menu's words
   ("Effort set to Extra high"); a Codex start
   never says, and draws "Session started";
+* a turn's end stays in the timeline for the fleet's status and preview, but draws no
+  "Turn complete" row when the screen already shows the turn ended: on Claude's reply,
+  on "Interrupted · What should Claude do instead?" (an Esc, a Stop, a refused or denied
+  call), and, in a session started from an app, at a command's own end (`/clear`,
+  `/compact`, `/effort low`), where a terminal run files none. A command an app sends
+  draws as a command row, and the run reads Running until the command's own turn ends;
+  a `/clear` draws only "Conversation cleared.";
 * Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
   drawn, as the card states the question and how it ended. Every other tool keeps its
   row beside its card.

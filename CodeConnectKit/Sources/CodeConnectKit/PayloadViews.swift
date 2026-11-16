@@ -225,6 +225,13 @@ extension Event {
         return payload["request_id"]?.stringValue
     }
 
+    /// The one of claude's commands the person's message names, on a Claude run CodeConnect started (`command`,
+    /// minor 40): `/effort low` is `effort`. Nil for any other message.
+    public var sentCommand: String? {
+        guard kind == .userMessage else { return nil }
+        return payload["command"]?.stringValue
+    }
+
     /// `capture-pane` text the daemon attaches to a `permission_prompt`
     /// notification — the only place the phone can learn Claude's *exact*
     /// option list, which is what makes `Option{index}` safe to offer. Drawn
@@ -244,6 +251,13 @@ extension Event {
     public var isTurnComplete: Bool {
         if kind == .turnComplete { return true }
         return kind == .sessionEnd && hookEventName == "Stop"
+    }
+
+    /// The command whose own turn this turn end closes, on a Claude run CodeConnect started (`local_command`, claude's
+    /// own field, minor 40): `/clear`, `/compact`, `/effort low`. Nil on an agent turn's end.
+    public var endedCommand: String? {
+        guard kind == .turnComplete else { return nil }
+        return payload["local_command"]?.stringValue
     }
 
     var isSessionExit: Bool {
@@ -379,8 +393,14 @@ extension Event {
     /// six real skill lines every one was answered, and one — 2.1.220
     /// `/code-review` — carries neither stamp; counted by its stamps alone, that
     /// run read Done for the 29 s Claude worked on it.
+    ///
+    /// A command an app sends a run CodeConnect started (`command`) starts its turn
+    /// too, and draws as a command row: every such turn ends with a turn end of its
+    /// own (claude's own commands' carry `local_command`, a skill's is an agent
+    /// turn's), so the run reads Running until then and never after.
     public var startsTurn: Bool {
         guard kind == .userMessage, !isTranscriptOnly else { return false }
+        if sentCommand != nil { return true }
         if let source = payload["promptSource"]?.stringValue, !source.isEmpty { return true }
         if payload["turnOrigin"]?.stringValue != nil { return true }
         return payload["message"]?["content"]?.stringValue?

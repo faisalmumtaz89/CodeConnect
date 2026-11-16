@@ -191,7 +191,7 @@ final class TimelineTurnTests: XCTestCase {
             ),
             (
                 "transcript-interrupts-wire", "refuse-tool",
-                ["reply", "tool:Bash:failed", "you", interrupted, "notice:Turn complete", "you", "reply"]
+                ["reply", "tool:Bash:failed", "you", interrupted, "you", "reply"]
             ),
         ]
         for (name, run, rows) in runs {
