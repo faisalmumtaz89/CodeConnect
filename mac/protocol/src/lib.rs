@@ -64,7 +64,8 @@ pub const PROTOCOL_MISMATCH: &str =
 /// `protocol_minor >= 1` rather than probing for the feature and guessing from
 /// the silence — which is the same honesty rule the event log follows.
 ///
-///   * `0` — hello/sessions/subscribe/answer/send_text/capture.
+///   * `0` — hello/sessions/subscribe/answer/send_text/capture. (`capture`, the
+///     Mac pane snapshot, is gone in X12: no run is left with a pane to read.)
 ///   * `1` — QR pairing + per-device tokens, `wss://`, `get_diff`,
 ///     `EventKind::TurnComplete`, `ResolvedBy::Local`, `risk_class`.
 ///   * `2` — `session_uid` on every session and event, accepted wherever a
@@ -155,14 +156,16 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     the Mac. From minor 9 the supervisor checks the composer after any
 ///     word-shaped slash injection, sends exactly one `Escape` if it is
 ///     gone, and reports what it observed:
-///     [`ws::SendTextResult::ComposerRecovered`] (with the pane it captured,
+///     `SendTextResult::ComposerRecovered` (with the pane it captured,
 ///     for `/status`, `/usage` and `/cost` only) or
-///     [`ws::SendTextResult::ComposerLost`] when one Escape was not enough —
+///     `SendTextResult::ComposerLost` when one Escape was not enough —
 ///     measured on `/config`, and on `/keybindings`, which opens an editor.
 ///     Advertised as the `slash_composer_recovery` capability, and enforced
 ///     per session: a supervisor below minor 9 accepts the request fields and
 ///     drops them, so the daemon refuses word-shaped slash commands for that
-///     session rather than typing one it cannot rescue.
+///     session rather than typing one it cannot rescue. **Gone in X12** with the
+///     supervisor: no run is typed into through a pane, so the recovery, its two
+///     statuses and the capability no longer exist.
 ///
 ///     **The new statuses are sent to every client**, because a `hello`
 ///     carries no client minor for the daemon to branch on. That is safe

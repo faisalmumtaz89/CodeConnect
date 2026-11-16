@@ -102,7 +102,7 @@ log and continued its `seq`. Two things were wrong with that:
   reuse an id came back as an already-applied duplicate: an answer nobody gave.
 
 Both identities ride every `event` and every entry in `sessions`. Anything that
-names a session — `subscribe`, `answer`, `send_text`, `capture`, `get_diff` —
+names a session — `subscribe`, `answer`, `send_text`, `get_diff` —
 accepts either, so a client that only knows `cc-1` keeps working. A bare name
 resolves to the run with a supervisor attached, and failing that to the newest
 run under the name. `lifecycle` is deliberately not consulted: a session that
@@ -142,118 +142,6 @@ main-thread request stops that command, as Esc would.
 scrollback, "a permission prompt is on screen" stayed true for as long as one
 had *ever* been on screen — so a prompt answered half an hour ago could
 authorise typing into the composer.
-
-**The composer is recognised by its box, not by its footer.** Claude draws it as
-a rule of box-drawing horizontals, a `❯` prompt row, a closing rule and a
-footer, and the presence check looks for the prompt row directly under a rule.
-The footer copy cannot carry it: `? for shortcuts` is dropped as soon as the
-shift+tab mode hint needs the room, and `← for agents` becomes `← 1 agent` once
-a subagent exists, so a session that types perfectly well shows neither string.
-A bare `❯` cannot carry it either — it opens the transcript echo of every
-submitted prompt and marks the selected row of every menu — and only under a
-rule does it mean "type here". The captures both halves are measured against
-are in `fixtures/panes/`.
-
-A named session (after `/rename`) carries its name in that rule, `──── myjob ─`,
-and the same place in a background agent's box, while the person at the computer
-views that agent, carries the agent's task — keys typed there reach the agent,
-and nothing in the box tells the two apart. So a labelled rule counts only when
-its label, drawn whole, is the session's own name **as Claude recorded it**: the
-`custom-title.json` Claude keeps beside the session's transcript (with the
-suffix Claude adds when another session already holds the name), read by the
-supervisor at every look. A name that equals any Claude agent task recorded on
-this computer — what an agent's box draws in the same place: its task, or `@name`
-for a named agent, as Claude records each agent in
-`~/.claude/projects/*/*/subagents/*.meta.json`, nested agents included and
-wherever the session has since moved with `/clear`, `/branch` or `/resume` —
-proves nothing and counts as no name. No name, an unreadable or stale one, or a
-label cut short with `…` because the pane is too narrow, and the phone is
-refused, as it was before named sessions were recognised. Reading every agent
-record means a phone message into a renamed session can take a moment longer
-(about half a second with 7,508 records on the computer it was measured on);
-other sessions are not affected. Measured on Claude Code 2.1.316; a name Claude
-gives a session by itself was not reproduced.
-
-**A drawn composer is not a live one.** Since `protocol_minor` 9 the presence
-check has a second half: the composer counts as ready only if its box is on
-screen *and* tmux says the keyboard reaches the program. That is three fields
-off one `display` — `#{cursor_flag}`, tmux's record of the terminal's DECTCEM
-state; `#{pane_in_mode}`, the number of tmux modes stacked on the pane; and
-`#{pane_mode}`, the name of the one on top — and it has to be a visible cursor
-with a mode count of exactly zero.
-
-Both halves are measured, and each catches a different way of losing the
-keyboard. Submitting `/status` while a turn is running leaves Claude's Settings
-view drawn **above** the composer box when the turn ends: the box is there, the
-cursor is hidden, typed text never appears and Enter does nothing. And a pane
-in tmux's copy-mode — which an ordinary tmux client attached by hand can enter —
-keeps `cursor_flag` at 1
-while routing every key to tmux's own mode table: `send-keys` exits 0 and the
-text is never delivered. Without the second half the interlock authorises keys
-into a pane that cannot receive them and reports them sent.
-
-**A scroll position is left by the send itself.** A prompt arriving from the
-phone is the intent to type, and where the pane happens to be scrolled to is a
-view of history rather than a question: so when the keyboard is held by exactly
-one mode, that mode is `copy-mode`, and the composer is already drawn on the
-capture just taken, the daemon leaves the mode and types, as if the Mac had
-never been scrolled. It happens inside the send that was already authorised —
-the same authority as the keystroke it clears the way for — and the full check
-then runs again on a fresh capture and a fresh keyboard read. If the composer
-is gone on *that* look, or the keyboard is still not the program's, the send is
-refused with nothing typed.
-
-The composer has to be on screen *before* the mode is touched because this is
-the one place the daemon changes what the Mac is showing without being asked
-to, and it should not do that for a send it was never going to complete. The
-check is free and it cannot cost a send: `capture-pane` reports the live screen
-whether or not the pane is scrolled back — measured at every scroll depth, and
-byte-identical either side of the exit — so it says the same thing before and
-after. The clock is checked the same way: with no room left for the exit, the
-second look *and* the keystrokes, nothing is touched.
-
-Only that one shape is left. `#{pane_mode}` names the mode on **top** of the
-stack, so it cannot on its own tell a bare scroll position from a `copy-mode`
-with somebody's `choose-tree` underneath; the count is what rules that out.
-Every other mode — `clock-mode`, `tree-mode`, `options-mode`, `view-mode`,
-`buffer-mode`, and any stack at all — is something the person at the Mac opened
-and is looking at, and popping one would take their screen away and answer a
-question they never saw. Those refuse exactly as they always have.
-
-The command is `send-keys -X cancel` rather than `copy-mode -q` for the same
-reason: measured on tmux 3.7b, it pops exactly one mode, refuses clock-, tree-,
-options- and buffer-mode with `not in a mode`, types nothing when the pane is
-in no mode at all, and does not depend on `mode-keys` — where `copy-mode -q`
-flattens the whole stack and clears a clock-mode just as readily. Its one
-uncovered edge is `view-mode`, which shares copy-mode's command table: nothing
-ever aims at one, but a `view-mode` pushed in the milliseconds between the look
-and the command would be popped by it, and then the look afterwards refuses.
-Older servers land on the safe side by construction — `#{pane_in_mode}` was a
-bool before tmux 2.9, and a pane that could hold only one mode makes its `1`
-mean exactly what this reads it as.
-
-The refusals name their cause, because the remedies differ: a view Claude
-opened is dismissed, and a mode tmux is holding is left with `q` — one press
-per mode, so a stack takes one each.
-
-The signal is the cursor rather than the view's `Esc to cancel` hint because a
-string is something an agent can write into its own output: a text rule would
-refuse every send in a session that merely *discussed* the hint, and would
-Escape a running turn to rescue it. Measured across states — idle, mid-turn
-(327 consecutive samples), and after a turn: cursor visible; every view Claude
-opens, including the one drawn above the composer: hidden. A cursor that cannot
-be read is a refusal, not a permissive default.
-
-**Word-shaped slash commands carry a postcondition.** After such a send the
-supervisor looks at the pane at 1.5s and again at 3.0s (a large inline render —
-measured on `/context` — can hide the footer for ~2.5s and restore it unaided),
-and if the composer is gone both times it saves that frame, sends exactly one
-`Escape`, and verifies for 250ms that the composer came back. It reports
-`composer_recovered` — with the saved pane, for the three snapshot commands and
-nothing else — or `composer_lost`, which asks for a human rather than guessing
-further keys. One Escape is the ceiling on purpose: `/keybindings` spawns an
-editor where Escape is a mode key, so no key sequence can rescue it, and typing
-into an unknown screen is how a rescue becomes damage.
 
 ## Durability of mutations
 
@@ -862,9 +750,9 @@ gate then refuses.
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
-`send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
+`send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
-`can_approve_reliably`, `fail_mode`, `answer_path`, `hold_secs`, `slash_composer_recovery`,
+`can_approve_reliably`, `fail_mode`, `answer_path`, `hold_secs`,
 `command_catalog`, `terminal_pty`, `start_session`, `start_worktree`, `browse_folders`,
 `machine_stats` and `stop_run` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`

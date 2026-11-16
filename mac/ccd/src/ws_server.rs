@@ -1578,23 +1578,6 @@ where
                 .await;
             send(sink, &ServerMessage::SendTextResult { session_id, result }).await?;
         }
-        ClientMessage::Capture { session_id, lines } => {
-            match daemon.capture(&session_id, lines.unwrap_or(80)).await {
-                Ok(text) => {
-                    send(sink, &ServerMessage::CaptureResult { session_id, text }).await?;
-                }
-                Err(err) => {
-                    send(
-                        sink,
-                        &ServerMessage::Error {
-                            code: "capture_failed".into(),
-                            message: format!("{err}"),
-                        },
-                    )
-                    .await?;
-                }
-            }
-        }
         ClientMessage::GetCommandCatalog { session_id } => {
             let result = daemon.command_catalog(&session_id).await;
             send(sink, &ServerMessage::CommandCatalog { session_id, result }).await?;
@@ -3250,7 +3233,6 @@ pub(crate) fn capabilities(
         // No fixed hold: a card is held for as long as Claude waits on it.
         hold_secs: 0,
         send_text: true,
-        capture: true,
         // **Direct only, and false in relay mode on purpose.** A client that
         // predates `push_relay` reads this flag alone; a true here would send
         // it to ask for notification permission and register a token with no
@@ -3266,7 +3248,6 @@ pub(crate) fn capabilities(
         send_text_idempotent: true,
         prompt_identity: true,
         command_catalog: true,
-        slash_composer_recovery: true,
         // A live terminal is shell-equivalent authority. Offered to a paired
         // per-device credential and never the static bootstrap token — the
         // caller decides `terminal_allowed`. The `TerminalAttach` handler
@@ -5248,9 +5229,9 @@ mod tests {
 
     #[test]
     fn an_oversized_reply_that_is_not_an_event_says_so() {
-        let message = ServerMessage::CaptureResult {
-            session_id: "cc-1".into(),
-            text: "y".repeat(2 * MAX_CLIENT_MESSAGE_BYTES),
+        let message = ServerMessage::Error {
+            code: "example".into(),
+            message: "y".repeat(2 * MAX_CLIENT_MESSAGE_BYTES),
         };
         let raw = serde_json::to_string(&message).unwrap();
         let sent = oversized_placeholder(&message, raw.len()).unwrap();
@@ -9396,8 +9377,10 @@ mod tests {
     /// sends.** The fixture is what minor 28 emitted, kept as it was: the phone's
     /// tests read its copy under `ios/` as an older Mac. This build may add a
     /// field a minor-28 phone ignores, and nothing else, so every value the
-    /// fixture holds must be in this build's wire unchanged. Its start outcomes are set,
-    /// not started ([`derived_minor_28_wire`]): this build checks their shape, not
+    /// fixture holds must be in this build's wire unchanged. Capabilities removed in X12
+    /// leave the record with their removal; any other difference is still a failure.
+    /// Its start outcomes are set, not started ([`derived_minor_28_wire`]): this build
+    /// checks their shape, not
     /// what a start answers today.
     #[tokio::test]
     async fn the_minor_28_wire_fixture_is_still_in_what_this_build_emits() {

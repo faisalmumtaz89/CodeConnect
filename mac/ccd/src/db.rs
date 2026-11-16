@@ -974,19 +974,6 @@ impl Db {
             .await
     }
 
-    pub async fn settle_text_mutation(
-        &self,
-        session_uid: String,
-        request_id: String,
-        matched: String,
-        settled_at: String,
-    ) -> Result<()> {
-        self.run(move |store| {
-            store.settle_text_mutation(&session_uid, &request_id, &matched, &settled_at)
-        })
-        .await
-    }
-
     pub async fn release_text_mutation(
         &self,
         session_uid: String,

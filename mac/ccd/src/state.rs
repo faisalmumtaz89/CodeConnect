@@ -54,7 +54,7 @@ use crate::apns::{PushHint, PushSender};
 use crate::db::Db;
 use crate::store::{
     AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
-    PrunedSession, SessionRow, Store, TextClaim,
+    PrunedSession, SessionRow, Store,
 };
 use protocol::config::Config;
 
@@ -78,19 +78,6 @@ const LOCAL_RESOLVE_MISSES: u32 = 2;
 /// gone; in an older one it can also be the old two-minute timeout, with the
 /// question still up.
 const SUPERVISOR_MINOR_QUESTION_TIMEOUT: u32 = 21;
-
-/// The supervisor feature level that runs the composer-recovery postcondition.
-///
-/// **The same trap as the fingerprint, one field over.** A supervisor below
-/// this accepts `recover_composer` and drops it — serde ignores what it does
-/// not know — so the daemon would type `/status`, get back a plain `sent`, and
-/// leave a session whose composer is gone and whose every later send the
-/// interlock refuses. The daemon is replaced by `codeconnect update`; the
-/// supervisors keep running until their sessions restart, so this is the
-/// ordinary state of affairs after an upgrade, not an edge case.
-const SUPERVISOR_MINOR_COMPOSER_RECOVERY: u32 = 9;
-/// The supervisor build that can *complete* a view instead of dismissing it.
-const SUPERVISOR_MINOR_CONFIRM_VIEW: u32 = 10;
 
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
@@ -1516,83 +1503,6 @@ enum SupervisorFailure {
     Unanswered(String),
 }
 
-/// The one translation from what a supervisor answered (or failed to) into
-/// what the phone is told — pure, because the claim's fate hangs on it:
-/// `Refused` is the only outcome that releases a text mutation's claim, so
-/// every arm here is an assertion about whether typing provably did not
-/// happen.
-/// The deadline stamp for one supervisor request, or the refusal to make
-/// one. A request whose bound cannot be established must not be issued:
-/// omitting the stamp would hand the supervisor a fresh full budget *after*
-/// whatever time the request spends queued, which is exactly the
-/// types-after-the-daemon-hung-up window the stamp exists to close. Nothing
-/// has been typed at this point, so refusing is retry-safe.
-fn respond_by_stamp(timeout_ms: u64) -> Result<u64, SupervisorFailure> {
-    protocol::time::now_monotonic_ms()
-        .map(|now| now + timeout_ms)
-        .ok_or_else(|| {
-            SupervisorFailure::NotSent(
-                "the computer's monotonic clock could not be read, so the send could not be \
-                 bounded; nothing was typed"
-                    .to_string(),
-            )
-        })
-}
-
-fn send_text_result_of(outcome: Result<SupervisorResult, SupervisorFailure>) -> SendTextResult {
-    match outcome {
-        Ok(SupervisorResult::Sent { matched }) => SendTextResult::Sent { matched },
-        Ok(SupervisorResult::ComposerRecovered {
-            matched,
-            pane_snapshot,
-            captured_at,
-        }) => SendTextResult::ComposerRecovered {
-            matched,
-            pane_snapshot,
-            captured_at,
-        },
-        // Typed, and the composer never came back. Not indeterminate:
-        // the typing is certain and so is the state it left behind.
-        Ok(SupervisorResult::ComposerLost { matched }) => SendTextResult::ComposerLost { matched },
-        // Deliberately `Sent`. A completed confirmation is the same news
-        // to the phone as a clean inline send — the keys landed and the
-        // transcript decides — so it needs no wire status of its own, and
-        // a client that predates this cannot misread one.
-        Ok(SupervisorResult::ViewConfirmed { matched }) => SendTextResult::Sent { matched },
-        // Typed, and then something could not be observed. `indeterminate`
-        // is exactly this state's existing name on the wire, and it is the
-        // one the phone already handles by keeping the identity so a retry
-        // is recognised rather than typed twice.
-        Ok(SupervisorResult::RecoveryUnconfirmed { reason, .. }) => {
-            SendTextResult::Indeterminate { reason }
-        }
-        // A refusal is a positive statement that nothing was typed — the
-        // supervisor checks before it injects, and when actuation itself
-        // fails provably (tmux refused, or never ran), it says so as a
-        // refusal too. Either way the claim may be released.
-        Ok(SupervisorResult::Refused { reason }) => SendTextResult::Refused { reason },
-        // The supervisor's own "this may have acted and I cannot know":
-        // a keystroke killed at its deadline, or Enter unconfirmed after
-        // the text landed. The message is the supervisor's, verbatim —
-        // it names the phase and what the phone should expect.
-        Ok(SupervisorResult::Error { message }) => {
-            SendTextResult::Indeterminate { reason: message }
-        }
-        // Anything else means we never found out. It may have typed, and no
-        // later evidence can settle it, so it is reported as unknown rather
-        // than as a refusal a retry would act on.
-        Ok(other) => SendTextResult::Indeterminate {
-            reason: format!("unexpected supervisor result: {other:?}"),
-        },
-        // Never handed to a supervisor, so nothing was typed and a retry is
-        // a fresh attempt rather than a permanent unknown.
-        Err(SupervisorFailure::NotSent(reason)) => SendTextResult::Refused { reason },
-        Err(SupervisorFailure::Unanswered(reason)) => SendTextResult::Indeterminate {
-            reason: format!("the supervisor never confirmed this injection ({reason})"),
-        },
-    }
-}
-
 impl std::fmt::Display for SupervisorFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1751,101 +1661,6 @@ fn holder(sighting: &crate::liveness::Sighting) -> Option<String> {
     }
 }
 
-/// Word-shaped slash command: `/status`, `/model sonnet`. Ordinary prose
-/// cannot open a Mac view, so it does not pay for the recovery check; a
-/// path like `/tmp/x` is not a command either.
-fn is_word_shaped_slash_command(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    let Some(rest) = trimmed.strip_prefix('/') else {
-        return false;
-    };
-    // The leading run, not the first *word*: `/ status` is a slash followed
-    // by prose, and Claude Code reads a command name only when it sits
-    // immediately after the slash. Matches `ClaudeCommandPolicy.firstToken`
-    // on the phone, which is the other half of this same rule.
-    let word: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
-    !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-/// What the Mac must be showing before the daemon may press `Enter` to
-/// complete the view a native command opened — or `None` when this command may
-/// never be completed.
-///
-/// **`/model <value>` and `/effort <value>`.** Both open the same shape of
-/// confirmation, measured on 2.1.223, and both are reached from a sheet that
-/// states the cost before the tap. Bare `/model` and bare `/effort` are
-/// excluded: they open Claude Code's own chooser, where the highlighted row is
-/// whatever it happens to be, so `Enter` there picks something nobody named.
-///
-/// **One needle.** Separate structural and value needles proved nothing,
-/// because the check runs over the whole visible pane and the pane carries
-/// Claude Code's echo of the command just submitted: a bare value needle
-/// matched that echo, and a bare affirmative needle matched whichever row was
-/// highlighted. Joined and anchored to the selection marker, the needle can
-/// only match a row that is *selected*, *affirmative*, and *about the value
-/// asked for*. Measured, and normalised the way the supervisor normalises the
-/// pane — `normalize_for_match` drops whitespace and lowercases but keeps `❯`
-/// and digits:
-///
-/// ```text
-/// ❯ 1. Yes, switch to Sonnet 5      (/model sonnet)
-/// ❯ 1. Yes, switch to low           (/effort low)
-/// ```
-///
-/// `/effort` echoes its argument verbatim; `/model` echoes a display name, so a
-/// full API id such as `claude-sonnet-5` — which the dialog renders as
-/// `Sonnet 5` — yields a needle that cannot match. The supervisor then runs the
-/// **ordinary rescue**: one `Escape`, composer restored, and the phone told no
-/// change was confirmed. The Model sheet's field suggests an alias for exactly
-/// this reason.
-fn confirmation_needle(text: &str) -> Option<String> {
-    let rest = text.trim_start().strip_prefix('/')?;
-    let name: String = rest
-        .chars()
-        .take_while(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if name != "model" && name != "effort" {
-        return None;
-    }
-    // One printable word. `is_ascii_graphic` is the whole rule: it excludes the
-    // empty argument, anything with whitespace or control bytes, and anything
-    // non-ASCII. A payload that did not make one command must never authorise
-    // one key.
-    let argument = rest[name.len()..].trim();
-    if argument.is_empty() || !argument.chars().all(|c| c.is_ascii_graphic()) {
-        return None;
-    }
-    Some(format!(
-        "❯1.yes,switchto{}",
-        protocol::ipc::normalize_for_match(argument)
-    ))
-}
-
-/// Consent plus the allowlist — two of the three things that must agree before
-/// the one keystroke that commits.
-///
-/// The client's flag says a human was shown what this command costs and tapped
-/// anyway; a client that predates that disclosure sends `false` and gets
-/// today's behaviour. The needle is the daemon's own, so the flag can never
-/// nominate a command. The third — whether this session's supervisor can
-/// *make* a confirmation — is asked in `supervisor_request`, under the same
-/// lock that fetches the handle, because a session can restart between two
-/// lookups and the answer would be about a supervisor that no longer exists.
-///
-/// A free function because it is the safety property: as a chain of `&&`
-/// inlined in `send_text` it could only be exercised through a full supervisor
-/// round trip, and it was not exercised at all.
-fn confirm_view_for(text: &str, complete_native_confirmation: bool) -> Option<String> {
-    if !complete_native_confirmation {
-        return None;
-    }
-    confirmation_needle(text)
-}
-
 /// The card a decision push is about, by its request id: the request that filed
 /// it knows its own, and a `permission_prompt` is matched to one through its
 /// prompt before it is admitted.
@@ -1996,25 +1811,6 @@ impl Waiting {
                 || entry.card.tool_name == crate::codex_approval::QUESTION_TOOL_NAME),
         }
     }
-}
-
-/// The only commands whose recovered pane may be kept. Deliberately three
-/// names and not a rule: a snapshot is a picture of somebody's screen, and
-/// the general version of this idea is the TUI-scraping bridge the design
-/// rejected.
-fn snapshot_command(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    let Some(rest) = trimmed.strip_prefix('/') else {
-        return false;
-    };
-    let name: String = rest
-        .chars()
-        .take_while(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    // No arguments: these commands take none, and a snapshot request with
-    // extra text is not one of them.
-    rest[name.len()..].trim().is_empty() && matches!(name.as_str(), "status" | "usage" | "cost")
 }
 
 impl Daemon {
@@ -7583,19 +7379,6 @@ impl Daemon {
     /// supervisor stays dumb and the operator can fix a broken presence check
     /// (Claude's TUI copy is the most churn-prone thing we depend on) by
     /// editing one config file instead of shipping a release.
-    /// The operator's configured prompt needles, or `None` when they have
-    /// configured none. Deliberately not the *default* permission needles:
-    /// those include `esctocancel`, which Claude's views offer too, so
-    /// handing them to recovery's guard would stop it rescuing the measured
-    /// lockout. See `SupervisorRequest::SendText::asking`.
-    fn configured_prompt_presence(&self) -> Option<PromptPresence> {
-        self.config
-            .permission_prompt_needles()
-            .map(|needles| PromptPresence::AnyOf {
-                needles: needles.to_vec(),
-            })
-    }
-
     fn with_needle_overrides(&self, presence: PromptPresence) -> PromptPresence {
         let overrides = match presence {
             PromptPresence::InputBox => self.config.input_box_needles(),
@@ -7610,19 +7393,12 @@ impl Daemon {
         }
     }
 
-    /// Free-text takeover from the phone. `session_ref` is a uid or a name.
+    /// A message from the phone to a Claude run CodeConnect started, which its host
+    /// delivers ([`crate::claude_host::send_text`]). `session_ref` is a uid or a name.
     ///
-    /// A mutation with an identity, so a phone on a flaky link can retry the
-    /// same takeover without typing it twice. Three things changed in minor 3
-    /// and all three are load-bearing:
-    ///
-    /// * The **server** picks the interlock. Letting the caller nominate the
-    ///   needle that authorises its own keystrokes (`PromptPresence::AnyOf`)
-    ///   made the safety check something the client could write for itself,
-    ///   which is not a safety check.
-    /// * The body is **bounded**. A megabyte typed into a TTY is not a takeover.
-    /// * The mutation is **claimed durably before anything is typed**, so a
-    ///   retry after a crash is told "unknown" rather than typing again.
+    /// A mutation with an identity, so a phone on a flaky link can retry the same
+    /// message without it arriving twice. The body is **bounded**: a megabyte is not
+    /// a message.
     pub async fn send_text(
         self: &Arc<Self>,
         session_ref: &str,
@@ -7643,16 +7419,10 @@ impl Daemon {
                 ),
             };
         }
-        let (session_uid, transcript_path) = match self.resolve(session_ref).await {
-            // **Refused here, on the row the resolver already read.** See
-            // [`Daemon::shared_ledgers_admit`] for what a rolled-back daemon does
-            // to a `text_mutations` row it finds. The position is the whole
-            // point: the claim below is durable and is written *before* anything
-            // is typed, while the refusal that would otherwise have stopped a
-            // non-Claude takeover is "no supervisor attached", raised inside
-            // `supervisor_request` after the claim exists. A daemon killed in
-            // that window leaves an `applying` row behind, which is exactly the
-            // row the old build rewrites.
+        let session_uid = match self.resolve(session_ref).await {
+            // **Refused here, on the row the resolver already read**, before the
+            // host writes its durable claim. See [`Daemon::shared_ledgers_admit`]
+            // for what a rolled-back daemon does to a `text_mutations` row it finds.
             Ok(row) if !self.shared_ledgers_admit(&row.agent) => {
                 return SendTextResult::Refused {
                     reason: format!(
@@ -7663,7 +7433,7 @@ impl Daemon {
                     ),
                 }
             }
-            Ok(row) => (row.session_uid, row.transcript_path),
+            Ok(row) => row.session_uid,
             Err(err) => {
                 return SendTextResult::Refused {
                     reason: format!("{err}"),
@@ -7696,10 +7466,11 @@ impl Daemon {
             (None, _) => None,
         };
 
-        // A Claude run started in an agent host takes the message through its host.
+        // A Claude run started in an agent host takes the message through its host;
+        // no other run has anything to deliver it.
         match self.db.hosted_link(session_uid.clone()).await {
             Ok(Some(linked)) => {
-                return crate::claude_host::send_text(
+                crate::claude_host::send_text(
                     self,
                     &session_uid,
                     linked.lifecycle,
@@ -7712,187 +7483,16 @@ impl Daemon {
                 )
                 .await
             }
-            Ok(None) => {}
+            Ok(None) => SendTextResult::Refused {
+                reason: "Only a run CodeConnect started takes messages; nothing was sent.".into(),
+            },
             Err(err) => {
                 crate::log_error!("send_text for {session_uid}: could not read its run: {err:#}");
-                return SendTextResult::Refused {
+                SendTextResult::Refused {
                     reason: "This computer could not read the session; nothing was sent.".into(),
-                };
+                }
             }
         }
-
-        if let Some((request_id, hash)) = &identity {
-            match self
-                .db
-                .claim_text_mutation(
-                    session_uid.clone(),
-                    request_id.to_string(),
-                    hash.to_string(),
-                    None,
-                    protocol::time::now_rfc3339(),
-                )
-                .await
-            {
-                Ok(TextClaim::Claimed) => {}
-                Ok(TextClaim::Applied {
-                    matched,
-                    settled_at,
-                }) => {
-                    return SendTextResult::Duplicate {
-                        matched,
-                        applied_at: settled_at,
-                    }
-                }
-                Ok(TextClaim::Indeterminate { started_at }) => {
-                    return SendTextResult::Indeterminate {
-                        reason: format!(
-                            "a previous attempt at this mutation (claimed {started_at}) was \
-                             interrupted; whether it reached the agent was never observed, and \
-                             it will not be typed again"
-                        ),
-                    }
-                }
-                Ok(TextClaim::Conflict) => {
-                    return SendTextResult::Refused {
-                        reason: "this request_id was already used for different text in this \
-                                 session; use a new one"
-                            .into(),
-                    }
-                }
-                Err(err) => {
-                    crate::log_error!("could not claim send_text {request_id}: {err:#}");
-                    return SendTextResult::Refused {
-                        reason: "could not record that this mutation is being applied; nothing \
-                                 was typed"
-                            .into(),
-                    };
-                }
-            }
-        } else {
-            crate::log_debug!(
-                "send_text for {session_uid} carries no request_id; a retry of it would type twice"
-            );
-        }
-
-        // Chosen here, never by the caller. Config overrides still apply — those
-        // come from the operator's own file, not from the wire.
-        let require = self.with_needle_overrides(PromptPresence::InputBox);
-        // Both decided here rather than trusted from the phone: recovery is
-        // safety behaviour, and the snapshot allowlist is what keeps this
-        // from becoming a general "screenshot any TUI view" facility.
-        let recover_composer = is_word_shaped_slash_command(&text);
-        let capture_recovered = snapshot_command(&text);
-        // **The one place a rescue becomes a completion.** Here the view is
-        // not an ambush: it is Claude Code asking the human to confirm the
-        // choice they already made on the phone, and dismissing it throws that
-        // choice away. Everything else keeps the generic rescue.
-        //
-        // Three things must agree, and the client is only one of them. The
-        // client's flag says a human was shown what this costs and tapped
-        // anyway — a client that predates that disclosure sends `false` and
-        // gets today's behaviour. The daemon's own allowlist says which
-        // commands may ever be completed, so the flag can never nominate one.
-        // The supervisor gate keeps a build that would silently drop the field
-        // — and therefore Escape — from being handed a confirmation to make.
-        // Consent and the allowlist decide here; the supervisor's capability
-        // is decided in `supervisor_request`, against the handle that actually
-        // receives the frame.
-        let confirm_view = confirm_view_for(&text, complete_native_confirmation);
-        let outcome = match respond_by_stamp(self.config.supervisor_timeout_ms) {
-            Err(refused) => Err(refused),
-            Ok(respond_by) => {
-                self.supervisor_request(
-                    &session_uid,
-                    SupervisorRequest::SendText {
-                        text,
-                        require,
-                        // This text goes to the composer, whatever needles the
-                        // operator configured for finding it — so the supervisor
-                        // may ask whether the composer has the keyboard.
-                        targets_composer: true,
-                        // Where Claude records the session's own name, which a
-                        // named session's message box carries in its top rule.
-                        transcript_path,
-                        // And whatever they configured for recognising a prompt,
-                        // so recovery's "never Escape a screen that is asking"
-                        // guard sees the prompts they taught us to see. `None`
-                        // when nothing is configured; the supervisor then uses
-                        // the question itself.
-                        asking: self.configured_prompt_presence(),
-                        submit,
-                        // Free text is not an answer to a prompt; the composer being
-                        // ready is the whole interlock, and a permission prompt on
-                        // screen makes that check fail on its own.
-                        expect: None,
-                        recover_composer,
-                        capture_recovered,
-                        confirm_view,
-                        // The moment this daemon stops waiting for the answer,
-                        // stamped so the supervisor spends its budget against the
-                        // clock that actually matters — including whatever time
-                        // this request spends queued before it is read.
-                        respond_by_monotonic_ms: Some(respond_by),
-                    },
-                )
-                .await
-            }
-        };
-
-        let result = send_text_result_of(outcome);
-
-        if let Some((request_id, _)) = &identity {
-            match &result {
-                // The three outcomes that prove the keys landed. Settling all
-                // three is what makes a lost response replay as `duplicate`
-                // instead of a permanent unknown: recovery and loss are as
-                // final as a plain send — the typing happened, and no retry
-                // may type it again.
-                SendTextResult::Sent { matched }
-                | SendTextResult::ComposerRecovered { matched, .. }
-                | SendTextResult::ComposerLost { matched } => {
-                    // Injected text landed at the prompt: the human moved the
-                    // run, and the ambient latch must not swallow what follows.
-                    self.push_gate.note_progress(&session_uid);
-                    if let Err(err) = self
-                        .db
-                        .settle_text_mutation(
-                            session_uid.clone(),
-                            request_id.to_string(),
-                            matched.to_string(),
-                            protocol::time::now_rfc3339(),
-                        )
-                        .await
-                    {
-                        // The claim stays `applying`, so a retry is told
-                        // "unknown" rather than typing a second time.
-                        crate::log_error!("could not settle send_text {request_id}: {err:#}");
-                    }
-                }
-                // Nothing was typed, so the claim is released and a later retry
-                // is a fresh attempt rather than a permanent "I do not know".
-                SendTextResult::Refused { .. } => {
-                    if let Err(err) = self
-                        .db
-                        .release_text_mutation(session_uid.clone(), request_id.to_string())
-                        .await
-                    {
-                        crate::log_error!("could not release send_text {request_id}: {err:#}");
-                    }
-                }
-                // Left claimed on purpose: an unconfirmed injection must not
-                // become answerable again.
-                _ => crate::log_error!(
-                    "send_text {request_id} was never confirmed; leaving it claimed so a retry \
-                     is told so rather than typing again"
-                ),
-            }
-        }
-        result
-    }
-
-    pub async fn capture(&self, session_ref: &str, lines: u32) -> Result<String> {
-        let session_uid = self.resolve(session_ref).await?.session_uid;
-        self.capture_run(&session_uid, lines).await
     }
 
     /// Which slash commands this session's Claude Code has: for a run CodeConnect
@@ -7935,11 +7535,6 @@ impl Daemon {
                 reason: format!("{err:#}"),
             },
         }
-    }
-
-    /// A snapshot for a human to read: scrollback included.
-    async fn capture_run(&self, session_uid: &str, lines: u32) -> Result<String> {
-        self.capture_pane(session_uid, lines, false).await
     }
 
     /// A snapshot for the daemon to *decide* from: the visible pane and nothing
@@ -9476,20 +9071,8 @@ impl Daemon {
     async fn supervisor_request(
         &self,
         session_uid: &str,
-        mut request: SupervisorRequest,
+        request: SupervisorRequest,
     ) -> std::result::Result<SupervisorResult, SupervisorFailure> {
-        // What the request needs the supervisor to be able to do, checked
-        // against the handle that will actually receive it. Asked separately
-        // beforehand it was a different question: a session can restart
-        // between the two lookups, and the answer would be about a
-        // supervisor that no longer exists.
-        let needs_recovery = matches!(
-            &request,
-            SupervisorRequest::SendText {
-                recover_composer: true,
-                ..
-            }
-        );
         let (slot, tx, rx) = {
             let inner = self.inner.lock().await;
             let Some(handle) = inner.supervisors.get(session_uid) else {
@@ -9497,24 +9080,6 @@ impl Daemon {
                     "no supervisor attached for {session_uid}"
                 )));
             };
-            if needs_recovery && handle.protocol_minor < SUPERVISOR_MINOR_COMPOSER_RECOVERY {
-                return Err(SupervisorFailure::NotSent(
-                    "this session cannot recover slash-command views safely yet. Restart it \
-                     after updating CodeConnect, or use Terminal."
-                        .into(),
-                ));
-            }
-            // Completing a view is decided against **this** handle for the same
-            // reason: a supervisor that predates the field drops it silently and
-            // presses `Escape`, so a capability read from an earlier lookup
-            // could hand a confirmation to a build that cannot make one. Asking
-            // here withdraws it instead, and the ordinary rescue runs — the same
-            // outcome as never having asked.
-            if handle.protocol_minor < SUPERVISOR_MINOR_CONFIRM_VIEW {
-                if let SupervisorRequest::SendText { confirm_view, .. } = &mut request {
-                    *confirm_view = None;
-                }
-            }
             let id = handle
                 .next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -13342,88 +12907,6 @@ pub(crate) mod answer_latch {
 
 #[cfg(test)]
 mod tests {
-
-    /// The one translation the claim's fate rides on, arm by arm: only
-    /// `Refused` may release a text mutation's claim, so every supervisor
-    /// answer that leaves typing possible must map to `Indeterminate`.
-    #[test]
-    fn supervisor_answers_map_to_claim_outcomes_exactly() {
-        use protocol::ipc::SupervisorResult;
-
-        // The supervisor's phase-aware "may have acted": verbatim to the
-        // phone, never rephrased into something a retry would act on.
-        match send_text_result_of(Ok(SupervisorResult::Error {
-            message: "the text was typed but Enter was not confirmed".into(),
-        })) {
-            SendTextResult::Indeterminate { reason } => {
-                assert_eq!(reason, "the text was typed but Enter was not confirmed")
-            }
-            other => panic!("a supervisor error may have typed; got {other:?}"),
-        }
-
-        // A refusal releases; the reason travels.
-        match send_text_result_of(Ok(SupervisorResult::Refused {
-            reason: "nothing was typed".into(),
-        })) {
-            SendTextResult::Refused { reason } => assert_eq!(reason, "nothing was typed"),
-            other => panic!("a refusal must release the claim; got {other:?}"),
-        }
-
-        // Never handed to a supervisor: retry-safe.
-        assert!(matches!(
-            send_text_result_of(Err(SupervisorFailure::NotSent("no supervisor".into()))),
-            SendTextResult::Refused { .. }
-        ));
-        // Handed over and never answered: permanently unknown.
-        assert!(matches!(
-            send_text_result_of(Err(SupervisorFailure::Unanswered("timed out".into()))),
-            SendTextResult::Indeterminate { .. }
-        ));
-        // Typed with recovery unconfirmed: unknown, reason preserved.
-        assert!(matches!(
-            send_text_result_of(Ok(SupervisorResult::RecoveryUnconfirmed {
-                matched: "composer".into(),
-                reason: "budget".into(),
-            })),
-            SendTextResult::Indeterminate { .. }
-        ));
-
-        // The typing-proven outcomes carry through one to one…
-        assert!(matches!(
-            send_text_result_of(Ok(SupervisorResult::Sent {
-                matched: "composer".into()
-            })),
-            SendTextResult::Sent { .. }
-        ));
-        assert!(matches!(
-            send_text_result_of(Ok(SupervisorResult::ComposerRecovered {
-                matched: "composer".into(),
-                pane_snapshot: None,
-                captured_at: "2026-01-01T00:00:00Z".into(),
-            })),
-            SendTextResult::ComposerRecovered { .. }
-        ));
-        assert!(matches!(
-            send_text_result_of(Ok(SupervisorResult::ComposerLost {
-                matched: "composer".into()
-            })),
-            SendTextResult::ComposerLost { .. }
-        ));
-        // …except a confirmed view, which is deliberately the same news as a
-        // clean send: the keys landed, the transcript decides.
-        assert!(matches!(
-            send_text_result_of(Ok(SupervisorResult::ViewConfirmed {
-                matched: "composer".into()
-            })),
-            SendTextResult::Sent { .. }
-        ));
-        // A result that makes no sense as an answer to typing is unknown —
-        // it may have typed, and a refusal here would let a retry act on it.
-        assert!(matches!(
-            send_text_result_of(Ok(SupervisorResult::Pong)),
-            SendTextResult::Indeterminate { .. }
-        ));
-    }
     use super::*;
     use serde_json::json;
 
@@ -14693,96 +14176,6 @@ mod tests {
             )
             .await
             .expect("registration must succeed")
-    }
-
-    /// Recovery is paid for by slash commands only — prose cannot open a
-    /// Mac view, and a path is not a command.
-    #[test]
-    fn only_word_shaped_slash_commands_ask_for_recovery() {
-        for text in [
-            "/status",
-            "/model sonnet",
-            "  /clear",
-            "/deep-research x",
-            "/a-b_c",
-        ] {
-            assert!(is_word_shaped_slash_command(text), "{text}");
-        }
-        for text in ["hello", "", "/", "/tmp/build.log", "look at /status", "/ x"] {
-            assert!(!is_word_shaped_slash_command(text), "{text}");
-        }
-    }
-
-    /// The allowlist that stands between a client's flag and a **committing**
-    /// keystroke. `Enter` selects whatever is highlighted, so everything this
-    /// function refuses is a key that is never pressed.
-    #[test]
-    fn only_model_with_one_ascii_graphic_argument_gets_a_confirmation_needle() {
-        assert_eq!(
-            confirmation_needle("/model sonnet").as_deref(),
-            Some("❯1.yes,switchtosonnet"),
-            "the needle binds the selection marker, the affirmative row and the value"
-        );
-        assert_eq!(
-            confirmation_needle("  /MODEL Opus").as_deref(),
-            Some("❯1.yes,switchtoopus"),
-            "leading space and case are the command's, not the needle's"
-        );
-        // Measured: `/effort` opens the identical shape and echoes its argument
-        // verbatim, so it shares the needle rather than growing a second one.
-        assert_eq!(
-            confirmation_needle("/effort low").as_deref(),
-            Some("❯1.yes,switchtolow")
-        );
-        for text in [
-            // Not a command whose confirmation the phone discloses.
-            "/clear",
-            "/status",
-            "hello",
-            // Bare: Claude Code's own chooser, where the highlighted row is
-            // whatever it happens to be.
-            "/model",
-            "/model   ",
-            "/effort",
-            // Not one printable word: a payload that did not make one command
-            // must never authorise one key.
-            "/model two words",
-            "/model with\ttab",
-            "/model line\nbreak",
-            "/model café",
-        ] {
-            assert_eq!(confirmation_needle(text), None, "{text:?}");
-        }
-    }
-
-    /// Consent and the allowlist both have to agree. Dropping either hands a
-    /// committing keystroke to a case that never authorised it. The third
-    /// condition — the supervisor's capability — is checked at dispatch, under
-    /// the lock that fetches the handle.
-    #[test]
-    fn a_confirmation_is_forwarded_only_with_consent_an_allowlisted_command_and_a_minor_10_supervisor(
-    ) {
-        assert_eq!(
-            confirm_view_for("/model sonnet", true).as_deref(),
-            Some("❯1.yes,switchtosonnet")
-        );
-        // The client never showed anybody what this costs.
-        assert_eq!(confirm_view_for("/model sonnet", false), None);
-        // Consent, but not a command the daemon will complete.
-        assert_eq!(confirm_view_for("/clear", true), None);
-        assert_eq!(confirm_view_for("/model", true), None);
-    }
-
-    /// Three names, no rule: a kept snapshot is a picture of somebody's
-    /// screen, and the general version of the idea was rejected by design.
-    #[test]
-    fn only_the_three_snapshot_commands_keep_a_pane() {
-        for text in ["/status", "/usage", "  /COST"] {
-            assert!(snapshot_command(text), "{text}");
-        }
-        for text in ["/model", "/clear", "/status extra", "/statuses", "hello"] {
-            assert!(!snapshot_command(text), "{text}");
-        }
     }
 
     #[tokio::test]
@@ -27028,49 +26421,6 @@ mod tests {
     // ========================================================== send_text
 
     #[tokio::test]
-    async fn send_text_with_an_identity_types_once_however_often_it_is_retried() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        let text = "reply with exactly: ok";
-        let hash = protocol::hash::send_text_hash(uid, text, true);
-
-        let first = daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some("st-1"),
-                Some(&hash),
-                true,
-                false,
-            )
-            .await;
-        assert!(matches!(first, SendTextResult::Sent { .. }), "{first:?}");
-
-        for _ in 0..4 {
-            match daemon
-                .send_text(
-                    uid,
-                    text.to_string(),
-                    Some("st-1"),
-                    Some(&hash),
-                    true,
-                    false,
-                )
-                .await
-            {
-                SendTextResult::Duplicate { .. } => {}
-                other => panic!("a retry must replay, not retype: {other:?}"),
-            }
-        }
-        assert_eq!(
-            pane.typed(),
-            vec![text.to_string()],
-            "a takeover retried five times must reach the TTY once"
-        );
-    }
-
-    #[tokio::test]
     async fn send_text_refuses_an_identity_that_does_not_match_its_own_text() {
         let daemon = test_daemon();
         let uid = TEST_UID;
@@ -27102,29 +26452,11 @@ mod tests {
             matches!(unbound, SendTextResult::Refused { .. }),
             "{unbound:?}"
         );
-
-        // The same id later carrying different material is a conflict, not a
-        // licence to type something else.
-        let ok = protocol::hash::send_text_hash(uid, "one", true);
-        assert!(matches!(
-            daemon
-                .send_text(uid, "one".into(), Some("st-3"), Some(&ok), true, false)
-                .await,
-            SendTextResult::Sent { .. }
-        ));
-        let other = protocol::hash::send_text_hash(uid, "two", true);
-        let conflict = daemon
-            .send_text(uid, "two".into(), Some("st-3"), Some(&other), true, false)
-            .await;
-        assert!(
-            matches!(&conflict, SendTextResult::Refused { reason } if reason.contains("already used")),
-            "{conflict:?}"
-        );
-        assert_eq!(pane.typed(), vec!["one".to_string()]);
+        assert!(pane.typed().is_empty());
     }
 
     #[tokio::test]
-    async fn send_text_is_bounded_and_the_server_picks_the_interlock() {
+    async fn send_text_is_bounded_and_only_a_run_codeconnect_started_takes_one() {
         let daemon = test_daemon();
         let uid = TEST_UID;
         let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
@@ -27135,85 +26467,17 @@ mod tests {
             matches!(&refused, SendTextResult::Refused { reason } if reason.contains("ceiling")),
             "{refused:?}"
         );
-        assert!(pane.typed().is_empty());
 
-        // The interlock is the composer, chosen here and not offered by the
-        // caller — `Daemon::send_text` has no parameter for it at all, which is
-        // the point: the client used to nominate the needle that authorised its
-        // own keystrokes.
-        assert!(matches!(
-            daemon.send_text(uid, "hello".into(), None, None, true, false).await,
-            SendTextResult::Sent { matched } if matched == "composer"
-        ));
-
-        // And with a permission prompt up, the composer is not ready, so free
-        // text is refused rather than typed into the prompt.
-        pane.show(&permission_pane("touch /tmp/a"));
-        let blocked = daemon
+        // A supervised run has nothing left to deliver a message: refused, and
+        // nothing typed into its pane.
+        let unhosted = daemon
             .send_text(uid, "hello".into(), None, None, true, false)
             .await;
-        assert!(
-            matches!(blocked, SendTextResult::Refused { .. }),
-            "{blocked:?}"
-        );
-        assert_eq!(pane.typed(), vec!["hello".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn a_send_text_interrupted_mid_injection_is_never_typed_again() {
-        let store = shared_store();
-        let uid = TEST_UID;
-        let text = "deploy";
-        let hash = protocol::hash::send_text_hash(uid, text, true);
-        // The claim writer refuses a uid with no session row, so the run this
-        // claim belongs to has to exist the way it would in production.
-        {
-            let now = protocol::time::now_rfc3339();
-            store
-                .upsert_session(&SessionRow {
-                    session_uid: uid.into(),
-                    session_id: "cc-1".into(),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: Lifecycle::Live,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    agent: protocol::agent::AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
-                .unwrap()
-                .assert_present();
-        }
-
-        // A claim from a process that did not come back.
         assert_eq!(
-            store
-                .claim_text_mutation(uid, "st-1", &hash, None, &protocol::time::now_rfc3339())
-                .unwrap(),
-            TextClaim::Claimed
-        );
-
-        let daemon = daemon_on(Arc::clone(&store), Config::default());
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        daemon.recover().await;
-
-        let result = daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some("st-1"),
-                Some(&hash),
-                true,
-                false,
-            )
-            .await;
-        assert!(
-            matches!(result, SendTextResult::Indeterminate { .. }),
-            "an interrupted takeover must be reported, not repeated: {result:?}"
+            unhosted,
+            SendTextResult::Refused {
+                reason: "Only a run CodeConnect started takes messages; nothing was sent.".into()
+            }
         );
         assert!(pane.typed().is_empty());
     }
@@ -27236,9 +26500,7 @@ mod tests {
 
         pane.go_silent();
         for _ in 0..5 {
-            let _ = daemon
-                .send_text("cc-1", "hello".into(), None, None, false, false)
-                .await;
+            let _ = daemon.capture_visible(uid).await;
         }
         assert_eq!(
             pane.inflight_len(),
@@ -27290,100 +26552,12 @@ mod tests {
             .unwrap();
 
         let started = std::time::Instant::now();
-        let result = daemon.capture("cc-1", 40).await;
+        let result = daemon.capture_visible(uid).await;
         assert!(result.is_err(), "a capture nobody can receive must fail");
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "it must fail fast rather than wait on a queue that will never drain"
         );
-    }
-
-    #[tokio::test]
-    async fn a_send_text_the_supervisor_never_confirms_stays_claimed() {
-        let daemon = daemon_with(Config {
-            supervisor_timeout_ms: 100,
-            ..Config::default()
-        });
-        let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        let text = "deploy";
-        let hash = protocol::hash::send_text_hash(uid, text, true);
-
-        pane.go_silent();
-        let first = daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some("st-1"),
-                Some(&hash),
-                true,
-                false,
-            )
-            .await;
-        assert!(
-            matches!(first, SendTextResult::Indeterminate { .. }),
-            "an unconfirmed takeover is unknown, not refused: {first:?}"
-        );
-
-        // Answering again — even with the supervisor healthy — must replay the
-        // unknown, because the first attempt may already have typed it.
-        let second = daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some("st-1"),
-                Some(&hash),
-                true,
-                false,
-            )
-            .await;
-        assert!(
-            matches!(second, SendTextResult::Indeterminate { .. }),
-            "{second:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_send_text_that_never_reached_a_supervisor_can_be_retried() {
-        let daemon = test_daemon();
-        let uid = TEST_UID;
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        let text = "deploy";
-        let hash = protocol::hash::send_text_hash(uid, text, true);
-        daemon.unregister_supervisor(&pane._registration).await;
-
-        let refused = daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some("st-1"),
-                Some(&hash),
-                true,
-                false,
-            )
-            .await;
-        assert!(
-            matches!(&refused, SendTextResult::Refused { reason } if reason.contains("no supervisor")),
-            "{refused:?}"
-        );
-
-        // The claim was released, so the same identity works once a supervisor
-        // is back rather than being stuck as a permanent unknown.
-        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        assert!(matches!(
-            daemon
-                .send_text(
-                    uid,
-                    text.to_string(),
-                    Some("st-1"),
-                    Some(&hash),
-                    true,
-                    false
-                )
-                .await,
-            SendTextResult::Sent { .. }
-        ));
-        assert_eq!(pane.typed(), vec![text.to_string()]);
     }
 
     #[test]

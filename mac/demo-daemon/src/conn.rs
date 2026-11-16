@@ -440,18 +440,6 @@ where
         // every reply the client waits on is keyed by a correlation id and a
         // request that goes unanswered is twenty seconds of spinner rather than
         // a sentence.
-        ClientMessage::Capture { session_id, .. } => {
-            send(
-                sink,
-                &ServerMessage::CaptureResult {
-                    session_id,
-                    text: "This demonstration daemon runs no terminal, so there is no pane to \
-                           capture."
-                        .into(),
-                },
-            )
-            .await?
-        }
         ClientMessage::GetCommandCatalog { session_id } => {
             send(
                 sink,
@@ -540,9 +528,8 @@ fn capabilities() -> Capabilities {
         answer_path: AnswerPath::HookReturn,
         hold_secs: 0,
         send_text: true,
-        // No pane, no shell, no Claude Code binary, no APNs key, and nothing
-        // destructive: an action this server cannot perform is not offered.
-        capture: false,
+        // No shell, no Claude Code binary, no APNs key, and nothing destructive:
+        // an action this server cannot perform is not offered.
         delete_session: false,
         test_push: false,
         push: false,
@@ -557,7 +544,6 @@ fn capabilities() -> Capabilities {
         // holding it, and resolving it takes it out of that set.
         prompt_identity: true,
         command_catalog: false,
-        slash_composer_recovery: false,
         terminal_pty: false,
         // No Codex link and no turn to stop: an action this server cannot perform
         // is not offered.
@@ -1004,7 +990,6 @@ mod tests {
             "push_relay",
             "test_push",
             "delete_session",
-            "capture",
             "command_catalog",
             "tls",
             "tls_active",
