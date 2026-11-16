@@ -369,7 +369,9 @@ pub enum Link {
 ///
 /// **[`CodexLink::Subscribed`] is actuatable, and [`CodexLink::BoundNotStarted`] is
 /// actuatable for a COMPOSE alone** — a thread the daemon has proved has never run a
-/// turn can be given its first one, and has no turn to stop. The remaining three are
+/// turn can be given its first one, and a run whose app-server ended without the
+/// daemon stopping it is relaunched by the next message, and neither has a turn to
+/// stop. The remaining three are
 /// the daemon's honest reasons why not, and a client greys the control and says which
 /// one rather than hiding it: a link that is offline now is subscribed a moment
 /// later, and four of the daemon's own refusal sentences end with "try again
@@ -394,11 +396,13 @@ pub enum CodexLink {
     /// difference is what a client may act on: this word means the daemon does not
     /// know whether a turn is running, so a `turn/start` might collide with one.
     Bound,
-    /// **Bound to a thread that has PROVABLY never run a turn**, and therefore the
-    /// one un-subscribed state a first message may still be sent into.
+    /// **A thread a message may be sent into although nothing is subscribed to it,
+    /// because nothing can be running on it**: one the daemon has proved has never run
+    /// a turn, or the thread of a run whose app-server ended, which the message
+    /// relaunches (below). The one un-subscribed state a compose is admitted in.
     ///
-    /// The daemon publishes it only when its own `thread/resume` for this very
-    /// thread came back with the measured not-ready answer — `-32600 "no rollout
+    /// For a link, the daemon publishes it only when its own `thread/resume` for this
+    /// very thread came back with the measured not-ready answer — `-32600 "no rollout
     /// found for thread id …"`. No rollout means no turn has ever run on the thread,
     /// which means no turn can be running now, which means a `turn/start` cannot
     /// join or collide with one.
@@ -414,6 +418,17 @@ pub enum CodexLink {
     ///
     /// **Compose only.** There is nothing to stop — no turn has ever run — so a
     /// client offers Compose here and does not offer Stop.
+    ///
+    /// **And a run CodeConnect started on its engine whose app-server ended without
+    /// the daemon stopping it** ("Stopped: its process ended": a crash, or a Mac
+    /// restart). Its lifecycle stays `exited`, and the person's next message relaunches
+    /// its app-server, resumes its thread and is sent there; nothing runs on it until
+    /// then, so again there is nothing to stop. A run ended by End run reads
+    /// [`CodexLink::None`]. A relaunch that cannot be done refuses the message with
+    /// nothing sent and leaves the run `exited` and offered this word again, even when
+    /// the daemon's own watch found the new app-server gone first; a daemon that dies
+    /// during the relaunch leaves it `failed`, read as [`CodexLink::None`]. The refusal is
+    /// the last word, as for any compose.
     ///
     /// **The fifth `codex_link` word, and it costs a minor: it is
     /// [`crate::PROTOCOL_MINOR`] 20.** It was originally written into minor 19 on the

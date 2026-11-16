@@ -125,6 +125,9 @@ async fn main() -> Result<()> {
     // that exists, not the name the QR advertises.
     let _ = daemon.bind_ip.set(bind.ip().to_string());
     let _ = daemon
+        .relaunch_from
+        .set((root.clone(), state::codex_launcher()));
+    let _ = daemon
         .machine_id
         .set(load_or_create_machine_id(&protocol::machine_id_path())?);
     // Its own bytes, hashed now: the file at this path can change under a
