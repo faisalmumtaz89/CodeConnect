@@ -334,7 +334,7 @@ extension RenderCatalog {
             app, driver in
             try toReady(app, driver)
             try tap(app, "start-go", driver)
-            try driver.requireExists(driver.element(containing: "Open the terminal", in: app), "the terminal offer")
+            try driver.requireExists(driver.element(containing: "Events appear here", in: app), "the empty-timeline state")
         },
         RenderScenario(
             name: "start2-i-folder-gone", purpose: "steps: the folder is gone", arguments: args(outcome: "folder_missing")

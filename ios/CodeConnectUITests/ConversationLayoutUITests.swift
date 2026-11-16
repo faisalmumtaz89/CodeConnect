@@ -83,8 +83,8 @@ final class ConversationLayoutUITests: XCTestCase {
             "the turn that ended on `npm run lint` must keep its line")
     }
 
-    /// The bar's "…" holds the terminal, the session's changes, and the link's
-    /// health under the name of the computer, which is a heading, not a button.
+    /// The bar's "…" holds the session's changes and the link's health under
+    /// the name of the computer, which is a heading, not a button.
     func testTheMenuNamesTheComputer() {
         let app = open("fx-6")
         app.buttons["session-more"].tap()
@@ -94,7 +94,6 @@ final class ConversationLayoutUITests: XCTestCase {
             app.staticTexts["On Jordan’s Mac Studio"].exists, "under the computer's name")
         XCTAssertFalse(
             app.buttons["On Jordan’s Mac Studio"].exists, "which is not an action")
-        XCTAssertTrue(app.buttons["Terminal"].exists, "beside the terminal")
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch.exists,
             "and the changes")

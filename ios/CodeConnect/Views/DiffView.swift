@@ -1469,8 +1469,7 @@ private struct DiffCommentSheet: View {
         case .composerRecovered:
             return "The comment was typed into the session."
         case .composerLost:
-            return "The comment was typed, but the computer's composer did not come back. "
-                + "Open Terminal to recover."
+            return "The comment was typed, but the computer's composer did not come back."
         }
     }
 

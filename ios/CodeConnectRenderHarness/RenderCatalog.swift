@@ -388,15 +388,6 @@ struct RenderDriver {
         try require(element(containing: "your computer last answered", in: app), "the link-health sheet")
     }
 
-    /// The session's terminal, from the bar's menu.
-    func openTerminal(_ app: XCUIApplication) throws {
-        try openFirstSession(app)
-        try openSessionMenu(app)
-        let terminal = app.buttons["Terminal"].firstMatch
-        try require(terminal, "Terminal in the session bar's menu")
-        terminal.tap()
-    }
-
     /// The session bar's "…" menu.
     func openSessionMenu(_ app: XCUIApplication) throws {
         let more = app.buttons["session-more"].firstMatch
@@ -1089,12 +1080,6 @@ enum RenderCatalog {
                     driver.text(containing: "Truncated", in: app),
                     "the truncation banner")
             }),
-
-        RenderScenario(
-            name: "terminal-ended",
-            purpose: "a session that has ended, and the one control it offers",
-            arguments: ["-CC_FIXTURE", "deck", "-cc.debug.terminalState", "ended"],
-            reach: { app, driver in try driver.openTerminal(app) }),
 
         RenderScenario(
             name: "settings",
