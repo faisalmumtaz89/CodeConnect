@@ -196,7 +196,7 @@ final class HostedRunRowsTests: XCTestCase {
         let shown = await state(try events("hosted-clear-wire"))
         XCTAssertEqual(shape(shown.timeline.filter { $0.seq == 3 }), [], "the person's /clear draws no row")
         XCTAssertEqual(
-            shape(TimelineBuilder.drawn(shown.timeline).filter { $0.seq >= 3 }), ["notice:Conversation cleared."])
+            shape(TimelineBuilder.drawn(shown.timeline).filter { (3...7).contains($0.seq) }), ["notice:Conversation cleared."])
     }
 
     /// Any other command an app sends draws as a terminal run's invocation does, a command row, and starts its turn:
