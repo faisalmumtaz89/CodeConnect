@@ -61,6 +61,9 @@ struct FleetList: View {
     /// The run End Run… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
+    /// The run Remove… is asking about, and what its computer said when it was not removed.
+    @State private var removing: FleetRow?
+    @State private var removeNote: String?
 
     var body: some View {
         let rows = narrowed(scope.rows(machines.fleet))
@@ -112,8 +115,14 @@ struct FleetList: View {
                             if !isFolded {
                                 ForEach(group.rows) { row in
                                     let selected = opened == row.id
-                                    let endable = machines.model(for: row.machineID)?.canEndRun(row.summary) == true
-                                    let more = endable && (hovered == row.id || moreOpen == row.id)
+                                    let model = machines.model(for: row.machineID)
+                                    let endable = model?.canEndRun(row.summary) == true
+                                    // The iPhone's rule for its Remove: ended (or adopted), on a computer whose ccd
+                                    // removes runs. Never with End run: a run CodeConnect started is removable only
+                                    // once it has ended.
+                                    let removable =
+                                        row.summary.isRemovable && model?.daemonProfile.removesSessions == true
+                                    let more = (endable || removable) && (hovered == row.id || moreOpen == row.id)
                                     Button {
                                         moreOpen = nil
                                         opened = selected ? nil : row.id
@@ -125,10 +134,20 @@ struct FleetList: View {
                                     .accessibilityAction { opened = selected ? nil : row.id }
                                     .accessibilityIdentifier("fleet.row.\(row.id)")
                                     .accessibilityAddTraits(selected ? .isSelected : [])
-                                    // The run's "…" (decision 185): on hover, its panel holding End Run…; for VoiceOver,
-                                    // which does not hover, End Run… is the row's own action.
-                                    .accessibilityActions { if endable { Button("End Run…") { ending = row }.accessibilityIdentifier("fleet.row.\(row.id).endRunAction") } }
-                                    .overlay(alignment: .trailing) { moreButton(row, shown: more) }
+                                    // The run's "…" (decisions 185 and 217): on hover, its panel holding End Run…
+                                    // while the run is live, or Remove… once it has ended (an adopted run's at any
+                                    // time); for VoiceOver, which does not hover, that is the row's own action.
+                                    .accessibilityActions {
+                                        if endable {
+                                            Button("End Run…") { ending = row }
+                                                .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
+                                        }
+                                        if removable {
+                                            Button("Remove…") { removing = row }
+                                                .accessibilityIdentifier("fleet.row.\(row.id).removeAction")
+                                        }
+                                    }
+                                    .overlay(alignment: .trailing) { moreButton(row, endable: endable, shown: more) }
                                     .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
                                     // Its panel opens below the row, over the rows after it.
                                     .zIndex(moreOpen == row.id ? 1 : 0)
@@ -190,15 +209,36 @@ struct FleetList: View {
         } message: { note in
             Text(note)
         }
+        // Removing forgets CodeConnect's own record of a run, never the agent's transcript: it asks once, in the
+        // iPhone's words, then says only what went wrong.
+        .alert(
+            removing.map { "Remove \($0.label.project)?" } ?? "",
+            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+            presenting: removing
+        ) { row in
+            Button("Remove", role: .destructive) { remove(row) }.accessibilityIdentifier("remove.confirm")
+            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("remove.cancel")
+        } message: { row in
+            Text("\(row.summary.agent.displayName)'s own transcript stays on the computer.")
+        }
+        .alert(
+            "Not removed", isPresented: Binding(get: { removeNote != nil }, set: { if !$0 { removeNote = nil } }),
+            presenting: removeNote
+        ) { _ in
+            Button("OK", role: .cancel) {}.accessibilityIdentifier("remove.ok")
+        } message: { note in
+            Text(note)
+        }
     }
 
     /// The row's "…" while it is shown: on hover, or while its panel is open.
-    @ViewBuilder private func moreButton(_ row: FleetRow, shown: Bool) -> some View {
+    @ViewBuilder private func moreButton(_ row: FleetRow, endable: Bool, shown: Bool) -> some View {
         if shown {
             RunMore(
                 id: "fleet.row.\(row.id).more",
-                open: Binding(get: { moreOpen == row.id }, set: { moreOpen = $0 ? row.id : nil })
-            ) { ending = row }
+                open: Binding(get: { moreOpen == row.id }, set: { moreOpen = $0 ? row.id : nil }),
+                action: endable ? .endRun : .remove
+            ) { if endable { ending = row } else { removing = row } }
             .padding(.trailing, 10)
         }
     }
@@ -206,6 +246,11 @@ struct FleetList: View {
     private func endRun(_ row: FleetRow) {
         guard let model = machines.model(for: row.machineID) else { return }
         Task { endNote = await model.endRun(row.summary) }
+    }
+
+    private func remove(_ row: FleetRow) {
+        guard let model = machines.model(for: row.machineID) else { return }
+        Task { removeNote = await model.removeSession(row.summary).refusal }
     }
 
     /// The computer the list is narrowed to, when it was refused for running a different version of CodeConnect,
@@ -383,12 +428,20 @@ private struct FleetLine: View {
 }
 
 /// A run's "…" on its row, and the panel it opens below it, in the app's own panel style (the model panel's), holding
-/// End Run…, which asks before anything is sent.
+/// End Run… or Remove…, each of which asks before anything is sent.
 private struct RunMore: View {
+    enum Action {
+        case endRun, remove
+
+        var title: String { self == .endRun ? "End Run…" : "Remove…" }
+        var id: String { self == .endRun ? "endRun" : "remove" }
+    }
+
     static let width: CGFloat = 26
     let id: String
     @Binding var open: Bool
-    let endRun: () -> Void
+    let action: Action
+    let perform: () -> Void
 
     var body: some View {
         Button { open.toggle() } label: {
@@ -412,20 +465,20 @@ private struct RunMore: View {
     private var panel: some View {
         Button {
             open = false
-            endRun()
+            perform()
         } label: {
-            Text("End Run…").font(Theme.ui(12.5)).foregroundStyle(Theme.red).lineLimit(1)
+            Text(action.title).font(Theme.ui(12.5)).foregroundStyle(Theme.red).lineLimit(1)
                 .padding(.horizontal, 12)
                 .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 5, id: "\(id).endRun"))
+        .buttonStyle(.hover(radius: 5, id: "\(id).\(action.id)"))
         .padding(4)
         .frame(width: 180)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
-        .accessibilityIdentifier("\(id).endRun")
+        .accessibilityIdentifier("\(id).\(action.id)")
     }
 }
 
