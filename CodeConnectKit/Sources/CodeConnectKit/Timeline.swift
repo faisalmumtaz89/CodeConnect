@@ -830,6 +830,19 @@ public enum TimelineBuilder {
             // ccd's own notice that a hosted run's `/clear` reset the conversation: the row a terminal run's clear
             // draws, once. Drawn by its type, it said the words twice, as title and detail.
             return .conversationCleared
+        case EngineNotice.compacted:
+            // A hosted run's compaction, which ccd files from claude's own boundary: the row a terminal run's
+            // compaction draws, without the model its start carries. Drawn by its type, it read "Compacted" over it.
+            return NoticeItem(
+                kind: .sessionStart, symbol: "play-circle", title: "Conversation compacted", detail: nil,
+                severity: .info)
+        case EngineNotice.modelSet:
+            // ccd's record of an effort an app set on a hosted run, which claude echoes nothing for, in the effort
+            // menu's own words. Drawn by its type, it read "Model Set" over "Effort set to low".
+            let effort = event.payload["effort"]?.stringValue.map(EffortConfirmation.label(for:))
+            return NoticeItem(
+                kind: .other, symbol: "gauge", title: effort.map { "Effort set to \($0)" } ?? "Effort set",
+                detail: nil, severity: .info)
         case EngineNotice.mailNudge:
             // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
             // words to the agent, not the reader's, so the row is the one a Codex wake draws.

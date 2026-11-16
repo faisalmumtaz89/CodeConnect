@@ -117,10 +117,12 @@ public enum EngineNotice {
     public static let conversationCleared = "conversation_cleared"
     /// The content-free line that wakes an idle agent to read its mail.
     public static let mailNudge = "mail_nudge"
-    /// The agent host confirmed a model change.
+    /// An effort an app set on a hosted run, which claude took (`{effort}`): claude echoes nothing for it.
     public static let modelSet = "model_set"
     /// The agent host confirmed a permission-mode change.
     public static let modeSet = "mode_set"
+    /// Claude compacted the conversation (`/compact`, or on its own).
+    public static let compacted = "compacted"
 }
 
 /// The two lines ccd sends to wake an idle Codex agent for its mail

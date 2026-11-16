@@ -52,14 +52,14 @@ final class HostedRunRowsTests: XCTestCase {
     private let terminalClearRow = TimelineItem.Content.notice(
         NoticeItem(kind: .other, symbol: "eraser", title: "Conversation cleared.", detail: nil, severity: .info))
 
-    private func codex(_ seq: UInt64, _ kind: String, _ payload: String) throws -> Event {
+    private func event(_ seq: UInt64, _ kind: String, _ payload: String, source: String) throws -> Event {
         try JSONDecoder().decode(
             Event.self,
             from: Data(
                 """
                 {"seq":\(seq),"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
                  "ts":"2026-08-02T10:00:\(String(format: "%02d", seq))Z","kind":"\(kind)",
-                 "payload":\(payload),"source":"codex"}
+                 "payload":\(payload),"source":"\(source)"}
                 """.utf8))
     }
 
@@ -81,10 +81,11 @@ final class HostedRunRowsTests: XCTestCase {
     /// A Codex thread started mid-run files a start with no source too; it is a new conversation and keeps its row.
     func testACodexStartMidRunKeepsItsRow() throws {
         let events = [
-            try codex(1, "user_message", #"{"text":"Fix the build"}"#),
-            try codex(
+            try event(1, "user_message", #"{"text":"Fix the build"}"#, source: "codex"),
+            try event(
                 2, "session_start",
-                #"{"thread_id":"t-2","cwd":"/tmp/p","rollout_path":"/tmp/r.jsonl","cli_version":"0.164.0"}"#),
+                #"{"thread_id":"t-2","cwd":"/tmp/p","rollout_path":"/tmp/r.jsonl","cli_version":"0.164.0"}"#,
+                source: "codex"),
         ]
         XCTAssertNil(events[1].payload["source"])
         XCTAssertEqual(shape(TimelineBuilder.build(events)), ["you:Fix the build", "notice:Session started"])
@@ -119,5 +120,41 @@ final class HostedRunRowsTests: XCTestCase {
         XCTAssertEqual(drawn.timeline.filter { $0.seq == notice.seq }.map(\.content), [terminalClearRow])
         XCTAssertEqual(
             shape(drawn.timeline).filter { $0.lowercased().contains("cleared") }, ["notice:Conversation cleared."])
+    }
+
+    /// A hosted compaction (`fixtures/claude/sdk-session-events.json`, the daemon's events for a real session, seq 84)
+    /// draws the row a terminal compaction's start draws, without the model the notice does not carry: by its type it
+    /// read "Compacted" over "Conversation compacted".
+    func testAHostedCompactionDrawsTheTerminalCompactionsRow() async throws {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "sdk-session-events", withExtension: "json"))
+        let all = try JSONDecoder().decode([Event].self, from: Data(contentsOf: url))
+        let notice = try XCTUnwrap(all.first { $0.kind == .notification && $0.notificationType == "compacted" })
+        let drawn = await state(all)
+        guard case .notice(let row)? = drawn.timeline.first(where: { $0.seq == notice.seq })?.content else {
+            return XCTFail("the compaction drew no row: \(shape(drawn.timeline))")
+        }
+        let terminal = TimelineBuilder.build([
+            try event(1, "user_message", #"{"text":"Fix the build"}"#, source: "hook"),
+            try event(2, "session_start", #"{"hook_event_name":"SessionStart","source":"compact"}"#, source: "hook"),
+        ])
+        guard case .notice(let compacted)? = terminal.last?.content else { return XCTFail("\(shape(terminal))") }
+        XCTAssertEqual([row.title, row.symbol], [compacted.title, compacted.symbol])
+        XCTAssertEqual(
+            row,
+            NoticeItem(
+                kind: .sessionStart, symbol: "play-circle", title: "Conversation compacted", detail: nil,
+                severity: .info))
+    }
+
+    /// An effort an app set (`fixtures/claude/minor-39-wire.json`'s `effort_notice`, ccd's payload) draws in the effort
+    /// menu's words: by its type it read "Model Set" over "Effort set to high".
+    func testAnEffortAnAppSetDrawsItsMessage() throws {
+        let payload = try XCTUnwrap(try wire("minor-39-wire")["effort_notice"], "no effort_notice in minor-39-wire.json")
+        let notice = try event(2, "notification", payload.canonicalJSONString, source: "daemon")
+        XCTAssertEqual(notice.notificationType, "model_set")
+        XCTAssertEqual(
+            TimelineBuilder.build([notice]).map(\.content),
+            [.notice(NoticeItem(kind: .other, symbol: "gauge", title: "Effort set to High", detail: nil, severity: .info))])
     }
 }
