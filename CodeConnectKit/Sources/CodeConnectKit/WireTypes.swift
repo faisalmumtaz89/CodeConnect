@@ -1530,7 +1530,7 @@ public enum WriteStage: Decodable, Sendable, Hashable {
 public enum CodexResolution: Decodable, Sendable, Hashable {
     /// The prompt was answered. `decision` is omitted when the daemon recorded
     /// no decision alongside the actor.
-    case answered(by: ResolutionActor, decision: AnswerDecision?)
+    case answered(by: ResolutionActor, decision: AnswerDecision?, answeredOn: AnsweredOn?)
     /// The prompt went away without an answer. `cause` says why.
     case cleared(cause: ClearCause)
     /// The prompt aged out.
@@ -1549,6 +1549,7 @@ public enum CodexResolution: Decodable, Sendable, Hashable {
         case attemptedBy = "attempted_by"
         case attemptedDecision = "attempted_decision"
         case writeStage = "write_stage"
+        case answeredOn = "answered_on"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1557,7 +1558,9 @@ public enum CodexResolution: Decodable, Sendable, Hashable {
         case "answered":
             self = .answered(
                 by: try c.decode(ResolutionActor.self, forKey: .by),
-                decision: try c.decodeIfPresent(AnswerDecision.self, forKey: .decision))
+                decision: try c.decodeIfPresent(AnswerDecision.self, forKey: .decision),
+                answeredOn: try c.decodeIfPresent(String.self, forKey: .answeredOn)
+                    .flatMap(AnsweredOn.init(rawValue:)))
         case "cleared":
             self = .cleared(cause: try c.decode(ClearCause.self, forKey: .cause))
         case "timeout":
@@ -2609,10 +2612,10 @@ public enum TestPushResult: Decodable, Sendable, Hashable {
     }
 }
 
-/// What the Mac knows about its Claude Code's slash commands.
+/// A Claude run's own slash commands, as the run reported them.
 public enum CommandCatalogResult: Sendable, Hashable {
-    /// The binary's own inventory — names without the leading slash, exactly
-    /// as it emitted them. `probedAt` is when the list was actually read; a
+    /// The run's own inventory — names without the leading slash, exactly as
+    /// it reported them. `probedAt` is when the run reported that list; a
     /// cache hit keeps the original stamp because the age of a fact is part
     /// of the fact.
     case available(commands: [String], claudeVersion: String?, probedAt: String)

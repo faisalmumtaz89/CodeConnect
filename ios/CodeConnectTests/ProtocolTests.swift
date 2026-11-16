@@ -894,7 +894,7 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
     func testAnsweredByPhoneWithADecision() throws {
         let resolution = try decodeResolution(
             #"{"status":"answered","by":"phone","decision":{"type":"allow"}}"#)
-        guard case .answered(let by, let decision) = resolution else {
+        guard case .answered(let by, let decision, _) = resolution else {
             return XCTFail("expected .answered, got \(resolution)")
         }
         XCTAssertEqual(by, .phone)
@@ -903,7 +903,7 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
 
     func testAnsweredByLocalWithoutADecision() throws {
         let resolution = try decodeResolution(#"{"status":"answered","by":"local"}"#)
-        guard case .answered(let by, let decision) = resolution else {
+        guard case .answered(let by, let decision, _) = resolution else {
             return XCTFail("expected .answered, got \(resolution)")
         }
         XCTAssertEqual(by, .local)

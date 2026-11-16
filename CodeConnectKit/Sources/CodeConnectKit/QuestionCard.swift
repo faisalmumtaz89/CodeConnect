@@ -319,12 +319,13 @@ public enum QuestionCardStatus: Sendable, Hashable {
     /// could not confirm is unconfirmed, and everything else is closed.
     private static func endedByCodex(_ resolution: CodexResolution) -> QuestionCardStatus {
         switch resolution {
-        case .answered(let by, let decision):
-            // `by` names a phone or the Mac, not a device kind; a phone's answer is
-            // recorded as an iPhone's, so the banner names the resolver (an iPhone to
-            // the Mac) rather than whoever is reading it.
+        case .answered(let by, let decision, let answeredOn):
+            // `by` names a phone or the Mac; `answeredOn` (minor 41) names the device KIND, so a Mac's
+            // answer reads "from a Mac" on both apps and an iPhone's "from an iPhone" — named by the
+            // resolver, not whoever is reading it. Absent (an older daemon) it is nil and the banner falls
+            // back to "a phone", as before.
             switch (by, decision) {
-            case (.phone, .some(.answers(let answers))): return .answeredOnPhone(answers, from: .iphone)
+            case (.phone, .some(.answers(let answers))): return .answeredOnPhone(answers, from: answeredOn)
             case (.phone, .some(.decline)): return .declined
             case (.local, _): return .answeredAtMac
             default: return .closed

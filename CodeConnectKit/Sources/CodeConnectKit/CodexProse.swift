@@ -71,7 +71,7 @@ public enum CodexProse {
     /// different fact and usually a completely ordinary one.
     public static func resolution(_ resolution: CodexResolution, on host: HostDevice = .current) -> Banner {
         switch resolution {
-        case .answered(let by, let decision):
+        case .answered(let by, let decision, _):
             return answered(by: by, decision: decision, on: host)
 
         case .cleared(.turnAborted):
@@ -182,13 +182,13 @@ public enum CodexProse {
     /// card is gone — a caption that disappears is worse than one that is exact.
     public static func whatWasChosen(_ resolution: CodexResolution) -> String {
         switch resolution {
-        case .answered(_, .some(.optionId(let id))):
+        case .answered(_, .some(.optionId(let id)), _):
             return "The option “\(id)”."
-        case .answered(_, .some(let decision)):
+        case .answered(_, .some(let decision), _):
             return decision.label + "."
-        case .answered(.local, nil):
+        case .answered(.local, nil, _):
             return "Not known. The Codex wire carries no provenance for a keyboard answer."
-        case .answered(_, nil):
+        case .answered(_, nil, _):
             return "Not known. \(HostDevice.current.computer("The computer")) recorded who answered but not what they chose."
         case .unknown(_, .some(.optionId(let id)), _, _):
             return "The option “\(id)” was written, and its outcome was never confirmed."
