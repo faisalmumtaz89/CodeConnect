@@ -6,9 +6,10 @@ import SwiftUI
 /// place, the tail), every row's height and where the pane stands are the app's, in `MacColumnLayout`; the table draws
 /// what that holds and decides nothing. Every change of rows, heights or pane is one `apply`: the layout keeps the
 /// reader's place, the table is told in the same call with no animation, and the origin is set. Nothing else moves the
-/// origin but the reader. Each row is the existing SwiftUI row view in a hosting view kept by its place for as long as
-/// the row is in the timeline, so what a row holds (an open tool's output) lasts as it does in a SwiftUI list, and a
-/// row's view is made once however often the table or an accessibility client asks for it.
+/// origin but the reader. Each row is the existing SwiftUI row view in a hosting view, made when the table draws the row
+/// and let go when the table does; what a reader opened in a row is kept by the row's place (`RowOpenings`), so a row
+/// made again opens as it was. A row far from the screen gets no view: an accessibility client walking the table finds
+/// it empty, as a SwiftUI list gives nothing for a row it has not loaded, and nothing is built for it.
 struct ConversationTable: NSViewRepresentable {
     let model: AppModel
     let key: String
@@ -44,7 +45,9 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private var layout = MacColumnLayout(rows: [], origin: 0, pane: 0)
     /// Rows whose height was measured at the present width; the rest hold an estimate until they come near the screen.
     private var measured: Set<String> = []
+    /// The rows the table holds, by place.
     private var cells: [String: RowCell] = [:]
+    private var openings: [String: RowOpenings] = [:]
     private var width: CGFloat = 0
     private var applying = false
     /// Heights the rows near the screen reported for themselves, applied together on the next turn.
@@ -120,6 +123,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         for place in changed { if let entry = next.first(where: { $0.place == place }) { cells[place]?.show(view(entry)) } }
         let kept = Set(next.map(\.place))
         cells = cells.filter { kept.contains($0.key) }
+        openings = openings.filter { kept.contains($0.key) }
         measured.formIntersection(kept)
         let old = entries.map(\.place), new = next.map(\.place)
         if old.isEmpty {
@@ -151,8 +155,11 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
             if entry.place == Self.earlier { return AnyView(Earlier(model: model, key: key).padding(Self.insets)) }
             return AnyView(Color.clear.frame(height: 1))
         }
+        let opened = openings[entry.place] ?? RowOpenings()
+        openings[entry.place] = opened
         return AnyView(
-            ConversationRow(item: item, model: model).padding(Self.insets).environment(\.conversationTail, tail))
+            ConversationRow(item: item, model: model).padding(Self.insets).environment(\.conversationTail, tail)
+                .environment(opened))
     }
 
     /// The row's height at the column's width: measured when the column has one and `fresh` (a row the published
@@ -194,8 +201,8 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         return near
     }
 
-    /// A row near the screen reports its own height (its content, an expansion, a banner's age); a view an
-    /// accessibility client asked for far from the screen is not heard. Applied on the next turn, outside any table call.
+    /// A row near the screen reports its own height (its content, an expansion, a banner's age); one the table prepared
+    /// further out is measured when it comes near. Applied on the next turn, outside any table call.
     private func reported(_ place: String, _ height: CGFloat) {
         guard let index = entries.firstIndex(where: { $0.place == place }), nearScreen().contains(index),
             abs(layout.rows[index].height - ceil(height)) > 0.5
@@ -280,25 +287,70 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         row < layout.rows.count ? layout.rows[row].height : 1
     }
 
+    /// A row the table draws or prepares to, or one within a pane of the screen, gets its view; a row asked for anywhere
+    /// else is an accessibility client walking the table, and gets none.
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entry = entries[row]
         if let cell = cells[entry.place] { return cell }
-        let cell = RowCell { [weak self] height in self?.reported(entry.place, height) }
+        guard isNear(row) else { return nil }
+        let cell = RowCell(place: entry.place) { [weak self] height in self?.reported(entry.place, height) }
         cell.show(view(entry))
         cells[entry.place] = cell
         return cell
     }
 
+    /// The table let a row go: its view goes with it.
+    func tableView(_ tableView: NSTableView, didRemove rowView: NSTableRowView, forRow row: Int) {
+        guard let cell = rowView.view(atColumn: 0) as? RowCell, cells[cell.place] === cell else { return }
+        cells[cell.place] = nil
+    }
+
+    /// A row the table took to draw without a view (it asked before the place it draws was known) is asked for again on
+    /// the next turn. Never the ordinary path: the follow log counts each.
+    func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
+        guard rowView.view(atColumn: 0) == nil else { return }
+        RunLoop.main.perform { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, row < self.table.numberOfRows, self.isNear(row) else { return }
+                noteFollow("BACKSTOP row \(row)")
+                self.table.reloadData(forRowIndexes: [row], columnIndexes: [0])
+            }
+        }
+    }
+
+    private func isNear(_ row: Int) -> Bool {
+        var low = layout.origin - layout.pane, high = layout.origin + 2 * layout.pane
+        for drawn in [table.visibleRect, table.preparedContentRect] where !drawn.isEmpty {
+            low = min(low, drawn.minY)
+            high = max(high, drawn.maxY)
+        }
+        let rect = table.rect(ofRow: row)
+        return rect.maxY > low && rect.minY < high
+    }
+
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
+}
+
+/// What a reader opened in one row of the column (a tool's output, a card's full input or all its files), kept by the
+/// row's place for as long as the conversation is open: a row's view is made again when it comes back near the
+/// screen, and the place survives a page that folds a tool's result into its call. A row at the pane's foot has none
+/// and keeps its own.
+@MainActor @Observable
+final class RowOpenings {
+    var tool = false
+    var input = false
+    var allChanges = false
 }
 
 /// One row's SwiftUI view, sized by the table (never by its content), its content at the top; it tells the column the
 /// height its content wants.
 private final class RowCell: NSView {
+    let place: String
     private let host = NSHostingView(rootView: AnyView(EmptyView()))
     private let report: (CGFloat) -> Void
 
-    init(report: @escaping (CGFloat) -> Void) {
+    init(place: String, report: @escaping (CGFloat) -> Void) {
+        self.place = place
         self.report = report
         super.init(frame: .zero)
         host.sizingOptions = []

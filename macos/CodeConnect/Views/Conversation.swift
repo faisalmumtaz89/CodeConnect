@@ -216,8 +216,11 @@ private struct TableBlock: View {
 private struct ToolLine: View {
     let tool: ToolItem
     let id: String
-    @State private var open = false
+    @State private var ownOpen = false
+    @Environment(RowOpenings.self) private var openings: RowOpenings?
     @Environment(\.conversationTail) private var tail
+
+    private var open: Bool { openings?.tool ?? ownOpen }
 
     /// What it was sent, what came back, or that the computer cut it short: something to open.
     private var opens: Bool { tool.input?.isNull == false || tool.output?.isEmpty == false || tool.isTruncated }
@@ -252,7 +255,7 @@ private struct ToolLine: View {
     /// Opening the row is choosing to read it: the follow hears first, before the row grows.
     private func toggle() {
         if !open { tail?.leave() }
-        open.toggle()
+        if let openings { openings.tool.toggle() } else { ownOpen.toggle() }
     }
 
     /// How the call reads aloud: how it stands, the tool, what it was given and how long it took.
