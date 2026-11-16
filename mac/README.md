@@ -1135,7 +1135,9 @@ yet.", the same for the effort: the sheets set them with `set_model`), and so is
 doesn't offer /status in this session."); `/usage`, `/cost` and `/clear` are messages. A
 clear goes on in the same run, as at claude's keyboard: claude starts its new session, the
 run's events carry a "Conversation cleared" notice with the earlier history above it, and a
-later resume continues the cleared conversation. The run's command menu
+later resume continues the cleared conversation. Each init's `session_start` says why a session
+starts, as a terminal run's SessionStart does: `source: "startup"` at a launch's first init,
+`"clear"` at the first after a `/clear`, and none at a turn's later init. The run's command menu
 (`get_command_catalog`, minor 38) is what its claude last reported: the start's initialize
 answer, then each `commands_changed`, without a claude.ai
 connector's commands (the host leaves them out of both), the ones the latest init keeps to
