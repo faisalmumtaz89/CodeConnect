@@ -113,6 +113,11 @@ public struct NoticeItem: Sendable, Hashable {
         self.detail = detail?.displaySafe
         self.severity = severity
     }
+
+    /// An agent woken to read its CodeConnect mail: a Codex wake line, or ccd's `mail_nudge` notice on a Claude run.
+    /// A task report, so a woken run reads Running until the agent replies.
+    static let mailWake = NoticeItem(
+        kind: .taskReport, symbol: "chat-text", title: "Reading CodeConnect mail", detail: nil, severity: .info)
 }
 
 public struct TimelineItem: Sendable, Hashable, Identifiable {
@@ -455,15 +460,7 @@ public enum TimelineBuilder {
                     // (not `.other`) keeps a mail-woken run Running: Codex emits no
                     // turn-start event, so the wake line is the only activity until the
                     // agent's first reply.
-                    items.append(
-                        event.item(
-                            .notice(
-                                NoticeItem(
-                                    kind: .taskReport,
-                                    symbol: "chat-text",
-                                    title: "Reading CodeConnect mail",
-                                    detail: nil,
-                                    severity: .info))))
+                    items.append(event.item(.notice(.mailWake)))
                 } else if event.isPersonsWords, let text = event.userText {
                     items.append(
                         event.item(
@@ -824,6 +821,10 @@ public enum TimelineBuilder {
                 title: "Agent finished",
                 detail: event.notificationMessage,
                 severity: .success)
+        case EngineNotice.mailNudge:
+            // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
+            // words to the agent, not the reader's, so the row is the one a Codex wake draws.
+            return .mailWake
         default:
             return NoticeItem(
                 kind: .other,
