@@ -5,7 +5,8 @@ import SwiftUI
 /// (Kit's `HostedSettings`). The Model rows carry the agent's own detail lines, the Effort rows are the selected model's
 /// efforts, and the Mode rows have the agent's own labels; the checks follow the run's facts, never a guess between a
 /// click and its answer. While one of its calls is in flight the list is disabled and a small spinner stands in the
-/// chevron's place; what became of the call is the reply box's note line.
+/// chevron's place; what became of the call is the reply box's note line. Its last rows are the reply box's own:
+/// Compact… opens its compact form, and Clear… its confirmation.
 struct HostedSettingsButton: View {
     let model: AppModel
     let key: String
@@ -16,6 +17,7 @@ struct HostedSettingsButton: View {
     /// A setting was chosen: the `/model` or `/effort` that opened the list has been answered.
     let chose: () -> Void
     let compact: () -> Void
+    let clear: () -> Void
 
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
 
@@ -96,6 +98,15 @@ struct HostedSettingsButton: View {
             .buttonStyle(.hover(radius: 5, id: "session.composer.compact"))
             .padding(.horizontal, 4)
             .accessibilityIdentifier("session.composer.compact")
+            Button {
+                open = false
+                clear()
+            } label: {
+                rowLabel("Clear…", detail: nil, marked: false)
+            }
+            .buttonStyle(.hover(radius: 5, id: "session.composer.clear"))
+            .padding(.horizontal, 4)
+            .accessibilityIdentifier("session.composer.clear")
         }
         .disabled(settings.inFlight)
         .padding(.vertical, 5)

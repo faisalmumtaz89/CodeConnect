@@ -156,8 +156,11 @@ private struct Composer: View {
                     case .hostedLive(let settings):
                         HostedSettingsButton(
                             model: model, key: key, settings: settings,
-                            help: blocked ?? "Model, effort, mode and compact", open: $commandsOpen, chose: takeOpener
-                        ) { compact(prefill: "") }
+                            help: blocked ?? "Model, effort, mode, compact and clear", open: $commandsOpen,
+                            chose: takeOpener, compact: { compact(prefill: "") }, clear: {
+                                opener = nil
+                                clearing = true
+                            })
                         .disabled(blocked != nil || busy)
                     }
                 }
