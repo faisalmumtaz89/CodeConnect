@@ -783,7 +783,16 @@ pub const PROTOCOL_MISMATCH: &str =
 ///       - [`ws::ClientMessage::SetMode`]'s `confirmed` (left out when false). A mode marked
 ///         `confirm` is refused without it, nothing sent; every other mode is as before. A
 ///         daemon below 40 lists no such mode and refuses `bypassPermissions` as not offered.
-pub const PROTOCOL_MINOR: u32 = 40;
+///   * `41` — **A Codex card's answer says which kind of device sent it.**
+///
+///     Additive:
+///       - `answered_on` on [`ws::CodexResolution::Answered`] — `iphone` or `mac` on a
+///         Codex card answered from a paired device (`by: phone`), by the `client_name`
+///         its connection said hello with ([`ws::AnsweredOn`]), as
+///         [`ws::AnswerOutcome::answered_on`] has said for Claude's since 34. A daemon
+///         below 41 sends none, nor does any daemon for an answer a restart settled, and a
+///         client reads that as before.
+pub const PROTOCOL_MINOR: u32 = 41;
 
 #[cfg(test)]
 mod ledger_tests {

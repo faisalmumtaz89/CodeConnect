@@ -1666,6 +1666,13 @@ pub enum CodexResolution {
         by: ResolutionActor,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decision: Option<AnswerDecision>,
+        /// Which kind of device sent a paired device's answer (`by: phone`), from
+        /// minor 41, as [`AnswerOutcome::answered_on`] says for Claude. Absent on
+        /// every other resolution, from an older daemon, on an answer a restart
+        /// settled, which keeps no record of the device, and on an answer through a
+        /// tmux-era control link.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answered_on: Option<AnsweredOn>,
     },
     /// Cleared without an answer.
     Cleared { cause: ClearCause },
@@ -2385,9 +2392,14 @@ mod tests {
             crate::PROTOCOL_MINOR >= 40,
             "the mode that asks nothing behind a confirmation (`confirm`, `confirmed`) is minor 40"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 41,
+            "which kind of device answered a Codex card (`answered_on` on its resolution) is \
+             minor 41"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 40);
+        assert_eq!(crate::PROTOCOL_MINOR, 41);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3003,10 +3015,12 @@ mod tests {
                 decision: Some(AnswerDecision::OptionId {
                     option_id: "accept".into(),
                 }),
+                answered_on: Some(AnsweredOn::Mac),
             },
             CodexResolution::Answered {
                 by: ResolutionActor::Local,
                 decision: None,
+                answered_on: None,
             },
             CodexResolution::Cleared {
                 cause: ClearCause::TurnAborted,
@@ -3042,7 +3056,8 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&CodexResolution::Answered {
                 by: ResolutionActor::Local,
-                decision: None
+                decision: None,
+                answered_on: None
             })
             .unwrap(),
             r#"{"status":"answered","by":"local"}"#
@@ -3091,6 +3106,7 @@ mod tests {
                 decision: Some(AnswerDecision::OptionId {
                     option_id: "accept".into(),
                 }),
+                answered_on: None,
             },
         };
         assert_eq!(
@@ -3114,6 +3130,7 @@ mod tests {
             CodexResolution::Answered {
                 by: ResolutionActor::Local,
                 decision: None,
+                answered_on: None,
             },
             CodexResolution::Cleared {
                 cause: ClearCause::ItemCompleted,

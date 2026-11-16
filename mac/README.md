@@ -1572,6 +1572,10 @@ to probe credentials.
   from a paired device: the Mac app's when its connection said hello as
   "CodeConnect Mac", an iPhone's otherwise. Absent on every other outcome, from
   an older daemon, and on an answer a restart settled. It chooses words only.
+* **`CodexResolution.answered_on`** (minor 41) — the same on a Codex card's
+  `answered` resolution by a paired device (`by: phone`). Absent on every other
+  resolution, from an older daemon, on an answer a restart settled, and on an
+  answer through a tmux-era control link.
 * **`ApprovalCard.allow_for_session`** (minor 36) — `true` on a card from a run
   started in an app whose request suggests an allow rule: the card offers "Allow for
   this session", answered `option_id: "acceptForSession"`. Left out when false, so an
