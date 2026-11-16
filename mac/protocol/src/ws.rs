@@ -309,11 +309,6 @@ pub enum ClientMessage {
         #[serde(default)]
         complete_native_confirmation: bool,
     },
-    Capture {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lines: Option<u32>,
-    },
     /// "What has this agent actually changed?" — answered from git, not from
     /// the event log, because the log knows about edits that were later undone
     /// and the working tree is the only thing that knows the net result.
@@ -689,10 +684,6 @@ pub enum ServerMessage {
     SendTextResult {
         session_id: String,
         result: SendTextResult,
-    },
-    CaptureResult {
-        session_id: String,
-        text: String,
     },
     CommandCatalog {
         session_id: String,
@@ -1163,7 +1154,6 @@ pub struct Capabilities {
     /// fixed bound. 0: a held card is held for as long as Claude waits on it.
     pub hold_secs: u64,
     pub send_text: bool,
-    pub capture: bool,
     /// The daemon accepts `delete_session`. Advertised rather than assumed so an
     /// older Mac does not get a swipe that silently does nothing: this app's rule
     /// is that an action it cannot perform is not offered.
@@ -1209,12 +1199,6 @@ pub struct Capabilities {
     /// must not retry one it did not see answered.
     #[serde(default)]
     pub send_text_idempotent: bool,
-    /// `send_text` runs the composer-recovery postcondition for slash
-    /// commands, and can answer `composer_recovered` / `composer_lost`. A
-    /// client that sees this false must not offer the snapshot commands:
-    /// their whole safety story is that the daemon closes the view again.
-    #[serde(default)]
-    pub slash_composer_recovery: bool,
     /// Approval cards carry a `generation` and an `identity_bound` flag, and
     /// the daemon refuses to answer a card whose prompt it cannot prove is
     /// still on screen. A client that sees this false must treat every remote
@@ -1923,29 +1907,6 @@ pub enum SendTextResult {
     /// human who can see the screen is a better judge than a guess.
     Indeterminate {
         reason: String,
-    },
-    /// The keys landed, Claude's composer disappeared, and the daemon's own
-    /// `Escape` brought it back. Terminal like `Sent`: the mutation
-    /// happened.
-    ///
-    /// Minor 9, and **sent to every client** — `hello` carries no client
-    /// minor for the daemon to branch on. That is safe because a status a
-    /// client does not know decodes as `indeterminate` ("typed, outcome
-    /// unknown, a retry is recognised") rather than as a decode failure;
-    /// this app's own decoder does exactly that, and any other client should.
-    ComposerRecovered {
-        matched: String,
-        /// The Mac's visible pane while the view was up — present only for
-        /// the snapshot commands (`/status`, `/usage`, `/cost`), and never
-        /// stored: it is a picture for a human to read once.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pane_snapshot: Option<String>,
-        captured_at: String,
-    },
-    /// The keys landed, the composer disappeared, and one `Escape` did not
-    /// bring it back. Somebody has to look at the Mac.
-    ComposerLost {
-        matched: String,
     },
 }
 
@@ -2887,7 +2848,6 @@ mod tests {
             answer_path: AnswerPath::SendKeys,
             hold_secs: 0,
             send_text: true,
-            capture: true,
             delete_session: true,
             test_push: true,
             push: false,
@@ -2900,7 +2860,6 @@ mod tests {
             send_text_idempotent: true,
             prompt_identity: true,
             command_catalog: true,
-            slash_composer_recovery: true,
             terminal_pty: true,
             codex_interrupt: true,
             codex_compose: true,

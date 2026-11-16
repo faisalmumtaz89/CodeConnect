@@ -83,11 +83,6 @@ public enum ComposeAttempt: Sendable, Equatable {
     /// same identity, so an explicit re-send is a recognisable retry instead
     /// of a second typing.
     case indeterminate(String)
-    /// It landed, it opened a view on the Mac, and CodeConnect closed the
-    /// view again. As final as `.sent`.
-    case composerRecovered(command: String, paneSnapshot: String?, capturedAt: String)
-    /// It landed, it opened a view, and one Escape did not close it.
-    case composerLost(command: String)
 }
 
 /// Why a diff request ended in nothing — and, decisively, **who said so**.
@@ -2357,7 +2352,7 @@ public final class AppModel {
         case .peers(let directory):
             tailnet = directory
             onPeers?(directory)
-        case .answerResult, .sendTextResult, .captureResult, .commandCatalog, .diff, .error,
+        case .answerResult, .sendTextResult, .commandCatalog, .diff, .error,
             .pong, .unknown:
             break
         }
@@ -3651,9 +3646,7 @@ public final class AppModel {
         // a denial reason, a diff comment. A deny reason that happens to
         // start with `/config` would otherwise recreate the measured Mac
         // dialog lockout through the side door.
-        switch ClaudeCommandPolicy.action(
-            for: text, recoversComposer: connection.capabilities?.recoversComposer == true)
-        {
+        switch ClaudeCommandPolicy.action(for: text) {
         case .nativeModel:
             return .refused("/model has its own control in the app — use the Model sheet.")
         case .nativeDiff:
@@ -3664,9 +3657,6 @@ public final class AppModel {
             return .refused("/compact has its own control in the app — use the Compact sheet.")
         case .nativeClear:
             return .refused("/clear has its own confirmation in the app.")
-        case .nativeSnapshot(let command):
-            return .refused(
-                "/\(command.rawValue) has its own view in the app — use the command palette.")
         case .blocked(_, let reason):
             return .refused(reason)
         case .passThrough:
@@ -3708,13 +3698,6 @@ public final class AppModel {
 
     public func sendClearCommand(to key: String) async -> ComposeAttempt {
         await sendUnchecked(text: "/clear", to: key, submit: true)
-    }
-
-    /// `/status`, `/usage`, `/cost` — the send whose *result* is the point:
-    /// on `.composerRecovered` the daemon returns the pane it saved while
-    /// the Mac view was open, and the snapshot sheet renders exactly that.
-    public func sendSnapshotCommand(_ command: SnapshotCommand, to key: String) async -> ComposeAttempt {
-        await sendUnchecked(text: "/\(command.rawValue)", to: key, submit: true)
     }
 
     private func sendUnchecked(
@@ -3767,20 +3750,6 @@ public final class AppModel {
             case .duplicate(_, let appliedAt):
                 pendingSendIdentities[mutation] = nil
                 return .alreadyApplied(appliedAt: appliedAt)
-            case .composerRecovered(_, let paneSnapshot, let capturedAt):
-                pendingSendIdentities[mutation] = nil
-                return .composerRecovered(
-                    command: trimmed, paneSnapshot: paneSnapshot, capturedAt: capturedAt)
-            case .composerLost:
-                // **The identity is kept, and the draft with it.** The keys
-                // landed; the daemon has settled this mutation, so pressing
-                // send again after recovering the Mac by hand is recognised
-                // as the duplicate it is instead of typing the command a
-                // second time into whatever is on screen by then. Dropping
-                // the identity here while the composer deliberately keeps the
-                // text was a way to type it twice.
-                retainIdentityIfListed(mutation, requestID)
-                return .composerLost(command: trimmed)
             case .indeterminate(let reason):
                 retainIdentityIfListed(mutation, requestID)
                 return .indeterminate(reason)
@@ -3865,11 +3834,6 @@ public final class AppModel {
     /// clear it, so a later notice is its own one-shot event and the same text is never re-offered.
     public func consumeComposerRestore(for key: String) {
         composerRestore[key] = nil
-    }
-
-    func capturePane(key: String, lines: UInt32 = 80) async -> String? {
-        guard connection.capabilities?.capture != false else { return nil }
-        return try? await connection.capture(session: key, lines: lines)
     }
 
     // MARK: - Machine stats

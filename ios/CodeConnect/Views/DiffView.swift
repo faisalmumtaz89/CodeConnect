@@ -1428,13 +1428,13 @@ private struct DiffCommentSheet: View {
             sending = false
             result = attempt
             switch attempt {
-            case .sent, .alreadyApplied, .composerRecovered:
+            case .sent, .alreadyApplied:
                 // Either way the comment is in the session — an earlier
                 // attempt's landing is a landing.
                 CCHaptic.success.fire()
                 try? await Task.sleep(for: .seconds(0.6))
                 dismiss()
-            case .refused, .indeterminate, .composerLost:
+            case .refused, .indeterminate:
                 // Recoverable states get the warning signature; failure's
                 // buzz is reserved for actual failure.
                 CCHaptic.warning.fire()
@@ -1451,8 +1451,6 @@ private struct DiffCommentSheet: View {
         case .failed: return "Failed"
         case .alreadyApplied: return "Already sent"
         case .indeterminate: return "Not confirmed"
-        case .composerRecovered: return "Sent"
-        case .composerLost: return "Composer not restored"
         }
     }
 
@@ -1466,18 +1464,14 @@ private struct DiffCommentSheet: View {
                 + "Retry is safe; it won’t be typed twice."
         case .alreadyApplied:
             return "This comment was typed earlier and wasn’t repeated."
-        case .composerRecovered:
-            return "The comment was typed into the session."
-        case .composerLost:
-            return "The comment was typed, but the computer's composer did not come back."
         }
     }
 
     private func resultTone(_ attempt: ComposeAttempt) -> CCTone {
         switch attempt {
-        case .sent, .alreadyApplied, .composerRecovered: return .success
+        case .sent, .alreadyApplied: return .success
         case .refused, .indeterminate: return .warning
-        case .failed, .composerLost: return .danger
+        case .failed: return .danger
         }
     }
 }

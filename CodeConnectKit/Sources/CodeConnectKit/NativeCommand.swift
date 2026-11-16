@@ -68,8 +68,8 @@ public enum NativeCommand: Sendable, Hashable {
     }
 
     /// The phase a send leads to at once, or nil when the keystrokes landed and only Claude Code's own receipt can
-    /// settle it: landing proves typing, not execution. A Compact whose composer came back returns a waiting phase
-    /// without reading a receipt. Any waiting phase that is not quiet starts the `quietAfter` window.
+    /// settle it: landing proves typing, not execution. Any waiting phase that is not quiet starts the `quietAfter`
+    /// window.
     public func phase(after attempt: ComposeAttempt) -> CommandPhase? {
         switch attempt {
         case .sent:
@@ -86,36 +86,6 @@ public enum NativeCommand: Sendable, Hashable {
             return .failed("Couldn’t type the command: \(reason)")
         case .indeterminate(let reason):
             return .failed("Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
-        case .composerRecovered:
-            let computer = HostDevice.current.computer("the computer")
-            switch self {
-            case .model(let alias):
-                // The command took the composer and the daemon's generic
-                // slash-command rescue pressed Esc to give it back. Measured on
-                // 2.1.223: when the conversation is already cached for the
-                // current model, `/model <alias>` opens a confirmation, and that
-                // Esc answers it in the negative — Claude Code then prints
-                // `Kept model as …`. So this is never a change. Only what was
-                // observed is claimed: the composer went away and one Esc
-                // brought it back; the daemon does not identify views.
-                return .neutral(
-                    "/model \(alias) took the composer on \(computer) and CodeConnect "
-                        + "pressed Esc to give it back. No model change was confirmed.")
-            case .effort(let value):
-                // As for /model: on 2.1.223 `/effort <new value>` opens a
-                // confirmation whenever the conversation is already cached for
-                // the current level, and the rescue answers it with Esc; Claude
-                // Code then prints `Kept effort level as …`.
-                return .neutral(
-                    "/effort \(value) took the composer on \(computer) and CodeConnect "
-                        + "pressed Esc to give it back. No effort change was confirmed.")
-            case .compact:
-                // The composer came back and the compaction may still complete:
-                // keep watching for its line.
-                return .waiting(request: request, quietly: false)
-            }
-        case .composerLost:
-            return .failed("Couldn’t restore the composer.")
         }
     }
 

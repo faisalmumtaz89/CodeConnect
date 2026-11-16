@@ -13,8 +13,6 @@ final class ComposeProseTests: XCTestCase {
         .failed("the link dropped."),
         .alreadyApplied(appliedAt: "2026-11-10T03:00:00Z"),
         .indeterminate("no answer came back."),
-        .composerRecovered(command: "/effort high", paneSnapshot: nil, capturedAt: "2026-11-10T03:00:00Z"),
-        .composerLost(command: "/effort high"),
     ]
 
     /// Each outcome of a Claude send, in its sentence, tone and mark; a landed send has none.
@@ -27,14 +25,6 @@ final class ComposeProseTests: XCTestCase {
             (
                 "Not confirmed: no answer came back. Retry is safe; the message won’t be typed twice.", .warning,
                 "question-fill"
-            ),
-            (
-                "After /effort high was typed, the computer's composer disappeared. CodeConnect pressed Esc and "
-                    + "confirmed it returned. The command's outcome was not confirmed.", .warning, "question-fill"
-            ),
-            (
-                "/effort high was typed, but the computer's composer did not come back.",
-                .danger, "warning-fill"
             ),
         ]
         for (attempt, expected) in zip(outcomes, expected) {
@@ -50,11 +40,9 @@ final class ComposeProseTests: XCTestCase {
         }
     }
 
-    /// What landed clears the draft, and a recovered composer's note retires by itself; a refusal, a failure
-    /// and an unknown outcome stand until the next edit; a lost composer stands
-    /// until another attempt.
+    /// What landed clears the draft; a refusal, a failure and an unknown outcome stand until the next edit.
     func testWhichOutcomesLandAndWhichAnEditRetires() {
-        XCTAssertEqual(outcomes.filter(\.landed), [outcomes[0], outcomes[3], outcomes[5]])
+        XCTAssertEqual(outcomes.filter(\.landed), [outcomes[0], outcomes[3]])
         XCTAssertEqual(outcomes.filter(\.clearsOnEdit), [outcomes[1], outcomes[2], outcomes[4]])
         let codex: [ComposeResult] = [
             .started(turnID: "t"), .steered(turnID: "t"), .duplicate(turnID: "t", started: false),

@@ -315,8 +315,8 @@ public final class DaemonConnection {
     /// failed to send) while its reply may still be in flight. The entry stays
     /// in the queue as a tombstone so the late reply is *consumed and dropped*
     /// rather than handed to the next request for the same key. Replies carry no
-    /// ticket on the wire (`send_text_result` and `capture_result` are keyed
-    /// only by session), so position is the only correlation available and it
+    /// ticket on the wire (`send_text_result` is keyed only by session), so
+    /// position is the only correlation available and it
     /// has to be kept exact.
     private struct Waiter<T> {
         let ticket: UInt64
@@ -325,7 +325,6 @@ public final class DaemonConnection {
 
     private var answerWaiters: [String: [Waiter<AnswerResult>]] = [:]
     private var sendTextWaiters: [String: [Waiter<SendTextResult>]] = [:]
-    private var captureWaiters: [String: [Waiter<String>]] = [:]
     private var catalogWaiters: [String: [Waiter<CommandCatalogResult>]] = [:]
     private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
     private var testPushWaiters: [String: [Waiter<TestPushResult>]] = [:]
@@ -1129,13 +1128,6 @@ public final class DaemonConnection {
             send: .forgetFolderTrust(requestID: requestID, path: path))
     }
 
-        public func capture(session: String, lines: UInt32?) async throws -> String {
-        try await request(
-            key: session,
-            store: \.captureWaiters,
-            send: .capture(session: session, lines: lines))
-    }
-
     /// On-demand `git diff` for one run. Correlated by the reference like the
     /// other single-keyed replies, so the same one-in-flight-per-key rule holds.
     public func diff(session: String) async throws -> SessionDiff {
@@ -1272,7 +1264,7 @@ public final class DaemonConnection {
     >
 
     /// FIFO correlation. `answer_result` carries a `request_id` and
-    /// `send_text_result`/`capture_result` carry only a `session_id`, so in both
+    /// `send_text_result` carries only a `session_id`, so in both
     /// cases replies for one key arrive in the order the requests were sent.
     private func request<T: Sendable>(
         key: String, store: WaiterTable<T>, send message: ClientMessage
@@ -1358,10 +1350,6 @@ public final class DaemonConnection {
         let texts = sendTextWaiters
         sendTextWaiters = [:]
         for queue in texts.values { for w in queue { w.continuation?.resume(throwing: error) } }
-
-        let captures = captureWaiters
-        captureWaiters = [:]
-        for queue in captures.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
         let catalogs = catalogWaiters
         catalogWaiters = [:]
@@ -1487,8 +1475,6 @@ public final class DaemonConnection {
             deliver(store: \.answerWaiters, key: requestID, value: result)
         case .sendTextResult(let sessionID, let result):
             deliver(store: \.sendTextWaiters, key: sessionID, value: result)
-        case .captureResult(let sessionID, let text):
-            deliver(store: \.captureWaiters, key: sessionID, value: text)
         case .commandCatalog(let sessionID, let result):
             deliver(store: \.catalogWaiters, key: sessionID, value: result)
         case .deleteSessionResult(let sessionUID, let result):

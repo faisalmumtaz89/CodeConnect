@@ -114,10 +114,10 @@
                 {"type":"hello_ack","protocol_version":1,"protocol_minor":\(state == .oldMac ? 20 : 21),\
                 "server_time":"2026-10-03T00:00:00.000Z",\
                 "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-                "answer_path":"hook_return","hold_secs":0,"send_text":true,"capture":true,\
+                "answer_path":"hook_return","hold_secs":0,"send_text":true,\
                 "delete_session":true,"test_push":false,"push":false,"tls":false,\
                 "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
-                "send_text_idempotent":true,"slash_composer_recovery":true,\
+                "send_text_idempotent":true,\
                 "prompt_identity":true,"command_catalog":true,"terminal_pty":true\
                 \(state == .oldMac ? "" : #","question_card":true"#)},"device_name":"iPhone"}
                 """

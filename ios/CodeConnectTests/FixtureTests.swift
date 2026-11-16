@@ -45,13 +45,9 @@ final class FixtureTests: XCTestCase {
 
         XCTAssertTrue(capabilities.canApproveReliably)
         XCTAssertTrue(capabilities.sendText)
-        XCTAssertTrue(capabilities.capture)
         XCTAssertTrue(capabilities.servesDiff)
         XCTAssertTrue(capabilities.sendTextIdempotent)
         XCTAssertTrue(capabilities.servesCommandCatalog)
-        XCTAssertTrue(
-            capabilities.recoversComposer,
-            "without this the snapshot rows are correctly omitted and cannot be rendered")
         XCTAssertTrue(capabilities.classifiesRisk)
         XCTAssertTrue(
             capabilities.servesTerminal,
@@ -78,7 +74,6 @@ final class FixtureTests: XCTestCase {
         XCTAssertFalse(
             capabilities.servesTerminal,
             "the terminal rides the connection; offered in the sample it asks the reviewer to pair")
-        XCTAssertFalse(capabilities.capture)
         XCTAssertFalse(capabilities.deletesSessions)
         XCTAssertFalse(capabilities.servesCommandCatalog)
 

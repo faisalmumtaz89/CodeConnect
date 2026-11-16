@@ -2,7 +2,6 @@
   "hello_ack_capabilities": {
     "answer_path": "hook_return",
     "can_approve_reliably": true,
-    "capture": true,
     "codex_compose": true,
     "codex_interrupt": true,
     "command_catalog": true,
@@ -20,7 +19,6 @@
     "send_text": true,
     "send_text_idempotent": true,
     "session_uid": true,
-    "slash_composer_recovery": true,
     "start_session": true,
     "terminal_pty": true,
     "test_push": false,

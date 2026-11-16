@@ -162,16 +162,6 @@ final class SendIdempotencyTests: XCTestCase {
         let modelAttempt = await model.send(text: "/model sonnet", to: "u-1")
         guard case .refused = modelAttempt else { return XCTFail("\(modelAttempt)") }
         XCTAssertTrue(model.connection.sendTextIdentities.isEmpty)
-
-        // A snapshot command against a daemon that never advertised the
-        // recovery capability is refused before typing, with the sentence
-        // that says what to do about it.
-        let statusAttempt = await model.send(text: "/status", to: "u-1")
-        guard case .refused(let statusReason) = statusAttempt else {
-            return XCTFail("\(statusAttempt)")
-        }
-        XCTAssertTrue(statusReason.contains("Restart it after updating"), statusReason)
-        XCTAssertTrue(model.connection.sendTextIdentities.isEmpty)
     }
 
     /// The counterpart: a session the daemon no longer lists retains

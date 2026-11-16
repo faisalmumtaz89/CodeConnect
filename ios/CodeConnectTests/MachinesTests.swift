@@ -156,7 +156,7 @@ final class MachinesTests: XCTestCase {
             let machineID = try XCTUnwrap(model.machineID)
             model.connection.simulateCapabilitiesForTesting(
                 Capabilities(
-                    sendText: true, capture: true,
+                    sendText: true,
                     extra: ["hook_only_approvals": .bool(true), "session_uid": .bool(true)]),
                 minor: 22)
             model.connection.injectForTesting(.sessions([claudeSummary(uid)]))
@@ -166,9 +166,6 @@ final class MachinesTests: XCTestCase {
                 case .answer(_, _, _, let session):
                     sent.frames[machineID, default: []].append("answer \(session ?? "")")
                     throw ConnectionError.notConnected
-                case .capture(let session, _):
-                    sent.frames[machineID, default: []].append("capture \(session)")
-                    connection?.injectForTesting(.captureResult(sessionID: session, text: "pane"))
                 default:
                     break
                 }
@@ -202,16 +199,6 @@ final class MachinesTests: XCTestCase {
         _ = await machines.model(forSession: onLaptop)?.send(text: "hello", to: onLaptop)
 
         XCTAssertEqual(sent.frames[machines.models[1].machineID!], ["send_text \(onLaptop)"])
-        XCTAssertNil(sent.frames[machines.models[0].machineID!], "the other machine is sent nothing")
-    }
-
-    /// A snapshot of a session's screen is captured on that session's machine.
-    func testASnapshotIsCapturedOnTheMachineTheSessionIsOn() async throws {
-        let (machines, sent) = try routed()
-
-        _ = await machines.model(forSession: onLaptop)?.capturePane(key: onLaptop)
-
-        XCTAssertEqual(sent.frames[machines.models[1].machineID!], ["capture \(onLaptop)"])
         XCTAssertNil(sent.frames[machines.models[0].machineID!], "the other machine is sent nothing")
     }
 

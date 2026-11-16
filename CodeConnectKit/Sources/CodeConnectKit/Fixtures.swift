@@ -368,10 +368,10 @@ enum Fixtures {
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-        "answer_path":"hook_return","hold_secs":0,"send_text":true,"capture":true,\
+        "answer_path":"hook_return","hold_secs":0,"send_text":true,\
         "delete_session":true,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
-        "send_text_idempotent":true,"slash_composer_recovery":true,\
+        "send_text_idempotent":true,\
         "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
         "hook_only_approvals":true,"start_session":true,"start_worktree":true,"browse_folders":true},\
         "machine_name":"Jordan’s Mac Studio","machine_os":"macos",\
@@ -390,42 +390,13 @@ enum Fixtures {
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-        "answer_path":"hook_return","hold_secs":0,"send_text":true,"capture":false,\
+        "answer_path":"hook_return","hold_secs":0,"send_text":true,\
         "delete_session":false,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
-        "send_text_idempotent":true,"slash_composer_recovery":true,\
+        "send_text_idempotent":true,\
         "prompt_identity":true,"command_catalog":false,"terminal_pty":false,\
         "hook_only_approvals":true},\
         "device_name":"iPhone"}
-        """
-
-    /// The `/status` view exactly as a narrow (80-column) tmux pane
-    /// rendered it in the measurement rig — wrapped cwd, the works —
-    /// with same-shape stand-ins for the account strings. Worst-case
-    /// real data for the snapshot sheet: the render must survive this,
-    /// not a tidied version of it.
-    static let statusPane = """
-        ❯ /usage
-          ⎿  Settings dialog dismissed
-        ❯ /status
-        ────────────────────────────────────────────────────────────────────────────────
-          Settings  Status   Config   Usage   Stats
-
-          Version:          2.1.222
-          Session name:     Reply with exactly alpha
-          Session ID:       022f6af6-328e-4245-8f10-d2d20ae4886f
-          Session kind:     interactive
-          cwd:              /private/tmp/claude-501/-Users-example-Documents-GitHub
-                            -CodeConnect/6e395e66-643a-4147-a28b-c8f7b18222c2/scratchpad
-          Login method:     Claude Max account
-          Organization:     fixture-owner@example.com's Organization
-          Email:            fixture-owner@example.com
-
-          Model:            fable (claude-fable-5)
-          Memory:           project + user
-          Setting sources:  Login managed settings, Command line arguments,
-
-          Esc to close
         """
 
     /// Claude Code's own receipt for a command, delivered the way the real
@@ -481,23 +452,10 @@ enum Fixtures {
     }
 
     /// `-cc.debug.sendText <mode>` — what the stubbed daemon says to any
-    /// send. `recovered` carries the measured pane above, as the real
-    /// daemon does for the three snapshot commands. The `kept-*` and
-    /// `set-effort-session` modes answer `sent` and let `receiptFrame`
+    /// send. The `kept-*` and `set-effort-session` modes answer `sent` and let `receiptFrame`
     /// supply the transcript line, which is the shape of the real thing.
     static func sendTextResult(mode: String) -> SendTextResult {
         switch mode {
-        case "recovered":
-            return .composerRecovered(
-                matched: "foragents",
-                paneSnapshot: statusPane,
-                capturedAt: "2026-08-05T14:32:08.000Z")
-        case "recovered-empty":
-            return .composerRecovered(
-                matched: "foragents", paneSnapshot: "  \n  ",
-                capturedAt: "2026-08-05T14:32:08.000Z")
-        case "lost":
-            return .composerLost(matched: "foragents")
         case "duplicate":
             // The daemon replaying a settled mutation. Its `matched` and
             // timestamp are all the wire carries — deliberately not the
@@ -1265,10 +1223,10 @@ enum CodexFixtures {
             {"type":"hello_ack","protocol_version":1,"protocol_minor":\(state.protocolMinor),\
             "server_time":"2026-09-04T21:31:59.000Z",\
             "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-            "answer_path":"codex_response","hold_secs":0,"send_text":true,"capture":true,\
+            "answer_path":"codex_response","hold_secs":0,"send_text":true,\
             "delete_session":true,"test_push":false,"push":false,"tls":false,\
             "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
-            "send_text_idempotent":true,"slash_composer_recovery":true,\
+            "send_text_idempotent":true,\
             "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
             "codex_interrupt":\(caps.interrupt),"codex_compose":\(caps.compose),\
             "supported_agents":["claude","codex"]},\

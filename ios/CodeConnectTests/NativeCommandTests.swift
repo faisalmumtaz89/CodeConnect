@@ -27,25 +27,7 @@ final class NativeCommandTests: XCTestCase {
             XCTAssertEqual(
                 command.phase(after: .indeterminate("no answer came back.")),
                 .failed("Not confirmed: no answer came back. Retry is safe; the command won’t be typed twice."))
-            XCTAssertEqual(
-                command.phase(after: .composerLost(command: "/x")),
-                .failed("Couldn’t restore the composer."))
         }
-        let recovered = ComposeAttempt.composerRecovered(
-            command: "/x", paneSnapshot: nil, capturedAt: "2026-11-10T07:00:00Z")
-        XCTAssertEqual(
-            NativeCommand.model("sonnet").phase(after: recovered),
-            .neutral(
-                "/model sonnet took the composer on the computer and CodeConnect pressed Esc to give it back. "
-                    + "No model change was confirmed."))
-        XCTAssertEqual(
-            NativeCommand.effort("high").phase(after: recovered),
-            .neutral(
-                "/effort high took the composer on the computer and CodeConnect pressed Esc to give it back. "
-                    + "No effort change was confirmed."))
-        XCTAssertEqual(
-            NativeCommand.compact(instructions: "keep the plan").phase(after: recovered),
-            .waiting(request: "keep the plan", quietly: false), "the compaction may still complete")
     }
 
     /// Only Claude Code's own receipt above the fence settles a wait: a change

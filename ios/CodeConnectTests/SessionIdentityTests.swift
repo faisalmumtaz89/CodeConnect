@@ -95,9 +95,6 @@ final class SessionIdentityTests: XCTestCase {
             try encodeClient(.subscribe(session: "01AAAAAAAAAAAAAAAAAAAAAAAA", afterSeq: 12))[
                 "session_id"]?.stringValue,
             "01AAAAAAAAAAAAAAAAAAAAAAAA")
-        XCTAssertEqual(
-            try encodeClient(.capture(session: "cc-1", lines: 40))["session_id"]?.stringValue,
-            "cc-1", "a legacy daemon still gets the only reference there is")
     }
 
     /// A `request_id` is unique within a run and not across them, which is why

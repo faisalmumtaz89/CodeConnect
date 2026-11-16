@@ -5304,22 +5304,6 @@ impl Store {
         Ok(claim)
     }
 
-    pub fn settle_text_mutation(
-        &self,
-        session_uid: &str,
-        request_id: &str,
-        matched: &str,
-        settled_at: &str,
-    ) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE text_mutations SET status = 'sent', matched = ?3, settled_at = ?4
-              WHERE session_uid = ?1 AND request_id = ?2",
-            params![session_uid, request_id, matched, settled_at],
-        )?;
-        Ok(())
-    }
-
     /// Drop a claim whose injection was refused, so a later retry is a fresh
     /// attempt rather than a permanent "I do not know".
     pub fn release_text_mutation(&self, session_uid: &str, request_id: &str) -> Result<()> {
@@ -5973,7 +5957,7 @@ impl Store {
     //
     // The generalized mutation ledger, keyed `(operation_kind, session_uid,
     // client_request_id)`. It is the same claim-before-write, lookup-then-
-    // conflict primitive as `claim_text_mutation`/`settle_text_mutation` above,
+    // conflict primitive as `claim_text_mutation` above,
     // widened so any Codex mutation (answer, compose, interrupt) shares one
     // idempotency law. A phone answer is its first producer — it claims here
     // under `operation_kind = "answer"` — so the code is live and carries no

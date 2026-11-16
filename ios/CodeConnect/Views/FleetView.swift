@@ -2873,7 +2873,6 @@ struct LinkHealthSheet: View {
                     VStack(spacing: 0) {
                         capabilityRow("Answer approvals", capabilities.canApproveReliably)
                         capabilityRow("Type into the session", capabilities.sendText)
-                        capabilityRow("Screen snapshots", capabilities.capture)
                         // Normalized, not raw `push`: a relay daemon advertises
                         // `push = false` on purpose and would otherwise read here
                         // as "no", though it is exactly the daemon that does send.

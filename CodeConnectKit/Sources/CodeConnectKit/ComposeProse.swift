@@ -36,24 +36,6 @@ public enum ComposeProse {
             return Note(
                 text: "Not confirmed: \(reason) Retry is safe; the message won’t be typed twice.",
                 tone: .warning, icon: "question-fill")
-        case .composerRecovered(let command, _, _):
-            // **Not a success.** The same daemon result on the Model and Effort
-            // sheets reports that no change was confirmed, and a typed command
-            // reaches this note by the identical path — `/effort high` routes
-            // through here, and on a cache-warm conversation it opens a
-            // confirmation that the daemon's one Esc then cancels. A green tick
-            // over that is the claim this app exists not to make.
-            let computer = HostDevice.current.computer("the computer")
-            return Note(
-                text: "After \(command) was typed, \(computer)'s composer disappeared. "
-                    + "CodeConnect pressed Esc and confirmed it returned. "
-                    + "The command's outcome was not confirmed.",
-                tone: .warning, icon: "question-fill")
-        case .composerLost(let command):
-            let computer = HostDevice.current.computer("the computer")
-            return Note(
-                text: "\(command) was typed, but \(computer)'s composer did not come back.",
-                tone: .danger, icon: "warning-fill")
         }
     }
 
@@ -75,22 +57,21 @@ extension ComposeProse.Tone {
 }
 
 extension ComposeAttempt {
-    /// The words reached the run — typed, typed earlier, or typed with the composer recovered after: the draft
-    /// clears, and the note, which only a recovered composer has, retires by itself. Never optimistic: nothing else
-    /// clears the draft.
+    /// The words reached the run — typed, or typed earlier: the draft clears. Never optimistic: nothing else clears
+    /// the draft.
     public var landed: Bool {
         switch self {
-        case .sent, .alreadyApplied, .composerRecovered: return true
-        case .refused, .failed, .indeterminate, .composerLost: return false
+        case .sent, .alreadyApplied: return true
+        case .refused, .failed, .indeterminate: return false
         }
     }
 
-    /// A note the next edit retires: editing is the reader's next act, so a standing failure has been read. A lost
-    /// composer stands until another attempt, and a landed outcome's note retires by itself.
+    /// A note the next edit retires: editing is the reader's next act, so a standing failure has been read. A landed
+    /// outcome has no note.
     public var clearsOnEdit: Bool {
         switch self {
         case .refused, .failed, .indeterminate: return true
-        case .sent, .alreadyApplied, .composerRecovered, .composerLost: return false
+        case .sent, .alreadyApplied: return false
         }
     }
 }
@@ -132,16 +113,15 @@ extension AppModel {
     /// and everything else — prose, custom skills — is typed as written.
     public func submission(of draft: String, to key: String) -> Submission {
         if shownSummary(for: key)?.isCodex == true { return .codex }
-        let action = ClaudeCommandPolicy.action(
-            for: draft, recoversComposer: connection.capabilities?.recoversComposer == true)
+        let action = ClaudeCommandPolicy.action(for: draft)
         if case .passThrough = action { return .claude }
         return .command(action)
     }
 
     /// What became of the last thing sent to this run, or nil.
     ///
-    /// A Codex outcome outranks the last Claude send, because on a Codex run the Claude vocabulary — "not typed",
-    /// "the composer did not come back" — describes machinery that is not there. A stop and a message share
+    /// A Codex outcome outranks the last Claude send, because on a Codex run the Claude vocabulary — "not typed" —
+    /// describes machinery that is not there. A stop and a message share
     /// this one slot, where the reader is looking after they act.
     public func outcomeNote(for key: String, lastSend: ComposeAttempt?) -> ComposeProse.Note? {
         let summary = shownSummary(for: key)
