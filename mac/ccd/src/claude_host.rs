@@ -602,8 +602,8 @@ async fn apply_sdk(
     write: &mut OwnedWriteHalf,
 ) -> Result<(), String> {
     let text = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
-    // Why a session starts, where ccd knows it, on the init's `session_start` as a terminal
-    // run's SessionStart hook names it: the launch's first init starts the session, or resumes
+    // Why a session starts, where ccd knows it, on the init's `session_start` as Claude
+    // Code's own SessionStart hook names it: the launch's first init starts the session, or resumes
     // it after a relaunch, and the first after a `/clear` begins the cleared conversation. A
     // turn's later init starts none.
     let mut source = None;
@@ -2267,7 +2267,7 @@ fn sent_command<'a>(text: &'a str, commands: &[serde_json::Value]) -> Option<&'a
 /// uuid among the run's claimed sends, is settled with the person's words filed when the
 /// host took the message, or released when it refused it, in one transaction with the
 /// cursor; then acknowledged, and whoever waits for it is told. A message taken is the
-/// person's prompt to the mail wake rule, as a terminal run's prompt hook tells it: with no
+/// person's prompt to the mail wake rule: with no
 /// turn running and unread mail waiting, the nudge follows it as a wake line ([`wake`]). An
 /// outcome naming no claimed send is an answer's ([`apply_answer_outcome`]); a wake's own
 /// outcome is one of those.
@@ -2644,8 +2644,6 @@ mod tests {
 
     fn daemon_with(root: &Path, config: Config) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
-        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(transcript_rx));
         Daemon::new(
             config,
             Arc::new(store),
@@ -2655,7 +2653,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            transcript_tx,
         )
     }
 
@@ -4906,7 +4903,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        daemon.store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(daemon.store.begin_run(&row, &sender, None).unwrap(), None);
         daemon
             .send_agent_message_on(
                 Some(&tailnet),
@@ -6276,7 +6273,7 @@ mod tests {
                            "input": {"command": "ls"}, "options": options})
     }
 
-    /// The hash a card for that call carries, a hook card's and a host card's alike.
+    /// The hash a card for that call carries.
     fn bash_hash() -> String {
         protocol::hash::approval_payload_hash("Bash", &serde_json::json!({"command": "ls"}))
     }
@@ -6784,6 +6781,212 @@ mod tests {
         );
         assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
         stop(&played.dir);
+    }
+
+    /// The run `uid`'s one `kind` event, with what differs between runs pinned, each
+    /// checked first: the run's uid, which is also its name (an answer's payload names it
+    /// too), and the clock reads (its `ts`, and an answer's `resolved_at`, to `at`).
+    async fn pinned_card_event(
+        rig: &Rig,
+        uid: &str,
+        kind: protocol::event::EventKind,
+        at: &str,
+    ) -> serde_json::Value {
+        let mut events: Vec<_> = rig
+            .daemon
+            .db
+            .events_after(uid.to_string(), 0, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .collect();
+        assert_eq!(events.len(), 1, "one {kind:?}");
+        let mut event = serde_json::to_value(events.remove(0)).unwrap();
+        assert_eq!(event["session_uid"], uid);
+        assert_eq!(event["session_id"], uid);
+        event["session_uid"] = "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into();
+        event["session_id"] = "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into();
+        if let Some(name) = event["payload"].get_mut("session_id") {
+            assert_eq!(*name, uid);
+            *name = "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into();
+        }
+        let pin = |slot: &mut serde_json::Value| {
+            assert!(
+                protocol::time::unix_ms_from_rfc3339(slot.as_str().unwrap()).is_some(),
+                "a clock read: {slot}"
+            );
+            *slot = at.into();
+        };
+        pin(&mut event["ts"]);
+        if let Some(resolved_at) = event["payload"].get_mut("resolved_at") {
+            pin(resolved_at);
+        }
+        assert!(!event.to_string().contains(uid), "{event}");
+        event
+    }
+
+    /// **Questions whose text would draw as something else, as this build emits them.**
+    /// `fixtures/claude/askuq-rlo-inputs.json` holds two `AskUserQuestion` inputs.
+    /// `unchecked` carries U+202E only in its headers, descriptions and long preview, over
+    /// two questions: a hosted run's agent host asks it, its card is held, and it is
+    /// answered from the phone with each question's first option. `everywhere` carries it in
+    /// its question, header, label, description and a 2,101-unit preview; its card in the
+    /// file is the one an earlier build sent to be answered at the Mac, a stage no build
+    /// files any more, kept as recorded. Only the run's uid and clock reads are pinned. The
+    /// phone's display tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_rlo_question_cards_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/question-cards-rlo-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        for (stage, emitted) in derived_rlo_question_cards().await.as_object().unwrap() {
+            assert_eq!(
+                &committed[stage], emitted,
+                "the committed RLO question card `{stage}` no longer matches what this build \
+                 emits. Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+                 regenerate_the_rlo_question_cards_fixture, then copy it over its copy under \
+                 ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+            );
+        }
+    }
+
+    /// Rewrite the stages of `fixtures/claude/question-cards-rlo-wire.json` this build
+    /// emits, keeping the at-Mac stage as recorded.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_rlo_question_cards_fixture() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/question-cards-rlo-wire.json");
+        let mut wire: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        for (stage, emitted) in derived_rlo_question_cards().await.as_object().unwrap() {
+            wire[stage] = emitted.clone();
+        }
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/question-cards-rlo-wire.json"
+            ),
+            serde_json::to_string_pretty(&wire).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The `unchecked` question's card, asked by a hosted run's agent host, and its
+    /// answer from the phone.
+    async fn derived_rlo_question_cards() -> serde_json::Value {
+        const INPUTS: &str = include_str!("../../../fixtures/claude/askuq-rlo-inputs.json");
+        let input = serde_json::from_str::<serde_json::Value>(INPUTS).unwrap()["unchecked"].clone();
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "permission", "seq": 3, "request": {
+                "tool_use_id": "toolu_fake_7440824", "tool_name": "AskUserQuestion",
+                "input": input, "options": {}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let hash = protocol::hash::approval_payload_hash("AskUserQuestion", &input);
+        let first_options = AnswerDecision::Answers {
+            answers: vec![
+                protocol::ws::QuestionAnswer {
+                    selected: vec![0],
+                    ..Default::default()
+                };
+                2
+            ],
+        };
+        let (result, _) = tokio::join!(
+            rig.daemon.answer(
+                "toolu_fake_7440824",
+                &hash,
+                first_options,
+                Some(&uid),
+                AnsweredOn::Iphone
+            ),
+            host_settles(&mut played.lines, &mut played.write, 4, "done")
+        );
+        assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        let at = "2026-10-03T00:00:00.000Z";
+        let wire = serde_json::json!({
+            "unchecked": pinned_card_event(
+                &rig, &uid, protocol::event::EventKind::ApprovalRequest, at).await,
+            "unchecked_answered": pinned_card_event(
+                &rig, &uid, protocol::event::EventKind::ApprovalResolved, at).await,
+        });
+        stop(&played.dir);
+        wire
+    }
+
+    /// **An answer from each kind of device, as a minor-34 daemon records it, emitted by
+    /// this build.** The apps' own tests read the copy under `ios/`.
+    #[tokio::test]
+    async fn the_minor_34_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-34-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_34_wire().await,
+            committed,
+            "the committed minor-34 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_34_wire_fixture, then copy it over its copy under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-34-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_34_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_34_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-34-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A hosted run's approval answered from each kind of device: its `approval_resolved`
+    /// event.
+    async fn derived_minor_34_wire() -> serde_json::Value {
+        let mut wire = serde_json::Map::new();
+        for (key, answered_on) in [
+            ("answered_on_iphone", AnsweredOn::Iphone),
+            ("answered_on_mac", AnsweredOn::Mac),
+        ] {
+            let rig = rig();
+            let mut played = live_run(&rig).await;
+            let uid = played.uid.clone();
+            host_asks(&mut played, 3, "toolu_answered", serde_json::json!({})).await;
+            let hash = bash_hash();
+            let (result, _) = tokio::join!(
+                rig.daemon.answer(
+                    "toolu_answered",
+                    &hash,
+                    AnswerDecision::Allow,
+                    Some(&uid),
+                    answered_on
+                ),
+                host_settles(&mut played.lines, &mut played.write, 4, "done")
+            );
+            assert!(
+                matches!(result, AnswerResult::Applied { .. }),
+                "{key}: {result:?}"
+            );
+            let event = pinned_card_event(
+                &rig,
+                &uid,
+                protocol::event::EventKind::ApprovalResolved,
+                "2026-11-10T00:00:00.000Z",
+            )
+            .await;
+            wire.insert(key.into(), event);
+            stop(&played.dir);
+        }
+        serde_json::Value::Object(wire)
     }
 
     /// **B6 part 2a, G8c: a hosted question takes only its answers or a decline.** Allow,
@@ -7796,7 +7999,7 @@ mod tests {
         until_ended(&rig, &uid, "exited", None).await;
         let hosted_ended =
             pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
-        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        let tmux = register_tmux_run(&rig).await;
         let tmux_live = pinned_summary(
             &summary(&rig.daemon, &tmux).await,
             &tmux,
@@ -8121,42 +8324,30 @@ mod tests {
     }
 
     /// A tmux Claude run `cc-1` on the rig's daemon, registered as its supervisor registers
-    /// it: its uid, and the supervisor's end of its channel, held to keep it attached.
-    async fn register_tmux_run(
-        rig: &Rig,
-    ) -> (
-        String,
-        tokio::sync::mpsc::Receiver<protocol::ipc::DaemonFrame>,
-    ) {
-        let (tx, supervisor) = tokio::sync::mpsc::channel(Config::default().ipc_write_queue);
-        let uid = rig
-            .daemon
-            .register_supervisor(
-                protocol::ipc::RegisterSession {
-                    session_id: "cc-1".into(),
-                    session_uid: None,
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: AgentKind::Claude,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                    codex_generation: None,
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(std::sync::Mutex::new(HashMap::new())),
-            )
+    /// it: its uid.
+    async fn register_tmux_run(rig: &Rig) -> String {
+        rig.daemon
+            .register_supervisor(protocol::ipc::RegisterSession {
+                session_id: "cc-1".into(),
+                session_uid: None,
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: AgentKind::Claude,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: None,
+                codex_generation: None,
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
             .unwrap()
             .session
-            .uid;
-        (uid, supervisor)
+            .uid
     }
 
     /// The host's side of one settings line: it reads it, then answers `status` (with
@@ -8274,7 +8465,7 @@ mod tests {
             ),
             "This session isn't running, so nothing was changed."
         );
-        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        let tmux = register_tmux_run(&rig).await;
         assert_eq!(
             refusal(
                 rig.daemon
@@ -8607,7 +8798,7 @@ mod tests {
                 selected_model: None,
             })
         );
-        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        let tmux = register_tmux_run(&rig).await;
         assert_eq!(summary(&rig.daemon, &tmux).await.menus, None);
         stop(&played.dir);
     }
@@ -8992,7 +9183,7 @@ mod tests {
             .find(|event| event["payload"]["notification_type"] == "model_set")
             .map(|event| event["payload"].clone())
             .expect("the effort's notice");
-        let (tmux, _supervisor) = register_tmux_run(&rig).await;
+        let tmux = register_tmux_run(&rig).await;
         let tmux_live = pinned_summary(
             &summary(&rig.daemon, &tmux).await,
             &tmux,

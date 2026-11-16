@@ -2483,8 +2483,6 @@ mod tests {
     /// [`daemon_on`], with `codex` as config.json's `codex_bin`.
     fn daemon_with(root: &Path, codex: &str) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
-        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(transcript_rx));
         Daemon::new(
             Config {
                 codex_bin: Some(codex.into()),
@@ -2497,7 +2495,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            transcript_tx,
         )
     }
 
@@ -6158,7 +6155,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        daemon.store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(daemon.store.begin_run(&row, &sender, None).unwrap(), None);
         daemon
             .send_agent_message_on(
                 Some(&tailnet),

@@ -18,8 +18,8 @@
 //! ## Source and dedup
 //!
 //! Events carry [`Source::Codex`]: the app-server stream is the single
-//! first-hand structured observation of a Codex session, exactly as a hook is
-//! for Claude. The daemon dedup key is `(session_uid, source, source_event_id)`
+//! first-hand structured observation of a Codex session, exactly as the agent
+//! host's messages are for a hosted Claude run. The daemon dedup key is `(session_uid, source, source_event_id)`
 //! (`store.rs`), so this module's whole job on the id side is to mint a **stable,
 //! unique** `source_event_id` per fact, **thread-namespaced** so a thread
 //! switch inside one session cannot alias two threads' item ids. Tool calls and

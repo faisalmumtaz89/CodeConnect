@@ -5,7 +5,7 @@
 //! `fsync`, a `BEGIN IMMEDIATE` that has to wait, or a `SELECT` that misses the
 //! page cache. With `rt-multi-thread` there are as many workers as cores, so a
 //! handful of concurrent slow queries stops *everything* — the WebSocket
-//! listener, the hook path, the timers — not just the caller. The store's own
+//! listener, the local socket, the timers — not just the caller. The store's own
 //! `busy_timeout` is 5 seconds, which is the worst case: five seconds of a dead
 //! runtime, from a database another process happened to be holding.
 //!
@@ -38,7 +38,7 @@ use protocol::ws::AnswerOutcome;
 
 use crate::store::{
     AnswerClaim, CodexPendingApprovalRow, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume,
-    PendingApprovalRow, PrunedSession, SessionRow, Store, TailCursor, TextClaim, TokenAuth,
+    PendingApprovalRow, PrunedSession, SessionRow, Store, TextClaim, TokenAuth,
 };
 
 #[derive(Clone)]
@@ -108,12 +108,8 @@ db_ops! {
     /// Append one fact. `None` means it was a duplicate.
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
-    fn hook_event_seq(session_uid: String, source_event_id: String) -> Option<u64>;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
-    fn load_cursor(session_uid: String) -> Option<crate::store::TailCursor>;
-    fn forget_transcript(session_uid: String) -> ();
-    fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
     /// The durable Codex generation high-water for one uid, or
     /// `None` when nothing provable has been adopted under it.
@@ -126,7 +122,6 @@ db_ops! {
     fn forget_folder_trust(path: String) -> bool;
     fn folder_trusts() -> Vec<protocol::ws::FolderAnswer>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
-    fn upsert_pending_approval(row: PendingApprovalRow) -> bool;
     /// File one Codex approval card **and** the `ApprovalRequest` it stands
     /// behind, in one commit. Idempotent on the item, so a re-delivered request
     /// rebinds the card it already raised instead of minting a second.
@@ -136,8 +131,6 @@ db_ops! {
     ) -> crate::store::CodexCardRaise;
     /// Every open Codex card for one run, with the identity retirement queries.
     fn codex_pending_approvals(session_uid: String) -> Vec<CodexPendingApprovalRow>;
-    fn name_is_tombstoned(session_id: String) -> bool;
-    fn clear_name_tombstone(session_id: String) -> ();
     fn claim_answer(claim: AnswerClaim) -> ();
     fn unresolved_answer_claims() -> Vec<AnswerClaim>;
     fn find_device(needle: String) -> DeviceLookup;
@@ -183,21 +176,6 @@ impl Db {
         codex_generation: Option<u64>,
     ) -> Result<crate::store::SessionUpsert> {
         self.run(move |store| store.upsert_session_at_generation(&row, codex_generation))
-            .await
-    }
-
-    /// Append a transcript batch **and** advance its cursor, atomically.
-    ///
-    /// The batch is the reason this module exists: a cold backfill hands over
-    /// megabytes of transcript, and doing that on a runtime worker stopped the
-    /// WebSocket listener for its duration.
-    pub async fn append_batch_with_cursor(
-        &self,
-        session_uid: String,
-        pendings: Vec<PendingEvent>,
-        cursor: TailCursor,
-    ) -> Result<Vec<Event>> {
-        self.run(move |store| store.append_batch_with_cursor(&session_uid, &pendings, &cursor))
             .await
     }
 
@@ -1128,33 +1106,45 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::RunNotes;
     use protocol::event::{EventKind, SessionKey, Source};
+    use protocol::proc_identity::{BirthIdentity, ProcessIdentity};
+
+    /// The host the seeded run records. Nothing here signals it.
+    const HOST: ProcessIdentity = ProcessIdentity {
+        pid: 4242,
+        birth: BirthIdentity {
+            start_sec: 1,
+            start_usec: 0,
+        },
+    };
 
     fn temp_db() -> Db {
         Db::new(Arc::new(Store::open_temp("ccd-db")))
     }
 
+    /// A run begun as the engine begins one, with its host recorded.
     fn seed(db: &Db) -> SessionKey {
         let key = SessionKey::new("01K1B3XQ8ZC0DE5FGH7JKMNPQR", "cc-1");
         let now = protocol::time::now_rfc3339();
-        db.blocking()
-            .upsert_session(&SessionRow {
-                session_uid: key.uid.clone(),
-                session_id: key.name.clone(),
-                tmux_session: key.name.clone(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
-            .unwrap()
-            .assert_present();
+        let row = SessionRow {
+            session_uid: key.uid.clone(),
+            session_id: key.name.clone(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        let store = db.blocking();
+        assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);
+        store.record_host(&key.uid, &HOST, None).unwrap();
         key
     }
 
@@ -1225,7 +1215,7 @@ mod tests {
     async fn reads_are_served_while_a_write_is_in_flight() {
         // What the reader pool buys, stated as a test: a read must not be
         // serialised behind the writer's mutex. Before the split there was one
-        // `Mutex<Connection>`, so a 4MB transcript batch stopped every replay,
+        // `Mutex<Connection>`, so a 4MB batch of events stopped every replay,
         // every session listing and every revocation check on the machine for
         // its whole duration.
         let db = temp_db();
@@ -1242,19 +1232,14 @@ mod tests {
                 .with_source_event_id(format!("b{i}"))
             })
             .collect();
-        let cursor = TailCursor {
-            path: "/tmp/t.jsonl".into(),
-            dev: 1,
-            ino: 1,
-            offset: 1,
-            last_line_start: 0,
-            last_line_sha: "x".into(),
-        };
 
         let writing = {
             let db = db.clone();
             let uid = key.uid.clone();
-            tokio::spawn(async move { db.append_batch_with_cursor(uid, batch, cursor).await })
+            tokio::spawn(async move {
+                db.append_host_message(uid, HOST, 1, batch, RunNotes::default())
+                    .await
+            })
         };
         // Concurrent reads. The assertion is that they *complete* — with one
         // shared mutex they would simply queue behind the batch, and with a
@@ -1263,7 +1248,8 @@ mod tests {
             db.list_sessions().await.unwrap();
             db.device_is_active("nobody".into()).await.unwrap();
         }
-        assert_eq!(writing.await.unwrap().unwrap().len(), 5_000);
+        let written = writing.await.unwrap().unwrap().expect("the cursor moved");
+        assert_eq!(written.len(), 5_000);
         assert_eq!(db.max_seq(key.uid).await.unwrap(), 5_000);
     }
 
@@ -1295,14 +1281,6 @@ mod tests {
                 .with_source_event_id(format!("slow{i}"))
             })
             .collect();
-        let cursor = TailCursor {
-            path: "/tmp/t.jsonl".into(),
-            dev: 1,
-            ino: 1,
-            offset: 1,
-            last_line_start: 0,
-            last_line_sha: "x".into(),
-        };
 
         // Ordering is the whole experiment, so it is spelled out. `tokio::spawn`
         // on a current-thread runtime only *queues* the task; it runs when this
@@ -1315,12 +1293,16 @@ mod tests {
         let writing = {
             let db = db.clone();
             let uid = key.uid.clone();
-            tokio::spawn(async move { db.append_batch_with_cursor(uid, batch, cursor).await })
+            tokio::spawn(async move {
+                db.append_host_message(uid, HOST, 1, batch, RunNotes::default())
+                    .await
+            })
         };
         tokio::time::sleep(Duration::from_millis(5)).await;
         let tick_latency = started.elapsed();
 
-        assert_eq!(writing.await.unwrap().unwrap().len(), 20_000);
+        let written = writing.await.unwrap().unwrap().expect("the cursor moved");
+        assert_eq!(written.len(), 20_000);
         let write_time = started.elapsed();
 
         // If the fixture is not slow enough the comparison proves nothing, so

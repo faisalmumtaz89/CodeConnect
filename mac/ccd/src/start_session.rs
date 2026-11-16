@@ -1915,8 +1915,6 @@ mod tests {
                 ),
             );
             let (claude, env) = test_claude(&root.join("claude-rig"));
-            let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
-            Box::leak(Box::new(transcript_rx));
             let daemon = Daemon::new(
                 protocol::config::Config {
                     claude_bin: Some(claude.display().to_string()),
@@ -1931,7 +1929,6 @@ mod tests {
                     port: 8787,
                     tls: false,
                 },
-                transcript_tx,
             );
             Rig {
                 db: crate::db::Db::new(store),
@@ -2183,8 +2180,6 @@ mod tests {
     /// host in `root`, a folder of the test's own under `/tmp` (removed by the caller).
     fn hosted_daemon(root: &Path, claude: &Path, host: &Path) -> Arc<Daemon> {
         let store = crate::store::Store::open(&root.join("events.db")).unwrap();
-        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(transcript_rx));
         Daemon::new(
             protocol::config::Config {
                 claude_bin: Some(claude.display().to_string()),
@@ -2198,7 +2193,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            transcript_tx,
         )
     }
 

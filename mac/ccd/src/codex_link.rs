@@ -6,8 +6,8 @@
 //! leg (WS-over-UDS on the run dir's `ccd.sock`), completes the ccd role's allowlisted
 //! handshake, attaches to the session's thread — by watching it start, or by resuming
 //! it and reconciling the answer — stamps every inbound frame with its ingress
-//! attribution, and hands the admitted ones to the adapter. What comes back lands through [`Daemon::ingest`] — the same call the
-//! hook and transcript paths make — so a Codex fact is deduplicated by
+//! attribution, and hands the admitted ones to the adapter. What comes back lands through
+//! [`Daemon::ingest`], so a Codex fact is deduplicated by
 //! `(session_uid, source, source_event_id)` exactly as a Claude fact is, and a
 //! re-observed frame costs a row that is never written rather than a duplicate.
 //!
@@ -5456,8 +5456,8 @@ impl Connection<'_> {
     ///     it is *about*: the answer, and what the log already knows of the turns it
     ///     names. Nothing downstream can withhold it or delay it.
     ///   * **Record before rebuild.** Every fact the answer describes goes through
-    ///     [`Daemon::ingest`] — the same call the hook, transcript and live-frame paths
-    ///     make, deduplicated by `(session_uid, source, source_event_id)` — *before*
+    ///     [`Daemon::ingest`] — the same call the live-frame path makes,
+    ///     deduplicated by `(session_uid, source, source_event_id)` — *before*
     ///     [`CodexAdapter::apply_resume_seed`] is allowed to forget what it had open.
     ///   * **A failed insert fails the attach.** Not "logs and carries on", which is
     ///     what the live-frame path does: there, a lost fact costs one row, while here
@@ -12417,27 +12417,26 @@ mod tests {
         let store = Arc::new(crate::store::Store::open(db.path()).unwrap());
         let now = protocol::time::now_rfc3339();
         store
-            .upsert_session(&crate::store::SessionRow {
-                session_uid: session.uid.clone(),
-                session_id: session.name.clone(),
-                tmux_session: session.name.clone(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/work".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: protocol::event::Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Codex,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
+            .upsert_session_at_generation(
+                &crate::store::SessionRow {
+                    session_uid: session.uid.clone(),
+                    session_id: session.name.clone(),
+                    tmux_session: session.name.clone(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Codex,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                None,
+            )
             .unwrap()
             .assert_present();
-        let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
-        // Kept alive: a dropped receiver would fail every tail registration, which
-        // is not what these tests are about.
-        Box::leak(Box::new(tail_rx));
         let push = Arc::new(crate::apns::LoggingPushSender::new());
         let daemon = Daemon::new(
             protocol::config::Config::default(),
@@ -12448,7 +12447,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tail_tx,
         );
         (daemon, db, push)
     }
@@ -12460,8 +12458,6 @@ mod tests {
     /// fact's value is that it survives one.
     fn daemon_on_db(db: &TempDb, _session: &SessionKey) -> Arc<Daemon> {
         let store = Arc::new(crate::store::Store::open(db.path()).unwrap());
-        let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(tail_rx));
         Daemon::new(
             protocol::config::Config::default(),
             store,
@@ -12471,7 +12467,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tail_tx,
         )
     }
 
@@ -21063,31 +21058,24 @@ mod tests {
         let leg = ScriptedLeg::start(answer, true);
         let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
         let (daemon, _db) = linked_daemon(&session);
-        let (tx, _rx) = tokio::sync::mpsc::channel::<protocol::ipc::DaemonFrame>(
-            protocol::config::Config::default().ipc_write_queue,
-        );
         daemon
-            .register_supervisor(
-                RegisterSession {
-                    session_id: session.name.clone(),
-                    session_uid: Some(session.uid.clone()),
-                    tmux_session: session.name.clone(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/work".into(),
-                    supervisor_pid: 4242,
-                    claude_bin: None,
-                    agent: protocol::agent::AgentKind::Codex,
-                    agent_bin: None,
-                    codex_thread_id: None,
-                    codex_socket: Some(leg.path.to_string_lossy().into_owned()),
-                    codex_generation: Some(1),
-                    started_at: protocol::time::now_rfc3339(),
-                    protocol_minor: protocol::PROTOCOL_MINOR,
-                    exit_replay: false,
-                },
-                tx,
-                Arc::new(Mutex::new(std::collections::HashMap::new())),
-            )
+            .register_supervisor(RegisterSession {
+                session_id: session.name.clone(),
+                session_uid: Some(session.uid.clone()),
+                tmux_session: session.name.clone(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/work".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: Some(leg.path.to_string_lossy().into_owned()),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            })
             .await
             .expect("the coordinator's registration is accepted");
         // Two not-ready answers: the link has bound and learned the thread has no
@@ -25443,8 +25431,6 @@ mod tests {
         // what a restart is: no shared memory, no connection, nothing carried
         // but the store.
         let store = Arc::new(crate::store::Store::open(db.path()).unwrap());
-        let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(tail_rx));
         let rebound = Daemon::new(
             protocol::config::Config::default(),
             store,
@@ -25454,7 +25440,6 @@ mod tests {
                 port: 8787,
                 tls: false,
             },
-            tail_tx,
         );
         rebound.recover().await;
 

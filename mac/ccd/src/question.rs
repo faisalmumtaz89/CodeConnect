@@ -1,11 +1,10 @@
 //! Claude's `AskUserQuestion`, answered from the phone.
 //!
 //! The answer goes back as `allow` with `updatedInput` = the input as shown plus
-//! `answers` and `annotations`: through the `PermissionRequest` hook Claude is
-//! holding, or, for a run started in an agent host, through the host's return to
-//! the SDK's `canUseTool` ([`host_updated_input`]). Claude validates none of it (measured on 2.1.286: a partial
-//! answer and a label from nowhere are both accepted), so this module is the
-//! only check there is. It builds exactly what Claude's own dialog builds when
+//! `answers` and `annotations`, through the agent host's return to the SDK's
+//! `canUseTool` ([`host_updated_input`]). Claude validates none of it (measured on
+//! 2.1.286: a partial answer and a label from nowhere are both accepted), so this
+//! module is the only check there is. It builds exactly what Claude's own dialog builds when
 //! the same choices are made at the keyboard, read from the 2.1.286 dialog:
 //!
 //! * a single choice is the option's label as the dialog shows it (whitespace
@@ -19,39 +18,15 @@
 //!   as the dialog trims them ([`js_trim`]);
 //! * `annotations` is always present, empty when nothing needs it.
 //!
-//! The dialog shows a label, and answers with it, only after rewriting what it
-//! will not draw as written: invisible and format characters, controls, bidi
-//! marks, variation selectors, tabs, more than 8 zero-width characters joined
-//! to one character, overlong text. A question whose text holds any of that —
-//! anything but letters, combining marks, numbers, punctuation, symbols, the
-//! plain space and the zero-width joiner and non-joiner — or a label shown
-//! twice is not offered to the phone at all: [`answerable`] says no, and the
-//! card stays at the Mac. Better unanswerable here than answered with a string
-//! the keyboard would not have produced. A hosted run's question has no keyboard
-//! dialog to match, so none of this applies to it; a label shown twice still
-//! does.
+//! A question asked twice, or with two options the dialog shows alike, is
+//! refused: no answer could say which one was meant.
 
 use protocol::ws::QuestionAnswer;
 use serde_json::{Map, Value};
-use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// Previews longer than this (UTF-16 units) are withheld by the dialog, so the
 /// keyboard's answer carries no preview for them.
 const PREVIEW_SHOWN_MAX: usize = 2000;
-
-/// Labels longer than this (UTF-16 units) are cut short by the dialog.
-const LABEL_SHOWN_MAX: usize = 2000;
-
-/// The most zero-width characters joined to one character that the dialog
-/// shows as written: combining marks, the zero-width joiner and non-joiner, and
-/// Hangul vowel and final jamo. Its width check walks the text grapheme by
-/// grapheme and writes U+FFFD for one that does not add its own
-/// `Bun.stringWidth` to the text before it; measured on 2.1.286, 8 such
-/// characters after a letter are kept and a ninth is rewritten, whichever of
-/// them they are, while an emoji modifier or a halfwidth sound mark, which have
-/// width, start the count again.
-const JOINED_SHOWN_MAX: usize = 8;
-
 /// One question as the dialog reads it.
 struct Question<'a> {
     text: &'a str,
@@ -67,31 +42,11 @@ impl Question<'_> {
     }
 }
 
-/// True when every question on this card can be answered from the phone and
-/// the answer would be byte-identical to the keyboard's.
-pub fn answerable(tool_input: &Value) -> bool {
-    questions(tool_input, true).is_ok()
-}
-
-/// The `updatedInput` for these answers to a hook's question, or why they are
-/// refused. Nothing is built from anything but the stored question and the
+/// The `updatedInput` for these answers to a hosted run's question, or why they
+/// are refused. Nothing is built from anything but the stored question and the
 /// indices given.
-pub fn updated_input(tool_input: &Value, answers: &[QuestionAnswer]) -> Result<Value, String> {
-    built(tool_input, answers, true)
-}
-
-/// The `updatedInput` for these answers to the question of a run started in an
-/// agent host. No keyboard dialog answers it, so nothing is refused for how the
-/// terminal would draw it; its questions and the choices are checked as a hook
-/// question's are.
 pub fn host_updated_input(tool_input: &Value, answers: &[QuestionAnswer]) -> Result<Value, String> {
-    built(tool_input, answers, false)
-}
-
-/// The answers built, `terminal` saying whether the question must be one the
-/// keyboard dialog shows as written ([`shown_as_written`]).
-fn built(tool_input: &Value, answers: &[QuestionAnswer], terminal: bool) -> Result<Value, String> {
-    let questions = questions(tool_input, terminal)?;
+    let questions = questions(tool_input)?;
     if answers.len() != questions.len() {
         return Err(format!(
             "{} answer(s) for {} question(s); every question needs exactly one answer",
@@ -176,17 +131,8 @@ fn built(tool_input: &Value, answers: &[QuestionAnswer], terminal: bool) -> Resu
     Ok(input.into())
 }
 
-/// Whether a `PostToolUse` for this question carries the answer the phone sent:
-/// the same `answers` and `annotations`. Anything else was answered at the Mac.
-pub fn same_answer(sent: &Value, ran_with: &Value) -> bool {
-    sent.get("answers") == ran_with.get("answers")
-        && sent.get("annotations") == ran_with.get("annotations")
-}
-
-/// The card's questions, or why it cannot be answered. With `terminal`, also
-/// refused: text, a label or a preview the keyboard dialog would not show as
-/// written, since its answer must be the keyboard's byte for byte.
-fn questions(tool_input: &Value, terminal: bool) -> Result<Vec<Question<'_>>, String> {
+/// The card's questions, or why it cannot be answered.
+fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
     let list = tool_input
         .get("questions")
         .and_then(Value::as_array)
@@ -201,11 +147,6 @@ fn questions(tool_input: &Value, terminal: bool) -> Result<Vec<Question<'_>>, St
                 .get("question")
                 .and_then(Value::as_str)
                 .ok_or(format!("question {number} has no text"))?;
-            if terminal && !shown_as_written(text, false) {
-                return Err(format!(
-                    "question {number}'s text is shown differently at the computer"
-                ));
-            }
             if seen.contains(&text) {
                 return Err(format!("question {number} repeats an earlier question"));
             }
@@ -230,7 +171,6 @@ fn questions(tool_input: &Value, terminal: bool) -> Result<Vec<Question<'_>>, St
                 let label = option
                     .get("label")
                     .and_then(Value::as_str)
-                    .filter(|label| !terminal || shown_as_written(label, false))
                     .ok_or(format!(
                         "question {number} has an option the phone cannot show as the computer does"
                     ))?;
@@ -242,11 +182,7 @@ fn questions(tool_input: &Value, terminal: bool) -> Result<Vec<Question<'_>>, St
                 }
                 let preview = match option.get("preview") {
                     None => None,
-                    Some(Value::String(preview))
-                        if !terminal
-                            || preview.encode_utf16().count() > PREVIEW_SHOWN_MAX
-                            || shown_as_written(preview, true) =>
-                    {
+                    Some(Value::String(preview)) => {
                         (!preview.trim().is_empty()).then_some(preview.as_str())
                     }
                     Some(_) => {
@@ -313,83 +249,6 @@ fn folded(label: &str) -> String {
         .join(" ")
 }
 
-/// Whether the dialog shows this text exactly as written: short enough not to
-/// be cut, and only letters, combining marks, numbers, punctuation, symbols,
-/// the plain space, the zero-width joiner and non-joiner (and line breaks in a
-/// preview), none of them default-ignorable, with no more than
-/// [`JOINED_SHOWN_MAX`] zero-width characters joined to one character.
-/// Everything else is something the 2.1.286 dialog rewrites, drops or may
-/// rewrite.
-fn shown_as_written(text: &str, lines: bool) -> bool {
-    use GeneralCategory::*;
-    let mut joined = 0;
-    text.encode_utf16().count() <= LABEL_SHOWN_MAX
-        && text.chars().all(|c| {
-            let category = get_general_category(c);
-            if matches!(category, NonspacingMark | SpacingMark)
-                || matches!(
-                    c,
-                    '\u{200c}' | '\u{200d}' | '\u{1160}'..='\u{11ff}' | '\u{d7b0}'..='\u{d7ff}'
-                )
-            {
-                joined += 1;
-            } else {
-                joined = 0;
-            }
-            joined <= JOINED_SHOWN_MAX
-                && !default_ignorable(c)
-                && (c == ' '
-                    || (lines && c == '\n')
-                    || matches!(c, '\u{200c}' | '\u{200d}')
-                    || matches!(
-                        category,
-                        UppercaseLetter
-                            | LowercaseLetter
-                            | TitlecaseLetter
-                            | ModifierLetter
-                            | OtherLetter
-                            | DecimalNumber
-                            | LetterNumber
-                            | OtherNumber
-                            | ConnectorPunctuation
-                            | DashPunctuation
-                            | OpenPunctuation
-                            | ClosePunctuation
-                            | InitialPunctuation
-                            | FinalPunctuation
-                            | OtherPunctuation
-                            | MathSymbol
-                            | CurrencySymbol
-                            | ModifierSymbol
-                            | OtherSymbol
-                            | NonspacingMark
-                            | SpacingMark
-                    ))
-        })
-}
-
-/// The default-ignorable characters among the categories [`shown_as_written`]
-/// takes: the Hangul fillers, which look like letters, the combining grapheme
-/// joiner, the Khmer inherent vowels, the Mongolian free variation selectors and
-/// every variation selector. The dialog turns most of these into U+FFFD or
-/// drops them; the Mongolian selectors and U+FE00..U+FE0D it lets through to a
-/// width check not measured here, so they are refused with the rest.
-fn default_ignorable(c: char) -> bool {
-    matches!(
-        c,
-        '\u{34f}'
-            | '\u{115f}'
-            | '\u{1160}'
-            | '\u{17b4}'
-            | '\u{17b5}'
-            | '\u{180b}'..='\u{180f}'
-            | '\u{3164}'
-            | '\u{fe00}'..='\u{fe0f}'
-            | '\u{ffa0}'
-            | '\u{e0100}'..='\u{e01ef}'
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,16 +298,15 @@ mod tests {
     #[test]
     fn the_phone_answer_is_what_the_keyboard_produced() {
         let keyboard: Value = serde_json::from_str(KEYBOARD).unwrap();
-        let built = updated_input(&card_input(), &keyboard_choices()).unwrap();
+        let built = host_updated_input(&card_input(), &keyboard_choices()).unwrap();
         assert_eq!(built["answers"], keyboard["tool_input"]["answers"]);
         assert_eq!(built["annotations"], keyboard["tool_input"]["annotations"]);
         assert_eq!(built["questions"], keyboard["tool_input"]["questions"]);
-        assert!(same_answer(&built, &keyboard["tool_input"]));
     }
 
     #[test]
     fn several_choices_keep_the_order_they_were_picked_in() {
-        let built = updated_input(
+        let built = host_updated_input(
             &card_input(),
             &[pick(&[1]), pick(&[2, 0]), pick(&[0]), pick(&[0])],
         )
@@ -469,7 +327,7 @@ mod tests {
     fn a_choice_that_contains_the_separator_is_quoted() {
         let input = json!({"questions": [{"question": "Q", "multiSelect": true,
             "options": [{"label": "a, b"}, {"label": "say \"hi\""}, {"label": "c"}]}]});
-        let built = updated_input(
+        let built = host_updated_input(
             &input,
             &[QuestionAnswer {
                 selected: vec![0, 2, 1],
@@ -484,9 +342,7 @@ mod tests {
 
     /// **B6 part 2a:** a hosted run's question is answered whatever the terminal would
     /// do to its text: question text with a tab and a variation selector (⚠️), a label
-    /// with one, and a preview indented with a tab are taken as written. A hook's question
-    /// with the same text stays refused, its answer having to be the keyboard's byte for
-    /// byte.
+    /// with one, and a preview indented with a tab are taken as written.
     #[test]
     fn a_hosted_question_takes_text_the_terminal_would_rewrite() {
         let input = json!({"questions": [{"question": "Which\tstart ⚠️?", "options": [
@@ -499,9 +355,7 @@ mod tests {
             json!({"preview": "if ready {\n\tstart()\n}"})
         );
         assert!(host_updated_input(&input, &[pick(&[1])]).is_ok());
-        assert!(updated_input(&input, &[pick(&[1])]).is_err());
-        assert!(!answerable(&input));
-        // The structure is checked as for a hook: one answer per question, in range.
+        // The structure is still checked: one answer per question, in range.
         assert!(host_updated_input(&input, &[]).is_err());
         assert!(host_updated_input(&input, &[pick(&[2])]).is_err());
     }
@@ -510,7 +364,7 @@ mod tests {
     fn a_label_is_answered_as_the_dialog_shows_it() {
         let input = json!({"questions": [{"question": "Q",
             "options": [{"label": "  Two   spaces "}, {"label": "B"}]}]});
-        let built = updated_input(&input, &[pick(&[0])]).unwrap();
+        let built = host_updated_input(&input, &[pick(&[0])]).unwrap();
         assert_eq!(built["answers"]["Q"], "Two spaces");
     }
 
@@ -520,154 +374,83 @@ mod tests {
         let input = card_input();
         let mut partial = keyboard_choices();
         partial.truncate(2);
-        assert!(updated_input(&input, &partial)
+        assert!(host_updated_input(&input, &partial)
             .unwrap_err()
             .contains("2 answer(s) for 4"));
 
         let mut empty = keyboard_choices();
         empty[0] = QuestionAnswer::default();
-        assert!(updated_input(&input, &empty)
+        assert!(host_updated_input(&input, &empty)
             .unwrap_err()
             .contains("question 1 has no answer"));
 
         let mut out_of_range = keyboard_choices();
         out_of_range[0] = pick(&[2]);
-        assert!(updated_input(&input, &out_of_range)
+        assert!(host_updated_input(&input, &out_of_range)
             .unwrap_err()
             .contains("no option 3"));
 
         let mut two_singles = keyboard_choices();
         two_singles[0] = pick(&[0, 1]);
-        assert!(updated_input(&input, &two_singles)
+        assert!(host_updated_input(&input, &two_singles)
             .unwrap_err()
             .contains("takes one answer"));
 
         let mut label_and_other = keyboard_choices();
         label_and_other[0].other = Some("x".into());
-        assert!(updated_input(&input, &label_and_other)
+        assert!(host_updated_input(&input, &label_and_other)
             .unwrap_err()
             .contains("takes one answer"));
 
         let mut twice = keyboard_choices();
         twice[1] = pick(&[0, 0]);
-        assert!(updated_input(&input, &twice).unwrap_err().contains("twice"));
+        assert!(host_updated_input(&input, &twice)
+            .unwrap_err()
+            .contains("twice"));
 
         let mut blank_other = keyboard_choices();
         blank_other[2].other = Some("  ".into());
-        assert!(updated_input(&input, &blank_other)
+        assert!(host_updated_input(&input, &blank_other)
             .unwrap_err()
             .contains("empty"));
 
         let mut notes_elsewhere = keyboard_choices();
         notes_elsewhere[0].notes = Some("n".into());
-        assert!(updated_input(&input, &notes_elsewhere)
+        assert!(host_updated_input(&input, &notes_elsewhere)
             .unwrap_err()
             .contains("takes no notes"));
 
         let mut too_many = keyboard_choices();
         too_many.push(pick(&[0]));
-        assert!(updated_input(&input, &too_many).is_err());
+        assert!(host_updated_input(&input, &too_many).is_err());
     }
 
+    /// A card of a shape the dialog does not draw takes no answer at all: no
+    /// questions, a question that is not a choice or offers nothing, two options
+    /// shown alike, and a question asked twice.
     #[test]
-    fn a_question_the_dialog_would_rewrite_is_not_offered() {
-        assert!(answerable(&card_input()));
-        for input in [
-            json!({}),
-            json!({"questions": []}),
-            json!({"questions": [{"question": "Q", "options": []}]}),
-            json!({"questions": [{"question": "Q", "kind": "text", "options": [{"label": "A"}]}]}),
-            json!({"questions": [{"question": "Q", "options": [{"label": "A\nB"}]}]}),
-            json!({"questions": [{"question": "Q", "options": [{"label": "A\u{1b}[31m"}]}]}),
-            json!({"questions": [{"question": "Q", "options": [{"label": "A"}, {"label": "A "}]}]}),
-            json!({"questions": [{"question": "Q", "options": [{"label": "A", "preview": "x\ty"}]}]}),
-            json!({"questions": [{"question": "Q", "options": [{"label": "A"}]},
-                                 {"question": "Q", "options": [{"label": "B"}]}]}),
+    fn a_card_of_a_shape_the_dialog_does_not_draw_takes_no_answer() {
+        let one = |options: Value| json!({"question": "Q", "options": options});
+        for (input, refusal) in [
+            (json!({"questions": []}), "has no questions"),
+            (
+                json!({"questions": [{"question": "Q", "kind": "text",
+                    "options": [{"label": "A"}]}]}),
+                "is not a choice",
+            ),
+            (json!({"questions": [one(json!([]))]}), "has no options"),
+            (
+                json!({"questions": [one(json!([{"label": "A  b"}, {"label": "A b"}]))]}),
+                "shows alike",
+            ),
+            (
+                json!({"questions": [one(json!([{"label": "A"}])), one(json!([{"label": "A"}]))]}),
+                "repeats an earlier question",
+            ),
         ] {
-            assert!(!answerable(&input), "{input}");
+            let refused = host_updated_input(&input, &[pick(&[0])]).unwrap_err();
+            assert!(refused.contains(refusal), "{input}: {refused}");
         }
-        // What 2.1.286's dialog shows differently from the text it was given,
-        // as measured: zero-width space, BOM, soft hyphen and the Hangul fillers
-        // become U+FFFD, a variation selector is dropped, a ninth zero-width
-        // character joined to one character is rewritten, and an overlong label
-        // is cut.
-        let marks = |n: usize| "\u{301}".repeat(n);
-        let nine_marks = format!("a{}", marks(9));
-        // Joiners and Hangul vowel and final jamo count with the marks.
-        let joined = [
-            format!("a\u{200c}{}", marks(8)),
-            format!("\u{1100}\u{1161}{}", marks(8)),
-            format!("a{}\u{200d}{}", marks(4), marks(4)),
-            format!("e\u{200d}{}", marks(8)),
-            format!("a{}b", "\u{200d}".repeat(20)),
-            format!("a{}b", "\u{200c}".repeat(9)),
-            format!("a{}\u{200c}", marks(8)),
-            format!("x{}", "\u{200d}".repeat(9)),
-        ];
-        for label in [
-            "Zero\u{200b}Width",
-            "Bom\u{feff}End",
-            "Soft\u{ad}Hyphen",
-            "Heart \u{2764}\u{fe0f}",
-            "Han\u{3164}gul",
-            "Half\u{ffa0}width",
-            "\u{115f}\u{1160}",
-            "Joiner\u{34f}x",
-            &nine_marks,
-            &joined[0],
-            &joined[1],
-            &joined[2],
-            &joined[3],
-            &joined[4],
-            &joined[5],
-            &joined[6],
-            &joined[7],
-            "No\u{a0}break",
-            "Tab\tbed",
-            "Right\u{202e}left",
-            &"x".repeat(LABEL_SHOWN_MAX + 1),
-        ] {
-            let option = json!({"questions": [{"question": "Q", "options": [{"label": label}]}]});
-            assert!(!answerable(&option), "{label:?}");
-            let question = json!({"questions": [{"question": label, "options": [{"label": "A"}]}]});
-            assert!(!answerable(&question), "{label:?} as the question");
-            let preview = json!({"questions": [{"question": "Q",
-                "options": [{"label": "A", "preview": label}, {"label": "B"}]}]});
-            let annotated = label.encode_utf16().count() <= PREVIEW_SHOWN_MAX;
-            assert_eq!(answerable(&preview), !annotated, "{label:?} as a preview");
-        }
-        // And what it shows exactly as written, as measured: scripts written
-        // with combining marks, the zero-width joiner and non-joiner, and 8
-        // zero-width characters joined to one character, whichever they are; an
-        // emoji modifier or a halfwidth sound mark starts the count again.
-        for label in [
-            "caf\u{e9} \u{2615}".to_string(),
-            "\u{65e5}\u{672c}\u{8a9e}".to_string(),
-            "x".repeat(LABEL_SHOWN_MAX),
-            "\u{939}\u{93f}\u{902}\u{926}\u{940} \u{92e}\u{947}\u{902}".to_string(),
-            "\u{e17}\u{e35}\u{e48}\u{e19}\u{e35}\u{e48}".to_string(),
-            "\u{5e9}\u{5b8}\u{5c1}\u{5dc}\u{5d5}\u{5b9}\u{5dd}".to_string(),
-            "e\u{301}clair".to_string(),
-            format!("a{}", marks(8)),
-            format!("a\u{200c}{}", marks(7)),
-            format!("\u{1100}\u{1161}{}", marks(7)),
-            format!("a{}b", "\u{200d}".repeat(8)),
-            format!("a{}\u{200d}{}", marks(3), marks(4)),
-            format!("\u{1100}\u{1161}\u{11a8}{}", marks(6)),
-            format!("\u{1f600}\u{200d}{}", marks(7)),
-            format!("\u{915}\u{94d}\u{200d}{}", marks(6)),
-            format!("a\u{1f3fb}{}", marks(8)),
-            format!("a\u{ff9e}{}", marks(8)),
-            "\u{1f468}\u{200d}\u{1f4bb} Dev".to_string(),
-            "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}".to_string(),
-        ] {
-            let option = json!({"questions": [{"question": "Q", "options": [
-                {"label": label, "preview": "line one\nline two"}, {"label": "B"}]}]});
-            assert!(answerable(&option), "{label:?}");
-        }
-        assert!(answerable(
-            &json!({"questions": [{"question": "Q", "kind": "choice", "options": [{"label": "A"}]}]})
-        ));
     }
 
     /// A single choice whose options carry previews is drawn without "Type
@@ -680,10 +463,10 @@ mod tests {
             other: Some("something else".into()),
             ..Default::default()
         };
-        assert!(updated_input(&input, std::slice::from_ref(&other)).is_err());
+        assert!(host_updated_input(&input, std::slice::from_ref(&other)).is_err());
         let plain = json!({"questions": [{"question": "Q",
             "options": [{"label": "A"}, {"label": "B"}]}]});
-        assert!(updated_input(&plain, &[other]).is_ok());
+        assert!(host_updated_input(&plain, &[other]).is_ok());
     }
 
     #[test]
@@ -691,9 +474,9 @@ mod tests {
         let long = "x".repeat(PREVIEW_SHOWN_MAX + 1);
         let input = json!({"questions": [{"question": "Q",
             "options": [{"label": "A", "preview": long}, {"label": "B", "preview": "  "}]}]});
-        let built = updated_input(&input, &[pick(&[0])]).unwrap();
+        let built = host_updated_input(&input, &[pick(&[0])]).unwrap();
         assert_eq!(built["annotations"], json!({}));
-        let noted = updated_input(
+        let noted = host_updated_input(
             &input,
             &[QuestionAnswer {
                 selected: vec![0],
@@ -713,7 +496,7 @@ mod tests {
         let input = json!({"questions": [{"question": "Q",
             "options": [{"label": "A", "preview": "a"}, {"label": "B", "preview": "b"}]}]});
         let noted = |notes: &str| {
-            updated_input(
+            host_updated_input(
                 &input,
                 &[QuestionAnswer {
                     selected: vec![0],
@@ -746,14 +529,5 @@ mod tests {
             Value::Null,
             "nothing left, no notes"
         );
-    }
-
-    #[test]
-    fn a_keyboard_answer_is_told_apart_from_the_phone_s() {
-        let keyboard: Value = serde_json::from_str(KEYBOARD).unwrap();
-        let mut other = keyboard_choices();
-        other[0] = pick(&[1]);
-        let built = updated_input(&card_input(), &other).unwrap();
-        assert!(!same_answer(&built, &keyboard["tool_input"]));
     }
 }

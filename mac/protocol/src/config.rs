@@ -3,63 +3,20 @@
 //! Every field has a working default and a malformed file is a warning, never a
 //! startup failure: a daemon that refuses to start because of a stray comma
 //! would take the whole product down for a cosmetic reason.
-//!
-//! The TUI-copy needles are configuration rather than constants on purpose.
-//! Claude Code's prompt wording is the single most churn-prone thing CodeConnect
-//! depends on, and a user must be able to fix a broken presence check without
-//! waiting for a release.
 
 use serde::{Deserialize, Serialize};
 
 fn default_ws_port() -> u16 {
     8787
 }
-fn default_gate_hook() -> String {
-    "PermissionRequest".to_string()
-}
-fn default_gate_timeout_ms() -> u64 {
-    120_000
-}
-fn default_connect_timeout_ms() -> u64 {
-    200
-}
-fn default_tail_poll_ms() -> u64 {
-    250
-}
 fn default_stale_after_ms() -> u64 {
     30_000
-}
-fn default_send_keys_delay_ms() -> u64 {
-    120
 }
 fn default_max_payload_bytes() -> usize {
     512 * 1024
 }
-/// How long the daemon waits for a supervisor's answer to one request.
-///
-/// The daemon stamps `now + this` into each send as `respond_by_monotonic_ms`,
-/// and the supervisor budgets every deliberate wait against that stamp —
-/// checking *before* each spend and stopping recovery honestly when the
-/// remainder cannot fit the next step. So this value does not need to
-/// dominate the theoretical worst path (every tmux call stalling to its
-/// full deadline through confirmation recovery sums past any sane wait);
-/// it needs to fit the *healthy* path and leave the phone standing. The
-/// healthy full path — looks and keystrokes in single-digit milliseconds,
-/// recovery's deliberate observation windows of 1.5s + 1.5s, a verify
-/// window up to 1.5s — is under six seconds; fifteen gives degraded tmux
-/// room to still finish ordinary sends, and stays inside the app's
-/// twenty-second request wait with margin for queue and transport.
-fn default_supervisor_timeout_ms() -> u64 {
-    15_000
-}
 fn default_pairing_ttl_secs() -> u64 {
     crate::pairing::PAIRING_TTL_SECS
-}
-fn default_local_resolve_grace_ms() -> u64 {
-    3_000
-}
-fn default_local_resolve_poll_ms() -> u64 {
-    2_000
 }
 fn default_liveness_sweep_secs() -> u64 {
     60
@@ -137,30 +94,6 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub ws_loopback: bool,
 
-    /// Which hook event carries the gate. `none` disables holding entirely.
-    ///
-    /// NOTE (claude 2.1.220): this previously read "the `PermissionRequest`
-    /// hook fires but its return value does **not** decide the permission —
-    /// measured against that build", and the send-keys answer path exists
-    /// because of it. That measurement was real but the conclusion was wrong:
-    /// the return value was being emitted in the wrong schema. `PermissionRequest`
-    /// takes a *nested* `hookSpecificOutput.decision.behavior`, not the flat
-    /// top-level `decision` that `PreToolUse` accepts. With the correct shape,
-    /// re-measured against 2.1.220, the return value decides the permission in
-    /// both directions and no local prompt appears at all.
-    ///
-    /// So answers are never typed into the pane: every phone answer to a Claude
-    /// card is that call's held hook's return value.
-    #[serde(default = "default_gate_hook")]
-    pub gate_hook: String,
-
-    /// cc-hook's own wait budget on a gate event other than `PermissionRequest`,
-    /// which waits as long as Claude does.
-    #[serde(default = "default_gate_timeout_ms")]
-    pub gate_timeout_ms: u64,
-    #[serde(default = "default_connect_timeout_ms")]
-    pub connect_timeout_ms: u64,
-
     /// Whether this daemon may ring a phone at all.
     ///
     /// **The only off switch, and the only push setting with a default of
@@ -203,25 +136,10 @@ pub struct Config {
     #[serde(default)]
     pub apns_topic: Option<String>,
 
-    /// Opt in to PreToolUse `ask` when the daemon is unreachable. Off by
-    /// default: it is the only channel that renders our reason to the local
-    /// operator, but it also forces a prompt on every auto-approved tool call.
-    pub unreachable_ask: bool,
-
-    #[serde(default = "default_tail_poll_ms")]
-    pub tail_poll_ms: u64,
     #[serde(default = "default_stale_after_ms")]
     pub stale_after_ms: u64,
-    #[serde(default = "default_send_keys_delay_ms")]
-    pub send_keys_delay_ms: u64,
-    #[serde(default = "default_supervisor_timeout_ms")]
-    pub supervisor_timeout_ms: u64,
     #[serde(default = "default_max_payload_bytes")]
     pub max_payload_bytes: usize,
-
-    /// Override the presence needles if Claude's TUI copy changes.
-    pub input_box_needles: Vec<String>,
-    pub permission_prompt_needles: Vec<String>,
 
     /// Try to obtain a certificate — one already sitting in
     /// `~/.codeconnect/tls/` as `<name>.crt` and `<name>.key`, else
@@ -316,17 +234,6 @@ pub struct Config {
     #[serde(default = "default_pairing_ttl_secs")]
     pub pairing_ttl_secs: u64,
 
-    /// Watch for approvals that were answered at the Mac's keyboard and resolve
-    /// them as [`crate::ws::ResolvedBy::Local`]. Best-effort by construction.
-    pub local_resolve: bool,
-    /// How long to wait after an approval appears before believing the absence
-    /// of a prompt. The hook fires microseconds *before* the TUI renders, so
-    /// checking immediately would resolve every approval as local.
-    #[serde(default = "default_local_resolve_grace_ms")]
-    pub local_resolve_grace_ms: u64,
-    #[serde(default = "default_local_resolve_poll_ms")]
-    pub local_resolve_poll_ms: u64,
-
     /// How often the daemon proves each session's `lifecycle` against tmux.
     ///
     /// This is the backstop for the case a supervisor cannot report: the daemon
@@ -349,11 +256,6 @@ pub struct Config {
     pub diff_timeout_ms: u64,
     /// Explicit path to `git` (launchd has no shell PATH).
     pub git_bin: Option<String>,
-
-    /// Use FSEvents to notice transcript writes immediately. The poll below
-    /// stays running either way: FSEvents is a latency optimisation, never the
-    /// correctness floor, because a coalesced stream can drop notifications.
-    pub fsevents: bool,
 
     /// Explicit path to the real `claude` binary (launchd has no shell PATH).
     pub claude_bin: Option<String>,
@@ -411,19 +313,18 @@ pub struct Config {
     ///
     /// The accept loop used to `spawn` unconditionally, so anything that could
     /// reach the tailnet port could hold the daemon's whole file-descriptor
-    /// budget open — and the *local* IPC socket, which carries the hook path and
+    /// budget open — and the *local* IPC socket, which carries the CLI and
     /// every supervisor link, lives on that same budget.
     ///
     /// The numbers come from that budget rather than from taste. ccd raises its
     /// soft `RLIMIT_NOFILE` to [`crate::fdlimit::TARGET`] as it starts, where
     /// launchd hands it 256. The daemon needs a few dozen for itself (five
     /// SQLite connections plus their WAL and SHM handles, the listeners, the log
-    /// files, the FSEvents watcher, the pipes of up to eight terminal
+    /// files, the pipes of up to eight terminal
     /// attachments), and the rest is the local IPC socket's. `64` here, on each
     /// of the tailnet and loopback listeners, keeps the network side a small
     /// share, where a larger WebSocket cap would let a remote peer squeeze out
-    /// the hooks — and a hook that cannot reach the daemon is an agent that stops
-    /// being observable.
+    /// the local side.
     #[serde(default = "default_ws_max_connections")]
     pub ws_max_connections: usize,
     /// How many of those one peer address may hold.
@@ -446,7 +347,7 @@ pub struct Config {
     /// How many local IPC connections may exist at once.
     ///
     /// The larger share of the descriptor budget, because this is the side that
-    /// must never starve: every `cc` invocation, every hook and every supervisor
+    /// must never starve: every `cc` invocation and every supervisor
     /// is one of these. The socket is `0600`, so reaching it already means being
     /// the owner of this account — this bounds a runaway, not an attacker.
     ///
@@ -481,36 +382,23 @@ impl Default for Config {
             ws_port: default_ws_port(),
             ws_bind: None,
             ws_loopback: true,
-            gate_hook: default_gate_hook(),
             push_enabled: true,
             apns_key_path: None,
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
-            gate_timeout_ms: default_gate_timeout_ms(),
-            connect_timeout_ms: default_connect_timeout_ms(),
-            unreachable_ask: false,
-            tail_poll_ms: default_tail_poll_ms(),
             stale_after_ms: default_stale_after_ms(),
-            send_keys_delay_ms: default_send_keys_delay_ms(),
-            supervisor_timeout_ms: default_supervisor_timeout_ms(),
             max_payload_bytes: default_max_payload_bytes(),
-            input_box_needles: Vec::new(),
-            permission_prompt_needles: Vec::new(),
             tls: true,
             tls_required: false,
             ws_allow_plaintext: false,
             tls_hostname: None,
             cert_refresh_days: default_cert_refresh_days(),
             pairing_ttl_secs: default_pairing_ttl_secs(),
-            local_resolve: true,
-            local_resolve_grace_ms: default_local_resolve_grace_ms(),
-            local_resolve_poll_ms: default_local_resolve_poll_ms(),
             liveness_sweep_secs: default_liveness_sweep_secs(),
             diff_max_bytes: default_diff_max_bytes(),
             diff_timeout_ms: default_diff_timeout_ms(),
             git_bin: None,
-            fsevents: true,
             claude_bin: None,
             codex_bin: None,
             agent_host_bin: None,
@@ -641,13 +529,10 @@ impl Config {
             );
             self.tmux_history_limit = clamped;
         }
-        self.tail_poll_ms = self.tail_poll_ms.clamp(50, 10_000);
-        self.connect_timeout_ms = self.connect_timeout_ms.clamp(10, 5_000);
         self.max_payload_bytes = self.max_payload_bytes.clamp(4 * 1024, 8 * 1024 * 1024);
         // A pairing code is a weak secret whose safety comes from its lifetime;
         // an hour-long "temporary" code is a standing invitation.
         self.pairing_ttl_secs = self.pairing_ttl_secs.clamp(30, 3_600);
-        self.local_resolve_poll_ms = self.local_resolve_poll_ms.clamp(250, 60_000);
         // Zero is meaningful — it disables the sweep — so only a non-zero value
         // is clamped. The floor is above the confirmation delay a single sweep
         // spends inside itself, so a sweep can never be asked to start before
@@ -655,9 +540,6 @@ impl Config {
         if self.liveness_sweep_secs != 0 {
             self.liveness_sweep_secs = self.liveness_sweep_secs.clamp(10, 86_400);
         }
-        // Below the grace period the detector fires before the TUI has drawn
-        // the prompt it is looking for, and resolves every approval as local.
-        self.local_resolve_grace_ms = self.local_resolve_grace_ms.max(1_000);
         self.diff_max_bytes = self.diff_max_bytes.clamp(1024, 8 * 1024 * 1024);
         self.diff_timeout_ms = self.diff_timeout_ms.clamp(500, 120_000);
         self.cert_refresh_days = self.cert_refresh_days.clamp(1, 80);
@@ -678,21 +560,6 @@ impl Config {
         self.pairing_max_attempts = self.pairing_max_attempts.min(10_000);
         self.pairing_window_secs = self.pairing_window_secs.clamp(1, 86_400);
         self
-    }
-
-    pub fn gate_event(&self) -> Option<crate::hook::HookEventName> {
-        match self.gate_hook.as_str() {
-            "none" | "" => None,
-            other => Some(crate::hook::HookEventName::parse(other)),
-        }
-    }
-
-    pub fn input_box_needles(&self) -> Option<&[String]> {
-        (!self.input_box_needles.is_empty()).then_some(&self.input_box_needles)
-    }
-
-    pub fn permission_prompt_needles(&self) -> Option<&[String]> {
-        (!self.permission_prompt_needles.is_empty()).then_some(&self.permission_prompt_needles)
     }
 }
 
@@ -787,31 +654,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn defaults_are_coherent() {
-        let config = Config::default();
-        assert!(!config.unreachable_ask);
-        assert_eq!(
-            config.gate_event(),
-            Some(crate::hook::HookEventName::PermissionRequest)
-        );
-    }
-
     /// The WebSocket listeners, each with its own `ws_max_connections`: the
     /// tailnet address and loopback.
     const WS_LISTENERS: usize = 2;
     /// Descriptors the daemon needs for itself: five SQLite connections plus
-    /// their WAL and SHM handles, the listeners, the log files, the FSEvents
-    /// watcher, and two pipes for each of up to eight terminal attachments.
-    /// Rounded up generously — being wrong in this direction costs a refused
-    /// connection, and being wrong in the other costs the hook path.
+    /// their WAL and SHM handles, the listeners, the log files, and two pipes
+    /// for each of up to eight terminal attachments. Rounded up generously —
+    /// being wrong in this direction costs a refused connection, and being wrong
+    /// in the other costs the local socket.
     const DAEMON_OVERHEAD: usize = 64;
 
     #[test]
     fn the_connection_caps_fit_inside_the_descriptor_budget() {
         // The caps exist to protect a *shared* file-descriptor budget: the
         // tailnet listener and the local IPC socket draw on the same one, and
-        // exhausting it from the network side takes the hook path down with it.
+        // exhausting it from the network side takes the local socket down with it.
         // Caps whose sum exceeds the budget do not protect it — they are two
         // numbers that happen to be finite. This is the arithmetic that makes
         // them a bound, written down so raising one is a decision rather than
@@ -827,8 +684,8 @@ mod tests {
             config.ws_max_connections,
             config.ipc_max_connections,
         );
-        // The hook path must never be the side that starves: a hook that cannot
-        // reach the daemon is an agent that stops being observable.
+        // The local socket must never be the side that starves: the CLI and each
+        // run's mail server reach the daemon through it.
         assert!(
             config.ipc_max_connections > config.ws_max_connections,
             "the local side must have the larger share"
@@ -887,19 +744,7 @@ mod tests {
     fn partial_config_keeps_other_defaults() {
         let config: Config = serde_json::from_str(r#"{"ws_port": 9999}"#).unwrap();
         assert_eq!(config.ws_port, 9999);
-        assert_eq!(config.gate_timeout_ms, default_gate_timeout_ms());
-    }
-
-    #[test]
-    fn gate_can_be_disabled() {
-        let config: Config = serde_json::from_str(r#"{"gate_hook":"none"}"#).unwrap();
-        assert_eq!(config.gate_event(), None);
-    }
-
-    #[test]
-    fn absurd_poll_intervals_are_clamped() {
-        let config: Config = serde_json::from_str(r#"{"tail_poll_ms": 0}"#).unwrap();
-        assert_eq!(config.sanitised().tail_poll_ms, 50);
+        assert_eq!(config.max_payload_bytes, default_max_payload_bytes());
     }
 
     #[test]
@@ -910,8 +755,6 @@ mod tests {
             !config.tls_required,
             "plaintext must keep working until the operator opts out"
         );
-        assert!(config.local_resolve);
-        assert!(config.fsevents);
         assert_eq!(config.pairing_ttl_secs, 300);
         assert_eq!(config.diff_max_bytes, 512 * 1024);
     }
@@ -928,7 +771,6 @@ mod tests {
         let config = config.sanitised();
         assert_eq!(config.ws_port, 8787);
         assert!(config.tls);
-        assert!(config.fsevents);
         assert_eq!(config.pairing_ttl_secs, 300);
     }
 
@@ -938,12 +780,6 @@ mod tests {
         assert_eq!(config.sanitised().pairing_ttl_secs, 3_600);
         let config: Config = serde_json::from_str(r#"{"pairing_ttl_secs": 0}"#).unwrap();
         assert_eq!(config.sanitised().pairing_ttl_secs, 30);
-    }
-
-    #[test]
-    fn a_local_resolve_grace_below_the_render_race_is_raised() {
-        let config: Config = serde_json::from_str(r#"{"local_resolve_grace_ms": 0}"#).unwrap();
-        assert_eq!(config.sanitised().local_resolve_grace_ms, 1_000);
     }
 
     #[test]

@@ -1,13 +1,12 @@
 # CodeConnect — Mac side
 
-Three shipped binaries and two shared libraries in one cargo workspace.
+Two shipped binaries and two shared libraries in one cargo workspace.
 
 | Crate | What it is |
 |---|---|
 | `protocol` | Shared wire types: event envelope, unix-socket frames, WebSocket protocol, session identity, config. |
-| `ccd` | The daemon: SQLite event log, hook gate, transcript tailer, tailnet WebSocket server, push. |
+| `ccd` | The daemon: SQLite event log, agent hosts, tailnet WebSocket server, push. |
 | `codeconnect` | The command line: the daemon's LaunchAgent lifecycle, pairing, sessions, the mail tools an agent calls (`mcp`) and updates. |
-| `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
 | `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. |
 
 ## Run it
@@ -89,8 +88,7 @@ A session has two names and they do different jobs.
 its number for the next.
 
 `session_uid` is a [ULID](https://github.com/ulid/spec) minted once at spawn and
-never reused. It is what the event log, the tail cursors and the answers ledger
-are keyed by.
+never reused. It is what the event log and the answers ledger are keyed by.
 
 The tmux name used to do both jobs, and a new `cc-1` inherited the dead one's
 log and continued its `seq`. Two things were wrong with that:
@@ -114,69 +112,36 @@ store by it.
 
 ## Card identity
 
-A Claude approval card is answered only through the `PermissionRequest` hook
-Claude holds for its own call, or, for a run started from an app, through the
-agent host's return to that call's `canUseTool` request, never by typing into the
-prompt on screen — see
+A Claude approval card is answered only through the agent host's return to its
+call's `canUseTool` request, never by typing into the prompt on screen — see
 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#approving-something-safely).
-What follows in this section is the hook's.
-The card is joined to its call's `tool_use_id` by that call's `PreToolUse`,
-keyed by run, prompt, tool, input and background agent; a request with two open
-calls under one key joins neither, and its card is read-only. A call whose
-result (its `PostToolUse`, or its `tool_result` in the transcript) was read
-before its request is not held: its card closes from that result.
 `ApprovalCard.question_hold` says whether the phone can answer it now, and
 `identity_bound` is true exactly on a held approval, for phones that predate the
-hold on approvals. A card no hook holds — from an older `cc-hook`, joined to no
-single call, whose hold has ended, or recovered after a daemon restart — is
-answered at the Mac, and nothing is typed for it. A held card is not retired by
-the 15-minute expiry: it lasts as long as Claude waits on it. Nor is a card
-while the daemon still reads its permission prompt on its run's screen.
-
-Known gap: Claude keeps a main-thread call's hook held until the call's result,
-even after the Mac answers, so a phone No after the Mac's Yes on the same
-main-thread request stops that command, as Esc would.
-
-**Visible pane only.** Every presence check captures
-`capture-pane -p -J` with no `-S`, which is tmux's visible-pane default. With
-scrollback, "a permission prompt is on screen" stayed true for as long as one
-had *ever* been on screen — so a prompt answered half an hour ago could
-authorise typing into the composer.
+hold on approvals. A held card lasts as long as Claude waits on it.
 
 ## Durability of mutations
 
-Anything that types into a TTY is claimed durably **before** it types, and the
-claim is cleared in the same transaction as its outcome.
+An answer or a message from the phone is claimed durably **before** it is handed
+to the run's agent host, and the claim is cleared in the same transaction as its
+outcome.
 
 That two-phase claim exists for one question a restart could not otherwise
-answer: *did the keystroke land?* A claim with no outcome means the daemon died
-between the two, and recovery records an explicit indeterminate outcome —
-`AnswerOutcome.indeterminate: true` for an approval, `SendTextResult` status
-`indeterminate` for a takeover. It is **never** retried: a second injection into
-a live TTY cannot be taken back, while an unanswered prompt is still sitting in
-front of a human.
-
-The same distinction applies without a crash. An injection has three outcomes,
-not two: applied, *refused*, and *unconfirmed*. A refusal is a positive
-statement that nothing was typed — the supervisor checks before it injects and
-never after, and a request that never reached a supervisor at all obviously
-typed nothing either — so the claim is released and the card can be answered
-again. A request that *was* sent and never answered (a timeout, a supervisor
-that vanished mid-flight) is different: it may have typed, and nothing later can
-settle that, so it becomes an indeterminate outcome too. Collapsing those two
-into one error is how a slow supervisor turns into a second keystroke — and
-collapsing them the other way strands an answerable card behind a permanent "we
-do not know".
+answer: *did it reach the agent?* The host's replay, once the host is attached
+again, settles it, and until then it is never sent again. A claim on a run with
+no host means the daemon died between the two, and recovery records an explicit
+indeterminate outcome — `AnswerOutcome.indeterminate: true` for an approval,
+`SendTextResult` status `indeterminate` for a message. It is **never** retried:
+a second delivery cannot be taken back, while an unanswered prompt is still
+sitting in front of a human.
 
 Open approval cards are persisted too. They used to be memory-only, so a restart
 answered "unknown or already-resolved request" to a tap on a card that was still
-on the screen. A recovered card comes back unheld and read-only: no hook is
-held across a restart, so it is answered at the Mac, and the call's result or
-the local-resolution sweep closes it.
+on the screen. A recovered card is answered again once its run's agent host is
+attached again, or, on a Codex run, once Codex asks for it again.
 
 ## Never claiming what it does not know
 
-Three places used to turn "we could not tell" into a confident answer. Each one
+Two places used to turn "we could not tell" into a confident answer. Each one
 is now three-valued.
 
 **A tmux error is not proof of death.** `has-session` exits non-zero for "there
@@ -199,23 +164,6 @@ construction: a session that *was* registered normally is simply re-registered
 under the same uid, which is the path a supervisor reconnecting after a daemon
 restart already takes.
 
-**A transcript line too long to hold no longer stalls the tail.** A line with no
-newline inside the 4MiB read window left nothing consumed, so the scan returned
-early and the cursor never moved — and every later poll read the same bytes and
-made the same decision. No transcript fact from that session was ever ingested
-again, silently, because the code path is indistinguishable from an idle file.
-The window is now consumed with an explicit `error{transcript_line_too_long}`
-fact carrying the offset, the byte count and a hash of what was skipped, and the
-cursor advances by exactly what was read — so a line of any length is consumed in
-`ceil(length / 4MiB)` polls instead of never. A short trailing fragment is still
-waited for, because that is a line Claude is in the middle of writing.
-
-A line that is not decodable JSON is also a fact now
-(`error{transcript_line_unreadable}`), rather than being dropped in silence
-*after* the cursor advanced past it. Valid JSON in a shape this build does not
-map is still skipped without comment: the transcript format grows, and an
-unrecognised entry is not damage.
-
 ## Build identity
 
 A version number moves at releases and at capability bumps (every
@@ -233,7 +181,7 @@ codeconnect 0.3.0 (build unknown)        # built outside a git checkout
 `daemon status` shows the running daemon's build the same way.
 
 `codeconnect update` downloads the newest GitHub Release, proves it is signed
-by CodeConnect's Apple team, and replaces the three binaries, their tmux and
+by CodeConnect's Apple team, and replaces the two binaries, their tmux and
 the agent host in a single directory exchange — so an interrupted update leaves
 the complete old set or the complete new one, never a mixture. Where
 CodeConnect.app installed the binaries (it leaves
@@ -392,11 +340,11 @@ keeps filling, and nothing says so.
 
 ## On Linux
 
-The same three binaries, built static (musl) for x86_64 and aarch64, so one archive runs on any
+The same two binaries, built static (musl) for x86_64 and aarch64, so one archive runs on any
 distribution; checked on Debian 12, Ubuntu 22.04 to 26.04, Fedora 44 and Alpine 3.22. The agent
 host beside them, which runs Claude Code for the app, is Bun's glibc build, built and tested on
 Ubuntu, so Claude Code runs started from the app need a glibc system. A musl system such as
-Alpine does not ship the glibc loader the host names, so the host cannot start there; the three
+Alpine does not ship the glibc loader the host names, so the host cannot start there; the two
 binaries run there as above.
 
 **Install.** The installer at codeconnect.sh downloads the release's
@@ -1267,7 +1215,7 @@ not ended (`exited`, or `failed` for an app start that never started), and
 anything it still holds a supervisor or an open approval for. An **adopted**
 run — CodeConnect never launched it, so it has neither tmux nor an agent host,
 and no probe can ever prove it ended — is deletable at any lifecycle. Only an earlier `cc-hook`
-recorded such runs: this one reports only for a run its launcher started.
+recorded such runs.
 A refusal is a `delete_session_result`, not an error. It deletes the daemon's own record only:
 Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
 `claude --resume <id>` still works afterwards.
@@ -1291,11 +1239,9 @@ to probe credentials.
   on minor 2 keeps working — such a request is applied at most once per attempt
   but cannot be made idempotent across retries, and the daemon says so in its
   log rather than pretending otherwise.
-  **`require` is now ignored.** The client used to nominate the needle that
-  authorised its own keystrokes (`PromptPresence::AnyOf`), which is not a safety
-  check; the server picks the interlock (composer presence, with the operator's
-  configured needle overrides). The field still decodes so an older client's
-  message parses.
+  **`require` is ignored.** It named what had to be on the pane before keystrokes
+  were typed, and nothing is typed into a pane. The field still decodes so an
+  older client's message parses.
   `SendTextResult` gains `duplicate` and `indeterminate`, neither of which can
   reach a client that did not send a `request_id`.
 
@@ -1324,79 +1270,27 @@ to probe credentials.
   prepared would run their program as the daemon's user. Observing a working tree
   must not be a way to execute anything.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
-  from the transcript alone, after the turn's last reply. The Stop hook arrives
-  before that reply is on disk (up to 100 ms), so filing the end from the hook put
-  it above the reply. When the Stop hooks end a turn, Claude writes a
-  `stop_hook_summary` line after the reply, and that line is the end. Every user
-  turn that finishes also gets a `turn_duration` line. It is the end when a tool
-  ended the turn (an MCP result's `claude/endTurn`, a `/loop` wakeup), which runs
-  the Stop hook but writes no summary, and when an API error ended it: Claude
-  runs its `StopFailure` hooks instead of Stop, writes no summary, and the Mac
-  draws its "✻ … done" line from the `turn_duration` after the error. An error
-  Claude carries on past (the stream cut mid-reply) is a leaf of the chain that
-  no `turn_duration` reaches, so it ends nothing. Walking Claude's `parentUuid`
-  chain back from the `turn_duration` tells the cases apart: a summary before
-  the turn's last assistant entry means the turn already has its end. Only a
-  main-conversation assistant entry proves an end; a chain that cannot be followed (an unknown or
-  missing parent, a loop, more than 64 entries) proves none. So a resumed transcript's
-  history gets its ends too. A run whose transcript has never existed (Claude's
-  session persistence turned off) has its ends filed from the Stop hook instead;
-  a transcript the tailer has read and that is missing for a moment does not
-  count. The Stop hook still closes a question held when the main
-  conversation's turn ends. When `/clear` moves a run to a new transcript, the
-  old one is still read for one second: `/clear` typed while Claude answers runs
-  at the end of the turn, and Claude writes that turn's reply and end to the old
-  file from its 100 ms write buffer after the move (measured 20 to 125 ms). The
-  old file is then read to its end, as long as each read is filed, and the new
-  one is followed, so the new transcript's lines reach the phone about a second
-  late. Phones judge whether a Claude tool call is still running by where the
-  transcript puts it, so a prompt queued during a turn, whose tool starts before
-  the last turn's end is read, does not show its running call as left without a
-  result. Known gaps:
-  Escape while the Stop hooks run leaves the turn without an end; a resumed run
-  whose transcript exists but is no longer written gets none; and when Claude
-  holds back the `turn_duration` while in-process teammates run, two turns that
-  tools ended in that time share one end. A turn an API error ended with no
-  `turn_duration` after it gets no end (seen once, Claude Code 2.1.276's
-  "Prompt is too long"), nor does one in a run whose transcript has never
-  existed, since `StopFailure` is not installed. A session already reading
-  Running after an API error when ccd is updated stays Running until the next
-  prompt: an older ccd filed that `turn_duration` as a plain line, and the log
-  keeps the kind a fact was first filed with, even on a rescan. Claude
-  Code 2.1.235 and 2.1.245 re-ran a turn after "Login expired" and `/login`
-  with no prompt line, so that work reads as Done. Esc while Claude retries a
-  failed request writes nothing at all — no error line, no interrupt marker, no
-  `turn_duration`, no hook (2.1.305, recorded) — so that turn reads Running
-  until the next prompt. Within the second after a `/clear`:
-  another transcript move skips the transcript in between; a move back to the
-  old transcript leaves the run following the abandoned one until it moves
-  again; restarting ccd loses that turn's last reply and end; and anything Claude
-  writes to the old transcript later than that second is not read. `SessionEnd` now means only what it
-  says: the supervisor exited or the tmux session is gone.
+  from the SDK's `result`, which the run's agent host relays as each turn ends.
+  `SessionEnd` now means only what it says: the supervisor exited or the tmux
+  session is gone.
 * **`risk_class`** rides on every `approval_request` card as
   `risk{class, matched_pattern}`. `high` for destructive shell patterns, `low`
   for pure read tools, `medium` for everything else — including anything
   unrecognised, because "we do not know this tool" is not evidence of safety.
   Matching is token-based, so `confirm -rf` is not `rm -rf` and `2>/dev/null` is
   not writing to a device node. It is a rendering hint for a human, never a gate.
-* **`ResolvedBy::Local`** — when a prompt is answered at the Mac's keyboard the
-  daemon notices and emits `approval_resolved{resolved_by: "local"}`, so the
-  phone shows "answered at the keyboard" instead of a rejection. If a tool result
-  arrives the decision is observed; if the prompt merely left the screen the
-  decision is a guess and is flagged `inferred: true`.
-* **`ResolvedBy::Timeout`** — closed with nobody's answer: an approval not held
-  for the phone that waited 15 minutes with no permission prompt seen on its
-  run's screen, or any open card of a run that ended
-  (detail "the session ended before anyone answered"; a held hook is let go).
-  The decision is `inferred`.
+* **`ResolvedBy::Local`** — recorded by earlier daemons when a prompt was
+  answered at the Mac's keyboard, so the phone shows "answered at the keyboard"
+  instead of a rejection; `inferred: true` when the prompt merely left the
+  screen.
+* **`ResolvedBy::Timeout`** — closed with nobody's answer: any open card of a
+  run that ended (detail "the session ended before anyone answered").
 * **`ResolvedBy::Superseded`** — recorded by daemons before minor 22, when a
   newer prompt replaced a card before it was answered. Nothing was typed, so a
   tap on it comes back `rejected` with that reason, not `duplicate`.
 * **`AnswerOutcome.indeterminate`** — the decision is known and whether it
   reached the agent is not: the daemon stopped between claiming it and
-  recording what became of it, or (from minor 22) it is a phone answer to a
-  Claude approval, sent to the call's hook (detail "Sent to Claude from a
-  phone", whichever device sent it), which Claude may not use. Distinct from
+  recording what became of it. Distinct from
   `inferred`, which is uncertainty about the *decision*. Never retried.
 * **`AnswerOutcome.answered_on`** (minor 34) — `iphone` or `mac` on an answer
   from a paired device: the Mac app's when its connection said hello as
@@ -1471,23 +1365,20 @@ user miss its `respond_by`.
 
 ```
 terminal tab ──exec──> tmux -L codeconnect (session cc-1) ──> real claude
-                              │                                   │
-                              │                            generated --settings
-                              │                                   │ hooks
-                              │                                   ▼
-                     codeconnect supervise (detached,                   cc-hook
-                      own process group,                          │
-                      PPID 1 once the tab closes)                 │ unix socket
-                              │                                   │
-                              └──────────► ccd ◄──────────────────┘
+                              │
+                     codeconnect supervise (detached,
+                      own process group,
+                      PPID 1 once the tab closes)
+                              │ unix socket
+                              └──────────► ccd
                                             │
                                    SQLite (source of truth)
                                             │
                               wss:// tailnet (ws:// fallback) ──► iPhone
 ```
 
-`ccd` is never an agent's parent. Both the supervisor and the hooks **connect
-out** to it, so `kill -9 ccd` costs a reconnect and nothing else.
+`ccd` is never an agent's parent. The supervisor **connects out** to it, so
+`kill -9 ccd` costs a reconnect and nothing else.
 
 One `ccd` per `~/.codeconnect`. Before it opens the database, the token or the
 socket, the daemon takes an exclusive `flock(2)` on `~/.codeconnect/ccd.lock`;
@@ -1508,11 +1399,6 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_port` | `8787` | WebSocket port. |
 | `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. The QR host is never one known to point somewhere else: bound to loopback the daemon advertises loopback and `codeconnect pair` refuses to print a code, and bound off the tailnet it drops a name this Mac's resolver puts at another address — see [Pairing](#pairing) and [TLS](#tls). |
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
-| `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
-| `unreachable_ask` | `false` | When the daemon is unreachable, make PreToolUse return `ask` with our reason. Renders the reason to the operator, at the cost of prompting on every tool call. |
-| `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals, or under a rule carrying the session's own recorded name — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
-| `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
-| `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
@@ -1523,14 +1409,10 @@ that is not valid JSON, whose every setting falls back to its default.
 | `tls_hostname` | auto | Override the MagicDNS name used for the certificate and the QR host. Dropped where this Mac's resolver puts the name at an address other than the bind; a resolver that says nothing is not a refusal, and the certificate settles that case. See [TLS](#tls). |
 | `cert_refresh_days` | `30` | Re-issue when the certificate has fewer days of validity left. |
 | `pairing_ttl_secs` | `300` | Pairing code lifetime. Clamped to 30…3600. |
-| `local_resolve` | `true` | Detect approvals answered at the Mac's keyboard. |
-| `local_resolve_grace_ms` | `3000` | How long to wait before believing the absence of a prompt. The hook fires *before* the TUI draws, so a shorter grace would resolve every approval as local. |
-| `local_resolve_poll_ms` | `2000` | How often to re-check the pane while an approval is open. |
 | `diff_max_bytes` | `524288` | `get_diff` cap; larger diffs come back with `truncated: true`. |
 | `diff_timeout_ms` | `10000` | Per-`git`-subcommand ceiling. |
 | `tailscale_bin` | auto | Explicit path to `tailscale`. Auto is the first of `/usr/local/bin/tailscale`, `/opt/homebrew/bin/tailscale`, the Tailscale app's own (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) and `/usr/bin/tailscale` that exists. Set, it is the only one the daemon and `codeconnect` run: a path that does not exist means no Tailscale, as if it were not installed (no tailnet addresses, peers or mail between computers, and no certificate issued; a cached one still serves). A test or rig daemon sets one so it never reads this computer's tailnet. |
 | `git_bin` | auto | Explicit path to `git` (launchd has no shell PATH). Auto is `/usr/bin/git` when Apple's developer tools are installed, else Homebrew's or `/usr/local/bin/git`; with none, branches and changes are absent. |
-| `fsevents` | `true` | Watch transcript directories with FSEvents. The poll below keeps running either way. |
 | `log_max_bytes` | `8388608` | Cap on each launchd log; one `.1` generation is kept, so the ceiling is twice this per stream. |
 | `log_rotate_secs` | `300` | How often the cap is checked. |
 | `ws_max_connections` | `64` | Live tailnet WebSocket connections. See [Bounds](#bounds). |
@@ -1539,10 +1421,6 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ipc_write_queue` | `1024` | Frames one IPC connection may have queued for writing before the read loop feels backpressure. |
 | `pairing_max_attempts` | `20` | Failed pairing attempts allowed per window. `0` disables the limiter. |
 | `pairing_window_secs` | `300` | The window those attempts are counted over. |
-
-The needle lists are configuration rather than constants on purpose: Claude
-Code's prompt wording is the most churn-prone thing this depends on, and it must
-be fixable without a release.
 
 ## Filesystem boundary
 
@@ -1615,13 +1493,14 @@ inherit it. ccd logs the limit it got. On Linux a systemd user service and an
 ssh login both allow far more than 10,240.
 
 The daemon needs a few dozen descriptors for itself — five SQLite connections
-plus their WAL and SHM handles, the listeners, the log files, the FSEvents
-watcher, the pipes of up to eight terminal attachments. `ws_max_connections`
+plus their WAL and SHM handles, the listeners, the log files, the pipes of up to
+eight terminal attachments. `ws_max_connections`
 (64, on each of the tailnet and loopback listeners) and `ipc_max_connections`
 (4,096) fit inside the raised limit with room to
-spare. The split is deliberately lopsided: the local socket carries every hook
-and every supervisor, and a hook that cannot reach the daemon is an agent that
-stops being observable, so the *remote* side gets the smaller share. A test
+spare. The split is deliberately lopsided: the local socket carries every
+supervisor and every run's mail server, and a supervisor that cannot reach the
+daemon is an agent that stops being observable, so the *remote* side gets the
+smaller share. A test
 asserts the arithmetic, so raising one of these is a decision rather than an
 accident. Where the limit cannot be raised, a connection past it fails to be
 accepted and the accept loop backs off and tries again.
@@ -1637,17 +1516,7 @@ tooling; and a client may legitimately open several sockets at once.
 that stops reading — a client suspended with ctrl-Z, a supervisor whose process
 is stopped — used to have the daemon buffer frames on its behalf without limit.
 Now the read loop simply stops taking new work from a peer that is not consuming
-its replies. Requests *to* a supervisor use `try_send` instead of waiting, so a
-supervisor that has stopped reading is reported as `NotSent` — nothing left the
-process, so nothing can have been typed and a retry is safe — rather than
-stalling the answer path behind it.
-
-**In-flight requests.** A supervisor round-trip's entry in the in-flight map is
-owned by a guard, so it is removed on every exit path: a reply, a timeout, a
-refused send, a dropped future. It used to be removed only by a *reply*, which
-leaked one entry per abandoned request on a map that lives as long as the
-session — unbounded growth on the stall path, which is the path that fires when
-the daemon is already under stress.
+its replies.
 
 **Frames.** Incoming WebSocket messages were already capped at 1MB; outgoing
 ones now are too. `URLSessionWebSocketTask` fails the *connection* rather than
@@ -1664,23 +1533,12 @@ for](#what-the-phone-can-ask-for).
 ## Testing
 
 ```sh
-cargo test                        # the workspace suite, including fixture replay
+cargo test                        # the workspace suite
 ```
 
 On Linux, run the suite with `TMPDIR` set to a folder you own: the tests make
 their temporary folder owner-only, as macOS's per-user one already is, and the
 shared `/tmp` is not yours to change.
-
-The daemon's own tests drive a **fake supervisor** over a screen the test
-controls: before typing it checks for the prompt with the same `protocol::ipc`
-prompt-presence function the real supervisor calls, so the interlock is
-exercised rather than re-implemented. Its one addition is a split screen —
-scrollback is returned only for a capture that did not ask for the visible pane,
-which is how a test can tell "read the screen" from "read the history".
-
-`ccd/src/fixture_replay.rs` runs recorded payloads from real sessions
-(`fixtures/`) through the production ingest path, so a Claude Code schema change
-fails the suite instead of failing silently in production.
 
 ## Known limits
 

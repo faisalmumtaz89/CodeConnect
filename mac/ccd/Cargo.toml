@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "CodeConnect daemon: event log, hook gate, tailnet WebSocket server, push."
+description = "CodeConnect daemon: event log, agent hosts, tailnet WebSocket server, push."
 
 [[bin]]
 name = "ccd"
@@ -32,12 +32,10 @@ h2 = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
 rustls-native-certs = { workspace = true }
-notify = { workspace = true }
 # The terminal wire carries raw pane bytes as base64 inside the existing JSON
 # frames. See `terminal.rs` for the carrier itself.
 base64 = { workspace = true }
 libc = { workspace = true }
-unicode-general-category = { workspace = true }
 
 [dev-dependencies]
 # `test-util` for the paused clock a test runs on when its timing must not depend on how

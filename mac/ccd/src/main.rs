@@ -21,8 +21,6 @@ mod codex_link_live;
 mod codex_refusals;
 mod codex_wake;
 mod db;
-#[cfg(test)]
-mod fixture_replay;
 mod folder_access;
 mod git;
 mod ipc_server;
@@ -42,7 +40,6 @@ mod secret;
 mod start_session;
 mod state;
 mod store;
-mod tailer;
 mod terminal;
 mod tls;
 mod ws_server;
@@ -53,22 +50,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
 
 use crate::state::{Daemon, Endpoint};
 use crate::store::Store;
 use protocol::config::Config;
-
-/// Approvals nobody answers are released after this, so `blocked_on` never
-/// accumulates ghosts. One whose run's screen still shows its prompt is no
-/// ghost, and stays.
-const APPROVAL_MAX_AGE_MS: i64 = 15 * 60 * 1000;
-
-/// How often the expiry sweep runs. Its first run waits a full period: the
-/// cards are restored before any run's supervisor is back (each retries at most
-/// ten seconds apart), and a screen not yet readable would let age close a card
-/// whose prompt is still up.
-const APPROVAL_SWEEP: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -108,7 +93,6 @@ async fn main() -> Result<()> {
     // [`crate::db::Db`], which runs the same operations on the blocking pool.
     let store = Arc::new(Store::open(&protocol::db_path())?);
     let token = Arc::new(load_or_create_token(&protocol::token_path())?);
-    let (transcript_tx, transcript_rx) = mpsc::unbounded_channel();
     let push = crate::apns::build(&config, Arc::clone(&store));
 
     let plan = resolve_bind(&config).await;
@@ -116,8 +100,7 @@ async fn main() -> Result<()> {
     tls::install_crypto_provider();
     let (acceptor, endpoint) = resolve_transport(&config, &plan).await;
     let certificate = acceptor.is_some();
-    let local_resolve_poll = Duration::from_millis(config.local_resolve_poll_ms);
-    let daemon = Daemon::new(config, Arc::clone(&store), push, endpoint, transcript_tx);
+    let daemon = Daemon::new(config, Arc::clone(&store), push, endpoint);
     // Told once, from the one place that knows it: `daemon_info` serves this
     // to the CLI's reachability advisory, which must reason about the socket
     // that exists, not the name the QR advertises.
@@ -141,7 +124,7 @@ async fn main() -> Result<()> {
     }
 
     crate::log_info!(
-        "ccd {} (protocol {}.{}) starting; root={} bind={} host={} tls={} gate={} managed={}",
+        "ccd {} (protocol {}.{}) starting; root={} bind={} host={} tls={} managed={}",
         env!("CARGO_PKG_VERSION"),
         protocol::PROTOCOL_VERSION,
         protocol::PROTOCOL_MINOR,
@@ -149,7 +132,6 @@ async fn main() -> Result<()> {
         bind,
         daemon.endpoint.host,
         daemon.endpoint.tls,
-        daemon.config.gate_hook,
         state::launchd_label().unwrap_or_else(|| "no (started by hand)".into()),
     );
     // Straight after the banner that names the bind, and before anything is
@@ -212,35 +194,6 @@ async fn main() -> Result<()> {
             }
         });
     }
-    let tail = tokio::spawn(tailer::run(Arc::clone(&daemon), transcript_rx));
-
-    let sweeper = {
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            let first = tokio::time::Instant::now() + APPROVAL_SWEEP;
-            let mut ticker = tokio::time::interval_at(first, APPROVAL_SWEEP);
-            loop {
-                ticker.tick().await;
-                daemon.expire_stale_approvals(APPROVAL_MAX_AGE_MS).await;
-            }
-        })
-    };
-
-    // Separate from the expiry sweeper because it runs on a completely
-    // different timescale: seconds (has the human already answered?) against
-    // minutes (has everyone forgotten about this?).
-    let local_watch = {
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(local_resolve_poll);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                daemon.sweep_local_resolutions().await;
-            }
-        })
-    };
-
     // The backstop for every way a session can end without anybody being left
     // to say so: the daemon down at the moment of death, a supervisor killed, a
     // Mac that slept through it. Every session this process inherited was last
@@ -251,7 +204,7 @@ async fn main() -> Result<()> {
     // **Concurrently with the listeners, not before them.** It is the only task
     // here that shells out, and it deliberately waits between the confirmations
     // an exit needs — up to two seconds. Holding the sockets shut for that long
-    // would put a two-second hole in the hook path on every restart, and this
+    // would put a two-second hole in the local socket on every restart, and this
     // daemon's central promise is that `kill -9` costs nothing but a reconnect.
     // Nothing is lost by publishing late: a client connected during the sweep
     // learns each end through the ordinary event path, which is the whole point
@@ -388,9 +341,6 @@ async fn main() -> Result<()> {
     let stop = tokio::select! {
         result = ipc => Stop::Task(format!("ipc server exited: {result:?}")),
         result = ws => Stop::Task(format!("ws server exited: {result:?}")),
-        result = tail => Stop::Task(format!("tailer exited: {result:?}")),
-        result = sweeper => Stop::Task(format!("sweeper exited: {result:?}")),
-        result = local_watch => Stop::Task(format!("local resolver exited: {result:?}")),
         result = liveness => Stop::Task(format!("liveness sweeper exited: {result:?}")),
         result = codex_recovery => Stop::Task(format!("codex link recovery exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
@@ -435,7 +385,7 @@ enum Stop {
 /// that reaches it has already run recovery against the live one's database,
 /// settling that daemon's in-flight answers as indeterminate, and when its
 /// listeners fail, the shutdown path unlinks the socket the live daemon is
-/// still serving — every hook and supervisor then fails to connect to a daemon
+/// still serving — every local client and supervisor then fails to connect to a daemon
 /// that never stopped.
 ///
 /// `flock(2)` on `ccd.lock`, held until the process exits. The kernel releases
@@ -2092,24 +2042,22 @@ mod tests {
     fn seed(store: &Store, uid: &str, events: u32) -> SessionKey {
         let key = SessionKey::new(uid, "cc-1");
         let now = protocol::time::now_rfc3339();
-        store
-            .upsert_session(&SessionRow {
-                session_uid: key.uid.clone(),
-                session_id: key.name.clone(),
-                tmux_session: key.name.clone(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Claude,
-                codex_thread_id: None,
-                codex_socket: None,
-            })
-            .unwrap()
-            .assert_present();
+        let row = SessionRow {
+            session_uid: key.uid.clone(),
+            session_id: key.name.clone(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);
         for i in 0..events {
             store
                 .append_event(
