@@ -1070,8 +1070,9 @@ to its own screen.
 An app changes such a run's model, its effort or its permission mode with `set_model` and
 `set_mode` (minor 39), each answered with a `setting_result`. Each value must be one the run's
 `menus` offer (its summary's while it is live: the models of its start's answer, each with
-the efforts claude lists for it, and four modes, "Ask before edits", "Accept edits", "Plan"
-and "Bypass permissions"), checked before anything is sent. Bypass permissions asks nothing,
+the efforts claude lists for it, and four modes, the agent's asking default first: "Ask
+before edits", "Accept edits", "Plan" and "Bypass permissions"), checked before anything is
+sent. Bypass permissions asks nothing,
 so its menu entry is marked `confirm` (minor 40): an app sends it with `confirmed` once the
 person has confirmed it in the app, and ccd refuses it without, nothing sent ("Turning on
 Bypass permissions needs your confirmation in the app; nothing was changed."). Every hosted
@@ -1080,7 +1081,10 @@ which names no mode: a start takes the person's own `defaultMode`, so a person w
 settings default to `bypassPermissions` now gets it on a run started from the app without
 the app's confirmation, as when they run claude directly, and a project's settings cannot
 set it (claude drops an escalating `defaultMode` from repo-committed settings); the run's
-mode fact says so from its first turn. A card already open when Bypass permissions is
+mode fact says so from its first turn. A start the person's own settings put in a mode the
+menu does not list (such as `dontAsk`) carries that mode as its fact, which no menu row
+matches: neither app checks a mode then, the Mac's closed settings button reads as at the
+asking default, and the person can still choose a listed mode. A card already open when Bypass permissions is
 turned on stays open and answerable; the mode applies from claude's next request. A ccd restart keeps the mode the person confirmed for
 the same process, and a new claude starts in the person's own default. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it

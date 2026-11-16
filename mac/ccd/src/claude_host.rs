@@ -8783,6 +8783,18 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(line).unwrap()["response"]["response"].clone()
     }
 
+    /// A run's menu starts with the mode claude starts a run in when no setting names another,
+    /// the one that asks before acting, as claude's recorded start answer reports it
+    /// (`current_permission_mode`): the Mac's settings button reads the first mode as the
+    /// run's default.
+    #[test]
+    fn a_runs_modes_start_with_the_mode_claude_starts_in() {
+        assert_eq!(
+            menus(&[]).modes.first().map(|mode| mode.value.as_str()),
+            recorded_start_answer()["current_permission_mode"].as_str()
+        );
+    }
+
     /// **The menu value a hosted run's model fact names** (`selected_model`), for each shape
     /// the fact takes, against claude's recorded start answer: an init's full id (and a receipt
     /// naming the bare id, sdk-session-0.3.322.jsonl:108), claude's receipt of an app's change
