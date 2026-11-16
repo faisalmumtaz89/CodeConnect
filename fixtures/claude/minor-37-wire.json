@@ -159,6 +159,11 @@
         {
           "label": "Plan",
           "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Bypass permissions",
+          "value": "bypassPermissions"
         }
       ]
     },

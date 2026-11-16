@@ -776,7 +776,15 @@ pub const PROTOCOL_MISMATCH: &str =
 ///       - A `notification` event `model_set {effort}` when claude took an app's effort
 ///         change. A model or mode change shows as claude itself reports it: its
 ///         `Set model to …` output and its permission-mode status.
-pub const PROTOCOL_MINOR: u32 = 39;
+///   * `40` — **The mode that asks nothing, behind a confirmation.**
+///
+///     Additive:
+///       - [`event::MenuMode`]'s `confirm` (left out when false), set on a Claude run's
+///         `bypassPermissions` ("Bypass permissions"), which its menus now list.
+///       - [`ws::ClientMessage::SetMode`]'s `confirmed` (left out when false). A mode marked
+///         `confirm` is refused without it, nothing sent; every other mode is as before. A
+///         daemon below 40 lists no such mode and refuses `bypassPermissions` as not offered.
+pub const PROTOCOL_MINOR: u32 = 40;
 
 #[cfg(test)]
 mod ledger_tests {

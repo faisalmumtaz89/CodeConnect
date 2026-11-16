@@ -76,7 +76,7 @@
   "refused_bypass": {
     "request_id": "mode-2",
     "result": {
-      "reason": "That permission mode isn't offered in this session; nothing was changed.",
+      "reason": "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.",
       "status": "refused"
     },
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -144,6 +144,11 @@
         {
           "label": "Plan",
           "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Bypass permissions",
+          "value": "bypassPermissions"
         }
       ],
       "selected_model": "sonnet"
@@ -217,6 +222,11 @@
         {
           "label": "Plan",
           "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Bypass permissions",
+          "value": "bypassPermissions"
         }
       ],
       "selected_model": "sonnet"

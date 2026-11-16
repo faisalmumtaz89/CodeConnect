@@ -26,6 +26,9 @@ export function queryOptions(options: StartOptions) {
     cwd: options.cwd,
     // With no mode named, claude picks its own: the person's `defaultMode`, else its default (decision 182).
     ...(options.permission_mode === undefined ? {} : { permissionMode: options.permission_mode }),
+    // The SDK's guard for bypassPermissions, on every start, so the run can take it later when the person confirms it
+    // in the app (decision 215). It sets no mode by itself; ccd's confirmation is what decides.
+    allowDangerouslySkipPermissions: true,
     ...(options.resume === undefined ? {} : { resume: options.resume }),
     ...(options.model === undefined ? {} : { model: options.model }),
     // Without it the initialize request carries an empty system prompt.

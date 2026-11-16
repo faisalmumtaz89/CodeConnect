@@ -105,7 +105,7 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(
             SettingOutcome.of(setting: .mode, label: "Plan", result: try result("refused_bypass")),
             SettingOutcome(
-                text: "That permission mode isn't offered in this session; nothing was changed.",
+                text: "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.",
                 tone: .warning))
         XCTAssertEqual(
             SettingOutcome.of(setting: .mode, label: "Plan", result: try result("indeterminate")),

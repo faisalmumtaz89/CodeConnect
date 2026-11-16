@@ -150,6 +150,11 @@
         {
           "label": "Plan",
           "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Bypass permissions",
+          "value": "bypassPermissions"
         }
       ]
     },
@@ -308,6 +313,11 @@
         {
           "label": "Plan",
           "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Bypass permissions",
+          "value": "bypassPermissions"
         }
       ]
     },

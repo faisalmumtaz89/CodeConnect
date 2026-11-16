@@ -1,0 +1,52 @@
+{
+  "applied_confirmed": {
+    "request_id": "mode-2",
+    "result": {
+      "applies": "now",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "menus_modes": [
+    {
+      "label": "Ask before edits",
+      "value": "default"
+    },
+    {
+      "label": "Accept edits",
+      "value": "acceptEdits"
+    },
+    {
+      "label": "Plan",
+      "value": "plan"
+    },
+    {
+      "confirm": true,
+      "label": "Bypass permissions",
+      "value": "bypassPermissions"
+    }
+  ],
+  "refused_unconfirmed": {
+    "request_id": "mode-1",
+    "result": {
+      "reason": "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.",
+      "status": "refused"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "set_mode_bare_request": {
+    "mode": "bypassPermissions",
+    "request_id": "mode-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_mode"
+  },
+  "set_mode_confirmed_request": {
+    "confirmed": true,
+    "mode": "bypassPermissions",
+    "request_id": "mode-2",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_mode"
+  }
+}

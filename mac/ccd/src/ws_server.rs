@@ -1408,9 +1408,13 @@ where
             session_id,
             request_id,
             mode,
+            confirmed,
         } => {
             let result = daemon
-                .set_setting(&session_id, crate::claude_host::Setting::Mode(mode))
+                .set_setting(
+                    &session_id,
+                    crate::claude_host::Setting::Mode { mode, confirmed },
+                )
                 .await;
             send(
                 sink,

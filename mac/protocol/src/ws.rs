@@ -239,6 +239,10 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
         mode: String,
+        /// The person confirmed the mode in the app (minor 40), as a mode whose menu entry is
+        /// `confirm` requires; refused without it, nothing sent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirmed: bool,
     },
     /// "Prove the doorbell rings." Sends one real APNs notification to **this
     /// connection's own device**, so the whole chain — stored token, provider
