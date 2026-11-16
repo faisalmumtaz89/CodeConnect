@@ -202,11 +202,11 @@ jobs:
           rustup target add ${{ matrix.target }}
           cargo build --release --locked --manifest-path mac/Cargo.toml \
             --target ${{ matrix.target }} \
-            --bin codeconnect --bin ccd --bin cc-hook
+            --bin codeconnect --bin ccd
 
       - name: Check the deployment target landed
         run: |
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd; do
             path="mac/target/${{ matrix.target }}/release/$binary"
             got="$(vtool -show-build "$path" | awk '/minos/ {print $2; exit}')"
             if [ "$got" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
@@ -227,7 +227,7 @@ jobs:
           # The whole line is knowable from the pinned commit, so it is
           # compared as a literal. A regex built from the version would leave
           # its dots as wildcards, and `0.4.0` would accept `0x4y0`.
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd; do
             expected="$binary $VERSION (${SHA:0:12})"
             said="$("mac/target/${{ matrix.target }}/release/$binary" --version)"
             if [ "$said" != "$expected" ]; then
@@ -270,7 +270,6 @@ jobs:
           path: |
             mac/target/${{ matrix.target }}/release/codeconnect
             mac/target/${{ matrix.target }}/release/ccd
-            mac/target/${{ matrix.target }}/release/cc-hook
           if-no-files-found: error
 
   # The agent host's two macOS slices, each built and run on its own
@@ -355,7 +354,7 @@ jobs:
           DIR: ${{ needs.pin.outputs.dir }}
         run: |
           mkdir -p "$DIR"
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd; do
             lipo -create -output "$DIR/$binary" \
               "slices/slice-arm64/$binary" "slices/slice-x86_64/$binary"
             # `upload-artifact` normalises uploaded files to 0644 and `lipo`
@@ -461,7 +460,7 @@ jobs:
             security find-identity -p codesigning || true
             exit 1
           fi
-          for binary in codeconnect ccd cc-hook cc-tmux; do
+          for binary in codeconnect ccd cc-tmux; do
             codesign --force --options runtime --timestamp \
               --sign "$identity" "$DIR/$binary"
           done
@@ -525,7 +524,7 @@ jobs:
             and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
             and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
-          for binary in codeconnect ccd cc-hook cc-tmux cc-agent-host; do
+          for binary in codeconnect ccd cc-tmux cc-agent-host; do
             path="$DIR/$binary"
             codesign --verify --strict --all-architectures -R="identifier \"$binary\" and $req" "$path"
             # Captured, then searched — not piped into `grep -q`. `grep -q`
@@ -547,7 +546,7 @@ jobs:
           # The same literal comparison the build jobs made per slice, repeated
           # on the file that will actually ship: `lipo` is the one step between
           # them, and a mis-combined binary would answer for the wrong code.
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd; do
             expected="$binary $VERSION (${SHA:0:12})"
             said="$("$DIR/$binary" --version)"
             if [ "$said" != "$expected" ]; then
@@ -679,14 +678,14 @@ jobs:
           archive="codeconnect-$VERSION-macos-universal.tar.gz"
           # Named one by one, deliberately: `tar -czf "$archive" "$dir"` also
           # writes a directory member, and the updater's archive validator
-          # allows only the four regular files. Packaging the directory would
+          # allows only the three regular files. Packaging the directory would
           # publish an archive the product refuses to install.
           COPYFILE_DISABLE=1 tar -czf "$archive" \
-            "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
+            "$DIR/codeconnect" "$DIR/ccd" "$DIR/LICENSE"
           shasum -a 256 "$archive" > "$archive.sha256"
           # tmux in an archive of its own: every released updater takes the
           # core archive by its exact name and must keep finding exactly the
-          # four members it allows there.
+          # three members it allows there.
           tmux_archive="codeconnect-$VERSION-tmux-macos-universal.tar.gz"
           COPYFILE_DISABLE=1 tar -czf "$tmux_archive" \
             "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"

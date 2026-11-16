@@ -176,14 +176,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-hook"
-version = "0.18.0"
-dependencies = [
- "protocol",
- "serde_json",
-]
-
-[[package]]
 name = "ccd"
 version = "0.18.0"
 dependencies = [

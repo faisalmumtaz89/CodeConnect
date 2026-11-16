@@ -25,7 +25,6 @@ const SHIP_SOURCE_PATHS: &[&str] = &[
     "mac/protocol",
     "mac/codeconnect",
     "mac/ccd",
-    "mac/cc-hook",
     "mac/push-core",
     "mac/tmux/SOURCES",
 ];
@@ -92,7 +91,6 @@ fn main() {
         "../Cargo.lock",
         "../codeconnect",
         "../ccd",
-        "../cc-hook",
         "../push-core",
         "../tmux/SOURCES",
     ] {

@@ -141,7 +141,7 @@ of_the_bundle() {
 # One Mac binary that ships, in an archive or inside the app, held to what `codeconnect update` enforces: signed as
 # itself by the pinned team's Developer ID, and carrying both architectures a release ships (update_install.rs,
 # is_universal) — a slice extracted alone keeps a valid signature, and every updater refuses it. Then a secure
-# timestamp and, for CodeConnect's own three, the pinned commit: the slice this runner runs says exactly what it is, and
+# timestamp and, for CodeConnect's own two, the pinned commit: the slice this runner runs says exactly what it is, and
 # every slice carries the commit.
 shipped_binary() {
   local binary="$1" path="$2" info expected said slice archs
@@ -206,7 +206,7 @@ check() {
   own_checksum "$archive"
   own_checksum "$tmux_archive"
   own_checksum "$host_archive"
-  holds_exactly "$archive" "$dir_name/codeconnect" "$dir_name/ccd" "$dir_name/cc-hook" "$dir_name/LICENSE"
+  holds_exactly "$archive" "$dir_name/codeconnect" "$dir_name/ccd" "$dir_name/LICENSE"
   holds_exactly "$tmux_archive" "$dir_name/cc-tmux" "$dir_name/THIRD_PARTY_NOTICES"
   holds_exactly "$host_archive" "$dir_name/cc-agent-host" "$dir_name/AGENT_HOST_NOTICES"
   mkdir "$work/mac"
@@ -242,7 +242,7 @@ check() {
     and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
     and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
     and certificate leaf[subject.OU] = \"$team\""
-  for binary in codeconnect ccd cc-hook cc-tmux cc-agent-host; do
+  for binary in codeconnect ccd cc-tmux cc-agent-host; do
     path="$work/mac/$dir_name/$binary"
     shipped_binary "$binary" "$path"
     # Notarized, as Apple's service confirms online: nothing can be stapled to a bare executable.
@@ -279,12 +279,12 @@ check() {
       fi
       own_checksum "$archive_name"
     done
-    holds_exactly "$core" "$dir_name/codeconnect" "$dir_name/ccd" "$dir_name/cc-hook" "$dir_name/LICENSE"
+    holds_exactly "$core" "$dir_name/codeconnect" "$dir_name/ccd" "$dir_name/LICENSE"
     holds_exactly "$tmux" "$dir_name/cc-tmux" "$dir_name/THIRD_PARTY_NOTICES"
     mkdir "$work/linux-$arch"
     tar -xzf "$core" -C "$work/linux-$arch"
     tar -xzf "$tmux" -C "$work/linux-$arch"
-    for binary in codeconnect ccd cc-hook; do
+    for binary in codeconnect ccd; do
       names_the_commit "$binary (linux $arch)" "$work/linux-$arch/$dir_name/$binary"
     done
     from_source "$work/linux-$arch/$dir_name/LICENSE" LICENSE
@@ -331,7 +331,7 @@ check() {
     exit 1
   fi
   codesign --verify --strict -R="$req" "$app"
-  for binary in codeconnect ccd cc-hook cc-tmux cc-agent-host; do
+  for binary in codeconnect ccd cc-tmux cc-agent-host; do
     shipped_binary "$binary" "$app/Contents/Helpers/$binary"
   done
   # The Mac tmux and agent host archives' notices are the ones sealed in the signed app, the same build's, byte for

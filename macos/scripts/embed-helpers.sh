@@ -1,7 +1,7 @@
 #!/bin/sh
 # Xcode build phase: copies CodeConnect's own binaries into the app (Contents/Helpers) and signs each with
 # the app's identity, so the app can install them (Installer.swift). They come from $CODECONNECT_HELPERS,
-# by default macos/Helpers, which is not in git: ccd, codeconnect and cc-hook from `cargo build --release`
+# by default macos/Helpers, which is not in git: ccd and codeconnect from `cargo build --release`
 # in mac/, cc-tmux and its THIRD_PARTY_NOTICES from mac/tmux/build.sh, cc-agent-host and its AGENT_HOST_NOTICES
 # from mac/agent-host/build.sh. Their notices travel with them, as in every release archive: the repository's
 # LICENSE and the two notices files go into Contents/Resources, and the installer puts them beside the binaries.
@@ -11,7 +11,7 @@ set -eu
 src="${CODECONNECT_HELPERS:-$SRCROOT/Helpers}"
 dst="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
 res="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
-names="ccd codeconnect cc-hook cc-tmux cc-agent-host"
+names="ccd codeconnect cc-tmux cc-agent-host"
 notices="THIRD_PARTY_NOTICES AGENT_HOST_NOTICES"
 missing=""
 for name in $names; do
