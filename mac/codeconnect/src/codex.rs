@@ -884,7 +884,7 @@ fn runnable_codex_candidates(candidates: Vec<PathBuf>) -> impl Iterator<Item = P
         .and_then(|exe| exe.canonicalize().ok());
     candidates
         .into_iter()
-        .filter(|candidate| protocol::tmux::is_executable_file(candidate))
+        .filter(|candidate| protocol::claude_bin::is_executable_file(candidate))
         .filter_map(|candidate| std::path::absolute(candidate).ok())
         .filter(move |candidate| candidate.canonicalize().ok() != current)
 }

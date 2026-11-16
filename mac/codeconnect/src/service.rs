@@ -325,7 +325,7 @@ fn hosts_running(root: &Path) -> String {
             .flatten()
     };
     let runs_program = |pid: i32, program: &dyn Fn(&str) -> bool| {
-        crate::codex_host::child_image(pid).is_some_and(|image| {
+        child_image(pid).is_some_and(|image| {
             image
                 .file_name()
                 .is_some_and(|name| program(&name.to_string_lossy()))
@@ -357,6 +357,28 @@ fn hosts_running(root: &Path) -> String {
                 .join(", ")
         )
     }
+}
+
+/// The child's own image, or `None` if it has no image to report (it is gone).
+#[cfg(target_os = "macos")]
+pub(crate) fn child_image(pid: i32) -> Option<std::path::PathBuf> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is exactly the size this call documents and outlives it.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(std::path::PathBuf::from(std::ffi::OsString::from(
+        String::from_utf8(buf).ok()?,
+    )))
+}
+
+/// The child's own image, or `None` if it has no image to report: the kernel's
+/// `/proc/<pid>/exe` link, which a dead or zombie child no longer has.
+#[cfg(target_os = "linux")]
+pub(crate) fn child_image(pid: i32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
 fn uninstall() -> Result<()> {
@@ -1050,7 +1072,7 @@ fn resolve_ccd() -> Result<PathBuf> {
             continue;
         }
         let absolute = candidate.canonicalize().unwrap_or(candidate);
-        if !protocol::tmux::is_executable_file(&absolute) {
+        if !protocol::claude_bin::is_executable_file(&absolute) {
             continue;
         }
         return Ok(absolute);
@@ -1115,7 +1137,7 @@ fn locate(tool: &str) -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|candidate| candidate.is_file())
-        .or_else(|| crate::tmux::search_path(tool))
+        .or_else(|| protocol::claude_bin::search_path(tool))
 }
 
 /// The staleness line for `daemon status`, or `None` while the running

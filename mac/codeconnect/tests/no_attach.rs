@@ -36,7 +36,8 @@ impl Rig {
     /// A codex that answers `--version`, serves an app-server socket, and as the
     /// TUI writes its arguments and size, then stays up.
     fn codex(&self) -> PathBuf {
-        let python = protocol::tmux::search_path("python3").expect("python3 for the fake codex");
+        let python =
+            protocol::claude_bin::search_path("python3").expect("python3 for the fake codex");
         let codex = self.root.join("codex");
         std::fs::write(
             &codex,

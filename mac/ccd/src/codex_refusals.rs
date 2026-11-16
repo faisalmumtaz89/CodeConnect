@@ -437,7 +437,7 @@ pub(crate) const COMPOSE_OUTCOME_UNRECORDED: &str =
 
 /// **Not catalogued, because a phone can never read it.**
 ///
-/// [`crate::codex_link::replayed_interrupt_report`] answers `INTERRUPT_ABORTED` with a
+/// [`crate::codex_host::replayed_interrupt_report`] answers `INTERRUPT_ABORTED` with a
 /// structured `Duplicate` naming the turn and returns before the sentence path — and it is
 /// the only production caller of [`crate::store::replayed_interrupt_sentence`]. So this arm
 /// exists to keep the match total and to say the right thing if a second caller ever

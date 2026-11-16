@@ -2982,7 +2982,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         },
         first_presence.clone(),
         crate::codex_link::LinkCarry::new(),
-        crate::codex_link::answer_channel().1,
+        crate::codex_host::answer_channel().1,
         crate::codex_link::interrupt_channel().1,
         crate::codex_link::compose_channel().1,
     ));
@@ -4113,7 +4113,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         },
         crate::codex_link::LinkPresence::new(),
         crate::codex_link::LinkCarry::new(),
-        crate::codex_link::answer_channel().1,
+        crate::codex_host::answer_channel().1,
         crate::codex_link::interrupt_channel().1,
         crate::codex_link::compose_channel().1,
     ));

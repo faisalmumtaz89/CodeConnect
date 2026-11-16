@@ -63,7 +63,6 @@ use tokio::time::Instant;
 use crate::codex_adapter::CodexAdapter;
 use crate::codex_approval::{Approval, Family};
 use crate::codex_client::{CallError, Client};
-use crate::codex_link::{AnswerReport, AnswerRequest, ComposeReport, InterruptReport};
 use crate::state::{Daemon, HostLink, Retirement};
 use crate::store::{AnswerStatus, AnswerTerminal, LiveCodexRun, SessionRow};
 use protocol::composite_id::{CompositeId, ServerRequestId};
@@ -314,6 +313,264 @@ struct Owed {
     resume: Value,
 }
 
+/// **What became of one answer the phone asked this link to write.**
+///
+/// Three endings, and they differ in what they left behind rather than in how they
+/// read. A caller that cannot tell "nothing was written and the question still stands"
+/// from "this may have actuated and nothing can say" cannot tell a card the operator may
+/// answer again from one that must never be answered again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AnswerReport {
+    /// Codex ended the request this answer was written to (it resolved it, or its item or
+    /// its turn ended), and the link has already retired the card as
+    /// [`protocol::ws::ResolutionActor::Phone`] and settled the claim — both in one
+    /// commit — or, finding the card already retired, settled the claim.
+    Delivered,
+    /// **Nothing was applied by THIS answer.** Two shapes reach it and they leave
+    /// different things behind, which is why the doc no longer claims one:
+    ///
+    ///  * refused before the claim — no ledger row exists, the card still stands, and
+    ///    the operator's next tap is a first attempt rather than a duplicate;
+    ///  * a lost race — the claim is terminal `lost` and the card stands for the
+    ///    WINNER's own terminal to retire, so this phone will not answer it again even
+    ///    though nothing it chose was applied.
+    ///
+    /// What is common, and what the sentence must convey, is that this tap changed
+    /// nothing upstream. Whether the card can be answered again is the ledger's
+    /// business, and `Daemon::answer` asks it before the link is ever reached.
+    NotApplied(String),
+    /// The answer may have reached Codex and nothing that survives can say, and the phone
+    /// is told so.
+    ///
+    /// Reached when the claim finds this very answer already sent and not settled, when
+    /// the connection ends as the answer is written or before Codex ends the request, when
+    /// the card's retirement or the claim's settle cannot be recorded, and when the link
+    /// task is dropped while it holds the ask. An answer written and not confirmed keeps
+    /// its claim `applying`, and a reconnect sends it once more if Codex asks the request
+    /// again.
+    Unknown(String),
+}
+
+impl AnswerReport {
+    /// The sentence the phone is shown, for the two endings that are refusals.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            AnswerReport::Delivered => None,
+            AnswerReport::NotApplied(why) | AnswerReport::Unknown(why) => Some(why),
+        }
+    }
+}
+
+/// **What became of one interrupt the phone asked this link to write.**
+///
+/// Three endings, and they differ in what they left behind rather than in how they
+/// read — the same distinction [`AnswerReport`] draws, for the same reason: a caller
+/// that cannot tell "nothing was written and the turn is still running" from "this
+/// may have actuated and nothing can say" cannot tell an ask worth repeating from
+/// one that must never be repeated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InterruptReport {
+    /// The turn this ask named reached its terminal, and this link watched it do so.
+    /// The turn id is carried back because the phone names the turn it stopped.
+    Aborted { turn_id: String },
+    /// **This exact ask already stopped this exact turn**, and the record says so.
+    /// A retry under the same id, carrying the same material — the thing an operator
+    /// does when a reply is slow — and the honest answer to "again?" is that it
+    /// already happened. Distinct from [`InterruptReport::Aborted`] only in that
+    /// nothing was written this time, which is the whole of what a duplicate means.
+    Duplicate { turn_id: String },
+    /// **Nothing was actuated by THIS ask, and the record says so.** Reached from a
+    /// refusal before the claim — the run has no link, or the turn is not the one it
+    /// runs — where no ledger row exists and the operator's next tap is a first attempt;
+    /// from a retry while a Stop of that turn is still waiting, whose claim stands and
+    /// which sends nothing more; from the agent's side refusing the write (Codex's error
+    /// answer to `turn/interrupt`, the agent host's refused outcome), which gives the
+    /// claim back; and from a turn that ended by itself first, recorded `turn_ended`.
+    NotApplied(String),
+    /// The interrupt may have reached the app-server and nothing that survives can
+    /// say. Terminal precisely so that it is never sent again: the budget expiring,
+    /// the connection ending, the task being dropped, and, on the tmux link, the turn
+    /// reaching a terminal this ask cannot claim to have caused (the engine records that
+    /// `turn_ended`, an [`InterruptReport::NotApplied`]).
+    Unknown(String),
+}
+
+/// **What became of one compose, in the link's own vocabulary.**
+///
+/// The link's word, which [`crate::state::Daemon::compose_result`] turns into the phone's.
+/// Kept apart from the wire type for [`InterruptReport`]'s reason: the link answers what it
+/// observed, and the mapping to what a person is told is one function rather than scattered
+/// constructions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComposeReport {
+    /// The thread was idle and these words began a turn.
+    Started { turn_id: String },
+    /// A turn was running and these words joined it — the same turn, not a new one.
+    Steered { turn_id: String },
+    /// This exact compose already ran. `started` says which of the two the ORIGINAL was,
+    /// read from the snapshotted route, so a replay describes what happened rather than
+    /// what would happen now.
+    Duplicate { turn_id: String, started: bool },
+    /// Nothing was written, and here is why.
+    NotApplied(String),
+    /// Written, and what became of it is not known. Never re-sent.
+    Unknown(String),
+}
+
+/// **A settled compose row, replayed.**
+///
+/// The one mapping the link's own `Applied` arm and
+/// [`crate::state::Daemon::compose`]'s terminal read both use, for
+/// [`replayed_interrupt_report`]'s reason: the same question asked at two moments must not
+/// get two answers. The daemon reaches it only when there is no addressee — with a link to
+/// ask, the link's claim is the answer, because it reads and claims without an await
+/// between them and this one always could be stale.
+///
+/// An outcome that names no turn is a refusal, and it replays as one — telling somebody
+/// their words reached the model because a row exists would be the one thing this must not
+/// do.
+pub(crate) fn replayed_compose_report(outcome: &str) -> ComposeReport {
+    match crate::store::parse_compose_outcome(outcome) {
+        Some((route, turn_id)) => ComposeReport::Duplicate {
+            turn_id: turn_id.to_string(),
+            started: route == crate::store::COMPOSE_ROUTE_START,
+        },
+        None => ComposeReport::NotApplied(crate::store::replayed_compose_sentence(outcome)),
+    }
+}
+
+/// **What a recorded interrupt outcome means, in one place.**
+///
+/// Both moments that can meet a terminal row read it through here: the daemon's
+/// pre-claim replay of a settled row, and the link's own duplicate arm when a claim
+/// comes back `Applied`. They used to be two mappings and they disagreed — an exact
+/// aborted duplicate was a `Duplicate` at one and a refusal at the other — which is a
+/// difference an operator feels as the daemon changing its mind about whether their
+/// tap worked.
+///
+/// **A known ending is never `Unknown`.** `turn_ended` and `refused` are both
+/// statements that nothing was actuated and that the record can say so, which is
+/// exactly what a refusal is; reporting them as unknown would tell a phone the
+/// outcome is unnameable when the ledger has named it, and would earn a turn that
+/// demonstrably ended on its own the same treatment as a daemon killed mid-write.
+pub(crate) fn replayed_interrupt_report(outcome: &str, turn_id: &str) -> InterruptReport {
+    if outcome == crate::store::INTERRUPT_ABORTED {
+        return InterruptReport::Duplicate {
+            turn_id: turn_id.to_string(),
+        };
+    }
+    InterruptReport::NotApplied(crate::store::replayed_interrupt_sentence(outcome))
+}
+
+/// One thing the daemon asks the live connection to do on its socket.
+///
+/// A struct on a channel of its own ([`answer_channel`]), apart from the link's other
+/// asks ([`LinkCommand`]), because the two are alike only in being writes. An answer
+/// quotes a wire id this connection was handed and learns its fate when Codex ends that
+/// request ([`settle`]); a Stop names a turn and learns its fate from that turn's end.
+///
+/// **The durable claim is not taken before this is sent, and that is deliberate.**
+/// Only the connection knows whether the card is still open, whether it holds a live
+/// wire id for it — a card a restart found standing has none until Codex asks again —
+/// and whether an answer to it is already waiting, so only the connection can say
+/// whether the ask is addressable at all. Claiming first would leave an `applying` row
+/// behind for every ask that was never addressable. The claim is therefore taken by the
+/// link, at the one moment it knows the answer is about to be written, and the card
+/// stays answerable until then.
+pub(crate) struct AnswerRequest {
+    /// The card's durable, item-derived id — never a wire id. The wire id belongs to
+    /// one socket, and the whole point of asking the connection is that only it
+    /// knows which one it currently holds.
+    pub(crate) request_id: String,
+    /// The decision exactly as the app-server offered it: a bare string, or the
+    /// single-key object whose body the server itself proposed. Composed by
+    /// [`crate::codex_approval`] from the stored card's option table, never from
+    /// anything a phone supplied.
+    pub(crate) decision: Value,
+    /// The immutable material this answer is claimed with. `thread_id` is also the
+    /// gate — an answer is written only on a connection bound to the card's own
+    /// thread — and `route` is the option the phone named, which is what lets a
+    /// recovered terminal say what was attempted.
+    pub(crate) claimed: crate::store::ClaimedMaterial,
+    /// Where the outcome goes.
+    pub(crate) reply: tokio::sync::oneshot::Sender<AnswerReport>,
+    /// **The answer gate's read guard, owned and travelling with the ask.** It is taken
+    /// in the answer path before the link is looked up and held for the answer's whole
+    /// passage: carried here rather than left in the caller's future, so dropping the
+    /// caller does not release it. The link moves it into the card's [`Answer::Phone`]
+    /// at the write; it is released when the ask is refused or its write fails, when the
+    /// card is retired, or when the link ends.
+    pub(crate) gate: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+/// The daemon's end of [`AnswerRequest`]: hand a live connection an answer to send.
+///
+/// Unbounded because it carries at most one entry per open approval card, and a card
+/// exists only because a person is looking at it. Bounding it would add a failure
+/// mode (a full queue) with no arrival that could reach it.
+#[derive(Clone)]
+pub(crate) struct LinkAnswers(tokio::sync::mpsc::UnboundedSender<AnswerRequest>);
+
+/// Mint the daemon's end and the link's end of the answer channel.
+///
+/// Made where the link starts ([`link`]) and split there: the sender goes into the
+/// daemon's host links with the run's link ([`crate::state::HostLink::Codex`]) and is
+/// taken out when the link ends ([`crate::state::Daemon::host_link_detached`]); the
+/// receiver is the link's own.
+pub(crate) fn answer_channel() -> (
+    LinkAnswers,
+    tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (LinkAnswers(tx), rx)
+}
+
+impl LinkAnswers {
+    /// Ask the link to answer `request_id`, and wait for what became of it.
+    ///
+    /// **The two `Err` arms are the honest half.** A send that fails means the link
+    /// task was already gone, so nothing was claimed and nothing was written — the
+    /// card stays answerable. A receive that fails means the task went away after
+    /// taking the ask, which the link's own teardown normally forestalls by settling
+    /// every open answer; reaching it means the task was aborted mid-answer, and the
+    /// only truthful thing to say then is that nothing here knows what happened.
+    pub(crate) async fn answer(
+        &self,
+        request_id: &str,
+        decision: Value,
+        claimed: crate::store::ClaimedMaterial,
+        // The owned answer-gate read guard, moved in so it travels with the ask and is
+        // released only at a pre-write refusal or terminal teardown.
+        gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> AnswerReport {
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        if self
+            .0
+            .send(AnswerRequest {
+                request_id: request_id.to_string(),
+                decision,
+                claimed,
+                reply,
+                gate,
+            })
+            .is_err()
+        {
+            return AnswerReport::NotApplied(
+                "the link to this Codex session is not running, so nothing was sent; \
+                 answer at the computer"
+                    .into(),
+            );
+        }
+        outcome.await.unwrap_or_else(|_| {
+            AnswerReport::Unknown(
+                "the link stopped while this answer was being written, so whether it \
+                 reached Codex is not known; it will not be sent again. Check the computer."
+                    .into(),
+            )
+        })
+    }
+}
+
 /// What the daemon asks a run's link to do beside answering its cards (X8).
 pub(crate) enum LinkCommand {
     /// A phone's Interrupt for the turn `turn_id`, its outcome told on `reply`
@@ -419,7 +676,7 @@ async fn link(
     mut cards: HashMap<String, Card>,
     first: Option<ComposeAsk>,
 ) {
-    let (answers, mut asked) = crate::codex_link::answer_channel();
+    let (answers, mut asked) = answer_channel();
     let (commands, mut commanded) = tokio::sync::mpsc::unbounded_channel();
     if let Some(ask) = first {
         let _ = commands.send(LinkCommand::Compose(ask));
@@ -970,9 +1227,7 @@ async fn interrupt_turn(
     match claim {
         Ok(MutationClaim::Claimed) => {}
         Ok(MutationClaim::Applied { outcome, .. }) => {
-            return Some(crate::codex_link::replayed_interrupt_report(
-                &outcome, &turn,
-            ));
+            return Some(replayed_interrupt_report(&outcome, &turn));
         }
         Ok(MutationClaim::Indeterminate { .. }) => {
             return Some(InterruptReport::Unknown(
@@ -1097,9 +1352,7 @@ async fn recorded_interrupt(
         ));
     }
     Some(match state.status {
-        AnswerStatus::Settled(outcome) => {
-            crate::codex_link::replayed_interrupt_report(&outcome, turn_id)
-        }
+        AnswerStatus::Settled(outcome) => replayed_interrupt_report(&outcome, turn_id),
         AnswerStatus::Indeterminate => {
             InterruptReport::Unknown(says::INTERRUPT_ALREADY_SENT_UNKNOWN.into())
         }
@@ -1158,9 +1411,7 @@ async fn compose(
         .await;
     match claim {
         Ok(MutationClaim::Claimed) => {}
-        Ok(MutationClaim::Applied { outcome, .. }) => {
-            return crate::codex_link::replayed_compose_report(&outcome)
-        }
+        Ok(MutationClaim::Applied { outcome, .. }) => return replayed_compose_report(&outcome),
         Ok(MutationClaim::Indeterminate { .. }) => {
             return ComposeReport::Unknown(says::COMPOSE_ALREADY_SENT_UNKNOWN.into())
         }
@@ -7045,5 +7296,60 @@ mod tests {
         );
         drop(ws);
         end_run(&rig, &uid).await;
+    }
+
+    /// **A row this build cannot read is refused plainly, not replayed as a steer.**
+    ///
+    /// `parse_compose_outcome` split on the first space and returned whatever it found, and
+    /// `replayed_compose_report` then asked `route == COMPOSE_ROUTE_START` — so ANY other
+    /// word came back `Duplicate{started:false}`, which the phone renders as "your words
+    /// joined a running turn". About words this daemon cannot account for. Reachable from
+    /// a corrupt row, or from a third route a future build writes and this one does not
+    /// know.
+    ///
+    /// **Mutation:** drop the `matches!` on the route and the first two rows go green as
+    /// duplicates.
+    #[test]
+    fn an_unreadable_compose_outcome_is_refused_rather_than_replayed_as_a_steer() {
+        for corrupt in [
+            "turn_bogus 01a0-a-real-looking-turn",
+            "delivered 01a0-a-real-looking-turn",
+            " 01a0-a-real-looking-turn",
+            "turn_start ",
+            "turn_start",
+        ] {
+            assert_eq!(
+                crate::store::parse_compose_outcome(corrupt),
+                None,
+                "{corrupt:?} names no route this build wrote"
+            );
+            let report = replayed_compose_report(corrupt);
+            assert!(
+                matches!(report, ComposeReport::NotApplied(_)),
+                "{corrupt:?} must replay as a refusal, not as a turn it joined: {report:?}"
+            );
+            // And the sentence carries none of the row — a corrupt outcome can hold a turn
+            // id the phone never sent.
+            let ComposeReport::NotApplied(reason) = report else {
+                unreachable!()
+            };
+            assert!(
+                !reason.contains("01a0-a-real-looking-turn"),
+                "the stored word reached the phone: {reason}"
+            );
+        }
+        // The two real routes still read.
+        for (route, started) in [
+            (crate::store::COMPOSE_ROUTE_START, true),
+            (crate::store::COMPOSE_ROUTE_STEER, false),
+        ] {
+            assert_eq!(
+                replayed_compose_report(&crate::store::compose_outcome(route, "01a0-t")),
+                ComposeReport::Duplicate {
+                    turn_id: "01a0-t".into(),
+                    started,
+                }
+            );
+        }
     }
 }

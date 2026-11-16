@@ -475,7 +475,7 @@ pub(crate) enum HostLink {
     /// A Codex run's: the way to hand its link a phone's answer to one of its cards, and the
     /// way to ask it to stop its turn or the run ([`crate::codex_host`]).
     Codex(
-        crate::codex_link::LinkAnswers,
+        crate::codex_host::LinkAnswers,
         tokio::sync::mpsc::UnboundedSender<crate::codex_host::LinkCommand>,
     ),
 }
@@ -520,7 +520,7 @@ struct Inner {
         String,
         (
             String,
-            tokio::sync::oneshot::Sender<crate::codex_link::InterruptReport>,
+            tokio::sync::oneshot::Sender<crate::codex_host::InterruptReport>,
         ),
     >,
     /// Settings sent to a run's agent host and waiting for its outcome, by the line's uuid
@@ -830,7 +830,7 @@ struct RetainedCarry {
 struct LinkCells {
     presence: crate::codex_link::LinkPresence,
     carry: crate::codex_link::LinkCarry,
-    answers: crate::codex_link::LinkAnswers,
+    answers: crate::codex_host::LinkAnswers,
     interrupts: crate::codex_link::LinkInterrupts,
     composes: crate::codex_link::LinkComposes,
 }
@@ -857,12 +857,12 @@ struct CodexLinkHandle {
     /// registration whose handles are not published yet.
     presence: crate::codex_link::LinkPresence,
     /// **How the daemon asks this link to write on its socket** — see
-    /// [`crate::codex_link::LinkAnswers`]. On the handle for the same lifetime reason
+    /// [`crate::codex_host::LinkAnswers`]. On the handle for the same lifetime reason
     /// as the two cells above, and it is the sharper case of the three: an ask that
     /// reached a superseded task would put a phone's decision on a socket the session
     /// no longer owns. Taking the sender out of the map with the handle is what makes
     /// that unreachable rather than unlikely.
-    answers: crate::codex_link::LinkAnswers,
+    answers: crate::codex_host::LinkAnswers,
     /// **How the daemon asks this link to stop the turn it is watching** — see
     /// [`crate::codex_link::LinkInterrupts`]. On the handle for the same lifetime
     /// reason as the answer sender beside it, and the same sharp case: an interrupt
@@ -2875,7 +2875,7 @@ impl Daemon {
         }
         inner.seed_codex_presence(&session.uid, &link, &presence);
         let generation = link.generation;
-        let (answers, asks) = crate::codex_link::answer_channel();
+        let (answers, asks) = crate::codex_host::answer_channel();
         let (interrupts, stops) = crate::codex_link::interrupt_channel();
         let (composes, words) = crate::codex_link::compose_channel();
         let outcome = inner.spawn_codex_link_if_owner(
@@ -5762,7 +5762,7 @@ impl Daemon {
         };
 
         // 5. The link claims and writes, in that order, and files the terminal
-        //    itself — see [`crate::codex_link::AnswerRequest`].
+        //    itself — see [`crate::codex_host::AnswerRequest`].
         //
         //    **Held across all of it, and taken before `inner`.** The epoch compared
         //    on the next line is compared at an instant; the claim and the socket
@@ -5779,7 +5779,7 @@ impl Daemon {
         // if this future is aborted after the ask is enqueued the borrowed guard would
         // drop while the old link still owned the queued response — the stake could
         // then land and the old link still write. The owned guard travels with the ask
-        // into [`crate::codex_link::AnswerRequest`]/`PendingAnswer` and is only released
+        // into [`crate::codex_host::AnswerRequest`]/`PendingAnswer` and is only released
         // at pre-write refusal or terminal teardown, so the registration's write side
         // genuinely waits for the response to finish, not merely for this caller to.
         let quiesce = self.actuation_gate(&session.uid).await;
@@ -5799,13 +5799,13 @@ impl Daemon {
             // An engine run with no link. An answer already sent stays claimed for the run's
             // reconnect, which sends it once more if Codex asks again.
             None if matches!(self.db.hosted_link(session.uid.clone()).await, Ok(Some(_))) => {
-                crate::codex_link::AnswerReport::NotApplied(if in_flight {
+                crate::codex_host::AnswerReport::NotApplied(if in_flight {
                     crate::codex_host::ANSWER_ALREADY_WAITING.into()
                 } else {
                     crate::codex_refusals::ENGINE_NO_CONNECTION.into()
                 })
             }
-            None => crate::codex_link::AnswerReport::NotApplied(
+            None => crate::codex_host::AnswerReport::NotApplied(
                 "there is no live link to this Codex session, so nothing was sent; \
                  answer at the computer"
                     .into(),
@@ -5975,7 +5975,7 @@ impl Daemon {
                     // a recorded outcome means.
                     crate::store::AnswerStatus::Settled(outcome) => {
                         return Daemon::interrupt_result(
-                            crate::codex_link::replayed_interrupt_report(&outcome, turn_id),
+                            crate::codex_host::replayed_interrupt_report(&outcome, turn_id),
                         )
                     }
                     crate::store::AnswerStatus::Indeterminate => {
@@ -6124,7 +6124,7 @@ impl Daemon {
                     .interrupt(request_id, claimed, visit.upstream_epoch, admitted)
                     .await
             }
-            None => crate::codex_link::InterruptReport::NotApplied(
+            None => crate::codex_host::InterruptReport::NotApplied(
                 crate::codex_refusals::INTERRUPT_NO_LINK.into(),
             ),
         };
@@ -6141,8 +6141,8 @@ impl Daemon {
         uid: &str,
         request_id: &str,
         turn_id: &str,
-    ) -> crate::codex_link::InterruptReport {
-        use crate::codex_link::InterruptReport;
+    ) -> crate::codex_host::InterruptReport {
+        use crate::codex_host::InterruptReport;
         let (reply, told) = tokio::sync::oneshot::channel();
         let asked = commands.send(crate::codex_host::LinkCommand::Interrupt {
             request_id: request_id.to_string(),
@@ -6184,7 +6184,7 @@ impl Daemon {
     /// reported.
     #[cfg(test)]
     pub(crate) fn interrupt_result_for_tests(
-        report: crate::codex_link::InterruptReport,
+        report: crate::codex_host::InterruptReport,
     ) -> protocol::ws::InterruptResult {
         Daemon::interrupt_result(report)
     }
@@ -6488,7 +6488,7 @@ impl Daemon {
                     )
                     .await
             }
-            None => crate::codex_link::ComposeReport::NotApplied(
+            None => crate::codex_host::ComposeReport::NotApplied(
                 crate::codex_refusals::COMPOSE_NO_LINK.into(),
             ),
         };
@@ -6505,7 +6505,7 @@ impl Daemon {
         request_id: &str,
         text: String,
         claimed_hash: String,
-    ) -> crate::codex_link::ComposeReport {
+    ) -> crate::codex_host::ComposeReport {
         let (reply, told) = tokio::sync::oneshot::channel();
         // A link that has gone drops the ask, and with it `reply`.
         let _ = commands.send(crate::codex_host::LinkCommand::Compose(
@@ -6526,9 +6526,9 @@ impl Daemon {
         &self,
         uid: &str,
         request_id: &str,
-        told: tokio::sync::oneshot::Receiver<crate::codex_link::ComposeReport>,
-    ) -> crate::codex_link::ComposeReport {
-        use crate::codex_link::ComposeReport;
+        told: tokio::sync::oneshot::Receiver<crate::codex_host::ComposeReport>,
+    ) -> crate::codex_host::ComposeReport {
+        use crate::codex_host::ComposeReport;
         if let Ok(report) = told.await {
             return report;
         }
@@ -6621,10 +6621,10 @@ impl Daemon {
             // Through the one mapping the link's own duplicate arm uses, so the two can
             // never disagree about what a recorded outcome means.
             crate::store::AnswerStatus::Settled(outcome) => {
-                Daemon::compose_result(crate::codex_link::replayed_compose_report(&outcome))
+                Daemon::compose_result(crate::codex_host::replayed_compose_report(&outcome))
             }
             crate::store::AnswerStatus::Indeterminate => {
-                Daemon::compose_result(crate::codex_link::ComposeReport::Unknown(
+                Daemon::compose_result(crate::codex_host::ComposeReport::Unknown(
                     crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
                 ))
             }
@@ -6634,42 +6634,42 @@ impl Daemon {
         })
     }
 
-    fn compose_result(report: crate::codex_link::ComposeReport) -> protocol::ws::ComposeResult {
+    fn compose_result(report: crate::codex_host::ComposeReport) -> protocol::ws::ComposeResult {
         use protocol::ws::ComposeResult;
         match report {
-            crate::codex_link::ComposeReport::Started { turn_id } => {
+            crate::codex_host::ComposeReport::Started { turn_id } => {
                 ComposeResult::Started { turn_id }
             }
-            crate::codex_link::ComposeReport::Steered { turn_id } => {
+            crate::codex_host::ComposeReport::Steered { turn_id } => {
                 ComposeResult::Steered { turn_id }
             }
-            crate::codex_link::ComposeReport::Duplicate { turn_id, started } => {
+            crate::codex_host::ComposeReport::Duplicate { turn_id, started } => {
                 ComposeResult::Duplicate { turn_id, started }
             }
-            crate::codex_link::ComposeReport::NotApplied(reason) => {
+            crate::codex_host::ComposeReport::NotApplied(reason) => {
                 ComposeResult::Rejected { reason }
             }
-            crate::codex_link::ComposeReport::Unknown(reason) => {
+            crate::codex_host::ComposeReport::Unknown(reason) => {
                 ComposeResult::Indeterminate { reason }
             }
         }
     }
 
     fn interrupt_result(
-        report: crate::codex_link::InterruptReport,
+        report: crate::codex_host::InterruptReport,
     ) -> protocol::ws::InterruptResult {
         use protocol::ws::InterruptResult;
         match report {
-            crate::codex_link::InterruptReport::Aborted { turn_id } => {
+            crate::codex_host::InterruptReport::Aborted { turn_id } => {
                 InterruptResult::Aborted { turn_id }
             }
-            crate::codex_link::InterruptReport::Duplicate { turn_id } => {
+            crate::codex_host::InterruptReport::Duplicate { turn_id } => {
                 InterruptResult::Duplicate { turn_id }
             }
-            crate::codex_link::InterruptReport::NotApplied(reason) => {
+            crate::codex_host::InterruptReport::NotApplied(reason) => {
                 InterruptResult::Rejected { reason }
             }
-            crate::codex_link::InterruptReport::Unknown(reason) => {
+            crate::codex_host::InterruptReport::Unknown(reason) => {
                 InterruptResult::Indeterminate { reason }
             }
         }
@@ -9030,7 +9030,7 @@ impl Daemon {
                     // [`Inner::seed_codex_presence`], a named step for the same
                     // reason its sibling above is one.
                     inner.seed_codex_presence(&session.uid, &link, &presence);
-                    let (answers, asks) = crate::codex_link::answer_channel();
+                    let (answers, asks) = crate::codex_host::answer_channel();
                     let (interrupts, stops) = crate::codex_link::interrupt_channel();
                     let (composes, words) = crate::codex_link::compose_channel();
                     let outcome = inner.spawn_codex_link_if_owner(
@@ -9775,7 +9775,7 @@ impl Daemon {
         // taken the guard cannot call this, so the "clone before guard" reordering the
         // mutation battery used to survive no longer type-checks.
         _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
-    ) -> Option<crate::codex_link::LinkAnswers> {
+    ) -> Option<crate::codex_host::LinkAnswers> {
         let owner = inner.registration_epochs.get(session_uid).copied();
         inner
             .codex_links
@@ -9842,7 +9842,7 @@ impl Daemon {
     pub(crate) async fn install_codex_answers_for_tests(
         &self,
         session_uid: &str,
-        answers: crate::codex_link::LinkAnswers,
+        answers: crate::codex_host::LinkAnswers,
     ) {
         let mut inner = self.inner.lock().await;
         let epoch = inner.registration_epochs.len() as u64 + 1;
@@ -9900,7 +9900,7 @@ impl Daemon {
                 generation: 1,
                 task: tokio::spawn(std::future::pending()),
                 presence,
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts,
                 composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
@@ -9937,7 +9937,7 @@ impl Daemon {
                 generation: 1,
                 task: tokio::spawn(std::future::pending()),
                 presence,
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes,
                 carry: crate::codex_link::LinkCarry::new(),
@@ -10599,7 +10599,7 @@ impl Daemon {
         &self,
         session_uid: &str,
         uuid: &str,
-    ) -> tokio::sync::oneshot::Receiver<crate::codex_link::InterruptReport> {
+    ) -> tokio::sync::oneshot::Receiver<crate::codex_host::InterruptReport> {
         let (tell, told) = tokio::sync::oneshot::channel();
         self.inner
             .lock()
@@ -10614,7 +10614,7 @@ impl Daemon {
     pub(crate) async fn host_stop_told(
         &self,
         uuid: &str,
-        report: Option<crate::codex_link::InterruptReport>,
+        report: Option<crate::codex_host::InterruptReport>,
     ) {
         let waiter = self.inner.lock().await.host_stops.remove(uuid);
         if let (Some((_, tell)), Some(report)) = (waiter, report) {
@@ -22645,7 +22645,7 @@ mod tests {
                 LinkCells {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                 },
@@ -22681,7 +22681,7 @@ mod tests {
                 LinkCells {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                 },
@@ -22787,7 +22787,7 @@ mod tests {
                 generation: 1,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
@@ -22883,7 +22883,7 @@ mod tests {
                 generation: 1,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry,
@@ -22908,7 +22908,7 @@ mod tests {
                 generation: 1,
                 task: ordinary,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
@@ -23066,7 +23066,7 @@ mod tests {
                 generation: 7,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
@@ -23341,7 +23341,7 @@ mod tests {
                 LinkCells {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                 },
@@ -23381,7 +23381,7 @@ mod tests {
                 LinkCells {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                 },
@@ -23443,7 +23443,7 @@ mod tests {
                 LinkCells {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                 },
@@ -23480,7 +23480,7 @@ mod tests {
                     LinkCells {
                         presence: crate::codex_link::LinkPresence::new(),
                         carry: crate::codex_link::LinkCarry::new(),
-                        answers: crate::codex_link::answer_channel().0,
+                        answers: crate::codex_host::answer_channel().0,
                         interrupts: crate::codex_link::interrupt_channel().0,
                         composes: crate::codex_link::compose_channel().0,
                     },
@@ -23812,7 +23812,7 @@ mod tests {
                 // Nothing drives it; the resolver reads the cell, never the task.
                 task: tokio::spawn(std::future::pending()),
                 presence: presence.clone(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 // Empty: what the link KNOWS is a separate cell from what it
@@ -24081,7 +24081,7 @@ mod tests {
                     // right answer BEFORE this task's first connection attempt.
                     task: tokio::spawn(std::future::pending()),
                     presence: presence.clone(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry,
@@ -24158,7 +24158,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(async {}),
                     presence: crate::codex_link::LinkPresence::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry: chasing,
@@ -24181,7 +24181,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(std::future::pending()),
                     presence: mid_chase.clone(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
@@ -24218,7 +24218,7 @@ mod tests {
                     generation: 2,
                     task: tokio::spawn(std::future::pending()),
                     presence: after_relaunch.clone(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
@@ -24381,7 +24381,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(async {}),
                     presence: presence.clone(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
@@ -24418,7 +24418,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(async {}),
                     presence: presence.clone(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry,
@@ -24510,7 +24510,7 @@ mod tests {
                     generation,
                     task: tokio::spawn(async {}),
                     presence: crate::codex_link::LinkPresence::new(),
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry,
@@ -24750,7 +24750,7 @@ mod tests {
                 generation: 1,
                 task,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry,
@@ -24841,7 +24841,7 @@ mod tests {
                 generation: 1,
                 task,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry,
@@ -24947,7 +24947,7 @@ mod tests {
                 generation: 1,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry,
@@ -25387,7 +25387,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(std::future::pending()),
                     presence,
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
@@ -25566,7 +25566,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(std::future::pending()),
                     presence,
-                    answers: crate::codex_link::answer_channel().0,
+                    answers: crate::codex_host::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
                     composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
@@ -26149,7 +26149,7 @@ mod tests {
                 generation: 1,
                 task: live,
                 presence: crate::codex_link::LinkPresence::new(),
-                answers: crate::codex_link::answer_channel().0,
+                answers: crate::codex_host::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
                 composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
@@ -30223,12 +30223,12 @@ mod tests {
         request_id: &str,
     ) -> (
         protocol::ws::ApprovalCard,
-        tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::AnswerRequest>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::codex_host::AnswerRequest>,
         // **A live clone of the outgoing sender**. A test that keeps
         // it can distinguish "no ask arrived" (a real timeout on the resolver) from
         // "the channel closed because the handle left the map" — the collapse the
         // vacuous post-stake test used to accept.
-        crate::codex_link::LinkAnswers,
+        crate::codex_host::LinkAnswers,
     ) {
         let session = SessionKey::new(uid, "cc-1");
         let card = codex_command_card(request_id);
@@ -30245,7 +30245,7 @@ mod tests {
                 .await,
             "the premise: a real card, filed the way the observer files one"
         );
-        let (answers, asks) = crate::codex_link::answer_channel();
+        let (answers, asks) = crate::codex_host::answer_channel();
         let retained = answers.clone();
         let mut inner = daemon.inner.lock().await;
         let epoch = *inner
@@ -30451,7 +30451,7 @@ mod tests {
         // travelled with the ask; splitting it out lets this test show that it — not
         // the reply — is what the handover waits on, and that the wait ends because the
         // guard is RELEASED, not because [`ANSWER_QUIESCE_BUDGET`] expired.
-        let crate::codex_link::AnswerRequest { reply, gate, .. } = ask;
+        let crate::codex_host::AnswerRequest { reply, gate, .. } = ask;
 
         let handover = {
             let daemon = Arc::clone(&daemon);
@@ -30474,7 +30474,7 @@ mod tests {
 
         // The answer's OWN outcome is reported, exactly as it would be alone.
         reply
-            .send(crate::codex_link::AnswerReport::Delivered)
+            .send(crate::codex_host::AnswerReport::Delivered)
             .expect("the daemon is still waiting on the outgoing link");
         let result = tokio::time::timeout(Duration::from_secs(5), answering)
             .await
@@ -30598,7 +30598,7 @@ mod tests {
 
         for ask in outstanding {
             ask.reply
-                .send(crate::codex_link::AnswerReport::Delivered)
+                .send(crate::codex_host::AnswerReport::Delivered)
                 .expect("the daemon is still waiting on the link");
         }
         for task in answering {
@@ -33136,7 +33136,7 @@ mod tests {
             .await
             .expect("the caller is told inside the budget")
             .expect("and told by a sender that was not simply dropped");
-        let crate::codex_link::InterruptReport::Unknown(why) = &report else {
+        let crate::codex_host::InterruptReport::Unknown(why) = &report else {
             panic!("an aborted link knows nothing about what it wrote: {report:?}");
         };
         assert!(why.contains("will not be sent again"), "{why}");
@@ -33566,7 +33566,7 @@ mod tests {
                 ask.generation,
                 ask.claimed_hash.clone(),
             );
-            let _ = ask.reply.send(crate::codex_link::ComposeReport::Started {
+            let _ = ask.reply.send(crate::codex_host::ComposeReport::Started {
                 turn_id: "turn-first".into(),
             });
             seen
