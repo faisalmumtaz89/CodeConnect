@@ -2,13 +2,8 @@ import XCTest
 
 /// The splice, against a **real** `ccd` at protocol minor 2.
 ///
-/// Everything here needs a daemon that has more than one run under one tmux
-/// name, which is the state a Mac reaches on its own the moment a `cc-1` exits
-/// and the next `codeconnect codex` takes the name back:
-///
-///   codeconnect codex                      # in some directory; note the uid from `codeconnect ls`
-///   tmux -L codeconnect kill-session -t cc-1
-///   codeconnect codex                      # same directory, same name, new uid
+/// The last two need a daemon that holds two runs in one project. Start them from
+/// the app: on the same computer, choose the same project and start an agent twice.
 ///
 ///   xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
 ///     -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \

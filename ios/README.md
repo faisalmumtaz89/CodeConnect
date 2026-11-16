@@ -6,8 +6,7 @@ protocol defined in `mac/protocol/src/ws.rs`.
 ## Session identity
 
 A run has two names and they do different jobs (see "Session identity" in
-`mac/README.md`). `session_id` is the tmux name — `cc-1` — and it is **reused**:
-`codeconnect codex` takes the lowest free number, so the next run is called `cc-1` again.
+`mac/README.md`). `session_id` is the tmux name — `cc-1` — and it is **reused**.
 `session_uid` is a ULID minted once at spawn and never reused.
 
 This app keys **everything** by `SessionSummary.sessionKey` / `Event.sessionKey`,

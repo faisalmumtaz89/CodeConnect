@@ -239,7 +239,6 @@ name = "codeconnect"
 version = "0.18.0"
 dependencies = [
  "anyhow",
- "codex-broker",
  "libc",
  "protocol",
  "qrcode",
@@ -247,7 +246,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tokio",
 ]
 
 [[package]]

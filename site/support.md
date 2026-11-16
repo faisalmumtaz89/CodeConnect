@@ -14,14 +14,14 @@ CodeConnect lets you monitor and control the coding agents running on your own c
 curl -fsSL https://codeconnect.sh | sh
 ```
 
-The installer downloads the latest release, verifies its signature before installing anything — the Developer ID signature on a Mac, CodeConnect's release key on Linux — and installs to `~/.codeconnect/bin`. It installs CodeConnect's own tmux with it, so tmux needs no separate install. It asks once before adding `~/.codeconnect/bin` to your `PATH`, as a marked block in your shell's startup file (two files for bash), which you can delete to undo. Then it asks "Set up CodeConnect now?" — Return means yes — and does, in order, whatever is still missing:
+The installer downloads the latest release, verifies its signature before installing anything — the Developer ID signature on a Mac, CodeConnect's release key on Linux — and installs to `~/.codeconnect/bin`. It asks once before adding `~/.codeconnect/bin` to your `PATH`, as a marked block in your shell's startup file (two files for bash), which you can delete to undo. Then it asks "Set up CodeConnect now?" — Return means yes — and does, in order, whatever is still missing:
 
 1. Connecting Tailscale. If Tailscale is not installed, it says how to install it and waits. On a Mac you then log in from Tailscale's icon in the menu bar; on Linux it runs `sudo tailscale up --qr`, whose QR code you scan with your phone, signed in to Tailscale. It waits until Tailscale is connected.
 2. Starting the daemon now and at login (at boot on Linux), restarting it on crash (`codeconnect daemon install`).
 3. Pairing your iPhone: it shows a QR code to scan with the CodeConnect Remote app, then waits for Return (`codeconnect pair` makes a new one).
 4. Signing in Claude Code and Codex: each one that is installed but signed out runs its own sign-in. Ctrl-C skips one.
 
-On a Mac it never uses sudo; on Linux it uses sudo only for `tailscale up --qr` and, where systemd refuses it to you, `loginctl enable-linger`. Tailscale is the default, not a requirement: to use your local network instead, answer `n` to that question and see "Is Tailscale required?" below. Stopped partway, the same command picks up where it left off. Then start an agent from the CodeConnect app: choose this computer, the project and the agent. For Codex, `codeconnect codex` in a new terminal in your project's folder starts it there through CodeConnect too.
+On a Mac it never uses sudo; on Linux it uses sudo only for `tailscale up --qr` and, where systemd refuses it to you, `loginctl enable-linger`. Tailscale is the default, not a requirement: to use your local network instead, answer `n` to that question and see "Is Tailscale required?" below. Stopped partway, the same command picks up where it left off. Then start an agent from the CodeConnect app: choose this computer, the project and the agent.
 
 Your phone now shows every session started this way. When an agent asks for permission, the prompt appears on your phone; answering it there has the same effect as answering at the computer.
 
@@ -35,30 +35,27 @@ Run the same command as your own user, not as root. On a machine where you have 
 
 ## Updating
 
-`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces CodeConnect's binaries and its tmux in one step, so a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
+`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces CodeConnect's binaries in one step, so a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
 
 The iPhone app updates from the App Store. When the app and a computer cannot understand each other, the app says which one to update: "Update CodeConnect on the computer" (run `codeconnect update` there) or "Update CodeConnect on this iPhone". This page describes CodeConnect 0.17.1, installer 1.7.7 and the iPhone app 1.1.16.
 
 ## Uninstalling
 
-1. End your sessions: quit each agent as you normally would, until `codeconnect ls` lists none. To end them all at once: `~/.codeconnect/bin/cc-tmux -L codeconnect kill-server` (it says "no server running" when none are left).
-2. `codeconnect daemon uninstall` — stops the daemon and removes its LaunchAgent.
-3. Delete `~/.codeconnect` — it holds the binaries, CodeConnect's tmux, your session history, pairing tokens, and TLS material.
-4. If you let the installer add CodeConnect to your `PATH`, delete each block between `# >>> codeconnect >>>` and `# <<< codeconnect <<<` in your shell's startup files (`~/.zshrc` for zsh; `~/.bashrc` and your login file, such as `~/.profile`, for bash). If nothing else is left in a file, you can delete it.
-5. Delete the app from your iPhone.
+1. `codeconnect daemon uninstall` — stops the daemon and removes its LaunchAgent.
+2. Delete `~/.codeconnect` — it holds the binaries, CodeConnect's tmux, your session history, pairing tokens, and TLS material.
+3. If you let the installer add CodeConnect to your `PATH`, delete each block between `# >>> codeconnect >>>` and `# <<< codeconnect <<<` in your shell's startup files (`~/.zshrc` for zsh; `~/.bashrc` and your login file, such as `~/.profile`, for bash). If nothing else is left in a file, you can delete it.
+4. Delete the app from your iPhone.
 
 ## Troubleshooting
 
 - **`codeconnect: command not found`** — `~/.codeconnect/bin` is not on your `PATH`. Open a new terminal if you let the installer add it; otherwise, for the current terminal: `export PATH="$HOME/.codeconnect/bin:$PATH"`. To add it for good, rerun the installer as `curl -fsSL https://codeconnect.sh | sh -s -- --path-yes`, or add that line to your shell's startup file yourself.
 - **Phone shows "Offline", "link stale" or no sessions** — confirm the Mac and phone can reach each other (Tailscale, or your own private network, connected on both), and that the daemon is running: `codeconnect daemon status`.
-- **Approval prompt not appearing on the phone** — approvals only surface for sessions started through the wrapper (e.g. `codeconnect codex`), not for agents launched directly.
-- **`codeconnect codex` says tmux is not found** — CodeConnect's own tmux is missing, which happens only on a Mac first set up by an older release, and the session could not fetch it (usually no network). Run `codeconnect update` to install it, then rerun.
 - **`codeconnect pair` says a paired phone could never reach the daemon** — the message says why. Most often the daemon found no Tailscale address and no `ws_bind` is set: Tailscale is not set up or not connected on this Mac. Set up or connect Tailscale, or set `ws_bind` as below, then run `codeconnect daemon restart` (on Linux without systemd, restart it as "On Linux" says) and `codeconnect pair` again.
 - **`codeconnect pair` says no phone can pair with this daemon** — the daemon refuses every connection on the address it is bound to. The message says why and what to change; then run `codeconnect daemon restart` (on Linux without systemd, restart it as "On Linux" says).
 - **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. To type it instead, tap "Enter the address and code instead" under "Scan pairing code" ("Pair by hand" on a device with no camera) and type the address and code it prints.
 - **Notifications not arriving** — they start at your own daemon (sent to Apple directly, or through CodeConnect's push relay), so it must be running, and the app must be allowed notifications in iOS Settings.
 - **The live terminal says it was superseded** — opening the terminal on a session that already has one open takes it over; the one that was open is told so. Expected behavior, not a fault.
-- **`codeconnect update` says another update or installation is already running** — an update, the installer, or a first session fetching CodeConnect's tmux holds the same lock, and two can't run at once; rerun after a moment.
+- **`codeconnect update` says another update or installation is already running** — an update and the installer hold the same lock, and two can't run at once; rerun after a moment.
 - **Revoke a lost device** — on the Mac: `codeconnect devices` to list, `codeconnect revoke <device>` to cut it off immediately, including open connections.
 
 ## Frequently asked

@@ -9109,13 +9109,6 @@ mod tests {
     /// > returns every row, agent-agnostically). This test deliberately does
     /// > **not** place a Codex row in the shared table, because in a correct build
     /// > one cannot be there.
-    ///
-    /// The real old-binary run — which drives the ACTUAL v0.6.0 `ccd` through a
-    /// new → old → new rollback — is the harness at
-    /// `mac/ccd/tests/new-old-new-real.sh` (a shell script, not a `cargo test`,
-    /// because it builds a historical binary). This in-process test proves the
-    /// additive-column contract deterministically for CI; that harness proves it
-    /// against the real old binary.
     #[test]
     fn additive_columns_are_transparent_to_a_legacy_reader_and_lose_no_data() {
         let (_p, path) = {

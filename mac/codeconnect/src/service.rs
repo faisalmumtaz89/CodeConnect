@@ -546,24 +546,6 @@ fn folders() -> Result<()> {
     Ok(())
 }
 
-/// At a start typed at a terminal on this Mac, the folder question, once: only
-/// while the daemon says it has never been answered. Silent otherwise, a daemon
-/// that cannot say included, so the start is as it always was.
-#[cfg(target_os = "macos")]
-pub fn ask_folders_once() {
-    if std::env::var_os("SSH_CONNECTION").is_some() {
-        return;
-    }
-    let Ok(DaemonFrame::FolderAccessAsked { asked: false }) =
-        crate::daemon::request(&ClientFrame::FolderAccessAsked)
-    else {
-        return;
-    };
-    if let Err(why) = folders() {
-        eprintln!("codeconnect: the folders were not asked about: {why:#}");
-    }
-}
-
 fn status() -> Result<()> {
     let plist = definition_path();
     println!("{DEFINITION_ROW}{}", describe_plist(&plist));
@@ -594,11 +576,10 @@ fn status() -> Result<()> {
                 info.protocol_version, info.protocol_minor, info.started_at
             );
             println!(
-                "         {}://{}:{} · {} session(s) attached",
+                "         {}://{}:{}",
                 if info.tls { "wss" } else { "ws" },
                 info.endpoint_host,
                 info.endpoint_port,
-                info.sessions
             );
             if let Some(line) = stale_binary_line(&info) {
                 println!("{line}");
@@ -1092,7 +1073,7 @@ fn resolve_ccd() -> Result<PathBuf> {
 /// all invisible to launchd otherwise.
 fn path_value() -> String {
     let mut dirs: Vec<PathBuf> = vec![protocol::root_dir().join("bin")];
-    for tool in ["tmux", "git", "tailscale", "claude", "sh"] {
+    for tool in ["git", "tailscale", "claude", "sh"] {
         if let Some(found) = locate(tool) {
             if let Some(dir) = found.parent() {
                 dirs.push(dir.to_path_buf());
@@ -1188,7 +1169,6 @@ fn legacy_daemon_probe() -> Option<DaemonInfo> {
         build_id: None,
         endpoint_port: 0,
         tls: false,
-        sessions: 0,
     })
 }
 
@@ -1391,22 +1371,17 @@ pub(crate) fn plist_document(ccd: &Path, path_value: &str) -> String {
 fn rig_environment() -> String {
     #[cfg(feature = "test-launchd-label")]
     {
-        [
-            protocol::TEST_LABEL_VAR,
-            "CODECONNECT_HOME",
-            "CODECONNECT_TMUX",
-            "TMUX_TMPDIR",
-        ]
-        .into_iter()
-        .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
-        .map(|(name, value)| {
-            format!(
-                "\n        <key>{}</key>\n        <string>{}</string>",
-                xml_escape(name),
-                xml_escape(&value)
-            )
-        })
-        .collect()
+        [protocol::TEST_LABEL_VAR, "CODECONNECT_HOME", "TMUX_TMPDIR"]
+            .into_iter()
+            .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
+            .map(|(name, value)| {
+                format!(
+                    "\n        <key>{}</key>\n        <string>{}</string>",
+                    xml_escape(name),
+                    xml_escape(&value)
+                )
+            })
+            .collect()
     }
     #[cfg(not(feature = "test-launchd-label"))]
     String::new()
@@ -1845,7 +1820,6 @@ mod tests {
             exe_path: Some(path.to_string_lossy().to_string()),
             exe_sha,
             build_id: None,
-            sessions: 0,
         };
 
         assert!(

@@ -995,17 +995,6 @@ fn is_test_label(label: &str) -> bool {
         })
 }
 
-/// The launcher subcommand that runs one bounded codex recovery pass.
-///
-/// **Here rather than in either crate that says it, because it is a seam between
-/// two binaries.** `ccd` cannot link the launcher — the launch records, their lock
-/// and the rules for repairing them all live in a crate with no library — so the
-/// daemon asks for this pass by spawning `codeconnect` and naming it. A name spelled
-/// once in the dispatcher and again in the daemon is a seam that compiles either way
-/// and fails at run time, silently, as a recovery pass that never runs; spelled once
-/// it cannot come apart.
-pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
-
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never
 /// touch the real `~/.codeconnect`.
 ///
@@ -1013,13 +1002,10 @@ pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
 /// of the wrapper. Both sources here can be relative — `CODECONNECT_HOME` is
 /// whatever the operator exported, and the `$HOME`-less fallback is literally
 /// `./.codeconnect` — and a relative root is not a root at all: it names a different
-/// directory in every process that resolves it. The launcher, the pane's host and
-/// the sweep run with **different working directories** by construction (the
-/// coordinator starts tmux in the session's folder), so a process-relative root has them
+/// directory in every process that resolves it. The daemon and the processes it starts
+/// run with **different working directories**, so a process-relative root has them
 /// addressing different records for the same session. Absolutising HERE, where the
-/// root is first read, is what makes every consumer — `session_dir`, the launch
-/// lock, the `CODECONNECT_HOME` the coordinator forwards into the pane — name one
-/// directory.
+/// root is first read, is what makes every consumer name one directory.
 ///
 /// `std::path::absolute` is prefix-only (it prepends the cwd and drops `.`
 /// components; it resolves no symlinks and no `..`), so it is idempotent: an

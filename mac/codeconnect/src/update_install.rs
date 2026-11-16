@@ -261,8 +261,7 @@ pub fn version_of(binary: &Path) -> Result<String> {
     answer_of(binary, "--version")
 }
 
-/// What a binary prints when asked one question: `--version`, `cc-tmux -V`,
-/// or `codeconnect --tmux-version` for the tmux a build requires.
+/// What a binary prints when asked one question, such as `--version`.
 pub fn answer_of(binary: &Path, question: &str) -> Result<String> {
     let output = std::process::Command::new(binary)
         .arg(question)

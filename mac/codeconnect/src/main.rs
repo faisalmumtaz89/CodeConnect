@@ -1,76 +1,22 @@
-//! `codeconnect` — the CodeConnect shim.
+//! `codeconnect` — CodeConnect's command line.
 //!
-//! `codeconnect codex [args…]` hosts a real `codex` inside the private tmux server and
-//! then **execs** the tmux client, so the terminal tab is showing the session
-//! itself rather than a wrapper around it. Nothing is proxied, no PTY is
-//! allocated, and every keystroke goes straight to the agent's TTY.
-//!
-//! What the shim adds happens entirely at spawn time: the environment fixes that
-//! keep transcripts alive, and a detached supervisor that connects out to `ccd`.
+//! It installs and runs the daemon, pairs phones, lists and prunes the daemon's
+//! sessions, serves the mail tools an agent calls (`mcp`), and installs updates.
+//! Agents are started from the apps, and the daemon runs them.
 
-mod attach;
-mod caller_env;
-mod codex;
-mod codex_coordinator;
-mod codex_custodian;
-mod codex_host;
-mod codex_launch;
 mod daemon;
-mod early_output;
-mod exec_gate;
-/// Test-only: a forked child that holds a lock it inherited until released.
-#[cfg(test)]
-mod forked_holder;
-/// Test-only: the fence that proves the suite does not write into the operator's
-/// own `~/.codeconnect`. See the module's own docs for what it watches.
-#[cfg(test)]
-mod home_guard;
-mod job;
 mod mail_trust;
 mod mcp;
-mod no_attach;
 mod pair;
 mod service;
-mod session_name;
 mod sessions;
-mod settings;
-mod supervisor;
-mod tmux;
 mod update_check;
 mod update_install;
 mod update_release;
 
 use anyhow::{bail, Context, Result};
-use protocol::config::Config;
 
 fn main() -> Result<()> {
-    // First, so the tmux server this launch may fork, and every pane under it,
-    // inherits the raised limit. Best effort: a launch at the old limit still
-    // works, it only holds fewer sessions.
-    let _ = protocol::fdlimit::raise();
-    // Hidden: the pane-command prefix that gives an agent the caller's
-    // environment. Dispatched before the UTF-8 argument read below, because the
-    // pane command it execs carries the caller's raw bytes. Machinery.
-    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    if raw
-        .first()
-        .is_some_and(|command| command == caller_env::SUBCOMMAND)
-    {
-        return caller_env::run(&raw[1..]);
-    }
-    if raw
-        .first()
-        .is_some_and(|command| command == job::SUBCOMMAND)
-    {
-        return job::run(&raw[1..]);
-    }
-    // Hidden: the copy of an agent's early output `pipe-pane` runs. Machinery.
-    if raw
-        .first()
-        .is_some_and(|command| command == early_output::SUBCOMMAND)
-    {
-        return early_output::run();
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = args
         .split_first()
@@ -89,14 +35,12 @@ fn main() -> Result<()> {
 
     // A command that prints and exits ends quietly when its reader goes away —
     // `codeconnect daemon status | head -3` — as other command-line tools do;
-    // with SIGPIPE ignored, Rust panics at the next print instead. The session
-    // roles keep it ignored: they handle a closed pipe themselves. `update` and
-    // `install-staged` keep it too, so a reader going away never ends an install
-    // partway through.
+    // with SIGPIPE ignored, Rust panics at the next print instead. `update` and
+    // `install-staged` keep it ignored, so a reader going away never ends an
+    // install partway through.
     if matches!(
         command,
-        "ls" | "list"
-            | "sessions"
+        "sessions"
             | "token"
             | "pair"
             | "devices"
@@ -105,7 +49,6 @@ fn main() -> Result<()> {
             | "daemon"
             | "--version"
             | "version"
-            | "--tmux-version"
     ) {
         // SAFETY: called before any thread is spawned; restores the default
         // disposition of one signal.
@@ -113,18 +56,7 @@ fn main() -> Result<()> {
     }
 
     match command {
-        // Hidden: run by the daemon for a session the phone starts.
-        "codex" if no_attach::requested(rest) => {
-            no_attach::run(protocol::agent::AgentKind::Codex, rest)
-        }
-        "codex" => {
-            ask_about_mail(!codex::asks_help_or_version(rest));
-            ask_about_folders(!codex::asks_help_or_version(rest));
-            codex::start(rest, false).map(|_| ())
-        }
         "mail-trust" => mail_trust::command(rest),
-        "attach" => attach(rest),
-        "ls" | "list" => no_arguments(rest, "codeconnect ls").and_then(|()| list()),
         "sessions" => sessions::command(rest),
         "token" => token(rest),
         "pair" => pair::pair(rest),
@@ -132,35 +64,6 @@ fn main() -> Result<()> {
         "revoke" => pair::revoke(rest),
         "unblock" => pair::unblock(rest),
         "daemon" => service::command(rest),
-        // Hidden: never typed by a human.
-        "supervise" => supervise(rest),
-        // Hidden: the inert exec gate. Spawned by a launch actor to bring a
-        // child up inertly; it either execs its target on GO or _exits without
-        // ever touching it. Machinery, never typed by a human.
-        "internal-exec-gate" => exec_gate::run_gate(rest),
-        // Hidden: a test-only gated target that fires the readiness fence and
-        // touches a marker, so the exec-gate tests can fence `execve` on a real
-        // target-side effect. Machinery, never typed by a human.
-        "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
-        // Hidden: the launch coordinator (the supervisor in launch mode).
-        // Spawned by the `codex` launcher before tmux exists; it owns the launch
-        // record and every forward mutation, and stays on as the session's
-        // supervisor once it commits `ready`. Machinery.
-        "internal-codex-coordinator" => codex_coordinator::run_coordinator(rest),
-        // Hidden: the launch custodian. Armed before `tmux new-session` with
-        // independent cleanup authority. Machinery.
-        "internal-codex-custodian" => codex_custodian::run_custodian(rest),
-        // Hidden: one bounded launch recovery sweep (stale pendings → failed;
-        // failed+incomplete+dead-custodian → replacement custodian). Machinery.
-        c if c == protocol::CODEX_SWEEP_SUBCOMMAND => codex_custodian::run_sweep(rest),
-        // Hidden: the late-host preflight gate — validate the launch record +
-        // take a lease, or cleanup-only refuse. Machinery.
-        "internal-codex-host-preflight" => codex_custodian::run_host_preflight(rest),
-        // Hidden: the Codex session host. Runs inside a tmux pane;
-        // launches the app-server, serves the broker in front of it, and spawns
-        // the interactive TUI against the broker. Machinery, never typed by a
-        // human — the coordinator spawns it.
-        "internal-codex-host" => codex_host::run_host(rest),
         // Hidden: the MCP server a hosted agent messages other agents with, started
         // by the agent itself. Machinery, never typed by a human.
         "mcp" => mcp::run(rest),
@@ -168,21 +71,14 @@ fn main() -> Result<()> {
             no_arguments(rest, "codeconnect update").and_then(|()| update_check::run_update())
         }
         // Hidden: run by the website installer as the `codeconnect` it just
-        // downloaded and verified, to install that release with its tmux the
-        // way `update` does. Machinery, never typed by a human.
+        // downloaded and verified, to install that release the way `update`
+        // does. Machinery, never typed by a human.
         "install-staged" => update_check::run_install_staged(rest),
         "--version" | "version" => {
             println!(
                 "{}",
                 protocol::build_identity::version_line("codeconnect", env!("CARGO_PKG_VERSION"))
             );
-            Ok(())
-        }
-        // Hidden: the `cc-tmux -V` line this build requires. Read by the
-        // release workflow and by an updater checking a downloaded release
-        // before installing it. Machinery, never typed by a human.
-        "--tmux-version" => {
-            println!("{}", protocol::tmux::bundled_version());
             Ok(())
         }
         "help" | "--help" | "-h" => {
@@ -209,26 +105,6 @@ fn usage() {
     eprintln!("{}", usage_text());
 }
 
-/// The one question a session launch can ask, once per computer, and only when it
-/// starts an agent's session in a terminal a person is at ([`mail_trust`]): never
-/// for an agent's help or version, which only print.
-fn ask_about_mail(starts_a_session: bool) {
-    if starts_a_session && crate::attach::Terminal::available() {
-        mail_trust::ask_once();
-    }
-}
-
-/// macOS's folder question, at a start typed at this Mac's terminal, while it
-/// has never been answered.
-fn ask_about_folders(starts_a_session: bool) {
-    #[cfg(target_os = "macos")]
-    if starts_a_session && crate::attach::Terminal::available() {
-        service::ask_folders_once();
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = starts_a_session;
-}
-
 /// The banner, as text rather than as a side effect.
 ///
 /// Split out so it can be held to the same bar as the retirement notice. This
@@ -241,9 +117,6 @@ fn usage_text() -> &'static str {
     "\
 codeconnect — host coding agents your iPhone can see and answer
 
-  codeconnect codex [args…]       start Codex here, as a session your phone sees
-  codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
-  codeconnect ls                  list running sessions (works with the daemon down)
   codeconnect sessions            list every session the daemon knows, live or ended
   codeconnect sessions prune      remove ended sessions and their history (--dry-run first)
 
@@ -306,10 +179,8 @@ const RETIRED_EXIT_CODE: i32 = 1;
 /// `codeconnect revoke iPhone --ssh` would revoke the device's token outright
 /// while its author believed they were removing a key.
 ///
-/// The flag is looked for only under those two commands. `codeconnect codex`'s
-/// arguments belong to `codex` and `codeconnect supervise`'s to the
-/// supervisor; a scan that reached either would let this dispatch swallow an
-/// argument meant for another program.
+/// The flag is looked for only under those two commands, so this dispatch never
+/// swallows an argument another command takes.
 fn retired_command(command: &str, args: &[String]) -> Option<RetiredCommand> {
     let ssh_flag = || args.iter().any(|arg| arg == "--ssh");
     match command {
@@ -475,385 +346,6 @@ fn explain_retired(retired: RetiredCommand) -> ! {
     std::process::exit(RETIRED_EXIT_CODE);
 }
 
-/// The launch advisory: what `codeconnect codex` does just before it attaches.
-/// The hold delays only when the session is shown, never what it does: a Codex
-/// session starts right after it (see `codex::launch`).
-fn advise_before_attach(config: &Config) {
-    use std::io::IsTerminal;
-    // Styling answers for stderr, this envelope's stream.
-    let style = update_check::style_for_stream(std::io::stderr().is_terminal());
-    let reachability = phone_unreachable_note(
-        crate::pair::configured_ws_bind(config),
-        config.tailscale_bin(),
-        style,
-    );
-    if let Some(group) = advisory_envelope(reachability) {
-        eprint!("{group}");
-        // The hold exists for a reader: only a real person at a real
-        // terminal gets one, and it is a countdown — not a spinner,
-        // because nothing is working; the pause is for reading. Return
-        // skips it.
-        if hold_permitted(
-            std::io::stderr().is_terminal(),
-            std::io::stdin().is_terminal(),
-            std::env::var("TERM").ok().as_deref(),
-        ) {
-            update_check::hold_for_reading(
-                std::time::Duration::from_secs(10),
-                |wait| update_check::returned_within(libc::STDIN_FILENO, wait),
-                &mut std::io::stderr(),
-                std::time::Instant::now,
-            );
-        }
-    }
-}
-
-/// How to turn Tailscale on, in the words of the system it runs on: the menu
-/// bar app on macOS; on Linux, `sudo tailscale up --qr` — refused to a normal
-/// user without sudo unless they have been made Tailscale's operator, and with
-/// `--qr` a computer with no screen signs in from a phone that scans the QR.
-#[cfg(target_os = "macos")]
-const CONNECT_TAILSCALE: &str = "Connect Tailscale (menu bar, or `tailscale up`)";
-#[cfg(target_os = "macos")]
-const RECONNECT_TAILSCALE: &str = "Connect Tailscale (menu bar)";
-#[cfg(target_os = "macos")]
-const TAILSCALE_UP: &str = "tailscale up";
-#[cfg(target_os = "linux")]
-const CONNECT_TAILSCALE: &str = "Connect Tailscale: run `sudo tailscale up --qr`, scan the QR it\n\
-                                 prints with your phone signed in to Tailscale and approve it there";
-#[cfg(target_os = "linux")]
-const RECONNECT_TAILSCALE: &str = "Connect Tailscale";
-#[cfg(target_os = "linux")]
-const TAILSCALE_UP: &str = "sudo tailscale up --qr";
-
-/// The "your phone cannot reach this Mac" note, or `None` while nothing here
-/// says it cannot — for a daemon address, the same fact the app shows as its
-/// "Connect Tailscale" banner, told in the same words at the other keyboard;
-/// for a missing daemon, that the session is out of the phone's sight until
-/// one runs. Printed by `advise_before_attach` in the
-/// shared pre-attach advisory slot (one 10-second countdown however many
-/// notes apply).
-///
-/// Four states earn it, distinguished because their fixes differ:
-///
-///   * no daemon is running and launchd does not hold the job (never installed,
-///     uninstalled, or unloaded) — install it;
-///   * the daemon is bound to an address no phone could ever reach — with no
-///     `ws_bind`, Tailscale is not set up or not connected (connect it, then
-///     restart the daemon so it can re-resolve); with a `ws_bind` naming that
-///     address, the setting is what to change; with one naming another
-///     address, it is a `ws_bind` the daemon has not applied (restart);
-///   * the daemon is bound to a tailnet address but Tailscale's backend is
-///     stopped (toggled off after the daemon started) — connect Tailscale
-///     and nothing else. The standing bind revives with the tunnel: measured
-///     on this machine, one daemon held its 100.x listener across a full
-///     off/on toggle and accepted connections again with no restart;
-///   * Tailscale is not installed at all — set it up.
-///
-/// A probe that *fails* (tailscale wedged, output unreadable) stays silent:
-/// "Tailscale is off" is a categorical claim, and an error is not evidence.
-///
-/// The session itself is untouched: the hold delays only when it is shown. A
-/// warning with no pause is a warning nobody has ever seen — the attach paints
-/// the session over the terminal's rows microseconds later.
-fn phone_unreachable_note(
-    ws_bind: Option<std::net::IpAddr>,
-    tailscale: Option<std::path::PathBuf>,
-    style: update_check::Style,
-) -> Option<String> {
-    // The timeout is advisory-sized — this check must never make a healthy
-    // start wait behind a wedged daemon.
-    let info = match daemon::request_within(
-        &protocol::ipc::ClientFrame::DaemonInfo,
-        std::time::Duration::from_millis(400),
-    ) {
-        Ok(protocol::ipc::DaemonFrame::Daemon(info)) => info,
-        Err(err) if no_daemon_and_no_job(&err, crate::service::job_is_loaded) => {
-            return Some(daemon_down_note(style));
-        }
-        _ => return None,
-    };
-    let signal = match tailscale {
-        None => TailscaleSignal::NotInstalled,
-        Some(bin) => probe_tailscale(&bin),
-    };
-    // A daemon too old to report its bind is judged by the host it advertises,
-    // which is the bind address whenever that address is unreachable.
-    let bound = info
-        .bind_ip
-        .as_deref()
-        .and_then(crate::pair::host_address)
-        .or_else(|| crate::pair::host_address(&info.endpoint_host));
-    let cause = crate::pair::bind_cause(bound, ws_bind);
-    phone_reachability_note(
-        &info.endpoint_host,
-        info.bind_ip.as_deref(),
-        signal,
-        style,
-        cause,
-    )
-}
-
-/// Whether a failed daemon request means there is no daemon and none coming:
-/// nothing is listening on the socket, and launchd is not holding the job.
-///
-/// A job launchd holds is a daemon it starts — at login, after a crash, after
-/// the daemon ends itself to move off loopback, between throttled restarts —
-/// and in each of those the socket is missing or refusing for a moment, while
-/// `launchctl` reports a job that has not run yet exactly as one that stopped
-/// cleanly. Saying it is down there would send somebody to fix a daemon already
-/// on its way, so a held job is silence, including the rare one stopped by hand
-/// or crashing on every start. Over ssh the login session's jobs are invisible
-/// until that session exists — the first seconds after a reboot, or with nobody
-/// logged in at the screen, where no LaunchAgent can run — and the note then
-/// shows. launchd is asked only once the socket has said
-/// nothing is there; any other failure (a reply that never came, an answer that
-/// did not decode) is not evidence of anything, so it stays silent.
-fn no_daemon_and_no_job(err: &anyhow::Error, job_held: impl FnOnce() -> bool) -> bool {
-    err.downcast_ref::<std::io::Error>().is_some_and(|io| {
-        matches!(
-            io.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-        )
-    }) && !job_held()
-}
-
-/// The note for a launch with no daemon to tell: the session runs, but the
-/// phone cannot see it until a daemon does. A session launched while the daemon
-/// is down registers when it comes up, so the remedy is the one command that
-/// brings it up from any state — and what the phone then shows still depends on
-/// the phone reaching this Mac, so that is all the assurance promises.
-fn daemon_down_note(style: update_check::Style) -> String {
-    phone_note(
-        "The daemon is not running, so your phone cannot see this session.",
-        &format!(
-            "Start it:\n\n{}",
-            emphasized("codeconnect daemon install", style)
-        ),
-        "This session is unaffected \u{2014} it runs either way.\n\
-         Once the daemon runs, the phone catches up as soon as it can reach\n\
-         this computer.",
-        style,
-    )
-}
-
-/// What this Mac's Tailscale is doing right now, as far as an advisory may
-/// honestly claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TailscaleSignal {
-    NotInstalled,
-    /// The probe failed — wedged daemon, unreadable output. Not evidence.
-    Unknown,
-    Up,
-    /// The backend answered and said it is not running the tunnel.
-    Down,
-}
-
-/// Ask `tailscale status --json` for its `BackendState`.
-///
-/// The JSON is the only shape worth parsing: `tailscale ip -4` was measured
-/// printing the *assigned* address while `status` said "Tailscale is
-/// stopped" — the address is configuration, not liveness. Bounded, because
-/// an advisory must never hang a start behind a wedged tailscaled.
-fn probe_tailscale(bin: &std::path::Path) -> TailscaleSignal {
-    use std::process::{Command, Stdio};
-    let Ok(mut child) = Command::new(bin)
-        .args(["status", "--json"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-    else {
-        return TailscaleSignal::Unknown;
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(15));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return TailscaleSignal::Unknown;
-            }
-        }
-    }
-    let mut stdout = String::new();
-    use std::io::Read;
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut stdout);
-    }
-    parse_backend_state(&stdout)
-}
-
-/// `BackendState` → signal. Pure, so the recognised states stay pinned.
-///
-/// Only the states that *mean* the tunnel is not carrying traffic map to
-/// `Down`; anything unrecognised — including a transitional `Starting` — is
-/// `Unknown`, because an advisory that guesses is worse than one that stays
-/// quiet.
-fn parse_backend_state(stdout: &str) -> TailscaleSignal {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
-        return TailscaleSignal::Unknown;
-    };
-    match value.get("BackendState").and_then(|v| v.as_str()) {
-        Some("Running") => TailscaleSignal::Up,
-        Some("Stopped") | Some("NeedsLogin") | Some("NeedsMachineAuth") => TailscaleSignal::Down,
-        _ => TailscaleSignal::Unknown,
-    }
-}
-
-/// Whether this address is the tailnet's to explain: Tailscale's own CGNAT
-/// v4 range, or its `fd7a:115c:a1e0::/48` v6 range (the /48 matters — all of
-/// `fd7a::/16` is ordinary ULA space anyone may use). An operator who
-/// explicitly bound the daemon elsewhere gets no Tailscale advice about it.
-fn tailnet_shaped_ip(host: &str) -> bool {
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(v4)) => {
-            let octets = v4.octets();
-            octets[0] == 100 && (64..128).contains(&octets[1])
-        }
-        Ok(std::net::IpAddr::V6(v6)) => {
-            let segments = v6.segments();
-            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
-        }
-        Err(_) => false,
-    }
-}
-
-/// The warning text, or `None` when nothing here can see anything wrong —
-/// which is silence rather than a clean bill. `unreachable_host` declines to
-/// judge a name it cannot resolve, and a probe that came back `Unknown` is not
-/// evidence of a tunnel, so a phone can be off the tailnet with every input
-/// this reads looking ordinary. Pure, so the wording and the rules are pinned
-/// by tests.
-///
-/// `bind_ip` is the socket's real address; `endpoint_host` is what the QR sends
-/// the phone to, which is a hostname when the daemon has one that reaches its
-/// own listener and the bind address as a literal otherwise — `ccd`'s
-/// `resolve_transport_with` decides which, and is the authority on the rule.
-/// What matters here is only that the two can differ, so neither substitutes
-/// for the other: a daemon on the tailnet may be advertised under a name, which
-/// is why the toggled-off advice keys on the *bind*. Only a daemon genuinely
-/// bound to a tailnet address revives with the tunnel, and an older daemon that
-/// does not report its bind gets silence, not a guess.
-///
-/// The wording matches the app's own banner for the same state — the phone
-/// says "Connect Tailscale" / "Set up Tailscale"; this says the same thing
-/// to the same person at the other keyboard.
-fn phone_reachability_note(
-    endpoint_host: &str,
-    bind_ip: Option<&str>,
-    signal: TailscaleSignal,
-    style: update_check::Style,
-    cause: crate::pair::BindCause,
-) -> Option<String> {
-    // Shared grammar with the update advisory: a heading, the state's own
-    // explanation, a blank line, the state's own remedy (its command or URL
-    // isolated on its own line), a blank line, the assurance. Bold yellow on
-    // the heading — this one *is* a current impairment, which is exactly
-    // what the app's amber means — and bold alone on an isolated command.
-    let assurance = "This session is unaffected \u{2014} it runs and records either way.\n\
-                     The phone catches up as soon as it can reach this computer.";
-
-    let (explanation, remedy) =
-        if let Some(problem) = protocol::pairing::unreachable_host(endpoint_host) {
-            // The address is data, not prose: isolated on its own line, the
-            // sentence around it stays inside its 76 columns however long a
-            // MagicDNS name grows.
-            let explanation = format!(
-                "The daemon is listening on an address no phone can reach:\n\n\
-             {endpoint_host}\n\n\
-             It {problem}."
-            );
-            let remedy = match (cause, signal) {
-                // A bind `ws_bind` chose is `ws_bind`'s to fix: Tailscale has no
-                // part in it, and no restart moves an explicit address.
-                (crate::pair::BindCause::Named, _) => format!(
-                    "Set `ws_bind` in ~/.codeconnect/config.json to this computer's address on a\n\
-                 network your phone is on, or remove it to use Tailscale, then:\n\n\
-                 {}",
-                    emphasized("codeconnect daemon restart", style)
-                ),
-                (crate::pair::BindCause::Pending(bind), _) => format!(
-                    "The daemon has not applied the `ws_bind` in ~/.codeconnect/config.json:\n\n\
-                 {bind}\n\n\
-                 {}",
-                    emphasized("codeconnect daemon restart", style)
-                ),
-                (_, TailscaleSignal::NotInstalled) => format!(
-                    "Set up Tailscale \u{2014} by default CodeConnect reaches phones over your\n\
-                 tailnet \u{2014} then restart the daemon:\n\n\
-                 {}\n\
-                 {}",
-                    emphasized("https://tailscale.com/download", style),
-                    emphasized("codeconnect daemon restart", style)
-                ),
-                _ => format!(
-                    "{CONNECT_TAILSCALE}, then:\n\n\
-                 {}",
-                    emphasized("codeconnect daemon restart", style)
-                ),
-            };
-            (explanation, remedy)
-        } else if signal == TailscaleSignal::Down && bind_ip.is_some_and(tailnet_shaped_ip) {
-            let explanation = "Tailscale is off on this computer.".to_string();
-            // Scoped to what has been watched happen. The daemon does keep its
-            // bind across the toggle — that is a property of the socket, not a
-            // guess — but "nothing needs restarting" is a promise about every
-            // Mac and every toggle, and the evidence behind it is one machine
-            // once. Saying what is known, and naming the fallback, costs the
-            // reader one sentence and claims only what was seen.
-            let remedy = format!(
-                "{RECONNECT_TAILSCALE}, or run:\n\n\
-             {}\n\n\
-             The daemon holds its tailnet address across the toggle, so it is\n\
-             normally reachable again as soon as the tunnel is. If the phone\n\
-             still cannot reach it, restart the daemon.",
-                emphasized(TAILSCALE_UP, style)
-            );
-            (explanation, remedy)
-        } else {
-            return None;
-        };
-    Some(phone_note(&explanation, &remedy, assurance, style))
-}
-
-/// The "Phone unreachable" advisory around one state's explanation, remedy and
-/// assurance, styled for the stream it is written to.
-fn phone_note(
-    explanation: &str,
-    remedy: &str,
-    assurance: &str,
-    style: update_check::Style,
-) -> String {
-    let heading = "Phone unreachable";
-    let heading = match style {
-        update_check::Style::Styled => format!("\u{1b}[1;33m{heading}\u{1b}[0m"),
-        update_check::Style::PlainUnicode | update_check::Style::Ascii => heading.to_string(),
-    };
-    let text = format!("{heading}\n{explanation}\n\n{remedy}\n\n{assurance}");
-    match style {
-        update_check::Style::Ascii => asciify(&text),
-        _ => text,
-    }
-}
-
-/// The reachability note as one write: a leading blank line, the note, and a
-/// trailing blank line before whatever follows. `None` when there is nothing to
-/// say, so a healthy launch writes nothing at all.
-fn advisory_envelope(reachability: Option<String>) -> Option<String> {
-    reachability.map(|note| format!("\n{note}\n\n"))
-}
-
-/// Whether the reading hold may run: a real person at a real terminal on
-/// both streams, and not a terminal that has disclaimed control sequences.
-fn hold_permitted(stderr_tty: bool, stdin_tty: bool, term: Option<&str>) -> bool {
-    stderr_tty && stdin_tty && term != Some("dumb")
-}
-
 /// Bold when styling is on; bare otherwise. For an advisory's heading, and for
 /// an isolated command or URL line — the thing the reader is meant to act on.
 fn emphasized(line: &str, style: update_check::Style) -> String {
@@ -870,152 +362,6 @@ fn asciify(text: &str) -> String {
         .replace('\u{2192}', "->")
         .replace('\u{b7}', ":")
         .replace('\u{2026}', "...")
-}
-
-fn supervise(args: &[String]) -> Result<()> {
-    let mut session_id = None;
-    let mut session_uid = None;
-    let mut tmux_session = None;
-    let mut cwd = None;
-    let mut claude_bin = None;
-    let mut tmux_session_id = None;
-    let mut server_pid = None;
-    let mut server_start_time = None;
-    let mut session_created = None;
-    let mut server_birth = None;
-    let mut server_exited = false;
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--session" => session_id = it.next().cloned(),
-            "--session-uid" => session_uid = it.next().cloned(),
-            "--tmux-session" => tmux_session = it.next().cloned(),
-            "--cwd" => cwd = it.next().cloned(),
-            "--claude-bin" => claude_bin = it.next().cloned(),
-            "--tmux-session-id" => tmux_session_id = it.next().cloned(),
-            "--server-pid" => server_pid = it.next().and_then(|v| v.parse().ok()),
-            "--server-start-time" => server_start_time = it.next().and_then(|v| v.parse().ok()),
-            "--session-created" => session_created = it.next().and_then(|v| v.parse().ok()),
-            "--server-birth" => {
-                server_birth = it.next().and_then(|v| {
-                    let (sec, usec) = v.split_once('.')?;
-                    Some(protocol::proc_identity::BirthIdentity {
-                        start_sec: sec.parse().ok()?,
-                        start_usec: usec.parse().ok()?,
-                    })
-                })
-            }
-            "--server-exited" => server_exited = true,
-            _ => {}
-        }
-    }
-    let session_id = session_id.context("--session is required")?;
-    let tmux_session = tmux_session.unwrap_or_else(|| session_id.clone());
-    let cwd = cwd.unwrap_or_else(|| "/".to_string());
-    // A malformed value is dropped rather than forwarded: the daemon resolves the
-    // name instead, which is right, whereas a bad uid would mint a second identity
-    // for a session that has one.
-    let session_uid = session_uid.filter(|uid| protocol::uid::is_well_formed(uid));
-    // The server this session is on, as the launcher read it from the server that
-    // created it. A session cannot outlive the process hosting it, so that server
-    // proven dead — by pid and birth, never by socket silence — ends this session
-    // even on the fleet-wide server.
-    let server_a = match &session_uid {
-        Some(uid) => {
-            if server_birth.is_none() && !server_exited {
-                bail!("--server-birth or --server-exited is required");
-            }
-            Some(protocol::tmux::OwnedSession {
-                socket: protocol::TMUX_SOCKET_NAME.to_string(),
-                session_id: tmux_session_id.context("--tmux-session-id is required")?,
-                uid: uid.clone(),
-                server_pid: server_pid.context("--server-pid is required")?,
-                server_start_time: server_start_time.context("--server-start-time is required")?,
-                session_created: session_created.context("--session-created is required")?,
-                server_birth,
-            })
-        }
-        None => None,
-    };
-    // That server had already exited when the launcher looked, taking this
-    // session, its last, with it.
-    let ended_unwatched = server_a.is_some() && server_exited;
-
-    supervisor::run(
-        supervisor::SupervisorArgs {
-            session_id,
-            session_uid,
-            tmux_session,
-            // No flag, on purpose. `supervise` is spawned by `codeconnect
-            // claude` and by nothing else — the Codex launch supervises itself,
-            // in the coordinator process, so the seat and the socket travel as
-            // values rather than as argv. Adding `--agent` here would be a
-            // user-facing surface with no caller, on a parser that silently
-            // ignores what it does not recognise.
-            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-            cwd,
-            claude_bin,
-            codex: None,
-            server_a,
-            ended_unwatched,
-        },
-        &Config::load(),
-    )
-}
-
-fn attach(args: &[String]) -> Result<()> {
-    let Some(name) = args.first() else {
-        let sessions = tmux::list_sessions()?;
-        match sessions.len() {
-            0 => bail!("no CodeConnect sessions are running"),
-            // With exactly one session, asking which one would be theatre.
-            1 => return attach(&[sessions[0].clone()]),
-            _ => bail!("which session? {}", sessions.join(", ")),
-        }
-    };
-    no_arguments(&args[1..], "codeconnect attach [session]")?;
-    if !tmux::has_session(name)? {
-        bail!("no session named {name}; `codeconnect ls` shows what is running");
-    }
-    tmux::attach(name)
-}
-
-fn list() -> Result<()> {
-    let sessions = tmux::list_sessions()?;
-    if sessions.is_empty() {
-        println!("no CodeConnect sessions");
-        return Ok(());
-    }
-    // The daemon knows more (identity, link state, blocked approvals) but must
-    // never be required: `codeconnect ls` has to work when ccd is down.
-    let known = daemon_sessions().unwrap_or_default();
-    println!("{:<10} {:<28} {:<10} CWD", "SESSION", "UID", "LINK");
-    for name in sessions {
-        // The *live* run under this name. A dead one with the same name may
-        // still be listed by the daemon; tmux is what says which is current.
-        let current = known
-            .iter()
-            .filter(|s| s.session_id == name)
-            .max_by(|a, b| a.session_uid.cmp(&b.session_uid));
-        let (uid, link, cwd) = current
-            .map(|s| {
-                (
-                    s.session_uid.clone(),
-                    format!("{:?}", s.link).to_lowercase(),
-                    s.cwd.clone(),
-                )
-            })
-            .unwrap_or_else(|| ("—".to_string(), "unknown".to_string(), String::new()));
-        println!("{name:<10} {uid:<28} {link:<10} {cwd}");
-    }
-    Ok(())
-}
-
-fn daemon_sessions() -> Result<Vec<protocol::event::SessionSummary>> {
-    match daemon::request(&protocol::ipc::ClientFrame::ListSessions)? {
-        protocol::ipc::DaemonFrame::Sessions { sessions } => Ok(sessions),
-        other => bail!("unexpected reply: {other:?}"),
-    }
 }
 
 /// Refuse what follows a command that takes nothing more. An argument it does not
@@ -1097,9 +443,7 @@ mod tests {
         }
     }
 
-    /// The diversion is surgical: every command that still exists runs, and a
-    /// passthrough command's arguments belong to the program they are passed
-    /// to — `codex` owns its own flags, whatever they are spelled.
+    /// The diversion is surgical: every command that still exists runs.
     #[test]
     fn the_commands_that_still_exist_are_never_diverted() {
         for (command, words) in [
@@ -1109,7 +453,6 @@ mod tests {
             ("token", argv(&[])),
             ("update", argv(&[])),
             ("help", argv(&[])),
-            ("supervise", argv(&["--session", "cc1", "--ssh"])),
         ] {
             assert_eq!(
                 retired_command(command, &words),
@@ -1275,446 +618,6 @@ mod tests {
         }
     }
 
-    /// The pre-attach warning across its states, in the app's own vocabulary
-    /// ("connect Tailscale" / "set up Tailscale") so the two screens the same
-    /// person is looking at never disagree — and each state names *its* fix,
-    /// The envelope, exactly: nothing at all when there is nothing to say;
-    /// a leading blank line; one trailing blank line.
-    #[test]
-    fn the_advisory_envelope_spaces_and_orders_exactly() {
-        assert_eq!(
-            advisory_envelope(None),
-            None,
-            "healthy launches write nothing"
-        );
-        assert_eq!(
-            advisory_envelope(Some("REACH".into())).as_deref(),
-            Some("\nREACH\n\n")
-        );
-    }
-
-    /// The hold's admission rule: both streams must be a person's terminal,
-    /// and a terminal that disclaimed control sequences gets no countdown.
-    #[test]
-    fn the_hold_needs_two_ttys_and_a_capable_terminal() {
-        assert!(hold_permitted(true, true, Some("xterm-256color")));
-        assert!(hold_permitted(true, true, None));
-        assert!(!hold_permitted(false, true, Some("xterm")));
-        assert!(!hold_permitted(true, false, Some("xterm")));
-        assert!(!hold_permitted(true, true, Some("dumb")));
-    }
-
-    /// Every asciify mapping, and the guarantee that matters: no state's
-    /// ASCII rendering carries a single non-ASCII byte, an escape, a
-    /// trailing space, or a line at 80 columns or more.
-    #[test]
-    fn ascii_renderings_are_pure_for_every_reachability_state() {
-        assert_eq!(
-            asciify("a \u{2014} b \u{2192} c \u{b7} d \u{2026}"),
-            "a -- b -> c : d ..."
-        );
-
-        use update_check::Style;
-        use TailscaleSignal::*;
-        let all = [
-            phone_reachability_note(
-                "127.0.0.1",
-                Some("127.0.0.1"),
-                Up,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet,
-            ),
-            phone_reachability_note(
-                "127.0.0.1",
-                Some("127.0.0.1"),
-                NotInstalled,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet,
-            ),
-            phone_reachability_note(
-                "mac.tailnet.ts.net",
-                Some("100.64.0.7"),
-                Down,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet,
-            ),
-            Some(daemon_down_note(Style::Ascii)),
-            phone_reachability_note(
-                "127.0.0.1",
-                Some("127.0.0.1"),
-                Up,
-                Style::Ascii,
-                crate::pair::BindCause::Named,
-            ),
-            phone_reachability_note(
-                "127.0.0.1",
-                Some("127.0.0.1"),
-                Up,
-                Style::Ascii,
-                crate::pair::BindCause::Pending(
-                    "fd12:3456:789a:bcde:f012:3456:789a:bcde".parse().unwrap(),
-                ),
-            ),
-        ];
-        for note in all.into_iter().flatten() {
-            assert!(note.is_ascii(), "non-ascii survived: {note}");
-            assert!(!note.contains('\u{1b}'));
-            for line in note.lines() {
-                assert!(line.len() < 80, "over 80 cols: {line}");
-                assert_eq!(line, line.trim_end(), "trailing space: {line:?}");
-            }
-        }
-    }
-
-    /// A launch with no daemon installed is told so, and told the one command
-    /// that brings one up — under the same heading as every other reason the
-    /// phone cannot see the session.
-    #[test]
-    fn a_launch_with_no_daemon_names_daemon_install() {
-        use update_check::Style;
-        let note = daemon_down_note(Style::PlainUnicode);
-        let mut lines = note.lines();
-        assert_eq!(lines.next(), Some("Phone unreachable"));
-        assert_eq!(
-            lines.next(),
-            Some("The daemon is not running, so your phone cannot see this session.")
-        );
-        assert!(
-            note.contains("\n\ncodeconnect daemon install\n\n"),
-            "{note}"
-        );
-        assert!(note.contains("runs either way"), "{note}");
-        let styled = daemon_down_note(Style::Styled);
-        assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
-        assert!(styled.contains("\u{1b}[1mcodeconnect daemon install\u{1b}[0m"));
-    }
-
-    /// Only nothing listening, with no launchd job held, is no daemon. A held job
-    /// is a daemon launchd starts, and a request that failed any other way proves
-    /// nothing — launchd is not even asked then.
-    #[test]
-    fn only_an_absent_socket_with_no_launchd_job_is_no_daemon() {
-        use anyhow::Context;
-        // Built the way `daemon::request_within` builds its connect error.
-        let failed = |kind: std::io::ErrorKind| {
-            Err::<(), _>(std::io::Error::from(kind))
-                .with_context(|| "cannot reach the CodeConnect daemon".to_string())
-                .unwrap_err()
-        };
-        use std::io::ErrorKind::*;
-        assert!(no_daemon_and_no_job(&failed(NotFound), || false));
-        assert!(no_daemon_and_no_job(&failed(ConnectionRefused), || false));
-        assert!(!no_daemon_and_no_job(&failed(NotFound), || true));
-        assert!(!no_daemon_and_no_job(&failed(ConnectionRefused), || true));
-        let unasked = || panic!("launchd asked about a failure that proves nothing");
-        for kind in [WouldBlock, TimedOut, BrokenPipe, PermissionDenied] {
-            assert!(!no_daemon_and_no_job(&failed(kind), unasked), "{kind:?}");
-        }
-        assert!(!no_daemon_and_no_job(
-            &anyhow::anyhow!("ccd closed the connection"),
-            unasked
-        ));
-    }
-
-    /// The toggled-off state's ASCII grammar: a heading, the explanation, the
-    /// command isolated on its own line, what the daemon does about the toggle,
-    /// and the assurance pair.
-    ///
-    /// Asserted as the parts that have to be there, not as one frozen string.
-    /// The sentence this note carries about restarting rests on a single
-    /// observation of a single Mac, and a test that pinned it word for word
-    /// would make the claim harder to withdraw than to keep — which is how
-    /// prose outlives the evidence for it. The structure is what the reader
-    /// needs; the wording stays free to become more honest.
-    #[test]
-    fn the_toggled_off_note_reads_as_the_advisory_grammar() {
-        let note = phone_reachability_note(
-            "mac.tailnet.ts.net",
-            Some("100.64.0.7"),
-            TailscaleSignal::Down,
-            update_check::Style::Ascii,
-            crate::pair::BindCause::Tailnet,
-        )
-        .unwrap();
-        let mut lines = note.lines();
-        assert_eq!(lines.next(), Some("Phone unreachable"));
-        assert_eq!(lines.next(), Some("Tailscale is off on this computer."));
-        assert_eq!(lines.next(), Some(""));
-        assert_eq!(
-            lines.next(),
-            Some(format!("{RECONNECT_TAILSCALE}, or run:").as_str())
-        );
-        assert_eq!(lines.next(), Some(""));
-        assert_eq!(
-            lines.next(),
-            Some(TAILSCALE_UP),
-            "the command has to stand on its own line to be copyable"
-        );
-        assert!(
-            note.contains("This session is unaffected"),
-            "the assurance pair closes the note: {note}"
-        );
-
-        // The claim itself, held to what has been watched happen. The daemon
-        // keeping its bind is a property of the socket; a phone reaching it
-        // again on every Mac and every toggle is not something one observation
-        // establishes, so the note must not put it as a certainty.
-        assert!(
-            note.contains("holds its tailnet address"),
-            "what the daemon does is the part that is known: {note}"
-        );
-        assert!(
-            !note.contains("Nothing needs restarting"),
-            "one measurement of one Mac does not settle every Mac: {note}"
-        );
-        assert!(
-            note.contains("restart the daemon"),
-            "the reader needs the way out when the standing bind does not \
-             revive: {note}"
-        );
-    }
-
-    /// The two inputs are not interchangeable, which is the whole reason both
-    /// are taken. A daemon is advertised under a name whenever it has one that
-    /// reaches its own listener, so the host settles nothing about where the
-    /// socket is bound — and the advice that only a tailnet bind can keep is
-    /// therefore read off the bind alone.
-    #[test]
-    fn the_toggled_off_advice_reads_the_bind_and_never_the_advertised_host() {
-        use update_check::Style;
-        use TailscaleSignal::Down;
-
-        // A tailnet bind behind a hostname: the advice is owed, and the host
-        // is no help in working that out.
-        assert!(
-            phone_reachability_note(
-                "mac.tailnet.ts.net",
-                Some("100.64.0.7"),
-                Down,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet
-            )
-            .is_some(),
-            "a daemon on a tailnet address revives with the tunnel however it \
-             happens to be advertised"
-        );
-        // The same name over a bind that is not the tailnet's. Nothing here
-        // comes back with `tailscale up`, so nothing is promised.
-        assert_eq!(
-            phone_reachability_note(
-                "mac.tailnet.ts.net",
-                Some("192.168.1.10"),
-                Down,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet
-            ),
-            None,
-            "advice that only a tailnet bind can keep must not follow a name"
-        );
-        // And a daemon too old to report its bind gets silence: an absent
-        // bind is not evidence of a tailnet one.
-        assert_eq!(
-            phone_reachability_note(
-                "mac.tailnet.ts.net",
-                None,
-                Down,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet
-            ),
-            None,
-            "an unreported bind is not a tailnet bind"
-        );
-        // The host is still read for the one thing it does settle on its own:
-        // an advertised address no phone can reach is unreachable whatever the
-        // socket is bound to.
-        assert!(
-            phone_reachability_note(
-                "127.0.0.1",
-                Some("100.64.0.7"),
-                Down,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet
-            )
-            .is_some(),
-            "a loopback advertisement is unreachable on its own terms"
-        );
-    }
-
-    /// The pre-attach warning across its states, in the shared advisory
-    /// grammar: one heading, the state's own explanation, the state's own
-    /// remedy with its command isolated, the assurance — and each state
-    /// names *its* fix, because they differ.
-    #[test]
-    fn the_phone_reachability_note_matches_the_apps_vocabulary() {
-        // An unreachable bind that `ws_bind` chose is `ws_bind`'s to fix, never
-        // Tailscale's — whatever Tailscale is doing.
-        use crate::pair::BindCause;
-        for signal in [TailscaleSignal::Up, TailscaleSignal::NotInstalled] {
-            let named = phone_reachability_note(
-                "127.0.0.1",
-                Some("127.0.0.1"),
-                signal,
-                update_check::Style::Ascii,
-                BindCause::Named,
-            )
-            .expect("an explicit loopback warns");
-            assert!(named.contains("Set `ws_bind`"), "{named}");
-            assert!(!named.contains("Tailscale ("), "{named}");
-            assert!(!named.contains("Set up Tailscale"), "{named}");
-            let pending = phone_reachability_note(
-                "127.0.0.1",
-                Some("127.0.0.1"),
-                signal,
-                update_check::Style::Ascii,
-                BindCause::Pending("192.168.1.20".parse().unwrap()),
-            )
-            .expect("an unapplied ws_bind warns");
-            assert!(pending.contains("\n\n192.168.1.20\n\n"), "{pending}");
-            assert!(
-                pending.contains("has not applied the `ws_bind`"),
-                "{pending}"
-            );
-            assert!(pending.contains("codeconnect daemon restart"), "{pending}");
-        }
-
-        use update_check::Style;
-        use TailscaleSignal::*;
-        let note = |host: &str, bind: Option<&str>, signal| {
-            phone_reachability_note(
-                host,
-                bind,
-                signal,
-                Style::Ascii,
-                crate::pair::BindCause::Tailnet,
-            )
-        };
-
-        // Bound wrong (daemon started before the tailnet): restart required.
-        let bound_wrong = note("127.0.0.1", Some("127.0.0.1"), Up).expect("loopback warns");
-        assert!(bound_wrong.starts_with("Phone unreachable\n"));
-        assert!(bound_wrong.contains("127.0.0.1"));
-        assert!(bound_wrong.contains("Connect Tailscale"));
-        assert!(bound_wrong.contains("codeconnect daemon restart"));
-        assert!(
-            bound_wrong.contains("unaffected"),
-            "the note must say the session itself is fine: {bound_wrong}"
-        );
-        assert!(bound_wrong.is_ascii(), "ascii style stays ascii");
-
-        // Tailscale absent entirely: set-up instruction, URL isolated.
-        let missing = note("127.0.0.1", Some("127.0.0.1"), NotInstalled).expect("loopback warns");
-        assert!(missing.contains("Set up Tailscale"));
-        assert!(missing.contains("\nhttps://tailscale.com/download\n"));
-
-        // Bound to the tailnet, backend stopped afterwards: connecting it back
-        // is the first thing to try, because the daemon holds its bind across
-        // the toggle. That the phone then reaches it on every Mac is a stronger
-        // claim than the one observation behind it, so the note offers the
-        // restart as a fallback rather than ruling it out.
-        let toggled_off =
-            note("mac.tailnet.ts.net", Some("100.64.0.7"), Down).expect("dead tailnet warns");
-        assert!(toggled_off.contains("Tailscale is off on this computer"));
-        assert!(toggled_off.contains("holds its tailnet address"));
-        assert!(toggled_off.contains(&format!("\n{TAILSCALE_UP}\n")));
-        assert!(
-            toggled_off.contains("restart the daemon"),
-            "the standing bind is the expectation, not a guarantee: {toggled_off}"
-        );
-
-        // Styled: the heading carries the impairment colour; the command is
-        // bold; the ascii variant carries neither.
-        let styled = phone_reachability_note(
-            "mac.tailnet.ts.net",
-            Some("100.64.0.7"),
-            Down,
-            Style::Styled,
-            crate::pair::BindCause::Tailnet,
-        )
-        .unwrap();
-        assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
-        assert!(styled.contains(&format!("\u{1b}[1m{TAILSCALE_UP}\u{1b}[0m")));
-
-        // Silence, each for its own reason.
-        assert_eq!(
-            note("mac.tailnet.ts.net", Some("100.64.0.7"), Up),
-            None,
-            "healthy earns silence"
-        );
-        assert_eq!(
-            note("mac.tailnet.ts.net", Some("192.168.1.20"), Down),
-            None,
-            "an operator's explicit LAN bind gets no Tailscale advice"
-        );
-        assert_eq!(
-            note("mac.tailnet.ts.net", None, Down),
-            None,
-            "an older daemon that cannot report its bind gets silence, not a guess"
-        );
-        assert_eq!(
-            note("mac.tailnet.ts.net", Some("100.64.0.7"), Unknown),
-            None,
-            "a failed probe is not evidence; stay quiet"
-        );
-        assert_eq!(
-            note("mac.tailnet.ts.net", Some("100.64.0.7"), NotInstalled),
-            None,
-            "a tailnet bind with no tailscale binary is a state the daemon \
-             could not have produced; stay silent rather than guess"
-        );
-    }
-
-    /// `BackendState` is the only liveness signal worth believing:
-    /// `tailscale ip -4` was measured printing the assigned address while
-    /// `status` said stopped. Unrecognised states — including transitional
-    /// ones — are Unknown, never Down.
-    #[test]
-    fn the_tailscale_probe_believes_backend_state_only() {
-        use TailscaleSignal::*;
-        assert_eq!(parse_backend_state(r#"{"BackendState":"Running"}"#), Up);
-        assert_eq!(parse_backend_state(r#"{"BackendState":"Stopped"}"#), Down);
-        assert_eq!(
-            parse_backend_state(r#"{"BackendState":"NeedsLogin"}"#),
-            Down
-        );
-        assert_eq!(
-            parse_backend_state(r#"{"BackendState":"NeedsMachineAuth"}"#),
-            Down
-        );
-        assert_eq!(
-            parse_backend_state(r#"{"BackendState":"Starting"}"#),
-            Unknown,
-            "transitional is not off"
-        );
-        assert_eq!(parse_backend_state("not json"), Unknown);
-        assert_eq!(parse_backend_state(""), Unknown);
-        assert_eq!(parse_backend_state(r#"{"Version":"1.94"}"#), Unknown);
-    }
-
-    /// Which addresses are the tailnet's to explain: the CGNAT v4 range and
-    /// Tailscale's own `fd7a:115c:a1e0::/48` — not all of `fd7a::/16`, which
-    /// is ordinary ULA space anyone may use.
-    #[test]
-    fn tailnet_shaped_ips_are_cgnat_and_the_tailscale_48_only() {
-        assert!(tailnet_shaped_ip("100.64.0.1"));
-        assert!(tailnet_shaped_ip("100.101.102.103"));
-        assert!(tailnet_shaped_ip("100.127.255.254"));
-        assert!(
-            !tailnet_shaped_ip("100.128.0.1"),
-            "the CGNAT range ends at 100.127"
-        );
-        assert!(!tailnet_shaped_ip("100.63.255.255"));
-        assert!(!tailnet_shaped_ip("192.168.1.20"));
-        assert!(tailnet_shaped_ip("fd7a:115c:a1e0::1"));
-        assert!(
-            !tailnet_shaped_ip("fd7a:2222::1"),
-            "a stranger's ULA in fd7a::/16 is not Tailscale's"
-        );
-        assert!(
-            !tailnet_shaped_ip("mac.tailnet.ts.net"),
-            "names are not binds"
-        );
-    }
-
     // --------------------------------------------- adversarial: the diversion
     //
     // Written against the diversion rather than with it: each of these is an
@@ -1725,22 +628,16 @@ mod tests {
     /// scoping test below fails the moment an arm is added without a decision
     /// about whether the flag scan reaches it.
     const LIVE_COMMANDS: &[&str] = &[
-        "codex",
-        "attach",
-        "ls",
-        "list",
         "sessions",
         "token",
         "pair",
         "devices",
         "revoke",
         "daemon",
-        "supervise",
         "update",
         "install-staged",
         "--version",
         "version",
-        "--tmux-version",
         "help",
         "--help",
         "-h",
@@ -1748,10 +645,9 @@ mod tests {
 
     /// The scan reaches exactly two command words and no others.
     ///
-    /// `--ssh` under `codex` is `codex`'s, and under `supervise` is the
-    /// supervisor's. Widening the scan by a single arm would let this dispatch
-    /// eat an argument meant for another program — so the scoping is asserted
-    /// against the whole dispatch table, not against a sample of it.
+    /// Widening the scan by a single arm would let this dispatch eat an argument
+    /// another command takes — so the scoping is asserted against the whole
+    /// dispatch table, not against a sample of it.
     #[test]
     fn only_pair_and_revoke_are_scanned_for_the_flag() {
         for command in LIVE_COMMANDS {
@@ -1761,27 +657,6 @@ mod tests {
                 "`codeconnect {command} --ssh` is scoped wrong"
             );
         }
-        // And with the flag buried in an argv shaped like real passthrough use,
-        // including one that names the flag inside a prompt.
-        assert_eq!(
-            retired_command(
-                "codex",
-                &argv(&[
-                    "--model",
-                    "opus",
-                    "--ssh",
-                    "-p",
-                    "why did --ssh stop working"
-                ]),
-            ),
-            None,
-            "codex owns every one of its own arguments"
-        );
-        assert_eq!(
-            retired_command("supervise", &argv(&["--session", "cc1", "--cwd", "--ssh"])),
-            None,
-            "the supervisor owns its own arguments"
-        );
     }
 
     /// The flag is matched whole and exactly. Everything that merely resembles

@@ -594,7 +594,6 @@ pub struct DaemonInfo {
     /// `build unknown` rather than guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_id: Option<String>,
-    pub sessions: usize,
 }
 
 impl DaemonInfo {
@@ -1999,7 +1998,6 @@ mod tests {
             build_id: Some("227f6d4e1791".into()),
             endpoint_port: 8787,
             tls: true,
-            sessions: 2,
         };
         assert!(info.is_launchd_managed());
 

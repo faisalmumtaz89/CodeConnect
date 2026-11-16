@@ -6,23 +6,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// The ordered candidates: config `claude_bin`, then the `CODECONNECT_CLAUDE_BIN`
-/// override, then every `claude` on `PATH` in the order the shell tries them — so the
-/// claude a session runs is the one typing `claude` runs — and the well-known install
-/// locations last, for a `PATH` that has none: the native installer's, the legacy
-/// local npm install's, and Homebrew's on Apple silicon and on Intel.
-pub fn candidates(
-    configured: Option<&str>,
-    env_override: Option<PathBuf>,
-    home: &Path,
-    path_hits: Vec<PathBuf>,
-) -> Vec<PathBuf> {
+/// The ordered candidates: config `claude_bin`, then every `claude` on `PATH` in the
+/// order the shell tries them — so the claude a session runs is the one typing `claude`
+/// runs — and the well-known install locations last, for a `PATH` that has none: the
+/// native installer's, the legacy local npm install's, and Homebrew's on Apple silicon
+/// and on Intel.
+pub fn candidates(configured: Option<&str>, home: &Path, path_hits: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(configured) = configured {
         candidates.push(PathBuf::from(configured));
-    }
-    if let Some(env) = env_override {
-        candidates.push(env);
     }
     candidates.extend(path_hits);
     candidates.push(home.join(".local/bin/claude"));
@@ -83,11 +75,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_candidate_order_is_config_env_path_wellknown() {
+    fn claude_candidate_order_is_config_path_wellknown() {
         assert_eq!(
             candidates(
                 Some("/from/config/claude"),
-                Some(PathBuf::from("/from/env/claude")),
                 Path::new("/home/u"),
                 vec![
                     PathBuf::from("/first/on/path/claude"),
@@ -96,7 +87,6 @@ mod tests {
             ),
             vec![
                 PathBuf::from("/from/config/claude"),
-                PathBuf::from("/from/env/claude"),
                 PathBuf::from("/first/on/path/claude"),
                 PathBuf::from("/second/on/path/claude"),
                 PathBuf::from("/home/u/.local/bin/claude"),
