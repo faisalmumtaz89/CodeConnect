@@ -249,7 +249,7 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertTrue(decline.isHittable, "and is on screen to be tapped")
         decline.tap()
         XCTAssertTrue(
-            app.staticTexts["Declined from the phone, as Escape does at the computer."]
+            app.staticTexts["Declined, as Escape does at the computer."]
                 .waitForExistence(timeout: 10),
             "the decline was sent")
         XCTAssertFalse(app.buttons["question-decline"].exists)
