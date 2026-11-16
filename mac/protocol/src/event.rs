@@ -628,6 +628,8 @@ pub struct ModelFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunMenus {
     pub models: Vec<MenuModel>,
+    /// The permission modes an app may set, the agent's own default first: the mode that asks
+    /// before acting, which a run starts in when no setting names another (Claude's `default`).
     pub modes: Vec<MenuMode>,
     /// The value in `models` the run's model fact names, for an app to show as chosen (display
     /// only: the run's model is claude's). Read off claude's own start answer: the fact itself,
