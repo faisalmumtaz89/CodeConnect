@@ -967,7 +967,6 @@ struct SessionDetailView: View {
     @State private var showCompactSheet = false
     @State private var compactSheetPrefill = ""
     @State private var showClearConfirm = false
-    @State private var snapshotCommand: SnapshotCommand?
     @State private var composeResultClearTask: Task<Void, Never>?
     @State private var sending = false
     /// The tail-following verdict — a box read only by `TailPill`, never by
@@ -1161,20 +1160,6 @@ struct SessionDetailView: View {
             CompactSheet(sessionKey: key, prefill: compactSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
                 .ccResizableSheet()
-        }
-        .sheet(item: $snapshotCommand) { command in
-            SnapshotSheet(
-                sessionKey: key, command: command,
-                onLanded: consumeDraft
-            )
-            .environment(model)
-            // **One detent, and it is the tall one.** This sheet carries a
-            // captured screen; every point of height is another row of the
-            // Mac's grid the reader does not have to scroll for. Offering a
-            // second detent would not have opened it tall anyway —
-            // `presentationDetents` takes a `Set`, so the order written is
-            // not an order at all.
-            .ccTallSheet()
         }
         .alert(ClearConfirmation.title, isPresented: $showClearConfirm) {
             Button(ClearConfirmation.clear, role: .destructive) { performClear() }
@@ -1532,9 +1517,7 @@ struct SessionDetailView: View {
         // is just a message that happens to start with a slash, and it goes
         // through `compose` like any other.
         guard summary?.isCodex != true else { return nil }
-        return CommandPalette.content(
-            for: composeText,
-            recoversComposer: model.connection.capabilities?.recoversComposer == true)
+        return CommandPalette.content(for: composeText)
     }
 
     /// One place to show a compose outcome that did not go through `send()` —
@@ -1589,8 +1572,6 @@ struct SessionDetailView: View {
             showCompactSheet = true
         case .nativeClear:
             showClearConfirm = true
-        case .nativeSnapshot(let command):
-            snapshotCommand = command
         case .blocked(_, let reason):
             noteComposeResult(.refused(reason))
         case .passThrough:

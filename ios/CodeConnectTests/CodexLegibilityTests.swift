@@ -87,11 +87,9 @@ final class CodexSlashPolicyTests: XCTestCase {
     /// The policy itself is unchanged and still classifies Claude's built-ins.
     /// What a Codex session adds is the branch in front of it.
     func testTheClaudePolicyStillClassifiesItsOwnCommands() {
-        guard case .nativeModel = ClaudeCommandPolicy.action(
-            for: "/model", recoversComposer: true)
+        guard case .nativeModel = ClaudeCommandPolicy.action(for: "/model")
         else { return XCTFail("/model is still Claude's own control") }
-        guard case .passThrough = ClaudeCommandPolicy.action(
-            for: "hello", recoversComposer: true)
+        guard case .passThrough = ClaudeCommandPolicy.action(for: "hello")
         else { return XCTFail("prose still passes through") }
     }
 

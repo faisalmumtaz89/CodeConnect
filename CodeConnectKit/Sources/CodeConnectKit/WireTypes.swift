@@ -927,7 +927,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
     let answerPath: AnswerPath
     let holdSecs: UInt64
     public let sendText: Bool
-    public let capture: Bool
     let push: Bool
     /// A minor-14 relay daemon advertises this instead of `push`: it sends
     /// through the CodeConnect relay, which needs an enrolled credential the
@@ -945,7 +944,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
         answerPath: AnswerPath = .sendKeys,
         holdSecs: UInt64 = 0,
         sendText: Bool = false,
-        capture: Bool = false,
         push: Bool = false,
         pushRelay: Bool = false,
         tls: Bool = false,
@@ -956,7 +954,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
         self.answerPath = answerPath
         self.holdSecs = holdSecs
         self.sendText = sendText
-        self.capture = capture
         self.push = push
         self.pushRelay = pushRelay
         self.tls = tls
@@ -966,7 +963,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
         map["answer_path"] = .string(answerPath.rawValue)
         map["hold_secs"] = .int(Int64(holdSecs))
         map["send_text"] = .bool(sendText)
-        map["capture"] = .bool(capture)
         map["push"] = .bool(push)
         map["push_relay"] = .bool(pushRelay)
         map["tls"] = .bool(tls)
@@ -982,7 +978,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
             raw["answer_path"]?.stringValue.map(AnswerPath.init(wire:)) ?? .sendKeys
         holdSecs = (raw["hold_secs"]?.intValue).map { UInt64(max(0, $0)) } ?? 0
         sendText = raw["send_text"]?.boolValue ?? false
-        capture = raw["capture"]?.boolValue ?? false
         push = raw["push"]?.boolValue ?? false
         pushRelay = raw["push_relay"]?.boolValue ?? false
         tls = raw["tls"]?.boolValue ?? false
@@ -1010,11 +1005,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
     var sendTextIdempotent: Bool { advertises(["send_text_idempotent"]) }
     /// `get_command_catalog` is answerable.
     var servesCommandCatalog: Bool { advertises(["command_catalog"]) }
-    /// The daemon closes a Mac view its own injection opened, and reports
-    /// `composer_recovered` / `composer_lost`. False means the snapshot
-    /// commands must not be offered: their entire safety story is that the
-    /// daemon closes the view again.
-    public var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
     /// `list_projects` and `start_session` are answerable.
     public var startsSessions: Bool { advertises(["start_session"]) }
     /// `get_project_git` is answerable, and `start_session` takes a
@@ -1824,22 +1814,12 @@ public enum SendTextResult: Sendable, Hashable {
     /// refusal: a refusal promises nothing was typed, and this promises
     /// nothing at all.
     case indeterminate(reason: String)
-    /// The keys landed, the Mac's composer disappeared, and the daemon's own
-    /// Escape brought it back. As final as `.sent`. `paneSnapshot` is the
-    /// Mac's screen while the view was up — present only for the snapshot
-    /// commands, and never stored.
-    case composerRecovered(matched: String, paneSnapshot: String?, capturedAt: String)
-    /// The keys landed, the composer disappeared, and one Escape was not
-    /// enough. Somebody has to look at the Mac.
-    case composerLost(matched: String)
 }
 
 extension SendTextResult: Codable {
     private enum CodingKeys: String, CodingKey {
         case status, matched, reason
         case appliedAt = "applied_at"
-        case paneSnapshot = "pane_snapshot"
-        case capturedAt = "captured_at"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1853,13 +1833,6 @@ extension SendTextResult: Codable {
                 appliedAt: try c.decode(String.self, forKey: .appliedAt))
         case "indeterminate":
             self = .indeterminate(reason: try c.decode(String.self, forKey: .reason))
-        case "composer_recovered":
-            self = .composerRecovered(
-                matched: try c.decode(String.self, forKey: .matched),
-                paneSnapshot: try c.decodeIfPresent(String.self, forKey: .paneSnapshot),
-                capturedAt: try c.decode(String.self, forKey: .capturedAt))
-        case "composer_lost":
-            self = .composerLost(matched: try c.decode(String.self, forKey: .matched))
         case let other:
             // A status this build has never seen is a mutation result it
             // cannot vouch for. "Refused" would promise nothing was typed —
@@ -1885,14 +1858,6 @@ extension SendTextResult: Codable {
         case .indeterminate(let reason):
             try c.encode("indeterminate", forKey: .status)
             try c.encode(reason, forKey: .reason)
-        case .composerRecovered(let matched, let paneSnapshot, let capturedAt):
-            try c.encode("composer_recovered", forKey: .status)
-            try c.encode(matched, forKey: .matched)
-            try c.encodeIfPresent(paneSnapshot, forKey: .paneSnapshot)
-            try c.encode(capturedAt, forKey: .capturedAt)
-        case .composerLost(let matched):
-            try c.encode("composer_lost", forKey: .status)
-            try c.encode(matched, forKey: .matched)
         }
     }
 }
@@ -2148,7 +2113,6 @@ public enum ClientMessage: Sendable {
     case sendText(
         session: String, text: String, require: PromptPresence?, submit: Bool,
         requestID: String?, payloadHash: String?, completeNativeConfirmation: Bool)
-    case capture(session: String, lines: UInt32?)
     case getDiff(session: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
@@ -2267,7 +2231,6 @@ extension ClientMessage: Encodable {
         case text
         case require
         case submit
-        case lines
         case completeNativeConfirmation = "complete_native_confirmation"
         case attachmentID = "attachment_id"
         case cols
@@ -2356,10 +2319,6 @@ extension ClientMessage: Encodable {
             // instruction: the daemon still decides which commands it applies
             // to, so this can never nominate one.
             try c.encode(completeNativeConfirmation, forKey: .completeNativeConfirmation)
-        case .capture(let session, let lines):
-            try c.encode("capture", forKey: .type)
-            try c.encode(session, forKey: .sessionID)
-            try c.encodeIfPresent(lines, forKey: .lines)
         case .registerPush(let token, let environment, let relayCredential):
             try c.encode("register_push", forKey: .type)
             try c.encode(token, forKey: .token)
@@ -2709,7 +2668,6 @@ public enum ServerMessage: Sendable {
         sessionID: String, requestID: String, beforeSeq: UInt64, firstSeq: UInt64, error: String?)
     case answerResult(requestID: String, result: AnswerResult)
     case sendTextResult(sessionID: String, result: SendTextResult)
-    case captureResult(sessionID: String, text: String)
     case commandCatalog(sessionID: String, result: CommandCatalogResult)
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case testPushResult(requestID: String, result: TestPushResult)
@@ -2795,7 +2753,6 @@ extension ServerMessage: Decodable {
         case requestID = "request_id"
         case sessionID = "session_id"
         case result
-        case text
         case code
         case message
         case attachmentID = "attachment_id"
@@ -2863,10 +2820,6 @@ extension ServerMessage: Decodable {
             self = .deleteSessionResult(
                 sessionUID: try c.decode(String.self, forKey: .sessionUID),
                 result: try c.decode(DeleteSessionResult.self, forKey: .result))
-        case "capture_result":
-            self = .captureResult(
-                sessionID: try c.decode(String.self, forKey: .sessionID),
-                text: try c.decode(String.self, forKey: .text))
         case "command_catalog":
             self = .commandCatalog(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

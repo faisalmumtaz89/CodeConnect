@@ -1,30 +1,5 @@
 import Foundation
 
-/// The Mac views the phone may capture: one Settings dialog on the Mac, three
-/// commands that open it. Each opens the reusable snapshot sheet.
-public enum SnapshotCommand: String, CaseIterable, Identifiable {
-    case status, usage, cost
-
-    public var id: String { rawValue }
-
-    /// The sheet's title — naming the phone's promise (a Mac capture), not
-    /// Claude's internal tab names.
-    ///
-    /// **`/cost` is titled "Usage", because that is the view it opens.**
-    /// Measured on 2.1.223: injecting `/cost` makes Claude Code record
-    /// `<command-name>/usage</command-name>` in the transcript and render a
-    /// pane identical to `/usage`'s. Titling it "Cost" promised a third view
-    /// that does not exist. The sheet prints the command actually typed
-    /// beneath this title, so it reads "Usage · /cost" — the view you got, and
-    /// how you got there.
-    public var title: String {
-        switch self {
-        case .status: return "Computer status"
-        case .usage, .cost: return "Usage"
-        }
-    }
-}
-
 /// What the composer should do with one piece of typed text, decided before
 /// anything reaches the Mac.
 public enum CommandAction: Equatable {
@@ -52,9 +27,6 @@ public enum CommandAction: Equatable {
     case nativeCompact(prefillInstructions: String)
     /// Bare `/clear` — the destructive confirmation, no intermediate sheet.
     case nativeClear
-    /// `/status`, `/usage`, `/cost` — the snapshot sheet, which captures
-    /// the Mac view these commands open and closes it again.
-    case nativeSnapshot(SnapshotCommand)
     /// A built-in this app will not inject, with the honest sentence why.
     /// Blocking beats "send and warn": a warning followed by a measured
     /// lockout is not a safeguard.
@@ -71,7 +43,7 @@ public enum CommandAction: Equatable {
 /// Every list here is *measured* — each command injected exactly as the
 /// daemon injects it, with the composer-presence needle sampled on a timing
 /// ladder afterwards. None of it is a guess about what a command is, and none
-/// of it is the binary's own inventory: see `action(for:recoversComposer:)`.
+/// of it is the binary's own inventory: see `action(for:)`.
 public enum ClaudeCommandPolicy {
 
     /// Commands **measured** to take the Mac's composer away — every one of
@@ -81,10 +53,8 @@ public enum ClaudeCommandPolicy {
     /// the daemon refuses every send, so the phone is locked out of its own
     /// session.
     ///
-    /// **This list is the fast path, not the safety guarantee.** The
-    /// guarantee is the supervisor's post-injection recovery check; this
-    /// list means the common cases are refused client-side and never typed
-    /// at all. Two of them are the reason the list must exist regardless:
+    /// They are refused client-side and never typed at all. Two of them are
+    /// the reason the list must exist regardless:
     /// `config` and `keybindings` survive Escape — `keybindings` spawns
     /// **vim** on a config file, where Escape is a mode key — so no
     /// automatic recovery can rescue them.
@@ -99,18 +69,15 @@ public enum ClaudeCommandPolicy {
         "mcp",
     ]
 
-    /// Measured to open a view that **one Escape does not close** — the
-    /// supervisor's recovery cannot save these, so they are refused with
-    /// their own sentence rather than the generic one.
+    /// Measured to open a view that **one Escape does not close**, so they are
+    /// refused with their own sentence rather than the generic one.
     static let unrecoverableCommands: Set<String> = ["config", "keybindings"]
 
     /// Commands this app answers itself rather than typing: sheets for
-    /// `/model`, `/effort` and `/compact`, a confirmation for `/clear`, the
-    /// native diff for `/diff`, and — when the daemon can recover the
-    /// composer — the snapshot sheet for `/status`, `/usage` and `/cost`.
+    /// `/model`, `/effort` and `/compact`, a confirmation for `/clear`, and the
+    /// native diff for `/diff`.
     static let nativeCommands: Set<String> = [
         "model", "diff", "effort", "compact", "clear",
-        "status", "usage", "cost",
     ]
 
     /// Refused because CodeConnect cannot observe the result: the Mac's
@@ -126,20 +93,16 @@ public enum ClaudeCommandPolicy {
     }
 
     /// Classification, in the order the measurements justify.
-    /// `recoversComposer` is the daemon's `slash_composer_recovery`
-    /// capability — the snapshot trio open a Mac view on purpose and are
-    /// only offered when the daemon is proven able to close it again.
     ///
     /// **The discovered catalog is deliberately not a parameter.** It was,
     /// and it was wrong: the probe lists 43 commands and omits real built-ins
     /// including `/status`, `/cost`, `/help` and `/export` — all four
     /// measured to take the composer away — so "absent from the catalog" was
     /// read as "harmless custom skill" and typed, which is the lockout this
-    /// feature exists to prevent. Safety is the measured lists below plus the
-    /// supervisor's post-injection recovery. Taking the argument away is
-    /// stronger than a test forbidding its use: the mistake cannot be
+    /// feature exists to prevent. Safety is the measured lists below. Taking
+    /// the argument away is stronger than a test forbidding its use: the mistake cannot be
     /// written here again.
-    public static func action(for text: String, recoversComposer: Bool) -> CommandAction {
+    public static func action(for text: String) -> CommandAction {
         guard let command = firstToken(text) else { return .passThrough }
         let args = arguments(of: text, command: command)
         if command == "model" {
@@ -164,23 +127,6 @@ public enum ClaudeCommandPolicy {
             }
             return .nativeClear
         }
-        if let snapshot = SnapshotCommand(rawValue: command) {
-            guard args.isEmpty else {
-                return .blocked(
-                    command: command,
-                    reason:
-                        "/\(command) takes no arguments here. Remove the "
-                        + "extra text to capture \(HostDevice.current.computer("the computer"))'s view.")
-            }
-            guard recoversComposer else {
-                return .blocked(
-                    command: command,
-                    reason:
-                        "This session cannot recover slash-command views "
-                        + "safely yet. Restart it after updating CodeConnect.")
-            }
-            return .nativeSnapshot(snapshot)
-        }
         if unrecoverableCommands.contains(command) {
             return .blocked(
                 command: command,
@@ -202,9 +148,7 @@ public enum ClaudeCommandPolicy {
                     "/\(command) changes something CodeConnect cannot yet observe.")
         }
         // Everything else — a measured-inline built-in, a custom skill, a
-        // project command, a typo — is typed. The supervisor's recovery
-        // check is what makes that safe: if the composer disappears anyway,
-        // it presses Esc and says so, rather than leaving the phone locked.
+        // project command, a typo — is typed.
         return .passThrough
     }
 

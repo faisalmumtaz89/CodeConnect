@@ -762,14 +762,10 @@ enum RenderCatalog {
                 try driver.require(app.buttons["session-more"], "the session detail")
             }),
 
-        // **The slash palette and its eight native commands.** Every state
+        // **The slash palette and its five native commands.** Every state
         // here shipped broken once for want of a photograph: the first
         // palette read as "Mac only" scolding, and the first /model sheet
-        // wore raw ids and a disabled-at-rest button. The fixture daemon
-        // advertises `slash_composer_recovery`, so the full eight-row
-        // discovery card is the state rendered; the snapshot rows' capability
-        // omission is covered by unit tests, not a photograph — a shorter
-        // list is not a distinct visual risk.
+        // wore raw ids and a disabled-at-rest button.
         RenderScenario(
             name: "session-palette",
             purpose: "bare / — every native row, the caption, the ~4-row scroll cap",
@@ -797,8 +793,8 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "/compact", in: app), "the /compact row")
                 try driver.require(
-                    driver.element(containing: "/cost", in: app), "the /cost row",
-                    scrollingWithin: driver.list(holding: "/cost", in: app))
+                    driver.element(containing: "/clear", in: app), "the /clear row",
+                    scrollingWithin: driver.list(holding: "/clear", in: app))
             }),
         // **Opened on the session that carries the facts.** `fx-4`'s log
         // holds a SessionStart with the raw hook id `claude-opus-5[1m]` and a
@@ -893,31 +889,6 @@ enum RenderCatalog {
                 try driver.openPaletteRow(app, fragment: "/cl", row: "/clear")
                 try driver.require(app.buttons["Clear context"], "the destructive action")
             }),
-        RenderScenario(
-            name: "session-snapshot-captured",
-            purpose: "a /status capture — the measured 80-column pane, verbatim",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "recovered",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/st", row: "/status")
-                try driver.require(
-                    driver.text(containing: "pressed Esc", in: app), "the recovery footer")
-            }),
-        RenderScenario(
-            name: "session-snapshot-lost",
-            purpose: "the capture whose Escape failed — no retry, Terminal only",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "lost",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/st", row: "/status")
-                try driver.require(
-                    driver.text(containing: "Couldn’t restore the composer", in: app),
-                    "the honest failure")
-            }),
 
         // ---------------------------------------------------------------
         //  The "no change" states.
@@ -979,20 +950,6 @@ enum RenderCatalog {
                     "the unconfirmed line")
             }),
         RenderScenario(
-            name: "session-model-composer-taken",
-            purpose: "the command took the composer and CodeConnect gave it back — no change claimed",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "recovered",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet")
-                try driver.require(
-                    driver.text(containing: "pressed Esc", in: app),
-                    "the observed-facts-only line")
-            }),
-        RenderScenario(
             name: "session-effort-kept",
             purpose: "the level was NOT changed, said plainly",
             arguments: [
@@ -1019,24 +976,6 @@ enum RenderCatalog {
                 try driver.require(
                     driver.text(containing: "this session only", in: app),
                     "the scope clause, verbatim from the receipt")
-            }),
-        RenderScenario(
-            name: "session-snapshot-cost-is-usage",
-            purpose: "/cost is titled Usage, because that is the view it opens",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "recovered",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/co", row: "/cost")
-                // **Exact label, not `contains`.** `text(containing:)` is
-                // `CONTAINS[c]` over the whole app, so "Usage" also matches the
-                // palette's own "/usage" row and its "Alias of /usage" subtitle
-                // sitting behind the sheet — the assertion would pass with the
-                // sheet still titled "Cost", which is the one thing this
-                // scenario exists to hold.
-                try driver.require(
-                    app.staticTexts["Usage"].firstMatch, "the sheet titled Usage")
             }),
         RenderScenario(
             name: "session-compact-already-sent",

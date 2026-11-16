@@ -44,9 +44,8 @@ struct CommandPalette: View {
     let content: Content
     let onAction: (CommandAction) -> Void
 
-    /// The eight native commands, in the order they are worth a thumb's
-    /// attention: the two levers, the two context acts, the diff, then the
-    /// three Mac captures.
+    /// The five native commands, in the order they are worth a thumb's
+    /// attention: the two levers, the two context acts, then the diff.
     static let allRows: [PaletteRow] = [
         PaletteRow(
             command: "model", subtitle: "Choose model", icon: "cpu",
@@ -65,40 +64,22 @@ struct CommandPalette: View {
             command: "diff", subtitle: "Review working-tree changes",
             icon: "plus-minus",
             action: .nativeDiff),
-        PaletteRow(
-            command: "status", subtitle: "Capture the computer's status view", icon: "info",
-            action: .nativeSnapshot(.status)),
-        PaletteRow(
-            command: "usage", subtitle: "Capture the computer's usage view", icon: "chart-bar",
-            action: .nativeSnapshot(.usage)),
-        // Kept as a row because Claude Code accepts `/cost` and a reader who
-        // thinks in cost should find it — but the subtitle states the measured
-        // fact instead of inventing a "cost view". See `SnapshotCommand.title`.
-        PaletteRow(
-            command: "cost", subtitle: "Alias of /usage", icon: "credit-card",
-            action: .nativeSnapshot(.cost)),
     ]
 
     /// The palette for one composer text, or `nil` for none. Bare `/` is the
     /// discovery moment: every available row plus the caption. A fragment
     /// filters case-insensitively. Whitespace after the fragment means
-    /// arguments are coming, and arguments are typing, not browsing. The
-    /// snapshot rows exist only when the daemon can close the Mac view they
-    /// open — omitted, never disabled.
-    static func content(for typed: String, recoversComposer: Bool) -> Content? {
+    /// arguments are coming, and arguments are typing, not browsing.
+    static func content(for typed: String) -> Content? {
         let afterLeading = typed.drop(while: \.isWhitespace)
         guard afterLeading.hasPrefix("/") else { return nil }
         let fragment = afterLeading.dropFirst()
-        let available = allRows.filter { row in
-            if case .nativeSnapshot = row.action { return recoversComposer }
-            return true
-        }
         if fragment.isEmpty {
-            return Content(rows: available, showsCaption: true)
+            return Content(rows: allRows, showsCaption: true)
         }
         guard !fragment.contains(where: \.isWhitespace) else { return nil }
         let needle = fragment.lowercased()
-        let matches = available.filter { $0.command.hasPrefix(needle) }
+        let matches = allRows.filter { $0.command.hasPrefix(needle) }
         return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
     }
 

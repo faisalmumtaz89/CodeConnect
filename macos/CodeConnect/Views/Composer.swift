@@ -316,17 +316,11 @@ private struct Composer: View {
         case .nativeDiff:
             // Kit's policy refuses it, before the wire, in its own words: they point to the Changes tab.
             Task { noteResult(await model.send(text: draft, to: key)) }
-        case .nativeSnapshot(let command):
-            noteResult(.refused(takesComposer("/\(command.rawValue)")))
         case .blocked(_, let reason):
             noteResult(.refused(reason))
         case .passThrough:
             break
         }
-    }
-
-    private func takesComposer(_ command: String) -> String {
-        "\(command) opens a view on \(computer) and would take over this composer."
     }
 
     /// A choice in a hosted run's list answers the `/model` or `/effort` that opened it: those words leave the box, as a

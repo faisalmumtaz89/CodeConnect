@@ -9,10 +9,8 @@ import XCTest
 /// prose and the user's own skills included.
 final class ClaudeCommandPolicyTests: XCTestCase {
 
-    /// Most policy questions do not depend on the recovery capability;
-    /// this default keeps those tests about what they test.
     private func action(_ text: String) -> CommandAction {
-        ClaudeCommandPolicy.action(for: text, recoversComposer: true)
+        ClaudeCommandPolicy.action(for: text)
     }
 
     func testModelIsTheNativeAdapterWithAndWithoutArguments() {
@@ -54,25 +52,16 @@ final class ClaudeCommandPolicyTests: XCTestCase {
         XCTAssertTrue(reason.contains("without arguments"), reason)
     }
 
-    /// The three snapshot commands open a Mac view on purpose — offered
-    /// only when the daemon has proven it can close that view again.
-    func testSnapshotCommandsRequireTheRecoveryCapability() {
-        for (typed, command) in [
-            ("/status", SnapshotCommand.status),
-            ("/usage", .usage),
-            ("/cost", .cost),
-        ] {
-            XCTAssertEqual(action(typed), .nativeSnapshot(command), typed)
-            guard
-                case .blocked(_, let reason) = ClaudeCommandPolicy.action(
-                    for: typed, recoversComposer: false)
-            else { return XCTFail("\(typed) must be refused below minor 9") }
-            XCTAssertTrue(reason.contains("Restart it after updating"), reason)
+    /// `/status`, `/usage` and `/cost` are measured dialog commands like the rest, refused before typing: the app has no
+    /// view of its own for them.
+    func testStatusUsageAndCostAreRefusedAsDialogCommands() {
+        for command in ["status", "usage", "cost"] {
+            guard case .blocked(let blocked, let reason) = action("/\(command)") else {
+                return XCTFail("/\(command) must be refused")
+            }
+            XCTAssertEqual(blocked, command)
+            XCTAssertTrue(reason.contains("take over this composer"), reason)
         }
-        guard case .blocked(_, let reason) = action("/status now") else {
-            return XCTFail("/status with arguments must be refused")
-        }
-        XCTAssertTrue(reason.contains("no arguments"), reason)
     }
 
     /// Every command in the refuse set was MEASURED to take the Mac's
@@ -87,7 +76,7 @@ final class ClaudeCommandPolicyTests: XCTestCase {
         }
     }
 
-    /// The two the recovery net cannot save: measured to survive Escape —
+    /// The two measured to survive Escape —
     /// `/keybindings` opens vim, where Escape is a mode key.
     func testUnrecoverableCommandsSayWhyTheyAreDifferent() {
         for command in ["config", "keybindings"] {
@@ -111,12 +100,8 @@ final class ClaudeCommandPolicyTests: XCTestCase {
     /// Neither app has a terminal, so no refusal sends the reader to one: each ends at why the command is not
     /// available here.
     func testNoRefusalSendsTheReaderToATerminal() {
-        let refusals: [(String, Bool)] = [
-            ("/clear everything", true), ("/status", false), ("/help", true), ("/config", true), ("/rename new", true),
-        ]
-        for (typed, recovers) in refusals {
-            guard case .blocked(_, let reason) = ClaudeCommandPolicy.action(for: typed, recoversComposer: recovers)
-            else { return XCTFail("\(typed) must be refused") }
+        for typed in ["/clear everything", "/status", "/help", "/config", "/rename new"] {
+            guard case .blocked(_, let reason) = action(typed) else { return XCTFail("\(typed) must be refused") }
             XCTAssertFalse(reason.localizedCaseInsensitiveContains("terminal"), "\(typed): \(reason)")
         }
     }
@@ -152,16 +137,13 @@ final class ClaudeCommandPolicyTests: XCTestCase {
 @MainActor
 final class PaletteContentTests: XCTestCase {
 
-    private func rows(_ typed: String, recovers: Bool = true) -> [String]? {
-        CommandPalette.content(for: typed, recoversComposer: recovers)?
-            .rows.map(\.command)
+    private func rows(_ typed: String) -> [String]? {
+        CommandPalette.content(for: typed)?.rows.map(\.command)
     }
 
     func testBareSlashIsDiscoveryWithEveryRowAndTheCaption() {
-        let content = CommandPalette.content(for: "/", recoversComposer: true)
-        XCTAssertEqual(
-            content?.rows.map(\.command),
-            ["model", "effort", "compact", "clear", "diff", "status", "usage", "cost"])
+        let content = CommandPalette.content(for: "/")
+        XCTAssertEqual(content?.rows.map(\.command), ["model", "effort", "compact", "clear", "diff"])
         XCTAssertEqual(content?.showsCaption, true)
         XCTAssertEqual(
             rows("  /"), rows("/"),
@@ -169,25 +151,16 @@ final class PaletteContentTests: XCTestCase {
         XCTAssertNil(rows("/ "), "trailing whitespace means typing has moved on")
     }
 
-    /// Rows the daemon cannot honour are omitted, never disabled: a
-    /// pre-minor-9 daemon shows five rows, not three dead ones.
-    func testSnapshotRowsAreOmittedWithoutTheRecoveryCapability() {
-        XCTAssertEqual(
-            rows("/", recovers: false),
-            ["model", "effort", "compact", "clear", "diff"])
-        XCTAssertNil(rows("/st", recovers: false), "no row, no palette")
-    }
-
     func testFragmentsFilterCaseInsensitively() {
         XCTAssertEqual(rows("/m"), ["model"])
         XCTAssertEqual(rows("/MODEL"), ["model"])
-        XCTAssertEqual(rows("/c"), ["compact", "clear", "cost"])
-        XCTAssertEqual(rows("/co"), ["compact", "cost"])
+        XCTAssertEqual(rows("/c"), ["compact", "clear"])
+        XCTAssertEqual(rows("/co"), ["compact"])
         XCTAssertEqual(rows("/e"), ["effort"])
-        XCTAssertEqual(rows("/s"), ["status"])
-        for typed in ["/c", "/e", "/s"] {
+        XCTAssertNil(rows("/s"), "no row, no palette")
+        for typed in ["/c", "/e"] {
             XCTAssertEqual(
-                CommandPalette.content(for: typed, recoversComposer: true)?.showsCaption,
+                CommandPalette.content(for: typed)?.showsCaption,
                 false, "the caption belongs to discovery, not filtering")
         }
     }
@@ -204,7 +177,7 @@ final class PaletteContentTests: XCTestCase {
         for row in CommandPalette.allRows {
             XCTAssertEqual(
                 row.action,
-                ClaudeCommandPolicy.action(for: "/\(row.command)", recoversComposer: true),
+                ClaudeCommandPolicy.action(for: "/\(row.command)"),
                 row.command)
         }
     }
