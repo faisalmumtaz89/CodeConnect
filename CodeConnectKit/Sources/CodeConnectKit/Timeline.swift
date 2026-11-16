@@ -118,6 +118,11 @@ public struct NoticeItem: Sendable, Hashable {
     /// A task report, so a woken run reads Running until the agent replies.
     static let mailWake = NoticeItem(
         kind: .taskReport, symbol: "chat-text", title: "Reading CodeConnect mail", detail: nil, severity: .info)
+
+    /// The conversation was reset: a terminal run's `/clear` invocation, or ccd's `conversation_cleared` notice on a
+    /// hosted run.
+    static let conversationCleared = NoticeItem(
+        kind: .other, symbol: "eraser", title: "Conversation cleared.", detail: nil, severity: .info)
 }
 
 public struct TimelineItem: Sendable, Hashable, Identifiable {
@@ -382,15 +387,7 @@ public enum TimelineBuilder {
                             // next-task`), and `/new` and `/reset` are recorded
                             // as `/clear` (2.1.289).
                             if command == "/clear" {
-                                items.append(
-                                    event.item(
-                                        .notice(
-                                            NoticeItem(
-                                                kind: .other,
-                                                symbol: "eraser",
-                                                title: "Conversation cleared.",
-                                                detail: nil,
-                                                severity: .info))))
+                                items.append(event.item(.notice(.conversationCleared)))
                             } else {
                                 items.append(
                                     event.item(
@@ -616,7 +613,7 @@ public enum TimelineBuilder {
             case .sessionStart:
                 runEnded = false
                 if atSessionTop { break }
-                guard let title = startTitle(source: event.payload["source"]?.stringValue)
+                guard let title = startTitle(source: event.payload["source"]?.stringValue, origin: event.source)
                 else { break }
                 items.append(
                     event.item(
@@ -680,11 +677,19 @@ public enum TimelineBuilder {
     /// it (2.1.289: `startup`, `resume`, `clear`, `compact`, `fork`). A resume
     /// or a compaction is the same session going on; `/clear` already has its
     /// row, "Conversation cleared.", so its start draws none.
-    private static func startTitle(source: String?) -> String? {
+    ///
+    /// A hosted run's agent host files a start for every init claude sends: a
+    /// launch's first says `startup`, a clear's says `clear`, and each later
+    /// turn's says nothing, so a hosted start with no source is a turn going
+    /// on and draws none. A Codex start never says what started it (ccd's Codex
+    /// adapter files the thread's folder, rollout and CLI version only), so it
+    /// keeps its row.
+    private static func startTitle(source: String?, origin: EventSource) -> String? {
         switch source {
         case "resume": return "Session resumed"
         case "compact": return "Conversation compacted"
         case "clear": return nil
+        case nil where origin == .sdk: return nil
         default: return "Session started"
         }
     }
@@ -821,6 +826,10 @@ public enum TimelineBuilder {
                 title: "Agent finished",
                 detail: event.notificationMessage,
                 severity: .success)
+        case EngineNotice.conversationCleared:
+            // ccd's own notice that a hosted run's `/clear` reset the conversation: the row a terminal run's clear
+            // draws, once. Drawn by its type, it said the words twice, as title and detail.
+            return .conversationCleared
         case EngineNotice.mailNudge:
             // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
             // words to the agent, not the reader's, so the row is the one a Codex wake draws.

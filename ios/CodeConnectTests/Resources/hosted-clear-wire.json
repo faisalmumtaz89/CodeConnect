@@ -1,0 +1,192 @@
+{
+  "session_hosted_live": {
+    "agent": "claude",
+    "blocked_on": [],
+    "claude_session_id": "23412b6b-2af7-41d0-bbc4-0679c536ae99",
+    "codex_link": "none",
+    "created_at": "2026-11-15T09:00:00.000Z",
+    "cwd": "/tmp/cc-sdk-rig/qa/capture/repo",
+    "last_seq": 7,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Default (recommended)",
+          "value": "default"
+        },
+        {
+          "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "Sonnet",
+          "value": "sonnet"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Ask before edits",
+          "value": "default"
+        },
+        {
+          "label": "Accept edits",
+          "value": "acceptEdits"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        }
+      ],
+      "selected_model": "sonnet"
+    },
+    "model": {
+      "at": "2026-11-15T09:00:00.000Z",
+      "seq": 5,
+      "source": "session_start",
+      "value": "claude-sonnet-5-5"
+    },
+    "permission_mode": {
+      "seq": 5,
+      "value": "default"
+    },
+    "project_label": "repo",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T09:00:00.000Z"
+  },
+  "session_hosted_live_events": [
+    {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 1,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "daemon",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "fix the tests"
+      },
+      "seq": 2,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "daemon",
+      "source_event_id": "say:6f1c2a5e-8b3d-4e7f-9a10-2c4d6e8f0a1b",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "request_id": "r-clear",
+        "text": "/clear"
+      },
+      "seq": 3,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "daemon",
+      "source_event_id": "say:9d3e5b7a-1c2f-4a6e-8b0d-3f5a7c9e1b2d",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "item_id": "3130f667-a648-46f9-8345-7f27cc7b9d31",
+      "kind": "notification",
+      "payload": {
+        "message": "Conversation cleared",
+        "notification_type": "conversation_cleared"
+      },
+      "seq": 4,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "3130f667-a648-46f9-8345-7f27cc7b9d31/notification/0",
+      "ts": "2026-11-16T00:00:00.000Z"
+    },
+    {
+      "item_id": "e74908e5-53c2-4eca-9e17-042f933a7abf",
+      "kind": "session_start",
+      "payload": {
+        "model": "claude-sonnet-5-5",
+        "permissionMode": "default",
+        "source": "clear"
+      },
+      "seq": 5,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "e74908e5-53c2-4eca-9e17-042f933a7abf/session_start/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "e74908e5-53c2-4eca-9e17-042f933a7abf"
+    },
+    {
+      "item_id": "139fa370-fbe9-4723-a534-5c9041d76b84",
+      "kind": "turn_complete",
+      "payload": {
+        "is_error": false,
+        "num_turns": 0,
+        "subtype": "success"
+      },
+      "seq": 6,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "139fa370-fbe9-4723-a534-5c9041d76b84/turn_complete/0",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "e74908e5-53c2-4eca-9e17-042f933a7abf"
+    },
+    {
+      "item_id": "139fa370-fbe9-4723-a534-5c9041d76b84",
+      "kind": "usage",
+      "payload": {
+        "total_cost_usd": 0,
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "",
+          "input_tokens": 0,
+          "iterations": [],
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        }
+      },
+      "seq": 7,
+      "session_id": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7C1EAR00",
+      "source": "sdk",
+      "source_event_id": "139fa370-fbe9-4723-a534-5c9041d76b84/usage/1",
+      "ts": "2026-11-16T00:00:00.000Z",
+      "turn_id": "e74908e5-53c2-4eca-9e17-042f933a7abf"
+    }
+  ]
+}
