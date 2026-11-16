@@ -1406,16 +1406,26 @@ private struct DiffCommentSheet: View {
     /// Never a dead button. Reads `actionsBlockedReason` so the sample fleet's
     /// controls stay live and answer in their own vocabulary at the send.
     private var blockedReason: CCDisabledReason? {
-        if let reason = model.actionsBlockedReason { return CCDisabledReason(reason) }
+        if let reason = admissionReason { return CCDisabledReason(reason) }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return CCDisabledReason("Nothing typed yet.")
+        }
+        return nil
+    }
+
+    /// Why this run cannot take a comment, or nil when it can. A Codex run uses the composer's own
+    /// admission — `composeBlocked`, the same gate the send applies, no second condition — so the button
+    /// disables for exactly what the send would refuse. A Claude run keeps the link/observe reason it
+    /// answers with.
+    private var admissionReason: String? {
+        if model.shownSummary(for: key)?.isCodex == true {
+            return model.composeBlocked(for: key)
+        }
+        if let reason = model.actionsBlockedReason { return reason }
         if let summary = model.shownSummary(for: key) {
             let capability = FleetStatusRule.capability(
                 summary: summary, capabilities: model.connection.capabilities)
-            if !capability.canAct, let reason = capability.reason {
-                return CCDisabledReason(reason)
-            }
-        }
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return CCDisabledReason("Nothing typed yet.")
+            if !capability.canAct, let reason = capability.reason { return reason }
         }
         return nil
     }
@@ -1455,15 +1465,21 @@ private struct DiffCommentSheet: View {
     }
 
     private func resultMessage(_ attempt: ComposeAttempt) -> String {
+        // A Codex run composes the comment as a message; a Claude run's computer types it into the TTY.
+        let isCodex = model.shownSummary(for: key)?.isCodex == true
         switch attempt {
-        case .sent(let matched): return "Your computer typed it into \(matched)."
+        case .sent(let matched):
+            return isCodex ? "Sent to \(matched)." : "Your computer typed it into \(matched)."
         case .refused(let reason), .failed(let reason):
             return reason
         case .indeterminate(let reason):
-            return "Couldn’t confirm whether the comment was typed: \(reason) "
-                + "Retry is safe; it won’t be typed twice."
+            return isCodex
+                ? "Couldn’t confirm whether the comment was sent: \(reason) Retry is safe; it won’t be sent twice."
+                : "Couldn’t confirm whether the comment was typed: \(reason) Retry is safe; it won’t be typed twice."
         case .alreadyApplied:
-            return "This comment was typed earlier and wasn’t repeated."
+            return isCodex
+                ? "This comment was sent earlier and wasn’t repeated."
+                : "This comment was typed earlier and wasn’t repeated."
         }
     }
 
