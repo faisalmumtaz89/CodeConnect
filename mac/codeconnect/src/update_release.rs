@@ -40,7 +40,7 @@ pub struct ReleaseAssets {
 
 /// The largest archive worth downloading.
 ///
-/// The three binaries are a few megabytes; the bound exists so a hostile or
+/// The two binaries are a few megabytes; the bound exists so a hostile or
 /// broken origin cannot stream indefinitely into a temporary directory. Stated
 /// generously — this is a backstop, not a size assertion.
 pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
@@ -50,7 +50,7 @@ pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 ///
 /// **A compressed bound is not an expanded bound.** A few megabytes of archive
 /// can hold an enormous file, and extraction happens before any signature is
-/// examined — so without this, four correctly named members could fill the disk
+/// examined — so without this, correctly named members could fill the disk
 /// while every other check was still waiting its turn.
 pub const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
@@ -68,12 +68,12 @@ const PLATFORM: &str = "linux-aarch64";
 ///
 /// **tmux and the agent host each have an archive of their own.** Every
 /// released updater takes the core archive by its exact name and refuses one
-/// holding anything beyond its four files, so either beside them would make
+/// holding anything beyond its own files, so either beside them would make
 /// the release uninstallable for every machine that has not updated yet. A
 /// name of its own is one they never ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
-    /// The three binaries and their licence.
+    /// The two binaries and their licence.
     Core,
     /// CodeConnect's own tmux and the notices of what it is built from.
     Tmux,
@@ -110,7 +110,7 @@ impl Archive {
             // it must: a binaries-only archive is a distribution without its
             // notice. The same holds for tmux, the agent host and what they are
             // built from.
-            Archive::Core => &["codeconnect", "ccd", "cc-hook", "LICENSE"],
+            Archive::Core => &["codeconnect", "ccd", "LICENSE"],
             Archive::Tmux => &[TMUX_BINARY, "THIRD_PARTY_NOTICES"],
             Archive::AgentHost => &[AGENT_HOST_BINARY, "AGENT_HOST_NOTICES"],
         }
@@ -118,7 +118,7 @@ impl Archive {
 }
 
 /// The binaries a release installs, in the order a reader would name them.
-pub const SHIPPED_BINARIES: [&str; 3] = ["codeconnect", "ccd", "cc-hook"];
+pub const SHIPPED_BINARIES: [&str; 2] = ["codeconnect", "ccd"];
 
 /// CodeConnect's own tmux, as it is named in `bin`.
 pub const TMUX_BINARY: &str = protocol::tmux::BUNDLED_TMUX;
@@ -621,8 +621,9 @@ mod tests {
             .contains("per-file ceiling"));
 
         let mut members = good("1.2.3");
+        // Every file at its own ceiling, which together are past the total.
         for member in members.iter_mut() {
-            member.size = MAX_TOTAL_BYTES / 3;
+            member.size = MAX_MEMBER_BYTES;
         }
         assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()

@@ -17,7 +17,7 @@ echo "building release binaries…"
 # binaries that never ship (demo-daemon, push-relay): no reason for
 # `./install.sh` to spend LTO on them.
 cargo build --release --manifest-path "$here/Cargo.toml" \
-    --bin codeconnect --bin ccd --bin cc-hook
+    --bin codeconnect --bin ccd
 
 echo "building the agent host…"
 # ccd runs it from beside itself for every Claude run started from the app. Its
@@ -28,7 +28,7 @@ trap 'rm -rf "$host_out"' EXIT
 "$here/agent-host/build.sh" "$host_out"
 
 mkdir -p "$bin"
-for binary in codeconnect ccd cc-hook; do
+for binary in codeconnect ccd; do
     rm -f "$bin/$binary"
     cp "$here/target/release/$binary" "$bin/$binary"
     codesign --force --sign - "$bin/$binary" 2>/dev/null || true

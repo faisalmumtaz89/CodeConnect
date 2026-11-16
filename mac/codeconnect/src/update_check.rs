@@ -347,7 +347,7 @@ pub struct UpdateDeps<'a> {
 /// `codeconnect update`: install the latest published release.
 ///
 /// **One way to update, whatever built the binary that is running.** It fetches
-/// the newest release, proves it is CodeConnect's, and replaces all three
+/// the newest release, proves it is CodeConnect's, and replaces the installed
 /// binaries together. It does not look for a checkout, does not build, and
 /// needs no toolchain on the machine.
 ///
@@ -406,7 +406,7 @@ fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
     // one looks exactly like an update that is due. See `may_install`.
     may_install(&latest_text, &installed_text).map_err(|why| anyhow::anyhow!("{why}"))?;
 
-    // Asked of all three installed binaries, not of the one running: a skewed
+    // Asked of every installed binary, not of the one running: a skewed
     // install — `ccd` a release behind the shim — is exactly what a check on
     // the running binary blesses and then cannot repair. A binary that cannot
     // be asked reads as absent, which reads as not current.
@@ -440,7 +440,7 @@ fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
                 None => println!("  {binary}: not installed"),
             }
         }
-        println!("reinstalling {latest_text} so all three match.");
+        println!("reinstalling {latest_text} so they match.");
     }
 
     let select = |archive| {
@@ -934,7 +934,7 @@ fn install_set(
     let live = &root.join("bin");
     let staged = fresh_staging(root)?;
 
-    // **One build across all three, not three binaries that agree on a
+    // **One build across the set, not binaries that agree on a
     // number.** A release is built from one commit; a set whose members name
     // different commits is not a release, however each one is signed.
     let mut common: Option<String> = None;
@@ -1672,7 +1672,7 @@ mod tests {
         events: Vec<String>,
     }
 
-    fn rig(version: &str, live_builds: [&str; 3]) -> Rig {
+    fn rig(version: &str, live_builds: [&str; 2]) -> Rig {
         // Distinct per rig, not per moment: parallel tests share the pid
         // and can share the millisecond, and two rigs on one root would race
         // each other's update lock and live set.
@@ -1688,7 +1688,7 @@ mod tests {
         // The live set: one build id per binary so a scenario can skew them,
         // plus a stranger the update must carry through untouched.
         let mut old_lines = BTreeMap::new();
-        for (binary, build) in ["codeconnect", "ccd", "cc-hook"].iter().zip(live_builds) {
+        for (binary, build) in ["codeconnect", "ccd"].iter().zip(live_builds) {
             place_binary(
                 &live.join(binary),
                 fixture_binary(binary, env!("CARGO_PKG_VERSION"), build, false),
@@ -1707,7 +1707,7 @@ mod tests {
         let fixtures = root.join("fixtures");
         let dir = fixtures.join(format!("codeconnect-{version}"));
         std::fs::create_dir_all(&dir).unwrap();
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             place_binary(
                 &dir.join(binary),
                 fixture_binary(binary, version, "bbbbbbbbbbbb", false),
@@ -1916,7 +1916,7 @@ mod tests {
     /// before it asks anything, takes a lock or moves a file.
     #[test]
     fn an_app_install_is_left_to_the_app_to_update() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         std::fs::write(
             fixture.live.join(INSTALLED_BY_APP),
             "/Applications/CodeConnect.app\n",
@@ -1942,7 +1942,7 @@ mod tests {
 
     #[test]
     fn a_downgrade_is_refused_before_a_byte_is_downloaded() {
-        let fixture = rig("0.0.1", ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig("0.0.1", ["aaaaaaaaaaaa"; 2]);
         let before = snapshot(&fixture.live);
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_err());
@@ -1956,7 +1956,7 @@ mod tests {
 
     #[test]
     fn a_current_set_downloads_nothing() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         let before = snapshot(&fixture.live);
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
@@ -1971,12 +1971,12 @@ mod tests {
 
     #[test]
     fn an_equal_version_skew_is_repaired_not_blessed() {
-        // Same version, three binaries from two builds: the state a release
+        // Same version, two binaries from two builds: the state a release
         // never produced, repaired by reinstalling the release.
-        let fixture = rig(&running(), ["aaaaaaaaaaaa", "cccccccccccc", "aaaaaaaaaaaa"]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa", "cccccccccccc"]);
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             assert_eq!(
                 probe_says(&fixture.live.join(binary)).unwrap(),
                 format!("{binary} {} (bbbbbbbbbbbb)", running()),
@@ -1987,7 +1987,7 @@ mod tests {
 
     #[test]
     fn a_wrong_checksum_stops_the_install_with_the_live_set_untouched() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let checksum = fixture
             .root
             .join("fixtures")
@@ -2008,7 +2008,7 @@ mod tests {
 
     #[test]
     fn an_archive_with_a_directory_member_is_refused_whole() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         // Repackage the same tree the wrong way: naming the directory writes
         // a directory member the validator refuses.
         let fixtures = fixture.root.join("fixtures");
@@ -2038,9 +2038,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_refused_signature_on_any_of_the_five_stops_everything() {
-        for call in 1..=5 {
-            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+    fn a_refused_signature_on_any_of_the_four_stops_everything() {
+        for call in 1..=4 {
+            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
             let before = snapshot(&fixture.live);
             let ran = run(
                 &fixture,
@@ -2062,7 +2062,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_thin_binary_in_the_archive_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         // Rebuild the archive with one thin slice — signed, versioned, and
         // still not installable.
         let fixtures = fixture.root.join("fixtures");
@@ -2081,12 +2081,12 @@ mod tests {
 
     #[test]
     fn an_archive_whose_binaries_mix_builds_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let fixtures = fixture.root.join("fixtures");
         let dir = fixtures.join(format!("codeconnect-{}", newer()));
         place_binary(
-            &dir.join("cc-hook"),
-            fixture_binary("cc-hook", &newer(), "dddddddddddd", false),
+            &dir.join("ccd"),
+            fixture_binary("ccd", &newer(), "dddddddddddd", false),
         );
         repackage(&fixture, &newer());
 
@@ -2099,7 +2099,7 @@ mod tests {
 
     #[test]
     fn a_binary_reporting_the_wrong_version_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let fixtures = fixture.root.join("fixtures");
         let dir = fixtures.join(format!("codeconnect-{}", newer()));
         place_binary(
@@ -2151,7 +2151,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_successful_update_downloads_verifies_exchanges_and_only_then_restarts() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
 
@@ -2178,7 +2178,7 @@ mod tests {
             ]
         );
 
-        // The signature judgment landed on the five unpacked candidates —
+        // The signature judgment landed on the four unpacked candidates —
         // each exactly once, never on a live path, never on the same file
         // twice while another goes unjudged.
         let verifies: Vec<&String> = ran
@@ -2191,7 +2191,6 @@ mod tests {
             vec![
                 "verify staged/codeconnect",
                 "verify staged/ccd",
-                "verify staged/cc-hook",
                 "verify staged/cc-tmux",
                 "verify staged/cc-agent-host"
             ]
@@ -2201,7 +2200,6 @@ mod tests {
         for (binary, run) in [
             ("codeconnect", "probe staged/codeconnect"),
             ("ccd", "probe staged/ccd"),
-            ("cc-hook", "probe staged/cc-hook"),
             ("codeconnect", "ask staged/codeconnect --tmux-version"),
             ("cc-tmux", "ask staged/cc-tmux -V"),
         ] {
@@ -2218,8 +2216,8 @@ mod tests {
             assert!(judged < executed, "{binary} was judged before `{run}`");
         }
 
-        // Every judgment before the smoke test, the smoke test on all three
-        // installed paths, the restart dead last. The *last* probe of each
+        // Every judgment before the smoke test, the smoke test on every
+        // installed path, the restart dead last. The *last* probe of each
         // live path is the smoke test — the first is the pre-update reading
         // of the old set.
         let last = |needle: &str| {
@@ -2236,7 +2234,6 @@ mod tests {
         for smoke in [
             "probe live/codeconnect",
             "probe live/ccd",
-            "probe live/cc-hook",
             "ask live/cc-tmux -V",
         ] {
             let smoke_at = last(smoke);
@@ -2249,7 +2246,7 @@ mod tests {
         assert_eq!(ran.events.last().map(String::as_str), Some("restart"));
 
         let after = snapshot(&fixture.live);
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             assert_eq!(
                 probe_says(&fixture.live.join(binary)).unwrap(),
                 format!("{binary} {} (bbbbbbbbbbbb)", newer()),
@@ -2282,8 +2279,8 @@ mod tests {
 
     #[test]
     fn a_smoke_failure_of_any_binary_restores_the_previous_set_and_never_restarts() {
-        for binary in ["codeconnect", "ccd", "cc-hook", "cc-tmux"] {
-            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        for binary in ["codeconnect", "ccd", "cc-tmux"] {
+            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
             let before = snapshot(&fixture.live);
             let ran = run(
                 &fixture,
@@ -2305,7 +2302,7 @@ mod tests {
 
     #[test]
     fn a_failed_restart_keeps_the_installed_set_and_says_so() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let ran = run(
             &fixture,
             Faults {
@@ -2315,7 +2312,7 @@ mod tests {
         );
         let said = ran.outcome.unwrap_err().to_string();
         assert!(said.contains("restart"), "{said}");
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             assert_eq!(
                 probe_says(&fixture.live.join(binary)).unwrap(),
                 format!("{binary} {} (bbbbbbbbbbbb)", newer()),
@@ -2331,7 +2328,7 @@ mod tests {
     /// stay byte for byte, and the daemon keeps running.
     #[test]
     fn current_binaries_without_their_tmux_get_only_the_tmux() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
         std::fs::remove_file(fixture.live.join("THIRD_PARTY_NOTICES")).unwrap();
         let before = snapshot(&fixture.live);
@@ -2391,7 +2388,7 @@ mod tests {
             (fixture_tmux(TMUX_LINE, "live", false), Some(1)),
             (fixture_tmux(TMUX_LINE, "live", true), None),
         ] {
-            let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+            let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
             place_binary(&fixture.live.join("cc-tmux"), live_tmux);
             let ran = run(
                 &fixture,
@@ -2412,7 +2409,7 @@ mod tests {
     /// correctly signed tmux from another release is not this release.
     #[test]
     fn a_release_whose_tmux_is_not_the_one_its_codeconnect_requires_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let dir = fixture
             .root
             .join("fixtures")
@@ -2434,7 +2431,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_thin_tmux_in_the_release_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let dir = fixture
             .root
             .join("fixtures")
@@ -2454,7 +2451,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_thin_agent_host_in_the_release_is_refused() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let dir = fixture
             .root
             .join("fixtures")
@@ -2474,7 +2471,7 @@ mod tests {
     #[test]
     fn a_release_without_its_tmux_or_agent_host_is_refused_before_any_download() {
         for archive in [Archive::Tmux, Archive::AgentHost] {
-            let mut fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+            let mut fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
             let missing = archive.name(&newer());
             let mut release: serde_json::Value = serde_json::from_slice(&fixture.body).unwrap();
             release["assets"]
@@ -2501,7 +2498,7 @@ mod tests {
     #[test]
     fn a_refused_checksum_signature_on_any_archive_stops_everything() {
         for call in 1..=3 {
-            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
             let archive = [Archive::Core, Archive::Tmux, Archive::AgentHost][call - 1];
             let name = archive.name(&newer());
             std::fs::write(
@@ -2546,7 +2543,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_linux_update_authenticates_each_checksum_before_anything_from_it_runs() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let ran = run(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
 
@@ -2585,7 +2582,6 @@ mod tests {
         for run in [
             "probe staged/codeconnect",
             "probe staged/ccd",
-            "probe staged/cc-hook",
             "ask staged/codeconnect --tmux-version",
         ] {
             assert!(
@@ -2605,14 +2601,13 @@ mod tests {
         for smoke in [
             "probe live/codeconnect",
             "probe live/ccd",
-            "probe live/cc-hook",
             "ask live/cc-tmux -V",
         ] {
             assert!(host_judged < last(smoke), "every judgment before `{smoke}`");
             assert!(last(smoke) < last("restart"), "restart waits for `{smoke}`");
         }
         assert_eq!(ran.events.last().map(String::as_str), Some("restart"));
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             assert_eq!(
                 probe_says(&fixture.live.join(binary)).unwrap(),
                 format!("{binary} {} (bbbbbbbbbbbb)", newer())
@@ -2635,7 +2630,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_wrong_tmux_beside_current_binaries_is_replaced() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         place_binary(
             &fixture.live.join("cc-tmux"),
             fixture_tmux("tmux 3.7c-cc8", "live", false),
@@ -2653,11 +2648,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_linux_install_takes_the_release_binaries_not_the_handed_over_ones() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_dir_all(&fixture.live).unwrap();
         let unpacked_copy = fixture.root.join("handed-over");
         std::fs::create_dir_all(&unpacked_copy).unwrap();
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             place_binary(
                 &unpacked_copy.join(binary),
                 fixture_binary(binary, &running(), "dddddddddddd", false),
@@ -2667,7 +2662,7 @@ mod tests {
             install_staged_at(root, &unpacked_copy, &running(), deps)
         });
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             assert_eq!(
                 probe_says(&fixture.live.join(binary)).unwrap(),
                 format!("{binary} {} (bbbbbbbbbbbb)", running()),
@@ -2692,7 +2687,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_session_start_without_tmux_installs_it_once_from_its_own_release() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
         std::fs::remove_file(fixture.live.join("THIRD_PARTY_NOTICES")).unwrap();
         let before = snapshot(&fixture.live);
@@ -2733,7 +2728,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_session_start_refuses_a_release_that_is_not_its_own() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
         let before = snapshot(&fixture.live);
         let ran = run_entry(&fixture, Faults::default(), ensure);
@@ -2748,7 +2743,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_session_start_waits_for_another_installation() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_file(fixture.live.join("cc-tmux")).unwrap();
         let held = claim_throttle_at(&update_lock_path(&fixture.root)).unwrap();
         let releaser = std::thread::spawn(move || {
@@ -2774,7 +2769,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn only_the_installed_binary_without_tmux_installs_one() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         let exe = fixture.live.join("codeconnect");
         let linked = fixture.root.join("linked-codeconnect");
         std::os::unix::fs::symlink(&exe, &linked).unwrap();
@@ -2811,7 +2806,7 @@ mod tests {
     /// touched.
     #[test]
     fn a_first_install_lands_the_binaries_their_tmux_and_agent_host_together() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_dir_all(&fixture.live).unwrap();
 
         let ran = install_staged(&fixture, Faults::default());
@@ -2825,7 +2820,6 @@ mod tests {
                 "LICENSE",
                 "THIRD_PARTY_NOTICES",
                 "cc-agent-host",
-                "cc-hook",
                 "cc-tmux",
                 "ccd",
                 "codeconnect"
@@ -2849,7 +2843,6 @@ mod tests {
         for smoke in [
             "probe live/codeconnect",
             "probe live/ccd",
-            "probe live/cc-hook",
             "ask live/cc-tmux -V",
         ] {
             assert!(
@@ -2867,7 +2860,7 @@ mod tests {
     /// exchange keeps what the user put in `bin`.
     #[test]
     fn a_reinstall_keeps_what_the_release_does_not_ship() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         let ran = install_staged(&fixture, Faults::default());
         assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
         assert_eq!(
@@ -2886,7 +2879,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_handed_over_binary_that_fails_the_updaters_rules_is_refused() {
-        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 2]);
         std::fs::remove_dir_all(&fixture.live).unwrap();
         let from = fixture
             .root
@@ -2908,7 +2901,7 @@ mod tests {
 
     #[test]
     fn the_installer_refuses_a_release_that_is_not_its_own() {
-        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 2]);
         let from = fixture
             .root
             .join("fixtures")

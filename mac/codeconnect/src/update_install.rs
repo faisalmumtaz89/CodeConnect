@@ -1,10 +1,10 @@
-//! Replacing the installed binaries, all three or none of them.
+//! Replacing the installed binaries, all of them or none.
 //!
-//! **One commit point, not three.** The obvious implementation renames each new
-//! binary over its old one, and that is three atomic operations rather than one
-//! atomic installation: a power loss or a `SIGKILL` between the second and the
-//! third leaves `codeconnect` and `ccd` from the new release running against a
-//! `cc-hook` from the old one. Nothing in the product would notice, and the
+//! **One commit point, not one per binary.** The obvious implementation renames
+//! each new binary over its old one, and that is one atomic operation per binary
+//! rather than one atomic installation: a power loss or a `SIGKILL` between two
+//! of them leaves `codeconnect` from the new release running against a `ccd`
+//! from the old one. Nothing in the product would notice, and the
 //! mixture is not a state anybody tested.
 //!
 //! So the whole directory is exchanged instead. A complete, verified set is
@@ -430,8 +430,8 @@ pub fn remove_tree(path: &Path) -> Result<()> {
 /// A binary that cannot be asked counts as not current: an update that skipped
 /// itself because a file was missing would leave the gap it was run to close.
 ///
-/// **The build has to agree too, not just the version.** Three binaries can all
-/// say `0.4.0` and still come from three different commits — which is precisely
+/// **The build has to agree too, not just the version.** The binaries can all
+/// say `0.4.0` and still come from different commits — which is precisely
 /// what a half-finished hand copy leaves behind, and a set no release ever
 /// produced. Equal version numbers are not evidence of a matching set, so a
 /// mixture reads as "not current" and is repaired rather than blessed.
@@ -523,7 +523,7 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
     }
     let err = io::Error::last_os_error();
     // A filesystem that cannot exchange atomically cannot install atomically.
-    // Falling back to three renames would silently give up the one property
+    // Falling back to one rename per binary would silently give up the one property
     // this module exists to provide, so it refuses instead — having changed
     // nothing. Linux says so with `EINVAL`.
     #[cfg(target_os = "macos")]
@@ -661,23 +661,23 @@ mod tests {
         assert_eq!(read(&live, "ccd"), "old", "the original set is back");
     }
 
-    /// A partial set never becomes live: the three binaries move together
+    /// A partial set never becomes live: the binaries move together
     /// because the directory holding them moves.
     #[test]
     fn every_binary_changes_in_the_same_operation() {
-        let root = scratch("all-three");
+        let root = scratch("every-binary");
         let live = root.join("bin");
         let staged = staging_dir(&root);
         std::fs::create_dir_all(&live).unwrap();
         std::fs::create_dir_all(&staged).unwrap();
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             write(&live, binary, "0.1.0");
             write(&staged, binary, "0.2.0");
         }
 
         exchange(&staged, &live).unwrap();
 
-        for binary in ["codeconnect", "ccd", "cc-hook"] {
+        for binary in ["codeconnect", "ccd"] {
             assert_eq!(read(&live, binary), "0.2.0", "{binary} moved with the rest");
         }
     }
@@ -752,26 +752,23 @@ mod tests {
     /// the running binary alone would bless and could not repair.
     #[test]
     fn a_skewed_install_is_not_current() {
-        let all = |a: &str, b: &str, c: &str| {
+        let all = |a: &str, b: &str| {
             vec![
                 ("codeconnect".to_string(), Some(a.to_string())),
                 ("ccd".to_string(), Some(b.to_string())),
-                ("cc-hook".to_string(), Some(c.to_string())),
             ]
         };
         assert!(set_is_current(
             &all(
                 "codeconnect 0.4.0 (abcdef123456)",
-                "ccd 0.4.0 (abcdef123456)",
-                "cc-hook 0.4.0 (abcdef123456)"
+                "ccd 0.4.0 (abcdef123456)"
             ),
             "0.4.0"
         ));
         assert!(!set_is_current(
             &all(
                 "codeconnect 0.4.0 (abcdef123456)",
-                "ccd 0.3.0 (abcdef123456)",
-                "cc-hook 0.4.0 (abcdef123456)"
+                "ccd 0.3.0 (abcdef123456)"
             ),
             "0.4.0"
         ));
@@ -779,9 +776,8 @@ mod tests {
         let mut missing = all(
             "codeconnect 0.4.0 (abcdef123456)",
             "ccd 0.4.0 (abcdef123456)",
-            "cc-hook 0.4.0 (abcdef123456)",
         );
-        missing[2].1 = None;
+        missing[1].1 = None;
         assert!(!set_is_current(&missing, "0.4.0"));
         assert!(!set_is_current(&[], "0.4.0"));
     }
@@ -815,8 +811,8 @@ mod tests {
     }
 
     /// **The two tar shapes, against the real listing parser.** Naming the
-    /// four files writes four regular members; `tar -czf archive dir` also
-    /// writes a directory member, and the validator allows only the four.
+    /// three files writes three regular members; `tar -czf archive dir` also
+    /// writes a directory member, and the validator allows only the three.
     /// This proves the member-shape rule and nothing more — the updater's
     /// other refusals (file type, signature, architecture, version) have
     /// their own tests, and the full sequence is proven by the transport
@@ -827,7 +823,7 @@ mod tests {
         let version = "9.9.9";
         let dir = root.join(format!("codeconnect-{version}"));
         std::fs::create_dir_all(&dir).unwrap();
-        for name in ["codeconnect", "ccd", "cc-hook", "LICENSE"] {
+        for name in ["codeconnect", "ccd", "LICENSE"] {
             std::fs::write(dir.join(name), b"contents").unwrap();
         }
 
@@ -849,13 +845,12 @@ mod tests {
             &[
                 "codeconnect-9.9.9/codeconnect",
                 "codeconnect-9.9.9/ccd",
-                "codeconnect-9.9.9/cc-hook",
                 "codeconnect-9.9.9/LICENSE",
             ],
             "good.tar.gz",
         );
         let members = list_members(&root.join("good.tar.gz")).expect("the listing parses");
-        assert_eq!(members.len(), 4, "four members: {members:?}");
+        assert_eq!(members.len(), 3, "three members: {members:?}");
         assert!(
             members.iter().all(|m| m.is_regular_file && m.size == 8),
             "mode and size are read from the right columns: {members:?}"
@@ -1045,12 +1040,12 @@ mod tests {
         );
     }
 
-    /// The set is judged on the build as well as the number, so three binaries
+    /// The set is judged on the build as well as the number, so two binaries
     /// that agree on `0.4.0` and disagree on the commit are not "current".
     #[test]
-    fn three_binaries_at_one_version_from_three_commits_are_not_a_release() {
-        let set = |builds: [&str; 3]| {
-            ["codeconnect", "ccd", "cc-hook"]
+    fn two_binaries_at_one_version_from_two_commits_are_not_a_release() {
+        let set = |builds: [&str; 2]| {
+            ["codeconnect", "ccd"]
                 .iter()
                 .zip(builds)
                 .map(|(binary, build)| {
@@ -1061,12 +1056,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert!(set_is_current(&set(["abcdef123456"; 3]), "0.4.0"));
+        assert!(set_is_current(&set(["abcdef123456"; 2]), "0.4.0"));
         assert!(
-            !set_is_current(
-                &set(["abcdef123456", "abcdef123456", "0123456789ab"]),
-                "0.4.0"
-            ),
+            !set_is_current(&set(["abcdef123456", "0123456789ab"]), "0.4.0"),
             "one binary from another commit makes it a mixture, not a release"
         );
     }

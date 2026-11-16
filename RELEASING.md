@@ -77,7 +77,7 @@ Each block starts from the repository root.
    (cd mac && cargo build --release --bin codeconnect && ./target/release/codeconnect --version)
    ```
 
-   All three shipped binaries (`codeconnect`, `ccd`, `cc-hook`) inherit the
+   Both shipped binaries (`codeconnect`, `ccd`) inherit the
    workspace version; the printed version must be the one you are about to
    tag.
 
