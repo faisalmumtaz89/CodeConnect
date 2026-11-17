@@ -329,23 +329,18 @@ final class QuestionCardTests: XCTestCase {
             "an ordinary approval still takes Allow from a daemon that answers it by its hook")
     }
 
-    func testTheMacAnsweringFirstReadsAsAnsweredAtTheMac() {
-        let reason =
-            "this question was answered at the Mac first, so the phone's answer was not used"
-        guard case .answeredAtKeyboard = AppModel.classify(rejection: reason) else {
-            return XCTFail("the Mac's answer won; it is not a refusal to retry")
-        }
-    }
-
-    /// A daemon that names the machine "the computer" says the same thing in
-    /// those words, for a question and for a card.
-    func testTheComputerAnsweringFirstReadsAsAnsweredAtTheComputer() {
+    /// Refusals no daemon sends any more (the prompt gone from the screen, an answer already being applied, the Mac
+    /// or the computer answering first) read as the refusals they are, never as an answer at the keyboard.
+    func testAnEarlierDaemonsRefusalsAreRefusals() {
         for reason in [
-            "this question was answered at the computer first, so the phone's answer was not used",
+            "the prompt is not on screen",
+            "this answer is already being applied",
+            "this question was answered at the Mac first, so the phone's answer was not used",
             "this card was answered at the computer first, so nothing you chose was applied",
         ] {
-            guard case .answeredAtKeyboard = AppModel.classify(rejection: reason) else {
-                return XCTFail("the computer's answer won; it is not a refusal to retry: \(reason)")
+            guard case .rejected(let said) = AppModel.classify(rejection: reason), said == reason else {
+                XCTFail("no daemon sends this; it is a refusal: \(reason)")
+                continue
             }
         }
     }

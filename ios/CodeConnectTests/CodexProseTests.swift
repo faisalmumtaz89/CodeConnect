@@ -133,7 +133,7 @@ final class CodexProseTests: XCTestCase {
             // the gate it was meant to exercise would pass.
             requestID: "rid", payloadHash: "unread-by-these-tests", toolName: toolName,
             toolInput: try! JSONDecoder().decode(JSONValue.self, from: Data(toolInput.utf8)),
-            displayText: display, permissionSuggestions: nil, promptID: nil, permissionMode: nil,
+            displayText: display, permissionSuggestions: nil, permissionMode: nil,
             risk: nil)
     }
 
@@ -238,7 +238,7 @@ final class CodexProseTests: XCTestCase {
                 JSONValue.self,
                 from: Data(#"{"command":"ls","options":[{"id":"accept","label":"Yes"}]}"#.utf8)),
             displayText: #"command\n{"command":"ls","options":[{"id":"accept"}]}"#,
-            permissionSuggestions: nil, promptID: nil, permissionMode: nil, risk: nil)
+            permissionSuggestions: nil, permissionMode: nil, risk: nil)
         XCTAssertFalse(unverifiable.verification.renderMatchesDisplayText)
 
         guard case .noneAnswerable =

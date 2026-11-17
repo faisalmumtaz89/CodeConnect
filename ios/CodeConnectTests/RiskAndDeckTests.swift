@@ -12,7 +12,7 @@ final class RiskAndDeckTests: XCTestCase {
         let display = "\(tool)\n\(input.canonicalJSONString)"
         return ApprovalCard(
             requestID: "r-\(tool)", payloadHash: "hash", toolName: tool, toolInput: input,
-            displayText: display, permissionSuggestions: nil, promptID: nil, permissionMode: nil,
+            displayText: display, permissionSuggestions: nil, permissionMode: nil,
             risk: risk)
     }
 
@@ -101,7 +101,7 @@ final class RiskAndDeckTests: XCTestCase {
                 tool: "Bash", input: .object(["command": .string("echo hi")]),
                 risk: WireRisk(cls: "high", matchedPattern: "pipe to shell")),
             requestedAt: Date(), sessionKey: "cc-1", outcome: nil,
-            paneSnapshot: nil, risk: WireRisk(cls: "high", matchedPattern: "pipe to shell"))
+            risk: WireRisk(cls: "high", matchedPattern: "pipe to shell"))
         let assessment = item.assessment(profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high)
         XCTAssertEqual(assessment.matchedPattern, "pipe to shell")
@@ -124,9 +124,9 @@ final class RiskAndDeckTests: XCTestCase {
             card: ApprovalCard(
                 requestID: request, payloadHash: "h", toolName: tool,
                 toolInput: input, displayText: "d", permissionSuggestions: nil,
-                promptID: nil, permissionMode: nil, risk: nil),
+                permissionMode: nil, risk: nil),
             requestedAt: Date(timeIntervalSince1970: 1_000_000 - ageSeconds), sessionKey: session,
-            outcome: nil, paneSnapshot: nil, risk: nil)
+            outcome: nil, risk: nil)
     }
 
     private func low(_ request: String, ageSeconds: TimeInterval) -> ApprovalItem {
@@ -194,15 +194,15 @@ final class RiskAndDeckTests: XCTestCase {
             ApprovalItem(
                 card: ApprovalCard(
                     requestID: "z", payloadHash: "h", toolName: "T", toolInput: .object([:]),
-                    displayText: "d", permissionSuggestions: nil, promptID: nil,
+                    displayText: "d", permissionSuggestions: nil,
                     permissionMode: nil, risk: nil), requestedAt: now, sessionKey: "cc-1",
-                outcome: nil, paneSnapshot: nil, risk: nil),
+                outcome: nil, risk: nil),
             ApprovalItem(
                 card: ApprovalCard(
                     requestID: "a", payloadHash: "h", toolName: "T", toolInput: .object([:]),
-                    displayText: "d", permissionSuggestions: nil, promptID: nil,
+                    displayText: "d", permissionSuggestions: nil,
                     permissionMode: nil, risk: nil), requestedAt: now, sessionKey: "cc-1",
-                outcome: nil, paneSnapshot: nil, risk: nil),
+                outcome: nil, risk: nil),
         ]
         XCTAssertEqual(
             DeckOrdering.sort(cards, profile: connectedDaemon).map(\.card.requestID), ["a", "z"])

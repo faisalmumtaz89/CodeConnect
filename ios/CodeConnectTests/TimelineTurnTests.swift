@@ -79,12 +79,6 @@ final class TimelineTurnTests: XCTestCase {
             #"{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"Done."}"#)
     }
 
-    private func idle(_ seq: UInt64) -> Event {
-        event(
-            seq, "notification",
-            #"{"hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}"#)
-    }
-
     /// One label per row, in order, so a wrong order reads as a wrong list.
     private func shape(_ items: [TimelineItem]) -> [String] {
         items.map { item in
@@ -114,8 +108,8 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "reply:Hi!"])
     }
 
-    /// A turn that ends on a tool call has no other end on screen until the
-    /// idle reminder, a minute later, so its line stays.
+    /// A turn that ends on a tool call has no other end on screen, so its line
+    /// stays.
     func testATurnEndingOnAToolKeepsItsTurnCompleteRow() {
         let items = TimelineBuilder.build([user(1), tool(2), stop(3)])
         XCTAssertEqual(
@@ -222,42 +216,24 @@ final class TimelineTurnTests: XCTestCase {
         }
     }
 
-    // MARK: The idle reminder
+    // MARK: An earlier daemon's hook notifications
 
-    func testTheIdleReminderIsNeutralAndSaysItOnce() throws {
-        let items = TimelineBuilder.build([user(1), reply(2, "Done."), stop(3), idle(4)])
-        guard case .notice(let notice)? = items.last?.content else {
-            return XCTFail("\(shape(items))")
+    /// Claude Code's own notifications (a permission prompt, the idle reminder, a request for input, an agent's
+    /// finish) came through its hooks, and no run files them any more. An earlier daemon's record of one is drawn as
+    /// any notification this build does not name: in its own words, never as a request.
+    func testAnEarlierDaemonsHookNotificationsAreDrawnInTheirOwnWords() {
+        for type in ["permission_prompt", "idle_prompt", "agent_needs_input", "agent_completed"] {
+            let items = TimelineBuilder.build([
+                event(1, "notification", #"{"message":"Claude needs you","notification_type":"\#(type)"}"#)
+            ])
+            guard case .notice(let notice)? = items.first?.content else {
+                XCTFail("\(type): \(shape(items))")
+                continue
+            }
+            XCTAssertEqual(notice.kind, .other, type)
+            XCTAssertEqual(notice.detail, "Claude needs you", type)
+            XCTAssertEqual(notice.severity, .info, type)
         }
-        XCTAssertEqual("\(notice.kind)", "agentIdle", "its own kind, so status can tell it from a request")
-        XCTAssertEqual(notice.title, "Claude is waiting for your input")
-        XCTAssertNil(notice.detail, "the title already says it")
-        XCTAssertEqual(notice.severity, .info, "amber means it needs you; a finished turn does not")
-    }
-
-    /// The next prompt answers it. It is replaced, not added to, so the
-    /// "N new" pill counts the prompt and nothing else.
-    func testTheNextPromptRetiresTheIdleReminder() {
-        let before = TimelineBuilder.build([user(1), reply(2, "Done."), stop(3), idle(4)])
-        let after = TimelineBuilder.build([user(1), reply(2, "Done."), stop(3), idle(4), user(5)])
-        XCTAssertEqual(
-            shape(after), ["you", "reply:Done.", "notice:Turn complete", "you"])
-        XCTAssertEqual(after.count, before.count, "the prompt replaces the reminder in the count")
-    }
-
-    /// A real request for input is not routine and stays a warning.
-    func testARequestForInputStaysAWarning() {
-        let items = TimelineBuilder.build([
-            event(
-                1, "notification",
-                #"{"message":"Claude needs your input","notification_type":"agent_needs_input"}"#),
-            user(2),
-        ])
-        guard case .notice(let notice)? = items.first?.content else {
-            return XCTFail("\(shape(items))")
-        }
-        XCTAssertEqual(notice.kind, .agentWaiting)
-        XCTAssertEqual(notice.severity, .warning)
     }
 
     // MARK: Rows that told the reader nothing
@@ -303,16 +279,16 @@ final class TimelineTurnTests: XCTestCase {
     }
 
     /// Whether a start is the session's own is decided by the events before
-    /// it, not by the rows: the idle reminder above it is retired by the next
-    /// prompt, and the start row must not go with it. Anything of the
+    /// it: a notice above it keeps it the session's own, and anything of the
     /// conversation before it makes it a restart.
     func testTheSessionsOwnStartIsDecidedByTheEventsBeforeIt() {
+        let compacted = event(1, "notification", #"{"notification_type":"compacted"}"#)
         let resume = event(
             2, "session_start", #"{"hook_event_name":"SessionStart","source":"resume"}"#)
         XCTAssertEqual(
-            shape(TimelineBuilder.build([idle(1), resume])),
-            ["notice:Claude is waiting for your input"])
-        XCTAssertEqual(shape(TimelineBuilder.build([idle(1), resume, user(3)])), ["you"])
+            shape(TimelineBuilder.build([compacted, resume])), ["notice:Conversation compacted"])
+        XCTAssertEqual(
+            shape(TimelineBuilder.build([compacted, resume, user(3)])), ["notice:Conversation compacted", "you"])
         let late = event(
             4, "session_start", #"{"hook_event_name":"SessionStart","source":"resume"}"#)
         XCTAssertEqual(
@@ -429,13 +405,6 @@ final class TimelineTurnTests: XCTestCase {
         let reviewed = await status(events)
         XCTAssertEqual(reviewed, .idle)
         let unreviewed = await status(events, reviewedSeq: 0)
-        XCTAssertEqual(unreviewed, .doneUnreviewed)
-    }
-
-    func testTheIdleReminderDoesNotMakeAFinishedTurnRunning() async {
-        let result = await status([user(1), reply(2, "Done."), stop(3), idle(4)])
-        XCTAssertEqual(result, .idle)
-        let unreviewed = await status([user(1), reply(2, "Done."), stop(3), idle(4)], reviewedSeq: 0)
         XCTAssertEqual(unreviewed, .doneUnreviewed)
     }
 }

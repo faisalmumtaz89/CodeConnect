@@ -89,7 +89,6 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertEqual(byName["file_change"]?.toolName, "file change")
 
         for (key, card) in cards {
-            XCTAssertNil(card.promptID, "\(key): a Codex card carries no prompt_id")
             XCTAssertNil(card.permissionMode, "\(key): a Codex card carries no permission_mode")
             XCTAssertNil(
                 card.permissionSuggestions,

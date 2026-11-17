@@ -125,7 +125,7 @@ final class FixtureTests: XCTestCase {
             guard case .event(let event) = frame, let card = event.approvalCard else { continue }
             let item = ApprovalItem(
                 card: card, requestedAt: event.date, sessionKey: event.sessionKey,
-                outcome: nil, paneSnapshot: nil, risk: card.risk)
+                outcome: nil, risk: card.risk)
             classes.insert(item.assessment(profile: profile).effective)
         }
         XCTAssertEqual(classes, [.low, .medium, .high])

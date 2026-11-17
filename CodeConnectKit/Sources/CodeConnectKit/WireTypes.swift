@@ -141,7 +141,7 @@ public enum Link: String, Codable, Sendable, Hashable {
 }
 
 public enum ResolvedBy: String, Codable, Sendable, Hashable {
-    case phone, timeout, superseded
+    case phone, timeout
     /// A resolver this build does not name, from a newer daemon or an earlier
     /// one's record. Said so, never read as one of the others.
     case unknown
@@ -822,8 +822,6 @@ public struct MenuMode: Codable, Sendable, Hashable {
 /// an affordance, never invent one.
 public struct Capabilities: Codable, Sendable, Hashable {
     public let canApproveReliably: Bool
-    let failMode: String
-    let holdSecs: UInt64
     public let sendText: Bool
     let push: Bool
     /// A minor-14 relay daemon advertises this instead of `push`: it sends
@@ -838,8 +836,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
 
     public init(
         canApproveReliably: Bool = false,
-        failMode: String = "unknown",
-        holdSecs: UInt64 = 0,
         sendText: Bool = false,
         push: Bool = false,
         pushRelay: Bool = false,
@@ -847,16 +843,12 @@ public struct Capabilities: Codable, Sendable, Hashable {
         extra: [String: JSONValue] = [:]
     ) {
         self.canApproveReliably = canApproveReliably
-        self.failMode = failMode
-        self.holdSecs = holdSecs
         self.sendText = sendText
         self.push = push
         self.pushRelay = pushRelay
         self.tls = tls
         var map = extra
         map["can_approve_reliably"] = .bool(canApproveReliably)
-        map["fail_mode"] = .string(failMode)
-        map["hold_secs"] = .int(Int64(holdSecs))
         map["send_text"] = .bool(sendText)
         map["push"] = .bool(push)
         map["push_relay"] = .bool(pushRelay)
@@ -868,8 +860,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
         let raw = try decoder.singleValueContainer().decode([String: JSONValue].self)
         advertised = raw
         canApproveReliably = raw["can_approve_reliably"]?.boolValue ?? false
-        failMode = raw["fail_mode"]?.stringValue ?? "unknown"
-        holdSecs = (raw["hold_secs"]?.intValue).map { UInt64(max(0, $0)) } ?? 0
         sendText = raw["send_text"]?.boolValue ?? false
         push = raw["push"]?.boolValue ?? false
         pushRelay = raw["push_relay"]?.boolValue ?? false
@@ -1262,7 +1252,6 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         case .unknown: return "by an answerer this app does not recognise"
         case .timeout where detail == Self.sessionEnded: return "when the session ended"
         case .timeout: return "by timeout - nobody answered"
-        case .superseded: return "superseded"
         }
     }
 }
@@ -1733,7 +1722,6 @@ public struct ApprovalCard: Codable, Sendable, Hashable {
     /// The exact text hashed into `payloadHash`.
     public let displayText: String
     let permissionSuggestions: JSONValue?
-    public let promptID: String?
     public let permissionMode: String?
     /// The daemon's own classification, decided at the Mac where the repo, the
     /// worktree and the operator's rules are actually visible. Sent only from
@@ -1756,7 +1744,6 @@ public struct ApprovalCard: Codable, Sendable, Hashable {
         case toolInput = "tool_input"
         case displayText = "display_text"
         case permissionSuggestions = "permission_suggestions"
-        case promptID = "prompt_id"
         case permissionMode = "permission_mode"
         case risk
         case questionHold = "question_hold"

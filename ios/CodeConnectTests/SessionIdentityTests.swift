@@ -493,10 +493,10 @@ final class SessionIdentityTests: XCTestCase {
         ApprovalItem(
             card: ApprovalCard(
                 requestID: request, payloadHash: "h", toolName: "Bash", toolInput: .object([:]),
-                displayText: "d", permissionSuggestions: nil, promptID: nil, permissionMode: nil,
+                displayText: "d", permissionSuggestions: nil, permissionMode: nil,
                 risk: nil),
             requestedAt: Date(timeIntervalSince1970: 1_000_000), sessionKey: session,
-            outcome: nil, paneSnapshot: nil, risk: nil)
+            outcome: nil, risk: nil)
     }
 
     private func helloAckJSON(minor: UInt32, sessionUID: Bool) -> String {

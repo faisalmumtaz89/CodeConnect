@@ -4,7 +4,7 @@ import XCTest
 ///
 /// An agent's words reach a view through a model that has already made them
 /// `displaySafe` — `ToolSummary`, `CodexCard`, `QuestionCard`, `NoticeItem`,
-/// `FleetRow`, `RunLabel`, `prettyJSONString`, the approval's `paneSnapshot`,
+/// `FleetRow`, `RunLabel`, `prettyJSONString`,
 /// and `AgentProse.inline` after it parses Markdown (`DecisionSurfaceTextTests`).
 ///
 /// What this test catches: any line under `ios/CodeConnect/Views/` that names

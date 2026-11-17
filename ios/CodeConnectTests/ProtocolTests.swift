@@ -99,7 +99,6 @@ final class ProtocolTests: XCTestCase {
             """)
         guard case .helloAck(let ack) = message else { return XCTFail("wrong message") }
         XCTAssertTrue(ack.capabilities.canApproveReliably)
-        XCTAssertEqual(ack.capabilities.holdSecs, 9)
         XCTAssertFalse(ack.capabilities.sendText, "an absent capability is not an available one")
         XCTAssertEqual(ack.capabilities.advertised["future_thing"]?.stringValue, "yes")
     }

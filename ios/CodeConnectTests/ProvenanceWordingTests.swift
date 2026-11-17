@@ -38,6 +38,15 @@ final class ProvenanceWordingTests: XCTestCase {
             "Closed by an answerer this app does not recognise · 1m ago", "the answerer said once")
     }
 
+    /// No daemon names an answer superseded any more: an earlier one's record names an answerer this app does not
+    /// recognise.
+    func testAnEarlierDaemonsSupersededAnswerNamesNoAnswerer() throws {
+        let superseded = try outcome("superseded")
+        XCTAssertEqual(superseded.resolvedBy, .unknown)
+        XCTAssertEqual(
+            ApprovalRow.resolutionText(for: superseded), "Allowed by an answerer this app does not recognise")
+    }
+
     /// Codex's `resolved_by: phone` names a paired phone too.
     func testACodexPhoneAnswerDoesNotClaimThisPhone() {
         XCTAssertEqual(

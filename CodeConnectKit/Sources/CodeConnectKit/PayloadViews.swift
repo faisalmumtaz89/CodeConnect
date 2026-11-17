@@ -217,12 +217,6 @@ extension Event {
         return payload["command"]?.stringValue
     }
 
-    /// `capture-pane` text the daemon attaches to a `permission_prompt`
-    /// notification — the only place the phone can learn Claude's *exact*
-    /// option list, which is what makes `Option{index}` safe to offer. Drawn
-    /// on the card, so `displaySafe`.
-    public var paneSnapshot: String? { payload["_codeconnect_pane"]?.stringValue?.displaySafe }
-
     // MARK: Lifecycle
 
     /// From feature level 1 the turn boundary has its own kind. Before that, the

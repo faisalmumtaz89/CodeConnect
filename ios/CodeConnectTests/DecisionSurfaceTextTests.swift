@@ -127,7 +127,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
     /// override once parsed, though the text holds none.
     func testANoticeAndItsProseAreDrawnSafe() {
         let notice = NoticeItem(
-            kind: .agentWaiting, symbol: "bell", title: "Push to \u{202E}niam",
+            kind: .other, symbol: "bell", title: "Push to \u{202E}niam",
             detail: "Run \u{2066}this", severity: .info)
         assertShowsNoControl(notice.title, "notice title")
         assertShowsNoControl(notice.detail, "notice detail")
@@ -169,20 +169,6 @@ final class DecisionSurfaceTextTests: XCTestCase {
         let input = JSONValue.object(["command": .string("git push origin \u{202E}niam ecrof--")])
         assertShowsNoControl(input.prettyJSONString, "pretty JSON")
         XCTAssertEqual(input.canonicalJSONString, "{\"command\":\"git push origin \u{202E}niam ecrof--\"}")
-    }
-
-    /// The Mac's screen attached to a permission prompt is drawn `displaySafe`.
-    func testThePaneSnapshotIsDrawnSafe() throws {
-        let event = try JSONDecoder().decode(
-            Event.self,
-            from: Data(
-                """
-                {"seq":1,"session_id":"cc-1","ts":"2026-10-22T00:00:00.000Z","kind":"notification",
-                 "source":"hook","payload":{"notification_type":"permission_prompt",
-                 "message":"Claude needs your permission","prompt_id":"p1",
-                 "_codeconnect_pane":"git push origin \u{202E}niam ecrof--"}}
-                """.utf8))
-        assertShowsNoControl(event.paneSnapshot, "pane snapshot")
     }
 
     /// The fleet row's sentence — here the agent's own last words — is drawn
@@ -492,8 +478,8 @@ final class DecisionSurfaceTextTests: XCTestCase {
         }
     }
 
-    /// The Claude card with its full input and the Mac's screen open, and the
-    /// chat with the held call's own tool row open above its approval.
+    /// The Claude card with its full input open, and the chat with the held
+    /// call's own tool row open above its approval.
     func testTheClaudeCardAndTheHeldCallsToolRowSpeakNoControl() async throws {
         let model = newModel()
         let wire = try resource("minor-22-wire")
@@ -506,12 +492,11 @@ final class DecisionSurfaceTextTests: XCTestCase {
         card["display_text"] = .string(text)
         card["payload_hash"] = .string(
             SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined())
-        card["prompt_id"] = .string("p1")
         payload["card"] = .object(card)
         request["payload"] = .object(payload)
-        request["seq"] = .int(3)
+        request["seq"] = .int(2)
         let uid = WireRecording.uid
-        try sessions(model, [summary(uid, blocked: ["toolu_allowed"], lastSeq: 3)])
+        try sessions(model, [summary(uid, blocked: ["toolu_allowed"], lastSeq: 2)])
         try inject(
             model,
             .object([
@@ -523,27 +508,14 @@ final class DecisionSurfaceTextTests: XCTestCase {
                     "tool_input": input,
                 ]),
             ]))
-        try inject(
-            model,
-            .object([
-                "seq": .int(2), "session_uid": .string(uid), "session_id": .string("cc-1"),
-                "ts": .string("2026-10-22T00:00:00.000Z"), "kind": .string("notification"),
-                "source": .string("hook"),
-                "payload": .object([
-                    "notification_type": .string("permission_prompt"),
-                    "message": .string("Claude needs your permission to use Bash"),
-                    "prompt_id": .string("p1"),
-                    "_codeconnect_pane": .string("Bash command\n git push origin \u{202E}niam ecrof--"),
-                ]),
-            ]))
         try inject(model, .object(request))
         let approval = try await approval(in: model, uid)
         assertScreenIsSafe(
             try await screen(
                 "claude-card", model, ScrollView { DecisionCardView(approval: approval) },
-                opening: ["Full tool input", "The computer's screen"]
+                opening: ["Full tool input"]
             ).spoken,
-            "the Claude card", expected: ["\"command\": \"git push origin \u{FFFD}niam", " git push origin \u{FFFD}niam", "app\u{FFFD}"])
+            "the Claude card", expected: ["\"command\": \"git push origin \u{FFFD}niam", "app\u{FFFD}"])
         // The tool row speaks one combined label, so its opened input is
         // read off the pixels: drawn as it arrives, the override made it
         // `"command": "git push origin --force main"`.
