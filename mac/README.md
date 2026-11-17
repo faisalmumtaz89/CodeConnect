@@ -958,8 +958,11 @@ refused, nothing sent. The run's model, effort and mode are the settings Codex n
 answer to the run's start and to each resume, and in its report of each change
 (`thread/settings/updated`), since it reports none at a start, a resume or a plain turn. A run
 that asks nothing reads `full-access`, in Plan too, and a combination none of the four is gives
-no mode. A run whose Codex reconnects or relaunches is given Default's approval and sandbox
-again, as its start was, and reads so from the resume's answer.
+no mode. A run whose Codex ccd reconnects to after its own restart is resumed with the
+approval and sandbox Codex last named for it, so the same Codex keeps Full Access; a run whose
+Codex is started again (relaunched) is given Default's, as its start was (the owner's decision
+233). Either reads what the
+resume's answer names. A resume does not carry Plan.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
@@ -1060,7 +1063,7 @@ and another process may hold its number now), ccd removes the run's `as.pid` and
 launches the codex
 a start would find, with the environment a start reads and the run's own folder answer, into
 the run's folder, its output added to the run's `host.log`, and resumes the run's thread on
-that connection as a reconnect does. The run is then `live`, its timeline gets a
+that connection at Default's approval and sandbox. The run is then `live`, its timeline gets a
 `session_start` under the new launch ("Session resumed"), and the message is sent on the new
 link before any other. A relaunch that fails before that stops what it launched, puts the
 run back to `exited` and relaunchable, and refuses the message with "CodeConnect has no
@@ -1116,7 +1119,8 @@ restarted daemon finds still `starting` is `failed`, whatever became of its star
 the daemon listens, and its recorded process group gets the same ladder under the same
 warrant. Nothing is sent again, so a first message Codex had already taken is lost with
 the run, and the person starts again. A `live` run whose app-server is still running is
-connected again: its thread is resumed with the same preset and thread config. The turns
+connected again: its thread is resumed with the approval and sandbox Codex last named for it
+and the same thread config. The turns
 it ran meanwhile are filed from the answer, and a turn still running then is read once more when it ends, for the items
 it finished while no daemon listened. A card still open stays open. If Codex asks for it
 again, the card answers that request; an answer that was on its way when ccd stopped is

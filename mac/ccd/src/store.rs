@@ -2994,6 +2994,19 @@ impl Store {
         Ok(Some(filed))
     }
 
+    /// The newest `codex_settings` fact of the run `session_uid` as it was filed: the settings
+    /// Codex last named for its thread ([`protocol::facts::CODEX_SETTINGS`]), `None` before any.
+    pub fn newest_codex_settings(&self, session_uid: &str) -> Result<Option<serde_json::Value>> {
+        let conn = self.read();
+        newest_decided(
+            &conn,
+            session_uid,
+            "kind = ?2",
+            &[protocol::facts::CODEX_SETTINGS],
+            |event| Some(event.payload.clone()),
+        )
+    }
+
     /// The model claude's newest receipt of a model change names for the run `session_uid`
     /// (its `Set model to …` line, as [`protocol::facts::model_fact`] reads it), whatever the
     /// inits filed since; `None` when it has none.
