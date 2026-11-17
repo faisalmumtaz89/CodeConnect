@@ -6,7 +6,7 @@
     ///
     /// `-CC_QUESTION <state>` replays one Claude session holding one
     /// `AskUserQuestion` card from the daemon's own events —
-    /// `fixtures/claude/minor-21-wire.json`, which ccd's test emits, copied into
+    /// `fixtures/claude/minor-21-wire.json`, which an earlier ccd emitted (frozen), copied into
     /// the app bundle. Every frame goes through the real `ServerMessage` decoder
     /// and the real ingest path.
     ///
