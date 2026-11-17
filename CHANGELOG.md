@@ -3,6 +3,98 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Agents start from the app, and the old engine is gone
+
+- This release changes how CodeConnect runs your agents, and the apps and your computers speak a new
+  version of its protocol. Update the iPhone app, the Mac app and CodeConnect on every computer
+  together: an app and a computer on different sides of the update can't connect, and the app says
+  to update both.
+- On a Linux computer, or a Mac without the Mac app, update with
+  `curl -fsSL https://codeconnect.sh | sh -s -- --reinstall`: the earlier version's
+  `codeconnect update` can't install this release.
+- Agents now start from the CodeConnect app: Claude Code runs under CodeConnect's agent host, and
+  Codex under its own app server. The live terminal, the Terminal tab, and the `codeconnect claude`,
+  `codeconnect codex`, `attach`, `ls` and `supervise` commands are gone.
+- CodeConnect no longer installs its own tmux, and the Linux downloads no longer include it (the
+  `codeconnect-<version>-tmux-linux-<arch>.tar.gz` archive): nothing in CodeConnect uses it any
+  more. An update leaves the earlier `cc-tmux`, `cc-hook` and `THIRD_PARTY_NOTICES` in
+  `~/.codeconnect/bin`; once the agents you started with the earlier version have ended, nothing
+  uses them and you can delete them.
+
+## Runs from earlier versions are removed
+
+- The first time the updated CodeConnect starts on your computer, it permanently removes every run
+  the earlier version started, with its history in CodeConnect: its timeline, its approvals and what
+  was decided. Your paired devices, trusted folders and projects stay.
+- Claude Code's and Codex's own conversation files are not touched, so `claude --resume` and Codex's
+  own history still find them.
+- Agents you started with the earlier version and left running are not ended: they keep running, but
+  no longer appear in the app, and their permission prompts stay at the computer. End them before
+  you update.
+- An earlier version of CodeConnect can't start on a computer that has been updated, and the runs
+  the update removed don't come back. If you open an earlier copy of the Mac app after updating,
+  open the updated one again.
+
+## Bypass permissions, after you confirm it
+
+- Claude's Bypass permissions can be turned on for a run started from the app, once you confirm it.
+
+## A run's settings button names its mode
+
+- A run's settings button names its mode beside its model, and a mode that works without asking is
+  shown in red.
+
+## Codex's questions in Plan mode
+
+- In Plan mode, Codex's questions arrive as cards you answer from the iPhone or the Mac, as Claude's
+  do, and an answer says which device sent it.
+
+## Codex's settings
+
+- A Codex run started from the app can be switched to Read Only, Plan or, once you confirm it, Full
+  Access, and its model and effort changed. It keeps its model, effort and mode when only
+  CodeConnect's service restarts, and goes back to Default when Codex itself has to be started
+  again.
+
+## A run that stopped on its own continues
+
+- A run whose agent stopped on its own, after a crash or a restart of your computer, continues the
+  same conversation with your next message. A run you ended stays ended.
+
+## Claude Code's commands
+
+- Claude runs started from the app take Claude Code's commands. `/model`, `/effort`, `/compact` and
+  `/clear` open the app's own controls, `/diff` is handled by the app's own view of the changes, and
+  any other command is sent to Claude and shown as its own row, with Claude's answer or a note that
+  it isn't available there. The Mac also has Clear… in a Claude run's settings list.
+
+## Remove a finished run on the Mac
+
+- On the Mac, a finished run can be removed from its row's menu, after asking. Claude Code's or
+  Codex's own transcript stays on the computer.
+
+## The Mac's conversation column
+
+- The Mac app's conversation column is rebuilt, and builds only the rows near the screen.
+
+## A change applies now
+
+- A model or mode change made while Claude is working applies from its next step, and the app says
+  so.
+
+## A comment on a Codex diff
+
+- From the iPhone, a comment on a Codex run's diff is sent to Codex.
+
+## A new run starts with a first message
+
+- A new run starts with a first message, and a Codex run that is still starting says so.
+
+## Your phone rings again for a decision still waiting
+
+- When a run started from the app finishes a turn while you are away from the Mac, your phone is
+  rung again if an approval or question is still waiting. A turn you stopped rings nothing.
+
 ## Choose any folder for a new agent on this Mac
 
 - Start an agent listed only folders an agent had already run in, so on a new Mac there was nothing
