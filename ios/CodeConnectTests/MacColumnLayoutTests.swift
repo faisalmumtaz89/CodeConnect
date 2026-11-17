@@ -229,14 +229,61 @@ final class MacColumnLayoutTests: XCTestCase {
     func test11ARowOpenedAtTheEndKeepsItsTop() {
         var c = fixture(at: 331)
         let top = c.minY(of: "r9")! - c.origin
-        let m = c.apply(.init(heights: ["r9": 400]), readerAway: true)
+        c.left()
+        let m = c.apply(.init(heights: ["r9": 400]))
         check(c, m, origin: 331, height: 881, dy: 0, grown: 350)
         XCTAssertEqual(c.minY(of: "r9")! - c.origin, top, "the opened row's top on screen")
     }
 
     func test11bAReaderAtTheEndWhoHasNotLeftFollowsALanding() {
         var c = fixture(at: 331)
-        let m = c.apply(.init(rows: [earlier] + rs(1...11) + [tail]), readerAway: false)
+        let m = c.apply(.init(rows: [earlier] + rs(1...11) + [tail]))
         check(c, m, origin: 381, height: 581, dy: 50, grown: 50)
+    }
+
+    // MARK: Following, the reader's to choose
+
+    func test12ADownwardScrollEndingWithinTheSlackFollowsALanding() {
+        var c = fixture(at: 100)
+        XCTAssertFalse(c.following, "a reader away does not follow")
+        c.scrolled(to: 310)
+        XCTAssertTrue(c.following, "21 pt from the end is the end")
+        let m = c.apply(.init(rows: [earlier] + rs(1...11) + [tail]))
+        check(c, m, origin: 381, height: 581, dy: 71, grown: 50)
+    }
+
+    func test13ARowOpenedThenClosedAtTheEndFollowsTheNextLanding() {
+        var c = fixture(at: 331)
+        c.left()
+        c.apply(.init(heights: ["r9": 400]))
+        XCTAssertFalse(c.following, "open: the reader's row is kept")
+        c.apply(.init(heights: ["r9": 50]))
+        XCTAssertEqual(c.origin, 331, "closed: the column is back at its end")
+        XCTAssertTrue(c.following, "a change that leaves the column at its end follows from there")
+        let m = c.apply(.init(rows: [earlier] + rs(1...11) + [tail]))
+        check(c, m, origin: 381, height: 581, dy: 50, grown: 50)
+    }
+
+    func test14EndAfterANarrowedWindowFollows() {
+        var c = fixture(at: 100)
+        var taller: [String: CGFloat] = [:]
+        for i in 1...10 { taller["r\(i)"] = 80 }
+        c.apply(.init(heights: taller, pane: 200))
+        XCTAssertEqual(c.origin, 130, "the reader's row kept through the new width")
+        XCTAssertFalse(c.following)
+        c.scrolled(to: c.height - c.pane)
+        XCTAssertTrue(c.following, "End reaches the end")
+        let m = c.apply(.init(heights: ["r10": 130]))
+        check(c, m, origin: 681, height: 881, dy: 50, grown: 50)
+    }
+
+    func test15ASlowStepUpOutOfTheEndStopsFollowing() {
+        var c = fixture(at: 331)
+        c.scrolled(to: 299)
+        XCTAssertTrue(c.following, "32 pt from the end is the end")
+        c.scrolled(to: 298.5)
+        XCTAssertFalse(c.following, "half a point further up is out of the end")
+        let m = c.apply(.init(rows: [earlier] + rs(1...11) + [tail]))
+        check(c, m, origin: 298.5, height: 581, dy: 0, grown: 50)
     }
 }

@@ -6,9 +6,9 @@ import SwiftUI
 /// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. A table the
 /// app drives (`ConversationTable`): the app measures every row, keeps the reader's place through every change in the
 /// same step, and builds only the rows near the screen. It opens at the newest row and follows new rows until the
-/// reader scrolls away from the end (`Tail`); a reader who went up stays where they are as rows land below or a page of
-/// earlier history lands above, and is followed again once they come back to the end. Reaching the top pages back on
-/// its own, as the iPhone does.
+/// reader scrolls up away from the end or opens a row to read it (`MacColumnLayout.following`); a reader who went up
+/// stays where they are as rows land below or a page of earlier history lands above, and is followed again once they
+/// come back to the end. Reaching the top pages back on its own, as the iPhone does (`Tail`).
 struct Conversation: View {
     let model: AppModel
     let key: String

@@ -60,6 +60,8 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         self.key = key
         self.tail = tail
         super.init()
+        // First: the scroll view's background setting lives on its clip view, so a clip swapped in later drew its own.
+        scroll.contentView = PageClip()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.automaticallyAdjustsContentInsets = false
@@ -78,6 +80,8 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         table.delegate = self
         scroll.documentView = table
         tail.attach(scroll)
+        tail.readerLeaves = { [weak self] in self?.left() }
+        tail.isFollowing = { [weak self] in self?.layout.following ?? true }
         let clip = scroll.contentView
         clip.postsBoundsChangedNotifications = true
         clip.postsFrameChangedNotifications = true
@@ -203,7 +207,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
 
     /// A row near the screen reports its own height (its content, an expansion, a banner's age); one the table prepared
     /// further out is measured when it comes near. Applied on the next turn, outside any table call; a row the reader
-    /// opened to read (they left the end: `Tail.readerLeft`) grows below its top.
+    /// opened to read (the column stopped following: `left()`) grows below its top.
     private func reported(_ place: String, _ height: CGFloat) {
         guard let index = entries.firstIndex(where: { $0.place == place }), nearScreen().contains(index),
             abs(layout.rows[index].height - ceil(height)) > 0.5
@@ -217,7 +221,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
                 guard let self else { return }
                 let heights = self.reports
                 self.reports = [:]
-                self.apply("report \(heights.count)", .init(heights: heights), readerAway: self.tail.readerLeft)
+                self.apply("report \(heights.count)", .init(heights: heights))
             }
         }
     }
@@ -227,14 +231,15 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     /// The layout decides (the reader's place kept), then the table is told in the same call, with no animation, and
     /// the origin set. Never re-entered; what it moved is handed to `Tail`.
     private func apply(
-        _ why: String, _ change: MacColumnLayout.Change, entries next: [Entry]? = nil, readerAway: Bool = false,
+        _ why: String, _ change: MacColumnLayout.Change, entries next: [Entry]? = nil,
         table update: (NSTableView) -> Void = { _ in }
     ) {
         guard !applying else { return }
         applying = true
         defer { applying = false }
-        let before = (origin: layout.origin, height: layout.height)
-        let moved = layout.apply(change, readerAway: readerAway)
+        let before = (origin: layout.origin, height: layout.height, following: layout.following)
+        let moved = layout.apply(change)
+        if layout.following != before.following { noteFollow("FOLLOW \(layout.following ? 1 : 0) \(why)") }
         if let next { entries = next }
         NSAnimationContext.beginGrouping()
         NSAnimationContext.current.duration = 0
@@ -259,12 +264,22 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     /// The reader moved the column; rows coming near the screen are measured.
     private func scrolled() {
         guard !applying else { return }
+        let was = layout.following
         layout.scrolled(to: scroll.contentView.bounds.origin.y)
+        if layout.following != was {
+            noteFollow(String(format: "FOLLOW %d scroll y %.3f", layout.following ? 1 : 0, layout.origin))
+        }
         measureNearScreen()
     }
 
+    /// The reader opened a row to read it: the column stops following before the row grows.
+    private func left() {
+        if layout.following { noteFollow("FOLLOW 0 opened a row") }
+        layout.left()
+    }
+
     /// The pane changed size. A new width measures the rows near the screen at it (the rest are measured as they
-    /// come near); either way one `apply`, which keeps a reader at the end at the end.
+    /// come near); either way one `apply`, which keeps a following reader at the end.
     private func resized() {
         guard !applying else { return }
         let bounds = scroll.contentView.bounds
@@ -393,5 +408,17 @@ private final class ColumnTableView: NSTableView {
         }
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: min(max(y, 0), highest)))
         scroll.reflectScrolledClipView(clip)
+    }
+}
+
+/// The column's clip view. A move the reader makes by the scroller's page part or track, or by an accessibility page
+/// press, lands at once, as the keys do, rather than gliding: AppKit's glide moves the bounds by a path of its own,
+/// aimed where the column ended when it began, and a landing that pins the column to its end meanwhile is undone by the
+/// glide's next frame. A scroll wheel's and a trackpad's moves (the current event a scroll wheel) stay AppKit's own.
+private final class PageClip: NSClipView {
+    override func scroll(to newOrigin: NSPoint) {
+        guard NSApp.currentEvent?.type != .scrollWheel else { return super.scroll(to: newOrigin) }
+        setBoundsOrigin(newOrigin)
+        enclosingScrollView?.reflectScrolledClipView(self)
     }
 }

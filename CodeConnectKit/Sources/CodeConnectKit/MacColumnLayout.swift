@@ -3,10 +3,11 @@ import CoreGraphics
 /// The Mac conversation column's geometry, kept by the app: its rows top to bottom (the Earlier row, the timeline's
 /// rows by `TimelineItem.places`, the tail), each row's height, the pane's height and where its top stands in the
 /// column (`origin`, flipped). Every height and every change of rows goes through `apply`, which keeps the reader's place
-/// in the same call: a reader at the end stays at the end, unless they left it themselves; a reader away keeps the
-/// first timeline row on screen that the change keeps exactly where its top was; with none kept, the end. The reader's
-/// own scroll is the other way the origin moves (`scrolled`). Nothing here reads the screen: the table is told what
-/// this decided.
+/// in the same call: a reader following the newest rows stays at the end; any other keeps the first timeline row on
+/// screen that the change keeps exactly where its top was; with none kept, the end. Whether the reader follows is
+/// theirs, kept here (`following`): it is set when they reach the end and cleared only when they move up out of it or
+/// open a row to read it, never by rows landing. The reader's own scroll is the other way the origin moves
+/// (`scrolled`). Nothing here reads the screen: the table is told what this decided.
 public struct MacColumnLayout: Sendable, Equatable {
     public struct Row: Sendable, Hashable {
         public let place: String
@@ -47,18 +48,21 @@ public struct MacColumnLayout: Sendable, Equatable {
         }
     }
 
-    /// Within this of the end, the reader is at the end.
+    /// Within this of the end, the reader has reached the end.
     public static let endSlack: CGFloat = 32
 
     public private(set) var rows: [Row]
     public private(set) var origin: CGFloat
     public private(set) var pane: CGFloat
+    /// The reader follows the newest rows: `apply` keeps the column at its end.
+    public private(set) var following = false
 
     public init(rows: [Row], origin: CGFloat, pane: CGFloat) {
         self.rows = rows
         self.pane = pane
         self.origin = 0
         self.origin = clamped(origin)
+        following = isAtEnd
     }
 
     /// The column's height: its rows' heights summed.
@@ -75,17 +79,30 @@ public struct MacColumnLayout: Sendable, Equatable {
         return nil
     }
 
-    /// The reader moved the column themselves (a trackpad, keys, the scroller, VoiceOver).
+    /// The reader moved the column themselves (a trackpad, keys, the scroller, VoiceOver): reaching the end follows; moving
+    /// up out of it stops following; any other move keeps what was.
     public mutating func scrolled(to y: CGFloat) {
+        let was = origin
         origin = clamped(y)
+        if isAtEnd {
+            following = true
+        } else if origin < was {
+            following = false
+        }
     }
 
-    /// Makes `change` and keeps the reader's place in the same step; returns what moved. `readerAway`: the reader left
-    /// the end themselves (opened a row to read it), so their row is kept even within the end's slack.
+    /// The reader opened a row to read it (a tool's output, a card's full input or all its files): their row is kept
+    /// as it grows, and rows landing below do not pull them down.
+    public mutating func left() {
+        following = false
+    }
+
+    /// Makes `change` and keeps the reader's place in the same step (the end while following, else the first row on
+    /// screen); returns what moved. A change that leaves the column at its end has the reader follow from there.
     @discardableResult
-    public mutating func apply(_ change: Change, readerAway: Bool = false) -> Moved {
+    public mutating func apply(_ change: Change) -> Moved {
         let before = (origin: origin, height: height)
-        let anchor = isAtEnd && !readerAway ? nil : firstOnScreen(keptBy: change.rows.map { Set($0.map(\.place)) })
+        let anchor = following ? nil : firstOnScreen(keptBy: change.rows.map { Set($0.map(\.place)) })
         var next = change.rows ?? rows
         if !change.heights.isEmpty {
             next = next.map { row in
@@ -99,6 +116,7 @@ public struct MacColumnLayout: Sendable, Equatable {
         } else {
             origin = clamped(height - pane)
         }
+        if isAtEnd { following = true }
         return Moved(dy: origin - before.origin, grown: height - before.height)
     }
 
