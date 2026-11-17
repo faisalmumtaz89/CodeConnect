@@ -705,6 +705,17 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         relaunchable ?? (lifecycle == .exited && codexLink == .boundNotStarted)
     }
 
+    /// The `claude --resume` session id to offer at the computer for an ended run, or nil. **Not offered
+    /// for a run the next message relaunches**: that run is picked up in the app by sending it a
+    /// message, so the manual command would be a second, worse path beside the open composer. Also nil for
+    /// a run still running, or one the daemon recorded no session id for.
+    public var resumeSessionID: String? {
+        guard lifecycle == .exited, !relaunchesOnMessage, let id = claudeSessionID, !id.isEmpty else {
+            return nil
+        }
+        return id
+    }
+
     /// What this app files the run's events, subscriptions and marks under, and
     /// what it sends when it has to name the run on the wire. See
     /// `Event.sessionKey` for why it is read off the data rather than off a flag.

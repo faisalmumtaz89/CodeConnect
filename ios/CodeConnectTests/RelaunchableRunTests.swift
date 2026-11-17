@@ -78,4 +78,41 @@ final class RelaunchableRunTests: XCTestCase {
             RunSettings.of(summary: summary), .hostedReadOnly(model: nil),
             "the self-stopped run's effort reads unset, not the old value")
     }
+
+    /// **A run the next message relaunches offers no manual resume command.** A relaunchable ended
+    /// run is picked up by sending it a message, so `cd … && claude --resume` beside its open composer
+    /// would be a second, worse path. The command stays for an ended run the daemon does NOT relaunch.
+    /// Repro from the daemon's own `minor-37-wire.json` (`session_hosted_ended`: exited, relaunchable, with
+    /// a recorded id). Must-fail: without the relaunchable guard the relaunchable run still offers its id.
+    func testARelaunchableRunOffersNoManualResumeCommand() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "minor-37-wire", withExtension: "json"),
+            "minor-37-wire.json is not in the test bundle (ios/CodeConnectTests/Resources/)")
+        let claudeWire = try XCTUnwrap(
+            try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue)
+        let relaunchable = try XCTUnwrap(
+            try claudeWire["session_hosted_ended"]?.decoded(SessionSummary.self))
+        XCTAssertTrue(relaunchable.relaunchesOnMessage, "precondition: the fixture is relaunchable")
+        XCTAssertFalse(
+            (relaunchable.claudeSessionID ?? "").isEmpty, "precondition: it has a recorded session id")
+        XCTAssertNil(
+            relaunchable.resumeSessionID,
+            "a relaunchable run offers no manual resume command — it is relaunched by a message")
+
+        // The contrast: an ended Claude run the daemon does NOT relaunch still offers the command.
+        let ended = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data(
+                """
+                {"session_uid":"u-ended","session_id":"u-ended","tmux_session":"",
+                 "cwd":"/work","project_label":"work","lifecycle":"exited","link":"attached",
+                 "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
+                 "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],"agent":"claude",
+                 "codex_link":"none","claude_session_id":"abc123"}
+                """.utf8))
+        XCTAssertFalse(ended.relaunchesOnMessage, "precondition: not relaunchable")
+        XCTAssertEqual(
+            ended.resumeSessionID, "abc123",
+            "a non-relaunchable ended run still offers its resume command")
+    }
 }
