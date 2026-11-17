@@ -7,7 +7,9 @@
 # moment of publication is the moment every machine can be handed these bytes.
 # A tag push builds, signs, notarizes and verifies a draft and stops.
 # Publishing requires a person to run the workflow with publishing enabled
-# *against a draft that already exists*: that run builds, signs and notarizes
+# *against a draft that already exists* (or that draft published as a
+# pre-release for the update proof, which no update path offers): that run
+# builds, signs and notarizes
 # nothing and reads no repository secret. It downloads the draft's nineteen
 # assets, checks them with the same `release-verify.sh` the draft run used, and
 # publishes exactly those bytes, so what was tested is what people download.
@@ -819,13 +821,14 @@ jobs:
           VERSION: ${{ needs.pin.outputs.version }}
         run: |
           # Publication is a PATCH on the id this run adopted, made only after
-          # re-reading what that id holds *now*: still a draft, still this
+          # re-reading what that id holds *now*: still a draft or the
+          # pre-release, still this
           # tag, and exactly the nineteen assets the verification step downloaded —
           # by id, name, and state, because an id survives a rename and the
           # updater selects by name — not whatever a concurrent writer left.
           state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
-          if [ "$(jq -r '.draft' <<<"$state")" != "true" ]; then
-            echo "::error::release $RELEASE_ID is no longer a draft; refusing"
+          if [ "$(jq -r '.draft or .prerelease' <<<"$state")" != "true" ]; then
+            echo "::error::release $RELEASE_ID is no longer a draft or a pre-release; refusing"
             exit 1
           fi
           if [ "$(jq -r '.tag_name' <<<"$state")" != "$TAG" ]; then

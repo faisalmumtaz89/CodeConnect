@@ -7,7 +7,8 @@
 #
 # The draft job (PROMOTING=false) adopts the draft or creates it. The promote job (PROMOTING=true) only finds it:
 # publication promotes a draft a draft run built and verified, and a promote run that finds none must not become a
-# create-and-publish run.
+# create-and-publish run. The promote job also finds it once it was published as a pre-release, which no update path
+# offers, for the update proof before promotion (RELEASING.md step 5); the draft job never adopts one.
 set -euo pipefail
 
 # Before anything is created, adopted, or promoted: the tag must still name the pinned commit. Adoption deletes and
@@ -45,7 +46,8 @@ case "$count" in
       -f name="CodeConnect $VERSION" --jq .id)"
     ;;
   1)
-    if [ "$(jq -r '.[0].draft' <<<"$matches")" != "true" ]; then
+    if [ "$(jq -r '.[0].draft' <<<"$matches")" != "true" ] &&
+      ! { [ "$PROMOTING" = "true" ] && [ "$(jq -r '.[0].prerelease' <<<"$matches")" = "true" ]; }; then
       echo "::error::$TAG is already published; this workflow will not modify a live release"
       exit 1
     fi
