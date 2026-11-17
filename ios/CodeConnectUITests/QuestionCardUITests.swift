@@ -86,9 +86,11 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertTrue(submit.isEnabled)
         submit.tap()
 
-        XCTAssertTrue(
-            app.staticTexts["Claude has the answers sent from the phone."].waitForExistence(timeout: 10),
-            "the confirmed answer")
+        let answeredBanner = app.staticTexts["Claude has the answers sent from the phone."]
+        XCTAssertTrue(answeredBanner.waitForExistence(timeout: 10), "the confirmed answer")
+        // The default size's shape of the same rule: the status is on screen once settled, here without
+        // any scroll to undo.
+        XCTAssertTrue(answeredBanner.isHittable, "the answered status is on screen")
         XCTAssertFalse(
             app.staticTexts["Answers sent"].exists || app.staticTexts["ANSWERS SENT"].exists,
             "the banner says it once")
@@ -248,10 +250,11 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertTrue(clear(), "Decline scrolls clear of the pinned bar")
         XCTAssertTrue(decline.isHittable, "and is on screen to be tapped")
         decline.tap()
-        XCTAssertTrue(
-            app.staticTexts["Declined, as Escape does at the computer."]
-                .waitForExistence(timeout: 10),
-            "the decline was sent")
+        let declinedBanner = app.staticTexts["Declined, as Escape does at the computer."]
+        XCTAssertTrue(declinedBanner.waitForExistence(timeout: 10), "the decline was sent")
+        // Brought into view, not left at the top the reader scrolled away from to reach Decline:
+        // hittable, not merely present — the needle for whether a decliner sees it happened.
+        XCTAssertTrue(declinedBanner.isHittable, "the Declined status is on screen, not off the top")
         XCTAssertFalse(app.buttons["question-decline"].exists)
     }
 

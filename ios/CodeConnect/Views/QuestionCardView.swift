@@ -148,6 +148,11 @@ struct QuestionCardView: View {
             // one would land the reader halfway down a question they have not
             // read.
             .onChange(of: step) { reader.scrollTo(Self.top, anchor: .top) }
+            // A card that settles brings its status into view — the banner sits at the top beside the
+            // questions, and the reader may have scrolled down to reach the action (at accessibility
+            // sizes the controls are in the scroll, not the pinned bar). The same move the step change
+            // makes, so a decliner or answerer sees the outcome they just produced.
+            .onChange(of: status.isAnswerable) { reader.scrollTo(Self.top, anchor: .top) }
         }
         .scrollIndicators(.hidden)
         .background(CC.color.bg)
