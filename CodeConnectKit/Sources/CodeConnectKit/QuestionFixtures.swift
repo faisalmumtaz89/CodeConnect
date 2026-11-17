@@ -118,7 +118,7 @@
                 "delete_session":true,"test_push":false,"push":false,"tls":false,\
                 "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
                 "send_text_idempotent":true,\
-                "prompt_identity":true,"command_catalog":true,"terminal_pty":true\
+                "prompt_identity":true,"command_catalog":true,"private_transport":true\
                 \(state == .oldMac ? "" : #","question_card":true"#)},"device_name":"iPhone"}
                 """
             return (try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))) ?? .null

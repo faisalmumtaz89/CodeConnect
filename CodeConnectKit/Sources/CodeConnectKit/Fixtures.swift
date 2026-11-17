@@ -369,7 +369,7 @@ enum Fixtures {
         "delete_session":true,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,\
-        "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
+        "prompt_identity":true,"command_catalog":true,"private_transport":true,\
         "hook_only_approvals":true,"start_session":true,"start_worktree":true,"browse_folders":true},\
         "machine_name":"Jordan’s Mac Studio","machine_os":"macos",\
         "device_name":"iPhone"}
@@ -377,10 +377,11 @@ enum Fixtures {
 
     /// The sample fleet's ack: exactly what the sample serves and nothing
     /// more — the demo daemon's own rule, "an action this server cannot
-    /// perform is not offered". `capture`, `delete_session`,
-    /// `command_catalog` and `terminal_pty` are false because each one's
-    /// request rides the connection, and the sample has none: advertising
-    /// them dresses a dead end as a control. `send_text` stays true — typing
+    /// perform is not offered". `delete_session` and `command_catalog` are
+    /// false because each one's request rides the connection, and the sample
+    /// has none: advertising them dresses a dead end as a control.
+    /// `private_transport` is false because there is no connection to vouch
+    /// for. `send_text` stays true — typing
     /// is answered in sample vocabulary, not hidden — and `diff` is true
     /// because the sample preloads its own.
     private static let sampleHelloAckJSON = """
@@ -391,7 +392,7 @@ enum Fixtures {
         "delete_session":false,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,\
-        "prompt_identity":true,"command_catalog":false,"terminal_pty":false,\
+        "prompt_identity":true,"command_catalog":false,"private_transport":false,\
         "hook_only_approvals":true},\
         "device_name":"iPhone"}
         """
@@ -1171,7 +1172,7 @@ enum CodexFixtures {
             "delete_session":true,"test_push":false,"push":false,"tls":false,\
             "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
             "send_text_idempotent":true,\
-            "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
+            "prompt_identity":true,"command_catalog":true,"private_transport":true,\
             "codex_interrupt":\(caps.interrupt),"codex_compose":\(caps.compose),\
             "supported_agents":["claude","codex"]},\
             "device_name":"iPhone"}

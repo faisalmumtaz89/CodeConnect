@@ -550,7 +550,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
         let chat = try await screen(
             "claude-chat", model,
             NavigationStack {
-                SessionDetailView(route: SessionRoute(key: uid), surfaceForTesting: .constant(.timeline))
+                SessionDetailView(route: SessionRoute(key: uid))
             }, height: 1400, opening: ["Bash tool call"])
         assertScreenIsSafe(chat.spoken, "the chat", expected: ["Bash tool call, git push origin \u{FFFD}niam"])
         XCTAssertTrue(chat.drawn.contains("command"), "the held call's row is open: \(chat.drawn)")

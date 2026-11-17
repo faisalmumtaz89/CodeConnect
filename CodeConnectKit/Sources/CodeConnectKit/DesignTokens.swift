@@ -100,37 +100,6 @@ private enum Hex {
     /// `successWord` #0D2D1F: 4.66 there, 5.26 on `dangerWord`, 6.58 on `bg`.
     /// Still unmistakably quieter than code at `text` (17.94).
     static let syntaxComment: UInt32 = 0x909090
-
-    // ANSI, the 16-colour terminal table.
-    //
-    // Only the six values below are new. The other ten are the palette's own
-    // tokens re-used by name, which is the point: `git diff` in the terminal is
-    // the same green as a `CCDiffRow`'s `+`, and a failing test is the same red
-    // as a `danger` badge. A terminal that agrees with the app it is inside is
-    // one fewer thing to learn at 2am.
-    //
-    //   0 black         `surfaceRaised`    8  bright black    `textDisabled`
-    //   1 red           `danger`           9  bright red      ↓
-    //   2 green         `success`         10  bright green    ↓
-    //   3 yellow        `warning`         11  bright yellow   ↓
-    //   4 blue          `info`            12  bright blue     ↓
-    //   5 magenta       ↓                 13  bright magenta  `syntaxKeyword`
-    //   6 cyan          ↓                 14  bright cyan     ↓
-    //   7 white         `textSecondary`   15  bright white    `text`
-    //
-    // Magenta and cyan are the two hues the app itself has no use for, so they
-    // are built rather than borrowed: magenta takes `syntaxKeyword`'s hue at
-    // full chroma (and `syntaxKeyword` *is* its bright form), cyan sits at 190°,
-    // between `success` and `info`, at the same saturation.
-    static let ansiMagenta: UInt32 = 0xAD57E6
-    static let ansiCyan: UInt32 = 0x4DBFD6
-    /// Brights are their normals with the saturation pulled back and the value
-    /// lifted — a lighter tint of the same hue, never a different colour.
-    static let ansiBrightRed: UInt32 = 0xFF9495
-    static let ansiBrightGreen: UInt32 = 0x79EEBA
-    static let ansiBrightYellow: UInt32 = 0xFFC96F
-    static let ansiBrightBlue: UInt32 = 0x87B4FF
-    static let ansiBrightCyan: UInt32 = 0x94E6F6
 }
 
 private extension Color {
@@ -227,86 +196,6 @@ extension CC {
         static let disabled: Double = 0.45
         /// The resting glow around a live status dot.
         public static let pulse: Double = 0.45
-    }
-}
-
-// MARK: - ANSI
-
-/// One entry in the terminal's 16-colour table.
-///
-/// Carries 16-bit components as well as a `Color` because the emulator's
-/// palette API takes `0...65535` per channel, and going through `Color` to get
-/// there would mean reading components back out of a `CGColor` — a round trip
-/// through a colour space that is not necessarily sRGB.
-public struct CCANSIColor: Equatable, Sendable {
-    public let red: UInt16
-    public let green: UInt16
-    public let blue: UInt16
-
-    fileprivate init(_ hex: UInt32) {
-        // 0xFF → 0xFFFF exactly. `<< 8` alone would top out at 0xFF00 and tint
-        // the whole table a shade dark.
-        red = UInt16((hex >> 16) & 0xFF) * 257
-        green = UInt16((hex >> 8) & 0xFF) * 257
-        blue = UInt16(hex & 0xFF) * 257
-    }
-
-    public var color: Color {
-        Color(
-            .sRGB, red: Double(red) / 65535, green: Double(green) / 65535,
-            blue: Double(blue) / 65535)
-    }
-}
-
-extension CC {
-    /// The terminal's 16-colour table.
-    ///
-    /// Supplied explicitly because SwiftTerm's defaults are tuned for a light
-    /// background: its normal blue is #0000EE, which measures **1.19:1** on
-    /// `bg` and is unreadable in this product. Every entry here is either a
-    /// palette token or built from one — see `Hex` for the derivation and the
-    /// index map.
-    ///
-    /// Contrast on `bg`, in index order:
-    /// `—` / 6.43 / 10.52 / 10.36 / 5.71 / 5.28 / 9.74 / 8.13 ·
-    /// `—` / 9.92 / 14.75 / 13.84 / 10.00 / 8.73 / 14.91 / 17.94.
-    ///
-    /// The two exemptions are the two that must be: **black** (#131313, 1.13)
-    /// and **bright black** (#525252, 2.69). ANSI black is a background colour
-    /// and is invisible on a black terminal by construction — every emulator
-    /// behaves this way, and lifting it would break `\e[30;47m` (black on
-    /// white). Bright black is the conventional "dim" slot: when a remote
-    /// program asks for dim, printing it bright would misreport what the
-    /// program said. Neither is a colour this app *chooses* for its own text.
-    // swiftlint:disable:next type_name
-    public enum ansi {
-        /// Indices 0–7 normal, 8–15 bright, in the standard ANSI order:
-        /// black, red, green, yellow, blue, magenta, cyan, white.
-        public static let table: [CCANSIColor] = [
-            CCANSIColor(Hex.surfaceRaised),
-            CCANSIColor(Hex.danger),
-            CCANSIColor(Hex.success),
-            CCANSIColor(Hex.warning),
-            CCANSIColor(Hex.info),
-            CCANSIColor(Hex.ansiMagenta),
-            CCANSIColor(Hex.ansiCyan),
-            CCANSIColor(Hex.textSecondary),
-
-            CCANSIColor(Hex.textDisabled),
-            CCANSIColor(Hex.ansiBrightRed),
-            CCANSIColor(Hex.ansiBrightGreen),
-            CCANSIColor(Hex.ansiBrightYellow),
-            CCANSIColor(Hex.ansiBrightBlue),
-            CCANSIColor(Hex.syntaxKeyword),
-            CCANSIColor(Hex.ansiBrightCyan),
-            CCANSIColor(Hex.text),
-        ]
-
-        /// The terminal's own background and foreground. Named separately
-        /// because they are not part of the 16 and an emulator sets them by a
-        /// different door.
-        public static let background = CC.color.bg
-        public static let foreground = CC.text.primary
     }
 }
 

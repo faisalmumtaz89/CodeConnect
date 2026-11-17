@@ -157,8 +157,8 @@ public final class DaemonConnection {
     ///
     /// **Written at most once a second**, by `noteContact`. This is observable
     /// state on an `@Observable` class that every mounted Fleet row reads, and
-    /// the terminal puts frames on this connection at chunk rate — so writing it
-    /// per frame invalidated the whole fleet a hundred times a second. Nothing
+    /// a replay puts hundreds of frames on this connection in a burst — so
+    /// writing it per frame invalidated the whole fleet for each one. Nothing
     /// is lost: every surface renders it as an age in whole seconds, and a stamp
     /// that is under a second old is one that would print the same string.
     public private(set) var lastContactAt: Date?
@@ -206,14 +206,8 @@ public final class DaemonConnection {
     /// Fired when the transport that actually worked is not the one that was
     /// stored, so the pairing can remember it.
     public var onTransportSettled: ((Bool) -> Void)?
-    /// The live terminal's own delivery channel: `terminal_attached`,
-    /// `terminal_output`, `terminal_credit` and `terminal_closed`, in arrival
-    /// order. Separate from `onMessage` because the terminal is a byte stream
-    /// with its own flow control, and its ordering must not depend on anything
-    /// the model chooses to do with a message.
-    public var onTerminal: ((ServerMessage) -> Void)?
-    /// Fired when a connection that was up goes down, so a live terminal learns
-    /// its carrier is gone rather than showing the last thing it received.
+    /// Fired when a connection that was up goes down, so what was read over it
+    /// stops being shown as current.
     public var onDisconnected: (() -> Void)?
 
     /// Whether the *current* attempt is `wss://`. Reported, never assumed: the
@@ -263,9 +257,8 @@ public final class DaemonConnection {
     ///
     /// Both are stateless configuration objects and this class is `@MainActor`,
     /// so there is exactly one caller of each. Building a fresh pair per frame
-    /// was allocation on the hottest path this app has: a live terminal is
-    /// hundreds of frames a second through the decoder, and every keystroke and
-    /// credit grant a frame through the encoder.
+    /// was allocation on the hottest path this app has: a replay is hundreds of
+    /// frames in a burst through the decoder.
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -800,8 +793,7 @@ public final class DaemonConnection {
             }
 
             // Straight to the bytes the decoder wants. Every frame the daemon
-            // sends is text — terminal output included, since pane bytes ride
-            // base64 inside the JSON — so the transcode below is the one this
+            // sends is text, so the transcode below is the one this
             // path always paid and the `.data` arm is for a frame it does not
             // send. It is kept because the API can hand one over and dropping
             // it would lose the connection over a shape, not because it saves
@@ -894,10 +886,6 @@ public final class DaemonConnection {
         let wasConnected = phase.isConnected
         if wasConnected { phase = .connecting }
         failAllWaiters(with: ConnectionError.sentButUnanswered)
-        // A live terminal rides this socket. Telling it now is what keeps a
-        // dead terminal from looking live: the alternative is a view still
-        // showing the last bytes it received, which is the one thing the
-        // terminal is never allowed to do.
         if wasConnected { onDisconnected?() }
     }
 
@@ -1160,7 +1148,6 @@ public final class DaemonConnection {
     /// button: a control that is merely hidden is one a deep link, a future
     /// layout or a test can still reach, and the whole point of the gate is that
     /// *no frame leaves* without the daemon having said it understands one.
-    /// `TerminalCarrier`'s `servesTerminal` guard is the same shape.
     ///
     /// `session` must be the `session_uid`: `payloadHash` is computed over the
     /// exact string this argument becomes on the wire.
@@ -1511,12 +1498,6 @@ public final class DaemonConnection {
             // The one place a string arrives having been written by the daemon.
             lastDaemonErrorMessage = lastErrorMessage
             lastDaemonErrorAt = lastErrorAt
-        case .terminalAttached, .terminalOutput, .terminalCredit, .terminalClosed:
-            // A stream, not a request/response: there is no waiter to resolve,
-            // and the carrier — not the model — owns the sequence. Delivered on
-            // its own channel so terminal bytes never depend on the model's
-            // dispatch, and in arrival order like everything else here.
-            onTerminal?(message)
         case .unknown(let type):
             // **Never swallowed.** A frame type this build cannot read is the
             // difference between a five-minute fix and a day whenever the Mac
@@ -1651,23 +1632,11 @@ public final class DaemonConnection {
         var catalogStub: ((String) async throws -> CommandCatalogResult)?
         private(set) var sendTextIdentities: [(requestID: String?, payloadHash: String?)] = []
 
-        /// Test seam: take a frame here instead of writing it to the socket.
-        ///
-        /// **Without it the terminal's own screens are unreachable.** The
-        /// carrier reaches `.attached` only by sending `terminal_attach` and
-        /// being answered for the id it chose, and that id is private and
-        /// unguessable by design. An `AppModel` built in a test has no socket,
-        /// so the send fails and the carrier ends the terminal — which leaves
-        /// every screen past the connect card provable only by asserting things
-        /// about the carrier a tab renders, never about the tab. Answering here
-        /// drives the real carrier through the real connection into the real
-        /// view. Throwing here is how a *failed* write is reached, which is the
-        /// other half nothing else can stage.
-        ///
-        /// It stands in for the socket and the framing both, so a test holding
-        /// it proves what the carrier does, not what goes on the wire. The wire
-        /// shape is asserted directly, against the encoder, in
-        /// `TerminalCarrierTests`.
+        /// Test seam: take a frame here instead of writing it to the socket. An
+        /// `AppModel` built in a test has no socket, so without it every send
+        /// fails; throwing here is how a *failed* write is reached. It stands in
+        /// for the socket and the framing both, so a test holding it proves what
+        /// the app sends, not what goes on the wire.
         public var sendStub: ((ClientMessage) throws -> Void)?
 
         /// Test seam: claim a set of capabilities without a handshake.

@@ -106,7 +106,7 @@ final class CatchUpScreenTests: XCTestCase {
         let scene = try XCTUnwrap(
             UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         return Host(
-            SessionDetailView(route: SessionRoute(key: a), surfaceForTesting: .constant(.timeline))
+            SessionDetailView(route: SessionRoute(key: a))
                 .environment(model)
                 .environment(Machines(holding: model)),
             scene: scene, size: CGSize(width: 402, height: 874))

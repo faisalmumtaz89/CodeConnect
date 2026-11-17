@@ -545,10 +545,10 @@ struct PairingView: View {
     }
 
     /// What protects a connection, in plain words, said only as far as the
-    /// daemon has vouched for it. A paired phone is offered the terminal exactly
-    /// when its connection is private — TLS, the daemon's tailnet address or
-    /// loopback — so that one answer separates "Tailscale encrypts it" from "not
-    /// encrypted"; with no paired answer it claims neither.
+    /// daemon has vouched for it. The daemon says whether a paired phone's
+    /// connection is private — TLS, its tailnet address or loopback — so that one
+    /// answer separates "Tailscale encrypts it" from "not encrypted"; with no
+    /// paired answer it claims neither.
     static func transport(
         encrypted: Bool, paired: Bool, capabilities: Capabilities?
     ) -> (value: String, note: String) {
@@ -556,15 +556,15 @@ struct PairingView: View {
             return ("Encrypted", "Your computer encrypts this connection itself.")
         }
         if paired, let capabilities {
-            if capabilities.servesTerminal {
+            if capabilities.isPrivateTransport {
                 return (
                     "Encrypted by Tailscale",
                     "This iPhone reaches your computer inside Tailscale, which encrypts the connection.")
             }
-            if capabilities.withholdsTerminal {
+            if capabilities.saysNotPrivate {
                 return (
                     "Not encrypted",
-                    "Your computer allows unencrypted connections on this network. The live terminal isn't offered over it.")
+                    "Your computer allows unencrypted connections on this network.")
             }
         }
         return ("Unknown", "Private only on a network that encrypts it, such as Tailscale.")

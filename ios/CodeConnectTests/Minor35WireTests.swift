@@ -34,6 +34,11 @@ final class Minor35WireTests: XCTestCase {
         XCTAssertFalse(try capabilities(28).endsRuns)
     }
 
+    /// A paired phone's ack says its connection is private under the key this build reads.
+    func testThePairedAckSaysItsConnectionIsPrivate() throws {
+        XCTAssertTrue(try capabilities(35).isPrivateTransport)
+    }
+
     func testEachStopRunAnswerDecodesAsTheDaemonSentIt() throws {
         let answers: [(String, StopRunResult)] = [
             ("stop_run_stopping", .stopping),

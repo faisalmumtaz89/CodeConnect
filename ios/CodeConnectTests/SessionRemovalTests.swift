@@ -251,19 +251,6 @@ final class SessionRemovalTests: XCTestCase {
         XCTAssertEqual(model.connection.deleteRequests, [target.sessionUID])
     }
 
-    /// Empty means "no known location", and the answer is nil — never a guess.
-    /// The old fallback substituted `session_id`, which for an adopted run is a
-    /// name tmux has never heard of, and for a recycled `cc-*` name could be a
-    /// different agent's keyboard.
-    func testTmuxNameIsNilWhenTheDaemonReportsNoLocation() {
-        let model = AppModel()
-        let unhosted = summary(lifecycle: "live", tmux: "")
-        let hosted = summary(lifecycle: "live", uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQS")
-        model.adoptSummariesForTesting([unhosted, hosted])
-        XCTAssertNil(model.tmuxName(for: unhosted.sessionKey))
-        XCTAssertEqual(model.tmuxName(for: hosted.sessionKey), "cc-1")
-    }
-
     // MARK: The cached-banner clocks
 
     /// The grace clock's lifecycle, through the real restore and the real

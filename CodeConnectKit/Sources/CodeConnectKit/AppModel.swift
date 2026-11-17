@@ -165,8 +165,6 @@ public final class AppModel {
     public let pairing: PairingStore
     public let connection: DaemonConnection
     public let settings: AppSettings
-    /// The live terminal, riding the same paired connection as everything else.
-    public let terminal: TerminalCarrier
     /// This machine's folder of the event cache.
     private let cache: EventCache
     /// Called once this machine's pairing is saved: its daemon has answered it.
@@ -369,19 +367,8 @@ public final class AppModel {
         self.relayEnrollment = relayEnrollment
         self.codexSpentLedger = codexSpentLedger
         self.pushRegistrar = pushRegistrar
-        // Owned here, not by the Terminal tab: the terminal rides the paired
-        // connection, and a view that owns it would drop the session every time
-        // SwiftUI rebuilt the tab. One carrier per connection is also what makes
-        // "one terminal at a time" true on this end, matching the daemon.
-        self.terminal = TerminalCarrier(connection: connection)
-        // The carrier took `onDisconnected` to end the terminal on a drop. Chain it,
-        // don't replace it: a drop must also clear the machine stats (a figure from a
-        // link that is gone is not current) without unhooking the terminal.
-        let endTerminalOnDrop = connection.onDisconnected
-        connection.onDisconnected = { [weak self] in
-            endTerminalOnDrop?()
-            self?.machineStats = nil
-        }
+        // A figure from a link that is gone is not current.
+        connection.onDisconnected = { [weak self] in self?.machineStats = nil }
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
         connection.onConnected = { [weak self] in
@@ -810,8 +797,8 @@ public final class AppModel {
         }
     }
 
-    /// Start the connection. One connection carries everything: the timeline,
-    /// approvals, and the live terminal.
+    /// Start the connection. One connection carries everything: the timeline
+    /// and approvals.
     private func connect(to endpoint: DaemonEndpoint) {
         connection.start(endpoint: endpoint)
     }
@@ -2034,23 +2021,6 @@ public final class AppModel {
         RunLabel.labels(for: shownSummaries)[key] ?? .unknown
     }
 
-    /// The tmux session name to attach to, or nil when the daemon no longer
-    /// lists this run.
-    ///
-    /// Nil rather than a guess, and taken from the fleet rather than from the
-    /// route: `tmux attach -t =<uid>` cannot work — tmux has never heard of a
-    /// uid — and the name is only safe to use while the daemon still vouches
-    /// that it belongs to this run.
-    public func tmuxName(for key: String) -> String? {
-        guard let summary = shownSummary(for: key) else { return nil }
-        // Empty is the daemon saying "no known location": an adopted run whose
-        // hooks arrived but which nothing ever put in tmux. Falling back to the
-        // session id here was a guess wearing a fact's clothes — the exact
-        // thing the comment above forbids — and attaching to a name nothing
-        // vouches for could hand the user a different agent's keyboard.
-        guard !summary.tmuxSession.isEmpty else { return nil }
-        return summary.tmuxSession
-    }
 
     private func subtitle(for summary: SessionSummary, shown: SessionState.Shown?) -> String {
         // **Nothing, rather than the run's own name back.** A run that has said
@@ -2127,7 +2097,7 @@ public final class AppModel {
         case .machineStats(let stats):
             // Only while a screen is watching (see `keepMachineStatsFresh`): a late
             // answer after the view left, or one in flight when the link drops, is
-            // ignored. The drop clears the sample through the `onDisconnected` chain,
+            // ignored. The drop clears the sample through `onDisconnected`,
             // and the view leaving clears it through the poll's own `defer`.
             if pollingStats { machineStats = stats }
         case .startSessionResult(let requestID, let outcome):
@@ -2135,11 +2105,6 @@ public final class AppModel {
             // The new session reaches the fleet on its own; asking now shortens
             // the Starting… it waits behind.
             if case .started = outcome { refreshFleet() }
-        case .terminalAttached, .terminalOutput, .terminalCredit, .terminalClosed:
-            // The terminal is a byte stream with its own flow control, delivered
-            // to `TerminalCarrier` on `connection.onTerminal`. Nothing here may
-            // read it: bytes off that screen are never facts this model holds.
-            break
         case .sessions(let list):
             let answersCatchUp = takeSessionsReply()
             if answersCatchUp {

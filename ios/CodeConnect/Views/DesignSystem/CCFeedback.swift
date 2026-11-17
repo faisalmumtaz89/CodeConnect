@@ -169,8 +169,8 @@ struct CCEmptyState<Detail: View>: View {
 /// **It is a component and not a modifier because the ramp is the whole
 /// point.** `ccGlyphContainer` takes `relativeTo:` as a free parameter, and two
 /// marks meaning *here is the thing this screen is about* were built with two
-/// different answers: `CCEmptyState` on `.largeTitle`, the Terminal tab's
-/// connect card on `.title2`. `.title2` grows without bound at accessibility
+/// different answers: `CCEmptyState` on `.largeTitle`, a connect card on
+/// `.title2`. `.title2` grows without bound at accessibility
 /// sizes and `.largeTitle` does not, so the two circles measured **58.67 / 61.66
 /// at M, 63.33 / 63.33 at the default L, and 150.33 / 108.67 at AX5** — a 41.66pt
 /// divergence, with one of them 37% of the screen's width, hiding behind the one
