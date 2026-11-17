@@ -154,6 +154,23 @@ extension AppModel {
         return lastSend.flatMap(ComposeProse.note)
     }
 
+    /// The compose slot's note when it is an outcome or a block, in precedence (the view adds the mic
+    /// failure and the neutral standing note below this). A **just-taken** outcome — a Stop the reader
+    /// tapped, read with no `lastSend` so a prior send's stale verdict does not qualify — wins over the
+    /// block, because the reader is looking here right after they acted. Otherwise the block (a card
+    /// waiting) wins over a stale outcome (R2T3-F1), then the stale outcome itself.
+    public func composeOutcomeOrBlock(for key: String, draft: String, lastSend: ComposeAttempt?)
+        -> ComposeProse.Note?
+    {
+        if let fresh = outcomeNote(for: key, lastSend: nil) { return fresh }
+        if sendBlockedReason(for: key, draft: draft) != nil,
+            let note = standingNote(for: key, draft: draft)
+        {
+            return note
+        }
+        return outcomeNote(for: key, lastSend: lastSend)
+    }
+
     /// Why sending to this run cannot work now, or nil.
     ///
     /// Text only lands if the composer is actually on screen at the computer, so the reasons a send cannot work are

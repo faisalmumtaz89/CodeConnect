@@ -2322,15 +2322,11 @@ private struct SessionComposeBar: View {
     @ViewBuilder
     private var standingNote: some View {
         // A reason that sending cannot work wins over a stale outcome note: the
-        // reader cannot send now (e.g. a card waits on this Codex run), so the
-        // standing reason — "answer the card first" — is what they need, not the
-        // last send's verdict (R2T3-F1). Only a block wins here; the neutral
-        // "observe only" note stays below the outcome, as before.
-        if model.sendBlockedReason(for: key, draft: text) != nil,
-            let note = model.standingNote(for: key, draft: text)
-        {
-            composeNote(note)
-        } else if let note = model.outcomeNote(for: key, lastSend: result) {
+        // reader cannot send now (e.g. a card waits on this Codex run), so the standing reason —
+        // "answer the card first" — is what they need, not a stale send's verdict (R2T3-F1). But a
+        // just-taken outcome (a Stop they tapped) wins over the block. Computed in `composeOutcomeOrBlock`
+        // so the precedence has a test; the neutral "observe only" note stays below, as before.
+        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result) {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
