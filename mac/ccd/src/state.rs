@@ -2497,8 +2497,8 @@ impl Daemon {
 
     /// Persist one message from a run's agent host, message `seq` from the host
     /// `host`, with its cursor ([`crate::store::Store::append_host_message`]), then
-    /// fan out what was filed. `false` when the cursor did not move: nothing was
-    /// written, and the message must not be acknowledged.
+    /// fan out what was filed, and return it. `None` when the cursor did not move:
+    /// nothing was written, and the message must not be acknowledged.
     pub async fn ingest_host_message(
         &self,
         session_uid: &str,
@@ -2506,7 +2506,7 @@ impl Daemon {
         seq: u64,
         pendings: Vec<PendingEvent>,
         notes: crate::store::RunNotes,
-    ) -> Result<bool> {
+    ) -> Result<Option<Vec<Event>>> {
         let mut pendings = pendings;
         for pending in &mut pendings {
             self.truncate_payload(pending);
@@ -2520,7 +2520,7 @@ impl Daemon {
                 .append_host_message(session_uid.to_string(), host, seq, pendings, notes)
                 .await?
             else {
-                return Ok(false);
+                return Ok(None);
             };
             for event in &events {
                 let _ = self.events_tx.send(event.clone());
@@ -2528,7 +2528,7 @@ impl Daemon {
             events
         };
         self.published(session_uid, &events).await;
-        Ok(true)
+        Ok(Some(events))
     }
 
     /// What follows filing a run's events, once they are broadcast: its facts, when
@@ -2756,7 +2756,7 @@ impl Daemon {
     /// The two things that could plausibly land late were **measured** rather than
     /// argued about, on this machine, against the fixture workload:
     ///
-    ///   * [`Daemon::note_codex_turn_running`] via the store's novelty read
+    ///   * [`Daemon::note_turn_running`] via the store's novelty read
     ///     ([`crate::store::Store::turn_terminal_filed`]) — a point query on the
     ///     unique dedup index, over WAL, on the DB executor: **p50 24 µs, p99 36 µs,
     ///     worst single sample 0.39 ms** over a 2,000-event log, and **p99 46 µs**
@@ -2936,9 +2936,11 @@ impl Daemon {
         });
     }
 
-    /// **A Codex turn is running, which is the run demonstrably moving.**
+    /// **A turn is running, which is the run demonstrably moving.**
     ///
-    /// The movement is read off the wire.
+    /// The movement is read off the wire: a Codex run's as below, and a Claude run
+    /// CodeConnect started by the `system/init` that begins each of its turns
+    /// ([`crate::claude_host`]'s `apply_sdk`).
     ///
     /// **What it buys is the cancellation, not a notification.** A turn ending
     /// admits a quiet-state doorbell that then waits out its dispatch grace; if the
@@ -2948,9 +2950,9 @@ impl Daemon {
     /// cancelled the first — a turn that merely started did not, and the doorbell
     /// went out while the agent was mid-turn.
     ///
-    /// # Two witnesses, and why recovery is allowed to be one of them
+    /// # Two Codex witnesses, and why recovery is allowed to be one of them
     ///
-    /// The wire says a turn is running in two ways, and both call this:
+    /// Codex's wire says a turn is running in two ways, and both call this:
     ///
     ///   * a live `turn/started` frame in the **measured shape the real wire always
     ///     carries** — the flat `threadId` naming the thread this connection is
@@ -2967,7 +2969,7 @@ impl Daemon {
     ///     witness, and it cancels nothing.
     ///
     /// The second is a *recovery* path, and the completion doorbell this cancels is
-    /// deliberately live-only ([`Daemon::push_codex_turn_complete`]). That is not
+    /// deliberately live-only ([`Daemon::push_turn_complete`]). That is not
     /// an inconsistency but the same rule read in the right direction: recovery may
     /// never *ring*, because a re-attach is not news; recovery may always
     /// **silence**, because the failure direction of a cancellation is a doorbell
@@ -2975,14 +2977,14 @@ impl Daemon {
     /// exactly the case where the daemon learns the run is mid-turn from the only
     /// evidence there is, and ringing anyway would announce a completion the reader
     /// can no longer act on.
-    pub(crate) fn note_codex_turn_running(&self, session_uid: &str) {
+    pub(crate) fn note_turn_running(&self, session_uid: &str) {
         self.push_gate.note_progress(session_uid);
     }
 
     /// **The operator started a new thread on this session, which is the person the
     /// doorbell is for, at the machine**.
     ///
-    /// The same cancellation as [`Daemon::note_codex_turn_running`] and for the same
+    /// The same cancellation as [`Daemon::note_turn_running`] and for the same
     /// reason, reached by the one movement that is not a turn. A completion doorbell
     /// admitted moments ago is waiting out its dispatch grace; a `/new` inside that
     /// window means the reader is sitting in front of the machine having already
@@ -3498,18 +3500,21 @@ impl Daemon {
         Retirement::Retired
     }
 
-    /// **A Codex turn this daemon watched finish, as an occasion to ring.**
+    /// **A turn this daemon watched finish, as an occasion to ring.**
     ///
-    /// The only completion signal Codex has: the design refuses Codex's `notify` hook and its
-    /// `PermissionRequest` hook precisely so that `turn/completed` is the one thing
-    /// that means a turn ended. So the same gate, the same ticket, the same
-    /// dispatch — and, like every doorbell, it rings only if a decision the phone
-    /// can answer is open when it goes, and is then about that decision
+    /// A Codex run's `turn/completed`, the only completion signal Codex has: the design
+    /// refuses Codex's `notify` hook and its `PermissionRequest` hook precisely so that
+    /// `turn/completed` is the one thing that means a turn ended. And a Claude run
+    /// CodeConnect started, at the `result` that ends each of its turns, read after its
+    /// host's replay ([`crate::claude_host`]'s `apply_sdk`): an end the host replays to a
+    /// restarted ccd is old news, as a Codex resume's is. So the same gate, the same
+    /// ticket, the same dispatch — and, like every doorbell, it rings only if a decision
+    /// the phone can answer is open when it goes, and is then about that decision
     /// (`dispatch_push`). What differs is only where the fact came from.
     ///
     /// # Live-only, and how that is guaranteed rather than checked
     ///
-    /// A turn terminal reaches the store from two places, and by deliberate design
+    /// A Codex turn terminal reaches the store from two places, and by deliberate design
     /// they are byte-identical facts under one dedup key: the live
     /// `turn/completed` frame, and a `thread/resume` answer describing a turn that
     /// finished while this daemon was not subscribed. Ringing about the second
@@ -3531,11 +3536,14 @@ impl Daemon {
     /// earlier resume already described never reaches this call — a re-attach
     /// cannot re-ring a turn the reader was told about when it happened.
     ///
-    /// # Only `completed`
+    /// # Which ends ring
     ///
-    /// An `interrupted` or `failed` terminal is no occasion. `interrupted` means a
-    /// human stopped the turn at the keyboard, and the person who did it is the
-    /// person the doorbell would wake.
+    /// A Codex `interrupted` or `failed` terminal is no occasion. `interrupted` means
+    /// a human stopped the turn at the keyboard, and the person who did it is the
+    /// person the doorbell would wake. A Claude turn's `result` rings however it
+    /// ended, an error included, except one a Stop ended (`terminal_reason`
+    /// `aborted…`), for the same reason. A command's own end (`local_command`:
+    /// `/clear`, `/compact`, `/cost`) is a turn's end like any other.
     ///
     /// # One ring per turn, except when two turns share a dispatch grace
     ///
@@ -3548,13 +3556,13 @@ impl Daemon {
     ///
     /// A second turn merely **starting** inside the grace cancels it too, and
     /// nothing rings: the run is working again, so there is no completion left to
-    /// announce. See [`Daemon::note_codex_turn_running`].
+    /// announce. See [`Daemon::note_turn_running`].
     ///
     /// Which is the right answer for the thing this is: a doorbell whose whole
     /// content is a few words and a count. Two rings 300 ms apart about the same
     /// open decisions are one fact told twice to somebody whose phone is on a
     /// table.
-    pub(crate) async fn push_codex_turn_complete(
+    pub(crate) async fn push_turn_complete(
         self: &Arc<Self>,
         session: &SessionKey,
         trigger: &Event,
@@ -3574,8 +3582,9 @@ impl Daemon {
             // A quiet-state push: progress landing during the grace means the run
             // has moved on from the state this announces, and it should not ring.
             true,
-            // No card behind it. A Codex approval push is
-            // [`Daemon::raise_codex_approval`]'s, and it carries its own.
+            // No card behind it. An approval's push is its raise's
+            // ([`Daemon::raise_codex_approval`], [`Daemon::host_card_asked`]), and it
+            // carries its own.
             None,
         );
     }
@@ -12258,25 +12267,10 @@ mod tests {
             .collect()
     }
 
-    /// A daemon whose pushes land in a vec instead of APNs, each with the
-    /// exclusion list it carried — the probe for the doorbell tests below.
-    struct CaptureSender(
-        std::sync::Mutex<Vec<(crate::apns::PushHint, Vec<String>)>>,
-        /// Devices the daemon told the sender to retire.
-        std::sync::Mutex<Vec<String>>,
-    );
-    impl crate::apns::PushSender for CaptureSender {
-        fn send(&self, hint: &crate::apns::PushHint, excluded: &[String]) {
-            self.0
-                .lock()
-                .unwrap()
-                .push((hint.clone(), excluded.to_vec()));
-        }
-        fn retire(&self, device_id: &str) {
-            self.1.lock().unwrap().push(device_id.to_string());
-        }
-    }
+    use crate::apns::CaptureSender;
 
+    /// A daemon whose pushes land in a [`CaptureSender`] instead of APNs — the probe
+    /// for the doorbell tests below.
     fn capture_daemon() -> (Arc<Daemon>, Arc<CaptureSender>) {
         capture_daemon_on(shared_store())
     }
@@ -12307,10 +12301,7 @@ mod tests {
         store: Arc<Store>,
         config: Config,
     ) -> (Arc<Daemon>, Arc<CaptureSender>) {
-        let capture = Arc::new(CaptureSender(
-            std::sync::Mutex::new(Vec::new()),
-            std::sync::Mutex::new(Vec::new()),
-        ));
+        let capture = Arc::new(CaptureSender::new());
         let daemon = Daemon::new(
             config,
             store,
@@ -12946,7 +12937,7 @@ mod tests {
                 .await;
                 let session = SessionKey::new(&uid, "cc-9");
                 let done = codex_turn_terminal(daemon, &session, "th:turn:1").await;
-                daemon.push_codex_turn_complete(&session, &done).await;
+                daemon.push_turn_complete(&session, &done).await;
             }
         }
     }
@@ -13230,10 +13221,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let sender = Arc::new(StallingSender {
-            capture: CaptureSender(
-                std::sync::Mutex::new(Vec::new()),
-                std::sync::Mutex::new(Vec::new()),
-            ),
+            capture: CaptureSender::new(),
             entered: std::sync::Mutex::new(Some(entered_tx)),
             release: std::sync::Mutex::new(Some(release_rx)),
         });
@@ -13353,7 +13341,7 @@ mod tests {
             .await;
             let session = SessionKey::new(&uid, "cc-9");
             let done = codex_turn_terminal(daemon, &session, "th:turn:1").await;
-            daemon.push_codex_turn_complete(&session, &done).await;
+            daemon.push_turn_complete(&session, &done).await;
             tokio::time::sleep(Duration::from_millis(700)).await;
             uid
         }
@@ -13361,7 +13349,7 @@ mod tests {
         let (daemon, capture) = capture_daemon();
         crate::presence::set_idle(Some(Duration::ZERO));
         let uid = codex_turn_held(&daemon).await;
-        daemon.note_codex_turn_running(&uid);
+        daemon.note_turn_running(&uid);
         leave_and_listen(&capture, "a new Codex turn started").await;
 
         let (daemon, capture) = capture_daemon();
@@ -16840,7 +16828,7 @@ mod tests {
         .await;
         let session = SessionKey::new(&uid, "cc-9");
         let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
-        daemon.push_codex_turn_complete(&session, &first).await;
+        daemon.push_turn_complete(&session, &first).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         {
             let rings = capture.0.lock().unwrap();
@@ -16856,7 +16844,7 @@ mod tests {
         // what the dispatch grace does to two turns closer together than that is
         // `two_turns_inside_one_dispatch_grace_ring_once_on_both_paths`.
         let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
-        daemon.push_codex_turn_complete(&session, &second).await;
+        daemon.push_turn_complete(&session, &second).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
@@ -16885,10 +16873,10 @@ mod tests {
         .await;
         let session = SessionKey::new(&uid, "cc-9");
         let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
-        daemon.push_codex_turn_complete(&session, &first).await;
+        daemon.push_turn_complete(&session, &first).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
-        daemon.push_codex_turn_complete(&session, &second).await;
+        daemon.push_turn_complete(&session, &second).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
@@ -16902,12 +16890,10 @@ mod tests {
     /// The parity test above covers the second turn *finishing*. This is the other
     /// half, and it was the live hole: turn A completes, turn B starts 200 ms later,
     /// and A's completion doorbell was still valid when its grace expired — so a
-    /// phone was told "finished a turn" about a run that was mid-turn. Codex, unlike
-    /// Claude, has a turn-start signal on the wire, and this is what reads it.
-    ///
-    /// Claude is the control again: its `Stop` hook records exactly this progress
-    /// beside the completion, and a `PreToolUse` arriving afterwards cancels a
-    /// waiting doorbell by the same epoch bump.
+    /// phone was told "finished a turn" about a run that was mid-turn. Codex's turn
+    /// start is `turn/started` on the wire, and this is what reads it; a hosted Claude
+    /// run's is the start its host files, read the same way in `claude_host`'s
+    /// `a_hosted_turn_starting_inside_the_grace_silences_the_last_ones_doorbell`.
     #[tokio::test]
     async fn a_turn_starting_inside_the_grace_cancels_the_last_turns_doorbell() {
         let (daemon, capture) = capture_daemon();
@@ -16920,11 +16906,11 @@ mod tests {
         .await;
         let session = SessionKey::new(&uid, "cc-9");
         let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
-        daemon.push_codex_turn_complete(&session, &first).await;
+        daemon.push_turn_complete(&session, &first).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         // The next turn begins. No terminal, no fact, no event — just the run
         // going back to work.
-        daemon.note_codex_turn_running(&uid);
+        daemon.note_turn_running(&uid);
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
@@ -16935,7 +16921,7 @@ mod tests {
         // And the latch is open, not stuck: the turn that started then finishes,
         // and *that* is news.
         let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
-        daemon.push_codex_turn_complete(&session, &second).await;
+        daemon.push_turn_complete(&session, &second).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
