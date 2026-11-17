@@ -1,17 +1,19 @@
 import CodeConnectKit
 import SwiftUI
 
-/// A Claude run started from the app: the model button and its close-on-click list, built from the run's own menus
-/// (Kit's `HostedSettings`). The Model rows carry the agent's own detail lines, the Effort rows are the selected model's
-/// efforts, and the Mode rows have the agent's own labels; a mode the menu marks `confirm` (one that lets the agent work
-/// without asking) ends in "…" and asks first, in the reply box's confirmation. The checks follow the run's facts, never
-/// a guess between a click and its answer. While one of its calls is in flight the list is disabled and a small spinner
-/// stands in the chevron's place; what became of the call is the reply box's note line. Its last rows are the reply
-/// box's own: Compact… opens its compact form, and Clear… its confirmation. Closed, the button names the run's mode
-/// beside the model whenever it is not the agent's asking default, a `confirm` mode in red.
+/// A Claude or Codex run started from the app: the model button, with the run's agent mark, and its close-on-click
+/// list, built from the run's own menus (Kit's `HostedSettings`). The Model rows carry the agent's own detail lines, the
+/// Effort rows are the selected model's efforts, and the Mode rows have the agent's own labels; a mode the menu marks
+/// `confirm` (one that lets the agent work without asking) ends in "…" and asks first, in the reply box's confirmation.
+/// The checks follow the run's facts, never a guess between a click and its answer. While one of its calls is in flight
+/// the list is disabled and a small spinner stands in the chevron's place; what became of the call is the reply box's
+/// note line. On a Claude run its last rows are the reply box's own: Compact… opens its compact form, and Clear… its
+/// confirmation; they type Claude Code's commands, which a Codex run does not take. Closed, the button names the run's
+/// mode beside the model whenever it is not the agent's asking default, a `confirm` mode in red.
 struct HostedSettingsButton: View {
     let model: AppModel
     let key: String
+    let agent: AgentKind
     let settings: HostedSettings
     /// The button's own tooltip: why it is disabled, or what it holds.
     let help: String
@@ -37,7 +39,7 @@ struct HostedSettingsButton: View {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
-                AgentMark(agent: .claude)
+                AgentMark(agent: agent)
                 Text(name).foregroundStyle(Theme.text)
                 if let standingMode {
                     Text("· \(standingMode.label)").foregroundStyle(standingMode.confirm ? Theme.red : Theme.text)
@@ -106,25 +108,27 @@ struct HostedSettingsButton: View {
                     }
                 }
             }
-            divider
-            Button {
-                open = false
-                compact()
-            } label: {
-                rowLabel("Compact…", detail: nil, marked: false)
+            if agent == .claude {
+                divider
+                Button {
+                    open = false
+                    compact()
+                } label: {
+                    rowLabel("Compact…", detail: nil, marked: false)
+                }
+                .buttonStyle(.hover(radius: 5, id: "session.composer.compact"))
+                .padding(.horizontal, 4)
+                .accessibilityIdentifier("session.composer.compact")
+                Button {
+                    open = false
+                    clear()
+                } label: {
+                    rowLabel("Clear…", detail: nil, marked: false)
+                }
+                .buttonStyle(.hover(radius: 5, id: "session.composer.clear"))
+                .padding(.horizontal, 4)
+                .accessibilityIdentifier("session.composer.clear")
             }
-            .buttonStyle(.hover(radius: 5, id: "session.composer.compact"))
-            .padding(.horizontal, 4)
-            .accessibilityIdentifier("session.composer.compact")
-            Button {
-                open = false
-                clear()
-            } label: {
-                rowLabel("Clear…", detail: nil, marked: false)
-            }
-            .buttonStyle(.hover(radius: 5, id: "session.composer.clear"))
-            .padding(.horizontal, 4)
-            .accessibilityIdentifier("session.composer.clear")
         }
         .disabled(settings.inFlight)
         .padding(.vertical, 5)
@@ -192,14 +196,15 @@ struct HostedSettingsButton: View {
     }
 }
 
-/// A Claude run started from the app that offers no menus (its link is down, it has ended or is starting, or its
-/// computer's CodeConnect is older): no list, the model as the run's fact names it.
+/// A Claude or Codex run started from the app that offers no menus (its link is down, it has ended or is starting, or
+/// its computer's CodeConnect is older): no list, the run's agent mark and the model as the run's fact names it.
 struct ModelFactLabel: View {
+    let agent: AgentKind
     let fact: String?
 
     var body: some View {
         HStack(spacing: 5) {
-            AgentMark(agent: .claude)
+            AgentMark(agent: agent)
             Text(fact ?? "Model").foregroundStyle(Theme.text)
         }
         .font(Theme.ui(12))

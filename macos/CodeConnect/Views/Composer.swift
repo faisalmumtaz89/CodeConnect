@@ -159,26 +159,24 @@ private struct Composer: View {
                         .accessibilityIdentifier("session.composer.count")
                 }
                 Spacer()
-                if !isCodex {
-                    // Which model control this run has is Kit's to say: a run started from the app gets its own menus,
-                    // or its model as a fact when it has none; a run these controls do not own draws none.
-                    switch model.runSettings(for: key) {
-                    case .deferToOtherPath:
-                        EmptyView()
-                    case .hostedReadOnly(let fact):
-                        ModelFactLabel(fact: fact)
-                    case .hostedLive(let settings):
-                        HostedSettingsButton(
-                            model: model, key: key, settings: settings,
-                            help: blocked ?? "Model, effort, mode, compact and clear", open: $commandsOpen,
-                            chose: takeOpener, compact: { compact(prefill: "") },
-                            clear: {
-                                opener = nil
-                                clearing = true
-                            },
-                            confirmMode: { confirmingMode = $0 })
-                        .disabled(blocked != nil || busy)
-                    }
+                // Which model control this run has is Kit's to say: a run started from the app gets its own menus, or
+                // its model as a fact when it has none; a run these controls do not own draws none.
+                switch model.runSettings(for: key) {
+                case .deferToOtherPath:
+                    EmptyView()
+                case .hostedReadOnly(let fact):
+                    ModelFactLabel(agent: summary?.agent ?? .claude, fact: fact)
+                case .hostedLive(let settings):
+                    HostedSettingsButton(
+                        model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
+                        help: blocked ?? (isCodex ? "Model, effort and mode" : "Model, effort, mode, compact and clear"),
+                        open: $commandsOpen, chose: takeOpener, compact: { compact(prefill: "") },
+                        clear: {
+                            opener = nil
+                            clearing = true
+                        },
+                        confirmMode: { confirmingMode = $0 })
+                    .disabled(blocked != nil || busy)
                 }
                 sendButton
             }
