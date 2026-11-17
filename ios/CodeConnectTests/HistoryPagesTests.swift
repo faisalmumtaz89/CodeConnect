@@ -785,14 +785,16 @@ final class HistoryPagesTests: XCTestCase {
         model.connection.injectForTesting(try capturedHelloAck())
         model.connection.injectForTesting(try sessions(lastSeq: 900))
         // A resets the rewound log just before it awaits the cache clear.
-        for _ in 0..<2_000 where state.gap?.cause != .logRewound { await Task.yield() }
+        // Yields, not a sleep: it must stop in the turn that sees the reset, while A still awaits its clear.
+        let deadline = ContinuousClock.now + .seconds(3)
+        while state.gap?.cause != .logRewound, ContinuousClock.now < deadline { await Task.yield() }
         XCTAssertEqual(state.gap?.cause, .logRewound)
         XCTAssertEqual(outbox.subscribes(uid), [500], "A is still at its cache clear")
 
         model.connection.injectForTesting(try capturedHelloAck())
         model.connection.injectForTesting(try sessions(lastSeq: 900))
         await settle(model)
-        for _ in 0..<50 { await Task.yield() }
+        _ = try await subscription(2)
         XCTAssertEqual(outbox.subscribes(uid), [500, 400], "B subscribes on the new link")
         XCTAssertEqual(state.windowStart, 401)
     }
@@ -804,14 +806,16 @@ final class HistoryPagesTests: XCTestCase {
         let state = try XCTUnwrap(model.statesForTesting[uid])
         model.connection.injectForTesting(try capturedHelloAck())
         model.connection.injectForTesting(try sessions(lastSeq: 900))
-        for _ in 0..<2_000 where state.gap?.cause != .logRewound { await Task.yield() }
+        // Yields, not a sleep: it must stop in the turn that sees the reset, while A still awaits its clear.
+        let deadline = ContinuousClock.now + .seconds(3)
+        while state.gap?.cause != .logRewound, ContinuousClock.now < deadline { await Task.yield() }
         XCTAssertEqual(state.gap?.cause, .logRewound)
         XCTAssertEqual(outbox.subscribes(uid), [500], "A is still at its cache clear")
 
         model.connection.injectForTesting(try capturedHelloAck())
         model.connection.injectForTesting(try sessions(lastSeq: 950))
         await settle(model)
-        for _ in 0..<50 { await Task.yield() }
+        _ = try await subscription(2)
         XCTAssertEqual(outbox.subscribes(uid), [500, 450], "the newest 500 of the new list")
         XCTAssertEqual(state.windowStart, 451)
     }
