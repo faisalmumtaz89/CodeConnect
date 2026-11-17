@@ -211,9 +211,7 @@
           ]
         },
         "model": {
-          "at": "2026-11-15T00:00:00Z",
           "seq": 11,
-          "source": "command",
           "value": "gpt-6.1-sol"
         },
         "permission_mode": {
@@ -240,9 +238,7 @@
         "lifecycle": "stopping",
         "link": "attached",
         "model": {
-          "at": "2026-11-15T00:00:00Z",
           "seq": 11,
-          "source": "command",
           "value": "gpt-6.1-sol"
         },
         "permission_mode": {
@@ -276,9 +272,7 @@
         "lifecycle": "exited",
         "link": "detached",
         "model": {
-          "at": "2026-11-15T00:00:00Z",
           "seq": 11,
-          "source": "command",
           "value": "gpt-6.1-sol"
         },
         "permission_mode": {

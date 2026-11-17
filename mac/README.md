@@ -55,11 +55,11 @@ support was built across five of those numbers:
 | 1.16 | The phone can answer a Codex approval — `AnswerPath::CodexResponse`, which is neither a hook return nor a keystroke but the app server's own response, written for it. |
 | 1.17 | Stop is honoured rather than refused. Every `InterruptResult` status becomes reachable, and the `codex_interrupt` capability says this daemon does the thing. |
 | 1.18 | Say something — the `codex_compose` message, and a `ComposeResult` that says whether the words *started* a turn or *steered* the one already running. Gated by `codex_compose`. |
-| 1.19 | The three facts that make a Codex session drivable from the fleet without inference: `request_id` inside the `approval_resolved` payload, `turn_id` on the approval card's event envelope, and `SessionSummary.codex_link` (`subscribed` · `bound` · `offline` · `none`). |
+| 1.19 | The three facts that make a Codex session drivable from the fleet without inference: `request_id` inside the `approval_resolved` payload, `turn_id` on the approval card's event envelope, and `SessionSummary.codex_link` (`subscribed` · `bound` · `offline` · `none`). `bound` and `offline` are gone in X12. |
 | 1.20 | `codex_link` gains a fifth word, `bound_not_started`: a link bound to a thread the daemon has proved has never run a turn. It is the one un-subscribed state a compose is admitted in — no rollout means no turn to collide with, and none to stop — so the phone may start a fresh session's first turn. |
 
-`subscribed` actuates both verbs; `bound_not_started` actuates compose only; every other
-word actuates neither. A refusal is still the last word: a link can move between the
+`subscribed` actuates both verbs; `bound_not_started` actuates compose only; `none`
+actuates neither. A refusal is still the last word: a link can move between the
 summary the phone drew and the tap.
 
 ```sh
@@ -1214,9 +1214,8 @@ to probe credentials.
   (`status: "duplicate"`); a retry with the same id and different material is
   refused. The body is capped at 8KB. A request missing either new field is
   refused, and nothing is sent.
-  **`require` is ignored.** It named what had to be on the pane before keystrokes
-  were typed, and nothing is typed into a pane. The field still decodes so an
-  older client's message parses.
+  **`require` is no longer a field.** A client that still sends it is unaffected,
+  as an unknown key is ignored, not refused.
   `SendTextResult` gains `duplicate` and `indeterminate`, neither of which can
   reach a client that did not send a `request_id`.
 
@@ -1253,10 +1252,6 @@ to probe credentials.
   unrecognised, because "we do not know this tool" is not evidence of safety.
   Matching is token-based, so `confirm -rf` is not `rm -rf` and `2>/dev/null` is
   not writing to a device node. It is a rendering hint for a human, never a gate.
-* **`ResolvedBy::Local`** — recorded by earlier daemons when a prompt was
-  answered at the Mac's keyboard, so the phone shows "answered at the keyboard"
-  instead of a rejection; `inferred: true` when the prompt merely left the
-  screen.
 * **`ResolvedBy::Timeout`** — closed with nobody's answer: any open card of a
   run that ended (detail "the session ended before anyone answered").
 * **`ResolvedBy::Superseded`** — recorded by daemons before minor 22, when a

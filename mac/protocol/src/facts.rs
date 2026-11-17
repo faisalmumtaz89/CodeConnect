@@ -10,7 +10,7 @@
 //! name two different models for one run: `SessionState.modelFact(of:)`,
 //! `LocalCommandLine.parse` and `ModelConfirmation.parse` in the iOS app.
 
-use crate::event::{Event, EventKind, Fact, ModelFact, ModelSource, Source};
+use crate::event::{Event, EventKind, Fact, Source};
 
 /// The kind an earlier build's transcript tailer filed Claude's permission-mode line
 /// under, read from a log that build wrote.
@@ -45,7 +45,7 @@ fn codex_settings(event: &Event) -> bool {
 /// A run's facts, each as of the newest event that decided it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFacts {
-    pub model: Option<ModelFact>,
+    pub model: Option<Fact>,
     pub permission_mode: Option<Fact>,
     pub effort: Option<Fact>,
     /// The seq of the run's newest `session_end`, 0 before one. An effort is the ended
@@ -129,33 +129,31 @@ pub fn effort_fact(event: &Event) -> Option<Fact> {
 /// ([`CODEX_SETTINGS`]), an agent's own receipt as Claude's is. Both verbs of the
 /// receipt are facts about the model in force; which one it was is not this fact's
 /// business.
-pub fn model_fact(event: &Event) -> Option<ModelFact> {
-    let (value, source) = match event.kind {
+pub fn model_fact(event: &Event) -> Option<Fact> {
+    let value = match event.kind {
         EventKind::SessionStart => {
             let model = event.payload.get("model")?.as_str()?;
             if model.is_empty() {
                 return None;
             }
-            (model.to_string(), ModelSource::SessionStart)
+            model.to_string()
         }
         EventKind::UserMessage => {
             let content = event.payload.get("message")?.get("content")?.as_str()?;
-            (model_receipt(content)?.1, ModelSource::Command)
+            model_receipt(content)?.1
         }
         _ if codex_settings(event) => {
             let model = event.payload.get("model")?.as_str()?;
             if model.is_empty() {
                 return None;
             }
-            (model.to_string(), ModelSource::Command)
+            model.to_string()
         }
         _ => return None,
     };
-    Some(ModelFact {
+    Some(Fact {
         value,
         seq: event.seq,
-        source,
-        at: event.ts.clone(),
     })
 }
 
@@ -449,7 +447,7 @@ mod tests {
 
     /// The phone's `modelFact(of:)`: a `session_start` with a non-empty `model`,
     /// or a `/model` receipt on a user line. Both verbs are a fact about the model
-    /// in force, and the provenance says which kind of event it was.
+    /// in force.
     #[test]
     fn the_model_comes_from_a_session_start_or_a_receipt() {
         let start = event(
@@ -460,11 +458,9 @@ mod tests {
         );
         assert_eq!(
             model_fact(&start),
-            Some(ModelFact {
+            Some(Fact {
                 value: "claude-opus-5[1m]".into(),
                 seq: 1,
-                source: ModelSource::SessionStart,
-                at: "2026-10-14T10:00:01.000Z".into(),
             })
         );
         let kept = user_line(
@@ -473,11 +469,9 @@ mod tests {
         );
         assert_eq!(
             model_fact(&kept),
-            Some(ModelFact {
+            Some(Fact {
                 value: "claude-sonnet-5".into(),
                 seq: 7,
-                source: ModelSource::Command,
-                at: "2026-10-14T10:00:07.000Z".into(),
             })
         );
         for silent in [
@@ -672,8 +666,8 @@ mod tests {
     }
 
     /// **A Codex run's settings decide its model, its effort and its mode** (minor
-    /// 43): the model and the effort as Codex names them, the model as the agent's own
-    /// receipt; the mode as the menu's, a run asking nothing reading `full-access` in Plan
+    /// 43): the model and the effort as Codex names them; the mode as the menu's, a run
+    /// asking nothing reading `full-access` in Plan
     /// too; and a combination no menu mode is, or a report with no effort, decides nothing of
     /// that.
     #[test]
@@ -705,10 +699,9 @@ mod tests {
             );
         }
         let reported = report(4, "on-request", "workspaceWrite", "default", json!("high"));
-        let model = model_fact(&reported).expect("its model");
         assert_eq!(
-            (model.value.as_str(), model.source),
-            ("gpt-6-astra", ModelSource::Command)
+            model_fact(&reported).map(|fact| fact.value),
+            Some("gpt-6-astra".into())
         );
         assert_eq!(
             effort_fact(&reported).map(|fact| fact.value),

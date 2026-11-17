@@ -9,7 +9,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, SessionSummary};
-use crate::ipc::PromptPresence;
 
 /// Ceiling on a single client message. Answers and prompts are small; anything
 /// larger is malformed.
@@ -187,25 +186,8 @@ pub enum ClientMessage {
         /// `submit`. Required whenever `request_id` is present.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload_hash: Option<String>,
-        /// **Ignored since minor 3.** Kept so a client below minor 3 still
-        /// decodes, but the interlock is chosen by the server: letting the
-        /// caller nominate the needle that authorises its own keystrokes made
-        /// the safety check a formality the client could write itself.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        require: Option<PromptPresence>,
         #[serde(default = "default_true")]
         submit: bool,
-        /// The client saw this command's consequences stated and the human
-        /// tapped anyway, so the daemon may **complete** the confirmation
-        /// Claude Code opens rather than dismissing it. Minor 10.
-        ///
-        /// Default false, and it is a *permission*, not an instruction: the
-        /// daemon still intersects it with its own allowlist, so a client
-        /// cannot nominate a command. It exists
-        /// because a client that predates the disclosure must not trigger a
-        /// committing keystroke it never told anybody about.
-        #[serde(default)]
-        complete_native_confirmation: bool,
     },
     /// "What has this agent actually changed?" — answered from git, not from
     /// the event log, because the log knows about edits that were later undone
@@ -1048,18 +1030,17 @@ pub struct Capabilities {
     /// It is **connection-global and build-shaped**: one capability set is composed
     /// per `hello_ack`, from this daemon's supported agents and nothing else. It is
     /// therefore true on a connection whose fleet is entirely Claude, and true for a
-    /// Codex session whose control link is offline, unbound or merely bound — every
-    /// one of which refuses an ask with a sentence of its own. The name carries
+    /// Codex session whose `codex_link` is not `subscribed`, which refuses an ask with
+    /// a sentence of its own. The name carries
     /// `codex_` for that reason: a bare `interrupt` read as a promise about whatever
     /// session the reader had in mind, which is the one thing this flag never was.
     ///
     /// **Per-session actuatability is `summary.agent` plus the session's link
     /// state, and BOTH are now on the summary.** The agent always was;
-    /// `codex_thread_id` never answered the second half, because it is resolved from
-    /// the addressee's *binding* and reads the same whether that link is subscribed,
-    /// bound or reconnecting. [`crate::event::SessionSummary::codex_link`] closes it:
-    /// it is resolved from the same addressee, in the same read, and says which of
-    /// the four states that addressee is in. A client that wants to know whether THIS
+    /// `codex_thread_id` never answered the second half: it is the thread the run's row
+    /// holds, and reads the same whether or not its link is attached.
+    /// [`crate::event::SessionSummary::codex_link`] closes it: it says whether an ask
+    /// aimed at the run can land. A client that wants to know whether THIS
     /// session can be stopped right now computes it from the fleet — this flag AND
     /// `agent == codex` AND `codex_link == subscribed`.
     ///
@@ -1155,8 +1136,7 @@ pub struct Capabilities {
     /// ([`ClientMessage::Interrupt`], minor 37), through the run's agent host. Absent
     /// decodes `false`: an older daemon refuses every Claude Stop, so a client offers
     /// Stop on a Claude run only when this is advertised. It is
-    /// [`Self::codex_interrupt`]'s twin for the other engine, and the two fold into one
-    /// once the tmux-era Codex path is removed (X12), so no third is added.
+    /// [`Self::codex_interrupt`]'s twin for the other engine.
     #[serde(default)]
     pub claude_interrupt: bool,
 }
@@ -1288,13 +1268,6 @@ impl QuestionHold {
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedBy {
     Phone,
-    /// Answered at the Mac's keyboard, as an earlier daemon recorded it. Detected,
-    /// not reported: that daemon saw the prompt leave the pane without having typed
-    /// into it, or saw the tool run. The phone should render "answered at the keyboard", never a
-    /// rejection — which is the entire point of distinguishing this from
-    /// `Timeout`. Best-effort by construction; check `AnswerOutcome::inferred`
-    /// before presenting `decision` as fact.
-    Local,
     Timeout,
     Superseded,
 }
@@ -1342,10 +1315,9 @@ pub struct AnswerOutcome {
     pub resolved_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// True when `decision` is the daemon's *inference* rather than an observed
-    /// answer — a card an earlier build filed, closed because its run ended, or an
-    /// earlier daemon's local resolution, where all it knew is that the prompt was
-    /// gone. Recording a guess without labelling it as one would make
+    /// True when `decision` was an earlier daemon's *inference* rather than an
+    /// observed answer, where all it knew is that the prompt was gone. Recording a
+    /// guess without labelling it as one would make
     /// the ledger lie, and the ledger is the thing a later duplicate tap is
     /// answered from.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1367,18 +1339,13 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Who resolved a Codex approval, when that is known. Upstream carries no
-/// provenance (`serverRequest/resolved` is the same frame however it was
-/// answered), so this is derived from the broker's own winner disposition, never
-/// read off the wire.
+/// Who answered a Codex approval: an app, whose answer the daemon wrote to Codex. A
+/// card Codex settled without one is cleared, not answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolutionActor {
     /// The phone's claim won.
     Phone,
-    /// Answered at the Mac's keyboard — the TUI beat the phone, or the phone
-    /// never claimed. Honest even when the specific decision is not known.
-    Local,
 }
 
 /// Why a Codex approval was cleared without being answered.
@@ -1457,9 +1424,8 @@ pub enum WriteStage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CodexResolution {
-    /// Answered. `decision` is absent when only the winner is known and not the
-    /// choice (upstream resolution has no provenance, so a keyboard answer often
-    /// arrives as `answered{by: local}` with no decision).
+    /// Answered by an app, with its `decision`. An earlier daemon could send one
+    /// without the decision, when it knew only who answered.
     Answered {
         by: ResolutionActor,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2417,18 +2383,33 @@ mod tests {
             ClientMessage::SendText {
                 request_id,
                 payload_hash,
-                require,
                 submit,
                 ..
             } => {
                 assert_eq!(request_id, None);
                 assert_eq!(payload_hash, None);
                 assert!(submit);
-                // Still decoded, deliberately ignored by the daemon.
-                assert!(require.is_some());
             }
             other => panic!("wrong message: {other:?}"),
         }
+    }
+
+    /// **A `send_text` is its session, text, identity and `submit`, and nothing else.** A
+    /// client that still sends `require` or `complete_native_confirmation` is read without
+    /// them: an unknown key is ignored, not refused.
+    #[test]
+    fn a_send_text_still_carrying_require_and_a_confirmation_is_read_without_them() {
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"send_text","session_id":"cc-1","text":"/model x","request_id":"st-1",
+                "payload_hash":"h","require":{"mode":"input_box"},"submit":true,
+                "complete_native_confirmation":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({"type": "send_text", "session_id": "cc-1", "text": "/model x",
+                               "request_id": "st-1", "payload_hash": "h", "submit": true})
+        );
     }
 
     #[test]
@@ -2439,12 +2420,9 @@ mod tests {
             text: "hi".into(),
             request_id: Some("st-1".into()),
             payload_hash: Some(hash.clone()),
-            require: None,
             submit: true,
-            complete_native_confirmation: false,
         };
         let encoded = serde_json::to_string(&msg).unwrap();
-        assert!(!encoded.contains("require"), "{encoded}");
         match serde_json::from_str::<ClientMessage>(&encoded).unwrap() {
             ClientMessage::SendText {
                 request_id,
@@ -2731,7 +2709,7 @@ mod tests {
                 answered_on: Some(AnsweredOn::Mac),
             },
             CodexResolution::Answered {
-                by: ResolutionActor::Local,
+                by: ResolutionActor::Phone,
                 decision: None,
                 answered_on: None,
             },
@@ -2768,12 +2746,12 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&CodexResolution::Answered {
-                by: ResolutionActor::Local,
+                by: ResolutionActor::Phone,
                 decision: None,
                 answered_on: None
             })
             .unwrap(),
-            r#"{"status":"answered","by":"local"}"#
+            r#"{"status":"answered","by":"phone"}"#
         );
         // The item-bound retirement, pinned by hand like its siblings. Written
         // out rather than derived from the variant name: this string is what a
@@ -2798,6 +2776,19 @@ mod tests {
             })
             .unwrap()
         );
+    }
+
+    /// **A Codex card is answered by `phone`**, spelled by hand, and `local` does not
+    /// decode.
+    #[test]
+    fn a_codex_card_is_answered_by_the_phone_alone() {
+        let encoded = serde_json::to_string(&ResolutionActor::Phone).unwrap();
+        assert_eq!(encoded, "\"phone\"");
+        assert_eq!(
+            serde_json::from_str::<ResolutionActor>(&encoded).unwrap(),
+            ResolutionActor::Phone
+        );
+        assert!(serde_json::from_str::<ResolutionActor>("\"local\"").is_err());
     }
 
     /// **The correlation the phone actually uses, pinned as a wire string.**
@@ -2841,7 +2832,7 @@ mod tests {
         // daemon's own readers — and any client written against minor 18 — working.
         for resolution in [
             CodexResolution::Answered {
-                by: ResolutionActor::Local,
+                by: ResolutionActor::Phone,
                 decision: None,
                 answered_on: None,
             },
@@ -3537,7 +3528,7 @@ mod tests {
             request_id: "toolu_1".into(),
             session_id: "cc-1".into(),
             decision: AnswerDecision::Deny,
-            resolved_by: ResolvedBy::Local,
+            resolved_by: ResolvedBy::Timeout,
             answered_on: None,
             applied_via: AnswerPath::SendKeys,
             resolved_at: "t".into(),
@@ -3554,6 +3545,22 @@ mod tests {
         assert!(!serde_json::to_string(&outcome)
             .unwrap()
             .contains("inferred"));
+    }
+
+    /// **An answer is resolved by `phone`, `timeout` or `superseded`**, spelled by hand,
+    /// and `local` does not decode.
+    #[test]
+    fn an_answer_is_resolved_by_phone_timeout_or_superseded() {
+        for (by, word) in [
+            (ResolvedBy::Phone, "phone"),
+            (ResolvedBy::Timeout, "timeout"),
+            (ResolvedBy::Superseded, "superseded"),
+        ] {
+            let encoded = serde_json::to_string(&by).unwrap();
+            assert_eq!(encoded, format!("\"{word}\""));
+            assert_eq!(serde_json::from_str::<ResolvedBy>(&encoded).unwrap(), by);
+        }
+        assert!(serde_json::from_str::<ResolvedBy>("\"local\"").is_err());
     }
 
     #[test]

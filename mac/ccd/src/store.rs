@@ -2334,10 +2334,7 @@ impl Store {
             session_uid,
             "kind = ?2",
             &[EventKind::UserMessage.as_str()],
-            |event| {
-                protocol::facts::model_fact(event)
-                    .filter(|fact| fact.source == protocol::event::ModelSource::Command)
-            },
+            protocol::facts::model_fact,
         )?
         .map(|fact| fact.value))
     }

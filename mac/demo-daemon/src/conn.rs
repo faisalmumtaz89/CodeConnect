@@ -392,11 +392,7 @@ where
             text,
             request_id,
             payload_hash,
-            // Decoded so a client below minor 3 still parses, then discarded:
-            // the interlock is the server's to choose.
-            require: _,
             submit,
-            complete_native_confirmation: _,
         } => {
             let result = fleet.send_text(
                 &session_id,
@@ -1309,8 +1305,6 @@ mod tests {
             .unwrap();
         assert_eq!(summary["model"]["value"], start.payload["model"]);
         assert_eq!(summary["model"]["seq"], start.seq);
-        assert_eq!(summary["model"]["source"], "session_start");
-        assert_eq!(summary["model"]["at"], start.ts.as_str());
         assert_eq!(
             summary["permission_mode"],
             json!({"value": "default", "seq": card.seq})

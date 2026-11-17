@@ -525,20 +525,6 @@ impl DaemonInfo {
     }
 }
 
-/// What had to be on a run's pane before keys were typed into it, as an older
-/// phone still names it in `SendText.require`. Nothing is typed into a pane any
-/// more, so ccd reads the field and ignores it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum PromptPresence {
-    /// The composer is accepting input.
-    InputBox,
-    /// A permission prompt is on screen ("Do you want to proceed?").
-    PermissionPrompt,
-    /// Caller-supplied needles; any one matching is enough.
-    AnyOf { needles: Vec<String> },
-}
-
 /// The arguments that start `codeconnect mcp`, the mail server, for the run
 /// `session_uid`, speaking to the daemon at `socket`. The launcher and ccd both
 /// build a run's server from this, and `codeconnect mcp` parses them back.

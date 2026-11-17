@@ -10,9 +10,7 @@
     "lifecycle": "exited",
     "link": "detached",
     "model": {
-      "at": "2026-11-15T09:00:00.000Z",
       "seq": 3,
-      "source": "session_start",
       "value": "claude-opus-5-5"
     },
     "permission_mode": {
@@ -84,9 +82,7 @@
       "selected_model": "default"
     },
     "model": {
-      "at": "2026-11-15T09:00:00.000Z",
       "seq": 7,
-      "source": "session_start",
       "value": "claude-opus-5-5"
     },
     "permission_mode": {

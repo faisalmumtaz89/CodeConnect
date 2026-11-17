@@ -2706,7 +2706,7 @@ mod tests {
             let hash = protocol::hash::send_text_hash(&g3.uid, &text, true);
             let sent = g3
                 .daemon
-                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true, false)
+                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true)
                 .await;
             let mut ran = false;
             for _ in 0..300 {
