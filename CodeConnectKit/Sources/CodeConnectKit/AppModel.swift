@@ -3253,6 +3253,7 @@ public final class AppModel {
         }
         let requestID = controls.composeRequestID(material: hash)
 
+        retireSettingNoticeForSend(key)
         controls.beginCompose()
         do {
             let result = try await connection.compose(
@@ -3286,6 +3287,7 @@ public final class AppModel {
         if let blocked = ComposeDraft(text: text).blockedReason { return .refused(blocked) }
         guard let reference = Self.sessionReference(summary) else { return .refused(Self.noUidSentence) }
         let hash = CodexHash.compose(sessionRef: reference, text: text)
+        retireSettingNoticeForSend(key)
         do {
             let result = try await connection.compose(
                 session: reference, requestID: "say-" + hash, text: text, payloadHash: hash)
@@ -3317,7 +3319,12 @@ public final class AppModel {
     /// **What one run's model / effort / mode controls draw**, computed in the one place both apps read.
     /// The selection follows the summary's facts; the only client state folded in is whether a call is
     /// in flight and the last answer — and a retained answer is dropped once that setting's own fact has
-    /// moved past the one it was recorded against: the notice bridged the wait, and the wait is over.
+    /// moved past the one the call started from: the notice bridged the wait, and the wait is over. An
+    /// answer that applies from the next turn is the exception: its fact can move at the change itself
+    /// (Codex reports the thread's new settings at once; ccd files claude's taken effort before it
+    /// answers), so it stands until this device sends the run's next message
+    /// (`retireSettingNoticeForSend`). A message sent from another device leaves it standing until this
+    /// device's own next send or call: an accepted miss.
     public func runSettings(for key: String) -> RunSettings {
         guard let summary = summary(for: key) else { return .deferToOtherPath }
         let state = settingStateByKey[key] ?? SettingState()
@@ -3326,6 +3333,12 @@ public final class AppModel {
             outcome = nil
         }
         return RunSettings.of(summary: summary, inFlight: state.inFlight, lastOutcome: outcome)
+    }
+
+    /// A message this device sends to the run ends its settings notice: a change that applies from the
+    /// next message now has, and the send's own outcome takes the line.
+    private func retireSettingNoticeForSend(_ key: String) {
+        settingStateByKey[key]?.outcome = nil
     }
 
     /// Set this run's model. The label the outcome names is the menu's own.
@@ -3370,13 +3383,19 @@ public final class AppModel {
         state.inFlight = true
         state.outcome = nil
         settingStateByKey[key] = state
-        func record(_ outcome: SettingOutcome?) {
+        func record(_ outcome: SettingOutcome?, fromNextTurn: Bool = false) {
             settingStateByKey[key] = SettingState(
-                inFlight: false, outcome: outcome, outcomeSetting: setting, outcomeBaselineSeq: baseline)
+                inFlight: false, outcome: outcome, outcomeSetting: fromNextTurn ? nil : setting,
+                outcomeBaselineSeq: baseline)
         }
         do {
             let result = try await send(reference, UUID().uuidString)
-            record(SettingOutcome.of(setting: setting, label: label, result: result))
+            let fromNextTurn: Bool = switch result {
+            case .applied(.now): false
+            case .applied: true
+            case .refused, .indeterminate, .unknown: false
+            }
+            record(SettingOutcome.of(setting: setting, label: label, result: result), fromNextTurn: fromNextTurn)
             return result
         } catch ConnectionError.sentButUnanswered {
             // The frame left and no answer came — the same promise as the wire's `indeterminate`.
@@ -3415,9 +3434,11 @@ public final class AppModel {
     private struct SettingState: Sendable {
         var inFlight = false
         var outcome: SettingOutcome?
+        /// The setting whose fact ends the notice; `nil` for an answer that applies from the next turn,
+        /// which no fact ends (`runSettings`).
         var outcomeSetting: SettingKind?
-        /// The seq of `outcomeSetting`'s fact when the outcome was recorded; the notice drops once the
-        /// run's fact passes it.
+        /// The seq of `outcomeSetting`'s fact when the call began; the notice drops once the run's fact
+        /// passes it.
         var outcomeBaselineSeq: UInt64 = 0
     }
 
@@ -3685,6 +3706,7 @@ public final class AppModel {
         // became of THIS send rather than a stale "stopped" from the turn just ended. Codex does the
         // same inside `beginCompose`; this is the Claude send path's own retirement.
         codexControls(for: key).retireStopForSend()
+        retireSettingNoticeForSend(key)
         // Every send carries an identity, so a retry is recognisable instead
         // of being typed twice. The id is fresh per mutation — except after
         // an indeterminate outcome, where re-sending the *same mutation*
