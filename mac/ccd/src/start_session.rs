@@ -1688,6 +1688,11 @@ const UTF8_CTYPE: &str = "C.UTF-8";
 /// and when it cannot be, the daemon's own is used (a written miss). Run any other
 /// way, the daemon's environment is the session's already.
 pub(crate) fn phone_environment() -> HashMap<OsString, OsString> {
+    #[cfg(test)]
+    assert!(
+        crate::READING_ENV.with(std::cell::Cell::get) > 0,
+        "a test copied the process environment without holding it: take crate::ProcessEnvRead first"
+    );
     let own: HashMap<OsString, OsString> = std::env::vars_os().collect();
     let session = (crate::state::launchd_label().as_deref() == Some(protocol::launchd_label()))
         .then(|| session_environment(&own))
