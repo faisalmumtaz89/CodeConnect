@@ -1,12 +1,12 @@
 # CodeConnect Support
 
-CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. Your sessions travel between the app and the daemon on your computer without passing through any server CodeConnect runs, and CodeConnect never sends them anywhere else; the one CodeConnect-operated service is a content-free push relay, described in the privacy policy. Your coding agents themselves send your conversation to the AI providers they use, normally Anthropic or OpenAI, as the privacy policy explains.
+CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions and review diffs, from your iPhone. Your sessions travel between the app and the daemon on your computer without passing through any server CodeConnect runs, and CodeConnect never sends them anywhere else; the one CodeConnect-operated service is a content-free push relay, described in the privacy policy. Your coding agents themselves send your conversation to the AI providers they use, normally Anthropic or OpenAI, as the privacy policy explains.
 
 ## Requirements
 
 - iPhone running iOS 17 or later.
 - A Mac running macOS 13 or later — Apple silicon or Intel; the released binaries are universal — or a Linux computer, x86_64 or arm64, with OpenSSL 3 (see "On Linux" below), with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in a terminal. However you installed them — their own installers, Homebrew, npm, bun, pnpm or mise — CodeConnect runs the `claude` and `codex` your shell runs.
-- A way for your iPhone to reach your computer. By default that is [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet. Your local network works too, with a setting on the computer, but without Tailscale's encryption or the live terminal — see "Is Tailscale required?" below.
+- A way for your iPhone to reach your computer. By default that is [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet. Your local network works too, with a setting on the computer, but without Tailscale's encryption — see "Is Tailscale required?" below.
 
 ## Installing
 
@@ -54,7 +54,6 @@ The iPhone app updates from the App Store. When the app and a computer cannot un
 - **`codeconnect pair` says no phone can pair with this daemon** — the daemon refuses every connection on the address it is bound to. The message says why and what to change; then run `codeconnect daemon restart` (on Linux without systemd, restart it as "On Linux" says).
 - **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. To type it instead, tap "Enter the address and code instead" under "Scan pairing code" ("Pair by hand" on a device with no camera) and type the address and code it prints.
 - **Notifications not arriving** — they start at your own daemon (sent to Apple directly, or through CodeConnect's push relay), so it must be running, and the app must be allowed notifications in iOS Settings.
-- **The live terminal says it was superseded** — opening the terminal on a session that already has one open takes it over; the one that was open is told so. Expected behavior, not a fault.
 - **`codeconnect update` says another update or installation is already running** — an update and the installer hold the same lock, and two can't run at once; rerun after a moment.
 - **Revoke a lost device** — on the Mac: `codeconnect devices` to list, `codeconnect revoke <device>` to cut it off immediately, including open connections.
 
@@ -67,7 +66,7 @@ Not to any server of ours. Sessions travel directly from your Mac to your phone 
 No, but it is the default: out of the box the daemon listens on your Mac's Tailscale address, so with both devices on the same tailnet there is nothing to configure. On your local network:
 
 1. Find the computer's address on that network — on a Mac, for Wi-Fi, `ipconfig getifaddr en0` (`en1` on a Mac with an Ethernet port); on Linux, `ip -4 addr`.
-2. Put it in `~/.codeconnect/config.json` as `ws_bind`, with `ws_allow_plaintext`: CodeConnect then encrypts nothing on that connection, and the live terminal stays off.
+2. Put it in `~/.codeconnect/config.json` as `ws_bind`, with `ws_allow_plaintext`: CodeConnect then encrypts nothing on that connection.
 
    ```
    { "ws_bind": "192.168.1.20", "ws_allow_plaintext": true }
@@ -75,12 +74,12 @@ No, but it is the default: out of the box the daemon listens on your Mac's Tails
 
 3. Run `codeconnect daemon restart` — or `codeconnect daemon install` if the daemon is not running yet; on Linux without systemd, start or restart it as "On Linux" says — then `codeconnect pair`.
 
-For encryption and the live terminal, use Tailscale.
+For encryption, use Tailscale.
 
 Every key is described in the [configuration reference](https://github.com/faisalmumtaz89/CodeConnect/blob/main/mac/README.md#configuration--codeconnectconfigjson).
 
 **Which coding agents are supported?**
-Claude Code and Codex. For Claude Code: the fleet, approvals, questions, diffs and the live terminal. For Codex: the fleet, approvals, stopping a turn and saying something.
+Claude Code and Codex. For Claude Code: the fleet, approvals, questions and diffs. For Codex: the fleet, approvals, stopping a turn and saying something.
 
 **What exactly is installed on my Mac?**
 CodeConnect's binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, and CodeConnect's own tmux (`cc-tmux`) beside them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.

@@ -19,7 +19,6 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 - **Claude's questions.** When Claude asks you to choose, the question appears on your phone, and your answer reaches Claude as if you had chosen at the computer.
 - **Diffs you can read on a phone.** Word-level highlighting, and a comment on any hunk goes to the agent.
 - **Talk to the agent.** Type or dictate a message; dictation uses Apple's speech recognition, and nothing is sent until you send it.
-- **A live terminal.** Open the session's terminal on the phone and take over.
 - **Claude Code and Codex.** Everything above works with Claude Code; on a Codex session the phone answers approvals with Codex's own options, stops a turn, and sends a message ([details](docs/codex.md)).
 - **Agents message each other.** A Claude Code or Codex session can message any other session on your computers, through a `codeconnect` tool CodeConnect gives it; the message waits until that session reads it, and the agent is woken to read it ([details](docs/codex.md#messages-from-other-agents)).
 - **Honest about what it knows.** A session shows the age of its last event, and a stale connection disables actions and says why.
@@ -29,7 +28,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 - An iPhone with iOS 17 or later.
 - A Mac with macOS 13 or later (Apple silicon or Intel), or a Linux computer (x86_64 or arm64) with OpenSSL 3. Claude Code started from the app needs glibc on Linux, which Alpine and other musl systems do not ship.
 - [Claude Code](https://code.claude.com/docs/en/setup) 2.1.268 or later, signed in, or [Codex](https://github.com/openai/codex), already working in your terminal. CodeConnect runs the `claude` and `codex` your shell runs.
-- [Tailscale](https://tailscale.com/download) on both, signed in to the same Tailscale account; a computer on another account pairs with a code. Tailscale is the default; your local network also works, without encryption or the live terminal ([how](https://codeconnect.sh/support)).
+- [Tailscale](https://tailscale.com/download) on both, signed in to the same Tailscale account; a computer on another account pairs with a code. Tailscale is the default; your local network also works, without encryption ([how](https://codeconnect.sh/support)).
 
 ## Install
 
@@ -84,7 +83,7 @@ The daemon, `ccd`, logs every session's events. Claude Code reports to it throug
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
 - Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user; any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, asked once (`codeconnect mail-trust`); it is guidance to the agent, and its own permission mode still governs what it may do.
-- A paired phone can send your sessions messages, answer their approvals and type into a session's live terminal. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
+- A paired phone can send your sessions messages and answer their approvals. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation
 

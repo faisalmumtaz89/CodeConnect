@@ -19,7 +19,7 @@ That single fact determines the design. Anything that detects approvals by readi
 │ Fleet                │  WSS   │  ccd  (Rust, launchd/systemd)    │
 │ Session timeline     │◄──────►│  ┌────────────────────────────┐  │
 │ Approval card        │ tailnet│  │ ingest → assign seq → dedup│  │
-│ Live terminal (tmux) │        │  │ SQLite WAL   PK(uid, seq)  │◄─┼── source of truth
+│ Diffs                │        │  │ SQLite WAL   PK(uid, seq)  │◄─┼── source of truth
 └──────────────────────┘        │  └──────────▲─────────────────┘  │
                                 │             │ unix socket        │
                                 │      ┌──────┴───────┐            │
