@@ -193,14 +193,13 @@ mod tests {
             "argv",
             r#"for a in "$@"; do printf '%s\n' "$a"; done > "$(dirname "$0")/argv""#,
         );
-        wake(
-            &bin,
+        let mut command = tokio::process::Command::new(&bin);
+        command.args(queue_args(
             Path::new("/tmp/cch.x/as.sock"),
             "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
             protocol::ipc::MAIL_NUDGE_ACT,
-        )
-        .await
-        .unwrap();
+        ));
+        run(command, &bin, WAKE_DEADLINE).await.unwrap();
         let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
         assert_eq!(
             argv.lines().collect::<Vec<_>>(),
@@ -223,14 +222,13 @@ mod tests {
             "refused",
             "echo 'Error: thread not found: 01a1' >&2\nexit 1",
         );
-        let err = wake(
-            &bin,
+        let mut command = tokio::process::Command::new(&bin);
+        command.args(queue_args(
             Path::new("/tmp/cch.x/as.sock"),
             "01a1",
             protocol::ipc::MAIL_NUDGE_SHOW,
-        )
-        .await
-        .unwrap_err();
+        ));
+        let err = run(command, &bin, WAKE_DEADLINE).await.unwrap_err();
         assert!(
             err.to_string().contains("thread not found: 01a1"),
             "{err:#}"
@@ -248,15 +246,15 @@ mod tests {
             "i=0; while [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done",
         );
         let started = std::time::Instant::now();
-        let err = queue(
-            &bin,
+        let mut command = tokio::process::Command::new(&bin);
+        command.args(queue_args(
             Path::new("/tmp/cch.x/as.sock"),
             "01a1",
             protocol::ipc::MAIL_NUDGE_SHOW,
-            Duration::from_millis(500),
-        )
-        .await
-        .unwrap_err();
+        ));
+        let err = run(command, &bin, Duration::from_millis(500))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err:#}");
         assert!(
             started.elapsed() < Duration::from_secs(5),
