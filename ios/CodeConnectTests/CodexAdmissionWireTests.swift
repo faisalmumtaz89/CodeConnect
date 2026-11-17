@@ -81,6 +81,31 @@ final class CodexAdmissionWireTests: XCTestCase {
             model.stopUnavailable(for: key), CodexLinkState.none.blockedReason(for: .stop), "Stop is refused for the link")
     }
 
+    /// **Q2: a Codex run still starting says it is starting, not "no live link".** A starting run has no link
+    /// yet, so the link-based reason would read "There is no live link to this Codex session." — a fault for
+    /// ordinary start-up. The composer's reason is "Codex is still starting." instead, device-independent (no
+    /// `HostDevice`, so both apps read the same words). Derived from the fixture's started summary. Must-fail:
+    /// today's link-based read says "no live link".
+    func testAStartingCodexRunSaysItIsStartingNotNoLiveLink() async throws {
+        let (model, sent) = try model()
+        let steps = try fleetOverARun()
+        model.refreshFleet()
+        var seq: UInt64 = 0
+        try await deliverEvents(steps[0], after: &seq, to: model)
+        try await answer(steps[0], to: model, sent: sent)
+        // Derived: the started summary, made explicitly starting with no link yet.
+        var summary = try XCTUnwrap(steps[0]["summary"] as? [String: Any])
+        summary["lifecycle"] = "starting"
+        summary["codex_link"] = "none"
+        try await answer(["summary": summary], to: model, sent: sent)
+        XCTAssertEqual(
+            model.composeUnavailable(for: key), "Codex is still starting.",
+            "a starting run says it is starting")
+        XCTAssertNotEqual(
+            model.composeUnavailable(for: key), CodexLinkState.none.blockedReason(for: .compose),
+            "never the lost-link sentence while it is starting")
+    }
+
     private let key = "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
 
     private func fixture() throws -> [String: Any] {

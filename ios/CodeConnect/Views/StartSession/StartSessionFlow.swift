@@ -603,7 +603,10 @@ struct StartStepsSheet: View {
                 if !(composing && typeSize.isAccessibilitySize) {
                     CCActionBar {
                         if !typeSize.isAccessibilitySize { messagePill(project, agent) }
-                        CCButton("Start", size: .lg, fullWidth: true) { start(project, agent) }
+                        CCButton(
+                            "Start", size: .lg, fullWidth: true,
+                            disabledReason: StartContext.firstMessageReason(message).map(CCDisabledReason.init)
+                        ) { start(project, agent) }
                             .accessibilityIdentifier("start-go")
                     }
                 }
@@ -613,7 +616,7 @@ struct StartStepsSheet: View {
 
     private func messagePill(_ project: StartProject, _ agent: StartAgent) -> some View {
         StartMessagePill(
-            text: $message, placeholder: "First message (optional)", focused: $composing,
+            text: $message, placeholder: "First message", focused: $composing,
             onSend: typeSize.isAccessibilitySize ? { start(project, agent) } : nil)
     }
 
