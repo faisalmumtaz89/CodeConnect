@@ -42,7 +42,7 @@ The iPhone app updates from the App Store. When the app and a computer cannot un
 ## Uninstalling
 
 1. `codeconnect daemon uninstall` — stops the daemon and removes its LaunchAgent.
-2. Delete `~/.codeconnect` — it holds the binaries, CodeConnect's tmux, your session history, pairing tokens, and TLS material.
+2. Delete `~/.codeconnect` — it holds the binaries, your session history, pairing tokens, and TLS material.
 3. If you let the installer add CodeConnect to your `PATH`, delete each block between `# >>> codeconnect >>>` and `# <<< codeconnect <<<` in your shell's startup files (`~/.zshrc` for zsh; `~/.bashrc` and your login file, such as `~/.profile`, for bash). If nothing else is left in a file, you can delete it.
 4. Delete the app from your iPhone.
 
@@ -82,7 +82,7 @@ Every key is described in the [configuration reference](https://github.com/faisa
 Claude Code and Codex. For Claude Code: the fleet, approvals, questions and diffs. For Codex: the fleet, approvals, stopping a turn and saying something.
 
 **What exactly is installed on my Mac?**
-CodeConnect's binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, and CodeConnect's own tmux (`cc-tmux`) beside them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
+CodeConnect's binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, with their licence notices, plus state under `~/.codeconnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
 
 ## Contact
 

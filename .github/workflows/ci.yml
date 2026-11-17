@@ -22,24 +22,6 @@ jobs:
       - name: Install toolchain
         run: rustup component add rustfmt clippy
 
-      # The launcher's lifecycle gates drive real tmux sessions and refuse to
-      # report green without one; the macOS image does not ship tmux. They run
-      # against the tmux a release ships, built from the same pinned sources,
-      # never whatever version a package manager has moved on to.
-      - name: Cache the pinned tmux
-        id: tmux-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/tmux
-          key: ${{ runner.os }}-${{ runner.arch }}-tmux-${{ hashFiles('mac/tmux/**') }}
-
-      - name: Build the pinned tmux
-        if: steps.tmux-cache.outputs.cache-hit != 'true'
-        run: mac/tmux/build.sh "$RUNNER_TEMP/tmux"
-
-      - name: Use the pinned tmux
-        run: echo "CODECONNECT_TMUX=$RUNNER_TEMP/tmux/cc-tmux-$(uname -m)" >> "$GITHUB_ENV"
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -78,27 +60,6 @@ jobs:
 
       - name: Install toolchain
         run: rustup component add clippy
-
-      # The same pinned tmux a Linux release ships. build.sh builds it static
-      # against musl, so it runs on Alpine, pinned by digest for both
-      # architectures, and the binary it writes runs on this runner as is.
-      - name: Cache the pinned tmux
-        id: tmux-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/tmux
-          key: ${{ runner.os }}-${{ runner.arch }}-tmux-${{ hashFiles('mac/tmux/**') }}
-
-      - name: Build the pinned tmux
-        if: steps.tmux-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p "$RUNNER_TEMP/tmux"
-          docker run --rm -v "$PWD/mac/tmux:/build:ro" -v "$RUNNER_TEMP/tmux:/out" \
-            alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f \
-            sh -c 'apk add --no-cache bash build-base curl pkgconf linux-headers bison && bash /build/build.sh /out'
-
-      - name: Use the pinned tmux
-        run: echo "CODECONNECT_TMUX=$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v4
