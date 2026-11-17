@@ -551,6 +551,7 @@ public enum EffortConfirmation: Sendable, Hashable {
         case "high": return "High"
         case "xhigh": return "Extra high"
         case "max": return "Maximum"
+        case "ultra": return "Ultra"
         default: return value
         }
     }

@@ -11,16 +11,16 @@ final class RunSettingsTests: XCTestCase {
 
     private let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
 
-    private func wire() throws -> [String: JSONValue] {
+    private func wire(_ name: String = "minor-39-wire") throws -> [String: JSONValue] {
         let url = try XCTUnwrap(
-            Bundle(for: type(of: self)).url(forResource: "minor-39-wire", withExtension: "json"))
+            Bundle(for: type(of: self)).url(forResource: name, withExtension: "json"))
         return try XCTUnwrap(
             try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue)
     }
 
-    private func summary(_ key: String) throws -> SessionSummary {
+    private func summary(_ key: String, in name: String = "minor-39-wire") throws -> SessionSummary {
         try JSONDecoder().decode(
-            SessionSummary.self, from: Data(try XCTUnwrap(try wire()[key]).canonicalJSONString.utf8))
+            SessionSummary.self, from: Data(try XCTUnwrap(try wire(name)[key]).canonicalJSONString.utf8))
     }
 
     private func result(_ key: String) throws -> SettingResult {
@@ -53,6 +53,36 @@ final class RunSettingsTests: XCTestCase {
             s.efforts.map(\.label), ["Low", "Medium", "High", "Extra high", "Maximum"])
         XCTAssertFalse(s.inFlight)
         XCTAssertNil(s.lastOutcome)
+    }
+
+    /// **X6: a live engine Codex run draws its settings through the same path as a hosted Claude run.**
+    /// The widened guard admits a Codex run with no tmux session; the menus are Codex's own (9 models,
+    /// four modes with Full Access confirm-marked), the selection follows the daemon's `selected_model`
+    /// and the `permission_mode` fact, and the effort menu is the selected model's efforts — labelled,
+    /// with "ultra" now "Ultra". The effort fact is absent (Codex leaves it to the model at a start), so
+    /// nothing is selected while the menu still lists its efforts. From the daemon's `codex-settings-wire.json`.
+    func testALiveCodexRunDrawsItsSettingsThroughRunSettings() throws {
+        guard case .hostedLive(let s) = RunSettings.of(
+            summary: try summary("session_codex_live", in: "codex-settings-wire"))
+        else { return XCTFail("a live engine Codex run with menus is hostedLive") }
+        XCTAssertEqual(s.models.count, 9)
+        XCTAssertEqual(s.modes.map(\.value), ["auto", "read-only", "plan", "full-access"])
+        XCTAssertEqual(s.modes.last?.confirm, true, "Full Access is confirm-marked")
+        XCTAssertEqual(s.selectedModel?.value, "gpt-6.1-sol")
+        XCTAssertEqual(s.selectedMode?.value, "auto")
+        XCTAssertNil(s.selectedEffort, "the effort fact is absent, so nothing is selected")
+        XCTAssertEqual(s.efforts.map(\.value), ["low", "medium", "high", "xhigh", "max", "ultra"])
+        XCTAssertEqual(s.efforts.last?.label, "Ultra", "ultra is labelled, the only new Codex effort")
+    }
+
+    /// Full Access, once Codex reports it: the `permission_mode` fact selects the confirm-marked row.
+    func testACodexRunInFullAccessSelectsTheConfirmMarkedMode() throws {
+        guard case .hostedLive(let s) = RunSettings.of(
+            summary: try summary("session_codex_full_access", in: "codex-settings-wire"))
+        else { return XCTFail("a live engine Codex run with menus is hostedLive") }
+        XCTAssertEqual(s.selectedMode?.value, "full-access")
+        XCTAssertEqual(s.selectedMode?.confirm, true)
+        XCTAssertEqual(s.selectedModel?.value, "gpt-6-astra")
     }
 
     /// **The fix's reason, against the daemon's own init-shape summary.** After claude's next init the
