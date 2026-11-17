@@ -11,8 +11,8 @@
 //!   * **The quiet-state ticket** is per session: a run is in one quiet state
 //!     at a time, so a new one retires the run's older quiet-state push, held
 //!     or in its grace, and the run demonstrably moving retires one still
-//!     waiting — it never rings a state the run has left. Moving is a Codex turn
-//!     or thread starting ([`PushGate::note_progress`]), and a decision or a turn
+//!     waiting — it never rings a state the run has left. Moving is a turn or a
+//!     Codex thread starting ([`PushGate::note_progress`]), and a decision or a turn
 //!     end, whose admissions take the same step ([`PushGate::admit_decision`],
 //!     [`PushGate::admit_turn_end`]).
 //!
@@ -84,7 +84,7 @@ impl PushGate {
         }
     }
 
-    /// The run demonstrably moved — a Codex turn or thread started. Any
+    /// The run demonstrably moved — a turn or a Codex thread started. Any
     /// quiet-state push still waiting out its grace is stale and must not ring:
     /// the wait it announces is over.
     pub fn note_progress(&self, session_uid: &str) {
@@ -138,7 +138,7 @@ impl PushGate {
     /// What the ticket does *not* promise is that this push will ring: a later
     /// turn ending inside the dispatch grace bumps the epoch again and supersedes
     /// it, which is the same coalescing every quiet-state push on either agent's
-    /// path is subject to — see [`crate::state::Daemon::push_codex_turn_complete`].
+    /// path is subject to — see [`crate::state::Daemon::push_turn_complete`].
     pub fn admit_turn_end(&self, session_uid: &str) -> Ticket {
         let mut epochs = self.epochs.lock().unwrap();
         quiet_ticket(&mut epochs, session_uid)

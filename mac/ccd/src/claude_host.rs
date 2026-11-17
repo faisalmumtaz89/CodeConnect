@@ -591,7 +591,10 @@ fn next_mark(last: i64, now: i64) -> i64 {
 /// stopped (its `result` aborted) is not ended for the rule: it stays open until their next
 /// turn ends, as Esc leaves a terminal run's, so its mail waits for that prompt. Until the
 /// host's replay ends the marks are set but nothing is decided: the replay's `state`
-/// decides, once the run's replayed turns are all marked.
+/// decides, once the run's replayed turns are all marked. A turn's init is the run moving
+/// again ([`Daemon::note_turn_running`]), and a turn's end read after the replay is an
+/// occasion to ring the phone about the decisions still open
+/// ([`Daemon::push_turn_complete`]), as a Codex turn's is; a stopped turn's is not.
 async fn apply_sdk(
     daemon: &Arc<Daemon>,
     uid: &str,
@@ -651,17 +654,30 @@ async fn apply_sdk(
         filed(EventKind::SessionStart),
         filed(EventKind::TurnComplete) && !stopped,
     );
-    match daemon
+    let events = match daemon
         .ingest_host_message(uid, host, seq, mapped.events, notes)
         .await
     {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(Some(events)) => events,
+        Ok(None) => {
             return Err(format!(
                 "message {seq} is not past the run's cursor for this host"
             ))
         }
         Err(err) => return Err(format!("{err:#}")),
+    };
+    if started {
+        daemon.note_turn_running(uid);
+    }
+    if ended && turns.replayed {
+        if let Some(end) = events
+            .iter()
+            .find(|event| event.kind == EventKind::TurnComplete)
+        {
+            daemon
+                .push_turn_complete(&SessionKey::new(uid, uid), end)
+                .await;
+        }
     }
     if started || ended {
         let now = next_mark(turns.marked, protocol::time::now_unix_ms());
@@ -1522,8 +1538,8 @@ async fn apply_setting_outcome(
         .ingest_host_message(uid, host, seq, notices, RunNotes::default())
         .await
     {
-        Ok(true) => send(write, &ToHost::Ack { seq }).await?,
-        Ok(false) => {
+        Ok(Some(_)) => send(write, &ToHost::Ack { seq }).await?,
+        Ok(None) => {
             return Err(format!(
                 "message {seq} is not past the run's cursor for this host"
             ))
@@ -2381,8 +2397,8 @@ async fn apply_interrupt_outcome(
         .ingest_host_message(uid, host, told.seq, notices, RunNotes::default())
         .await
     {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Err(format!(
                 "message {} is not past the run's cursor for this host",
                 told.seq
@@ -2610,11 +2626,16 @@ mod tests {
     }
 
     fn rig() -> Rig {
+        rig_sending(Arc::new(crate::apns::LoggingPushSender::new()))
+    }
+
+    /// A rig whose daemon's pushes go to `push`.
+    fn rig_sending(push: Arc<dyn crate::apns::PushSender>) -> Rig {
         let uid = protocol::uid::new().unwrap();
         let root = PathBuf::from(format!("/tmp/cch2.{}", &uid[16..]));
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(root.join("home")).unwrap();
-        let daemon = daemon_on(&root);
+        let daemon = daemon_sending(&root, Config::default(), push);
         let environment = HashMap::from([
             (OsString::from("HOME"), root.join("home").into_os_string()),
             (OsString::from("SHELL"), OsString::from("/bin/sh")),
@@ -2652,11 +2673,23 @@ mod tests {
     }
 
     fn daemon_with(root: &Path, config: Config) -> Arc<Daemon> {
+        daemon_sending(
+            root,
+            config,
+            Arc::new(crate::apns::LoggingPushSender::new()),
+        )
+    }
+
+    fn daemon_sending(
+        root: &Path,
+        config: Config,
+        push: Arc<dyn crate::apns::PushSender>,
+    ) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
         Daemon::new(
             config,
             Arc::new(store),
-            Arc::new(crate::apns::LoggingPushSender::new()),
+            push,
             Endpoint {
                 host: "test.ts.net".into(),
                 port: 8787,
@@ -2800,12 +2833,13 @@ mod tests {
     }
 
     /// The run's folder once the start has spawned its stand-in host, which has written
-    /// host.json there.
+    /// host.json there: the one no test plays yet (no host.sock), so a second run in the rig
+    /// finds its own.
     async fn spawned_dir(rig: &Rig) -> PathBuf {
         loop {
             if let Some(dir) = runs(rig)
                 .into_iter()
-                .find(|dir| dir.join("host.json").exists())
+                .find(|dir| dir.join("host.json").exists() && !dir.join("host.sock").exists())
             {
                 return dir;
             }
@@ -3443,11 +3477,16 @@ mod tests {
 
     /// [`live_run`] with the stand-in host `host`.
     async fn live_run_on(rig: &Rig, host: &Path) -> Played {
+        live_run_as(rig, host, "req-live").await
+    }
+
+    /// [`live_run_on`] started by the request `request_id`, so a rig can hold a second run.
+    async fn live_run_as(rig: &Rig, host: &Path, request_id: &str) -> Played {
         let host = host.to_path_buf();
         let cwd = rig.root.to_str().unwrap().to_string();
         let daemon = Arc::clone(&rig.daemon);
         let (result, played) =
-            tokio::join!(start(&daemon, run(rig, "req-live", &cwd, &host)), async {
+            tokio::join!(start(&daemon, run(rig, request_id, &cwd, &host)), async {
                 let mut played = play_to_start(rig).await;
                 let uuid = played.start_uuid();
                 say(
@@ -3823,9 +3862,17 @@ mod tests {
         rig: &Rig,
         dir: &Path,
     ) -> (Arc<Daemon>, Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf) {
+        restarted_as(rig, dir, daemon_on(&rig.root)).await
+    }
+
+    /// [`restarted`], the new daemon being `restarted`.
+    async fn restarted_as(
+        rig: &Rig,
+        dir: &Path,
+        restarted: Arc<Daemon>,
+    ) -> (Arc<Daemon>, Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf) {
         let _ = std::fs::remove_file(dir.join("host.sock"));
         let listener = UnixListener::bind(dir.join("host.sock")).unwrap();
-        let restarted = daemon_on(&rig.root);
         restarted.recover().await;
         restarted.recover_hosted_runs(&rig.root).await;
         let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
@@ -4998,6 +5045,251 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    // ------------------------------- a hosted turn's end as a doorbell
+
+    /// How many doorbells `capture` holds once a dispatch grace, and some, has passed.
+    async fn rung_after_grace(capture: &crate::apns::CaptureSender) -> usize {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        capture.0.lock().unwrap().len()
+    }
+
+    /// A rig whose doorbells land in a capture, and a hosted run on it holding one approval
+    /// the phone can answer, its own doorbell already rung: the decision open elsewhere a
+    /// turn's end rings about.
+    async fn a_decision_open_elsewhere() -> (Rig, Arc<crate::apns::CaptureSender>, Played) {
+        let capture = Arc::new(crate::apns::CaptureSender::new());
+        let rig = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let mut asking = live_run(&rig).await;
+        host_asks(&mut asking, 3, "toolu_open", serde_json::json!({})).await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            1,
+            "the card's own doorbell"
+        );
+        (rig, capture, asking)
+    }
+
+    /// A second run in `rig`, beside the one [`live_run`] started.
+    async fn another_live_run(rig: &Rig) -> Played {
+        live_run_as(
+            rig,
+            &stub_host(rig, HOST_PROTOCOL_VERSION, None),
+            "req-live-2",
+        )
+        .await
+    }
+
+    /// The stand-in host ends the running turn with claude's `result` naming its command
+    /// `command`, as a local command's own end does, as message `seq`.
+    async fn command_ends(played: &mut Played, seq: u64, command: &str) {
+        sdk(
+            &mut played.write,
+            seq,
+            serde_json::json!({"type": "result", "subtype": "success", "is_error": false,
+                "num_turns": 0, "local_command": command,
+                "uuid": format!("9d1f0000-0000-4000-8000-0000000005{seq:02}"),
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+    }
+
+    /// **A hosted turn's end rings again about a decision still open, and about nothing
+    /// else.** With nothing the phone can answer open, a Claude run's turn ending rings
+    /// nothing; with an approval open on another run, it rings once more, about that
+    /// approval, as a Codex turn's end does. Without it, on a Mac running only Claude, a
+    /// card whose own doorbell skipped a phone that was watching when it was raised had no
+    /// later occasion to ring at all.
+    ///
+    /// **Mutation:** take the push out of `apply_sdk` and the second leg rings nothing.
+    #[tokio::test]
+    async fn a_hosted_turns_end_rings_only_about_a_decision_open_elsewhere() {
+        let capture = Arc::new(crate::apns::CaptureSender::new());
+        let quiet = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let mut played = live_run(&quiet).await;
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000501").await;
+        turn_ends(&mut played, 4).await;
+        assert_eq!(rung_after_grace(&capture).await, 0, "with nothing open");
+        stop(&played.dir);
+
+        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let mut played = another_live_run(&rig).await;
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000502").await;
+        turn_ends(&mut played, 4).await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            2,
+            "the card's, then the turn's end about it"
+        );
+        {
+            let rings = capture.0.lock().unwrap();
+            let (hint, _) = rings.last().unwrap();
+            assert_eq!(
+                (hint.kind, hint.decisions),
+                (crate::apns::PushKind::Approval, 1)
+            );
+            assert_eq!(
+                hint.session_uid, played.uid,
+                "rung by the run that finished"
+            );
+        }
+        stop(&played.dir);
+        stop(&asking.dir);
+    }
+
+    /// **Two hosted turns ending inside one dispatch grace ring once**, as two Codex turns'
+    /// do: the next turn's start and end supersede the first end's doorbell, and the later,
+    /// truer one rings.
+    ///
+    /// **Mutation:** dispatch a turn end's push without heeding progress and both ring.
+    #[tokio::test]
+    async fn two_hosted_turns_ending_inside_one_grace_ring_once() {
+        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let mut played = another_live_run(&rig).await;
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000511").await;
+        turn_ends(&mut played, 4).await;
+        turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000512").await;
+        turn_ends(&mut played, 6).await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            2,
+            "the card's, then one for both turns"
+        );
+        stop(&played.dir);
+        stop(&asking.dir);
+    }
+
+    /// **A hosted turn that starts inside the grace silences the last one's doorbell**: the
+    /// run is working again, so there is no end left to announce. That turn's own end then
+    /// rings.
+    ///
+    /// **Mutation:** take `note_turn_running` out of `apply_sdk` and the first end rings.
+    #[tokio::test]
+    async fn a_hosted_turn_starting_inside_the_grace_silences_the_last_ones_doorbell() {
+        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let mut played = another_live_run(&rig).await;
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000521").await;
+        turn_ends(&mut played, 4).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000522").await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            1,
+            "only the card's: the run went back to work"
+        );
+        turn_ends(&mut played, 6).await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            2,
+            "the turn that started ends, and rings"
+        );
+        stop(&played.dir);
+        stop(&asking.dir);
+    }
+
+    /// **A stopped hosted turn's end rings nothing**: the person who stopped it is the one
+    /// the doorbell would reach, as a Codex turn's `interrupted` end rings nothing.
+    ///
+    /// **Mutation:** count a stopped turn's end as ended and it rings.
+    #[tokio::test]
+    async fn a_stopped_hosted_turns_end_rings_nothing() {
+        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let mut played = another_live_run(&rig).await;
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000531").await;
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "result", "subtype": "error_during_execution",
+                "is_error": true, "terminal_reason": "aborted_streaming", "num_turns": 1,
+                "uuid": "9d1f0000-0000-4000-8000-000000000532",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(rung_after_grace(&capture).await, 1, "only the card's");
+        stop(&played.dir);
+        stop(&asking.dir);
+    }
+
+    /// **A command's own end rings as any turn's end does**: `/cost`'s `result` names its
+    /// command (`local_command`) and is an occasion to ring about the approval still open.
+    ///
+    /// **Mutation:** take the push out of `apply_sdk` and it rings nothing.
+    #[tokio::test]
+    async fn a_commands_own_end_rings_as_any_turns_end_does() {
+        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let mut played = another_live_run(&rig).await;
+        turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000541").await;
+        command_ends(&mut played, 4, "cost").await;
+        assert!(
+            stored(&rig, &played.uid)
+                .iter()
+                .any(|event| event["kind"] == "turn_complete"
+                    && event["payload"]["local_command"] == "cost"),
+            "the end names its command"
+        );
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            2,
+            "the card's, then the command's end about it"
+        );
+        stop(&played.dir);
+        stop(&asking.dir);
+    }
+
+    /// **Only a turn's end read after the host's replay rings.** A ccd that restarts is
+    /// replayed the turn that ended while it was down, a turn nobody is waiting to hear of
+    /// now, and it rings nothing; the run's next turn, ending once the replay's `state` has
+    /// come, rings about the approval still open, as any live turn's end does.
+    ///
+    /// **Mutation:** ring a replayed turn's end too (`turns.replayed` dropped from
+    /// `apply_sdk`'s push) and the replay rings.
+    #[tokio::test]
+    async fn a_turns_end_replayed_to_a_restarted_ccd_rings_nothing() {
+        let (rig, _, asking) = a_decision_open_elsewhere().await;
+        let Played {
+            dir,
+            uid,
+            record,
+            start,
+            ..
+        } = asking;
+        let capture = Arc::new(crate::apns::CaptureSender::new());
+        let daemon = daemon_sending(
+            &rig.root,
+            Config::default(),
+            Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
+        );
+        let (_restarted, mut lines, write) = restarted_as(&rig, &dir, daemon).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 3 }));
+        let mut played = Played {
+            dir,
+            uid,
+            record,
+            start,
+            lines,
+            write,
+        };
+        turn_begins(&mut played, 4, "9d1f0000-0000-4000-8000-000000000551").await;
+        turn_ends(&mut played, 5).await;
+        assert_eq!(rung_after_grace(&capture).await, 0, "the replayed end");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "state", "seq": 6, "pending": [
+                bash_request("toolu_open", serde_json::json!({}))]}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
+        turn_begins(&mut played, 7, "9d1f0000-0000-4000-8000-000000000552").await;
+        turn_ends(&mut played, 8).await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            1,
+            "the live end, about the approval still open"
+        );
+        stop(&played.dir);
     }
 
     /// The text of the mail wake ccd sends the host next.

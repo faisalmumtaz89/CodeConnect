@@ -363,6 +363,35 @@ impl PushSender for LoggingPushSender {
     }
 }
 
+/// A sender whose pushes land in a vec instead of APNs, each with the exclusion list it
+/// carried, and the devices it was told to retire: the probe for the doorbell tests of
+/// every agent's runs.
+#[cfg(test)]
+pub(crate) struct CaptureSender(
+    pub(crate) Mutex<Vec<(PushHint, Vec<String>)>>,
+    pub(crate) Mutex<Vec<String>>,
+);
+
+#[cfg(test)]
+impl CaptureSender {
+    pub(crate) fn new() -> Self {
+        CaptureSender(Mutex::new(Vec::new()), Mutex::new(Vec::new()))
+    }
+}
+
+#[cfg(test)]
+impl PushSender for CaptureSender {
+    fn send(&self, hint: &PushHint, excluded: &[String]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((hint.clone(), excluded.to_vec()));
+    }
+    fn retire(&self, device_id: &str) {
+        self.1.lock().unwrap().push(device_id.to_string());
+    }
+}
+
 /// The sender this configuration asks for.
 ///
 /// **Ordered, and every branch is reachable from a file somebody can write**, so

@@ -4910,7 +4910,7 @@ fn addressee_of(
 ///
 /// A `TurnComplete` whose status is `completed`. The narrowing away from
 /// `interrupted`/`failed` is argued where the push is composed
-/// ([`Daemon::push_codex_turn_complete`]): a human stopped one, and the other has no
+/// ([`Daemon::push_turn_complete`]): a human stopped one, and the other has no
 /// honest sentence.
 ///
 /// **Deliberately its own predicate, not shared with
@@ -5539,7 +5539,7 @@ impl Connection<'_> {
         // follow.
         //
         // Recovery may silence and may not ring — see
-        // [`Daemon::note_codex_turn_running`] for why those are the same rule.
+        // [`Daemon::note_turn_running`] for why those are the same rule.
         //
         // **The read is on the cancel's critical path, and its cost was measured rather
         // than assumed.** It is a point query on the dedup index over WAL — p50 24 µs,
@@ -5585,7 +5585,7 @@ impl Connection<'_> {
                 // remaining queries, and before the ingest loop below, which is the
                 // part that scales with the answer.
                 Ok(false) => {
-                    self.daemon.note_codex_turn_running(&self.session.uid);
+                    self.daemon.note_turn_running(&self.session.uid);
                     break;
                 }
                 Ok(true) => crate::log_info!(
@@ -8052,7 +8052,7 @@ impl Connection<'_> {
     /// frame that says the agent has gone back to work. The push gate needs exactly
     /// that: a completion doorbell admitted moments ago is waiting out its dispatch
     /// grace, and a turn starting inside that window means the state it announces is
-    /// over. See [`Daemon::note_codex_turn_running`].
+    /// over. See [`Daemon::note_turn_running`].
     ///
     /// Read off the raw frame rather than off an event, because there is no event to
     /// read; the *call site* is what keeps it live-only, exactly as it does for the
@@ -8167,7 +8167,7 @@ impl Connection<'_> {
                 generation: self.visit.generation,
                 turn_id: turn_id.to_string(),
             });
-        self.daemon.note_codex_turn_running(&self.session.uid);
+        self.daemon.note_turn_running(&self.session.uid);
     }
 
     /// Normalize one admitted frame and record whatever it turned into.
@@ -8227,12 +8227,10 @@ impl Connection<'_> {
             // Live-only is a property of *this call site* rather than of the fact:
             // this function is reached only from a frame read off the wire, while
             // the two recovery paths write through `record` and `Daemon::ingest`
-            // and stop. See `Daemon::push_codex_turn_complete`, which is where the
+            // and stop. See `Daemon::push_turn_complete`, which is where the
             // reasoning is written down.
             if let (true, Some(event)) = (rings, filed.as_ref()) {
-                self.daemon
-                    .push_codex_turn_complete(self.session, event)
-                    .await;
+                self.daemon.push_turn_complete(self.session, event).await;
             }
         }
     }
@@ -16269,7 +16267,7 @@ mod tests {
             assert!(
                 !rings_the_doorbell(&fact(EventKind::TurnComplete, json!({"status": status}))),
                 "{status}: a human stopped it, or it has no honest sentence — see \
-                 Daemon::push_codex_turn_complete"
+                 Daemon::push_turn_complete"
             );
         }
         assert!(
@@ -16946,7 +16944,7 @@ mod tests {
     ///     the stale leg cancels again;
     ///   * make the gate unconditional (cancel on every arm, not only `Ok(false)`) →
     ///     the stale and quiet legs both cancel;
-    ///   * drop the `note_codex_turn_running` call entirely → the novel leg stops
+    ///   * drop the `note_turn_running` call entirely → the novel leg stops
     ///     cancelling;
     ///   * ask the log by `turn_id` alone (drop the thread from the source-event id) →
     ///     the fourth leg stops cancelling.
@@ -17138,7 +17136,7 @@ mod tests {
     /// The write failure is a `BEFORE INSERT` trigger rather than a broken database,
     /// because the novelty read must still work — see [`refuse_event_writes`].
     ///
-    /// **Mutation:** move the `note_codex_turn_running` call back below the ingest
+    /// **Mutation:** move the `note_turn_running` call back below the ingest
     /// loop and this fails — the attach returns `Err` before ever reaching it.
     #[tokio::test]
     async fn the_cancel_survives_a_recovery_whose_writes_fail() {
