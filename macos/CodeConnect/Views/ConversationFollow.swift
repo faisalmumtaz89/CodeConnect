@@ -2,19 +2,16 @@ import AppKit
 import CodeConnectKit
 import SwiftUI
 
-/// Whether the conversation follows its newest rows, read off the column's scroll view: the iPhone's `TailWatch` and
-/// `TailObserver` (SessionDetailView.swift) in AppKit. Owned by the conversation for as long as it is open. Nothing
-/// draws from it, so none of its writes updates a view.
+/// The conversation's top, read off the column's scroll view: the iPhone's `HeadObserver` (SessionDetailView.swift) in
+/// AppKit. It asks Kit for the page above when the reader comes to the top, and passes on a reader opening a row to read
+/// it. Whether the reader follows the newest rows is the column's layout's (`MacColumnLayout.following`), which this
+/// reads. Owned by the conversation for as long as it is open. Nothing draws from it, so none of its writes updates a
+/// view.
 ///
 /// It reads once per turn of the run loop. AppKit tells of the clip view's bounds and the document view's frame
 /// separately, so one layout pass read a notification at a time can look like a scroll with nothing changing size;
 /// read at the end of the turn, a scroll and the change of size that came with it are one reading. What the column's
 /// own `apply` moved in that turn (`applied(_:)`) is taken out first: a reading holds only the reader's own move.
-///
-/// The verdicts, in the iPhone's order: nothing moved, none; a column shorter than the pane, at the end; within 32 pt
-/// of the end, at the end; a hand (a trackpad, its momentum, the scroller dragged) moving up, away; a move up with no
-/// hand while the column and the pane keep their size (a page by VoiceOver, a key, the scroller's page part), away;
-/// otherwise a departure, settled 400 ms later.
 @MainActor
 final class Tail {
     /// Asks Kit for the page above: the reader came to the top.
@@ -22,13 +19,10 @@ final class Tail {
     /// Asks Kit for the page above without the reader: a column shorter than the pane, or a page that left the reader
     /// near the top.
     var pageBackOnItsOwn: () -> Void = {}
-    /// The reader left the newest rows: set at once, cleared on arriving.
-    private var handAway = false
-    /// Settled 400 ms after a departure, so the column's end moving away an instant before a reading has caught up is
-    /// not taken for the reader leaving.
-    private var following = true
-    /// The one pending verdict: an arrival replaces a departure and the other way round.
-    private var verdict: Task<Void, Never>?
+    /// The reader opened a row to read it: the column stops following.
+    var readerLeaves: () -> Void = {}
+    /// The column follows its newest rows.
+    var isFollowing: () -> Bool = { true }
     private weak var scrollView: NSScrollView?
     private var observers: [NSObjectProtocol] = []
     private var dirty = false
@@ -42,19 +36,10 @@ final class Tail {
     /// The one pending ask; a burst of readings replaces it.
     private var ask: Task<Void, Never>?
 
-    /// Away from the newest rows: rows land below without moving the reader.
-    var isAway: Bool { handAway || !following }
-
-    /// The reader left the newest rows themselves and no reading has found them back at the end: a row's own size
-    /// report keeps their row, not the end, even within its slack (a row opened at the end grows below its top).
-    var readerLeft: Bool { handAway }
-
-    /// The reader left the newest rows, or opened a row to read it (a tool's output, a card's full input or the rest
-    /// of its files): away before the row grows.
+    /// The reader opened a row to read it (a tool's output, a card's full input or the rest of its files): the column
+    /// stops following before the row grows.
     func leave() {
-        if !handAway { noteFollow("LEAVE") }
-        handAway = true
-        depart()
+        readerLeaves()
     }
 
     /// The column's `apply` moved the origin and the column's height by these: the next reading takes them out.
@@ -100,28 +85,7 @@ final class Tail {
     func detach() {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
-        verdict?.cancel()
         ask?.cancel()
-    }
-
-    private func arrive() {
-        if isAway { noteFollow("BACK") }
-        handAway = false
-        verdict?.cancel()
-        verdict = Task { [weak self] in
-            guard !Task.isCancelled else { return }
-            self?.following = true
-        }
-    }
-
-    private func depart() {
-        verdict?.cancel()
-        verdict = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(400))
-            guard !Task.isCancelled, let self, following else { return }
-            noteFollow("AWAY")
-            following = false
-        }
     }
 
     private func markDirty() {
@@ -145,25 +109,15 @@ final class Tail {
             return
         }
         let dy = y - last.y - own.dy, grown = height - last.height - own.grown, resized = pane != last.pane
-        noteFollow(String(format: "READ y %.3f dy %.3f h %.3f grown %.3f pane %.3f away %d hand %d",
-            y, dy, height, grown, pane.height, isAway ? 1 : 0, hand ? 1 : 0))
+        noteFollow(String(format: "READ y %.3f dy %.3f h %.3f grown %.3f pane %.3f following %d hand %d",
+            y, dy, height, grown, pane.height, isFollowing() ? 1 : 0, hand ? 1 : 0))
         guard abs(dy) > 0.5 || abs(grown) > 0.01 || resized else { return }
         readTop(scrollView, dy: dy)
-        let gap = height - (y + pane.height)
-        if height <= pane.height || gap <= MacColumnLayout.endSlack {
-            arrive()
-        } else if hand {
-            if dy < -0.5 { leave() } else { depart() }
-        } else if dy < -0.5, abs(grown) < 0.01, !resized {
-            leave()
-        } else {
-            depart()
-        }
     }
 
     /// The top, as the iPhone's `HeadObserver` reads it. A column shorter than the pane pages back on its own; a hand
     /// within a pane's height of the top asks for the page above, and so does any reading that finds the reader at the
-    /// top, by a move up or while away from the newest rows.
+    /// top, by a move up or while not following the newest rows.
     private func readTop(_ scrollView: NSScrollView, dy: CGFloat) {
         if Self.isShort(scrollView) {
             if hand {
@@ -177,7 +131,7 @@ final class Tail {
             arrived = false
             return
         }
-        let atTop = scrollView.contentView.bounds.origin.y <= 0.5 && (dy < -0.5 || isAway)
+        let atTop = scrollView.contentView.bounds.origin.y <= 0.5 && (dy < -0.5 || !isFollowing())
         guard hand || atTop else { return }
         readerAsks(if: Self.isNearTop)
     }
@@ -217,9 +171,9 @@ extension EnvironmentValues {
 }
 
 /// `-CC_FOLLOW_LOG YES` (Debug builds): one line on stderr for each change the column makes (APPLY: what changed, the
-/// origin and the column's height before and after, the anchor), each reading the follow takes (READ, with the
-/// column's own moves taken out) and each turn of its verdict (the reader left, the departure settled, the reader came
-/// back), so a test reads them from outside the app. Nothing in a Release build.
+/// origin and the column's height before and after), each reading of the top (READ, with the column's own moves taken
+/// out) and each turn of the follow (FOLLOW 1 or 0, and why), so a test reads them from outside the app. Nothing in a
+/// Release build.
 func noteFollow(_ move: @autoclosure () -> String) {
     #if DEBUG
         guard UserDefaults.standard.bool(forKey: "CC_FOLLOW_LOG") else { return }
