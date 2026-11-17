@@ -107,13 +107,13 @@ extension AppModel {
         case command(CommandAction)
     }
 
-    /// **A Codex run takes a different road entirely**: `send_text` is Claude's TTY takeover and a Codex run refuses
+    /// **A Codex run takes a different road entirely**: `send_text` is Claude's typed text and a Codex run refuses
     /// it by name, while `compose` is a message, not keystrokes. On Claude, slash commands answer to
-    /// `ClaudeCommandPolicy` first: native commands open their controls, dialog built-ins get the honest refusal,
-    /// and everything else — prose, custom skills — is typed as written.
+    /// `ClaudeCommandPolicy` first: native commands open their controls, and everything else — prose, Claude's other
+    /// commands, custom skills — is typed as written.
     public func submission(of draft: String, to key: String) -> Submission {
         if shownSummary(for: key)?.isCodex == true { return .codex }
-        let action = ClaudeCommandPolicy.action(for: draft, runSettings: runSettings(for: key))
+        let action = ClaudeCommandPolicy.action(for: draft)
         if case .passThrough = action { return .claude }
         return .command(action)
     }
@@ -173,10 +173,8 @@ extension AppModel {
 
     /// Why sending to this run cannot work now, or nil.
     ///
-    /// Text only lands if the composer is actually on screen at the computer, so the reasons a send cannot work are
-    /// the reasons an answer cannot. **Except for Codex**: there is no composer, no keystrokes and no `send_text`, so
-    /// its reasons are its own and are asked first, and a Codex run is never refused with a sentence about a TTY it
-    /// does not have.
+    /// A send cannot work for the reasons an answer cannot: the link, and what the computer said it can do.
+    /// **Except for Codex**: there is no `send_text`, so its reasons are its own and are asked first.
     public func sendBlockedReason(for key: String, draft: String) -> String? {
         // The sample fleet's reason, not the link's: "Not paired with a computer."
         // beside a card that answers in sample vocabulary would be two different

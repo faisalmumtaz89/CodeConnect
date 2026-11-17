@@ -15,7 +15,7 @@
 //! 1. **launchd hands a process no shell PATH.** Not a short one — none. Every
 //!    external binary is therefore resolved to an absolute path *at install
 //!    time* and written into the plist's `EnvironmentVariables`, and the daemon
-//!    additionally resolves `tmux`, `git` and `tailscale` from candidate lists
+//!    additionally resolves `git` and `tailscale` from candidate lists
 //!    in code. Belt and braces, because the two failures look identical from
 //!    the outside (a daemon that starts and then quietly cannot do anything).
 //! 2. **A plist naming a relative program silently never runs.** The binary path
@@ -140,9 +140,10 @@ codeconnect daemon — the ccd LaunchAgent
   codeconnect daemon uninstall                 end its runs, stop it and remove the LaunchAgent
 
 Installing stops whatever ccd is running — its own job included, because the
-plist cannot be replaced under a live one. Sessions survive it: they live in
-tmux and their supervisors reconnect. `--no-takeover` refuses instead of
-stopping anything; to pick up new binaries without rewriting the plist, use
+plist cannot be replaced under a live one. Sessions survive it: their agent
+hosts keep running and the new daemon attaches to them again. `--no-takeover`
+refuses instead of stopping anything; to pick up new binaries without rewriting
+the plist, use
 `codeconnect daemon restart`."
     );
 }
@@ -159,9 +160,10 @@ codeconnect daemon — the ccd systemd user unit
   codeconnect daemon uninstall                 end its runs, stop it and remove the unit
 
 Installing stops whatever ccd is running — its own unit's included, so the new
-definition is the one that runs. Sessions survive it: they live in tmux and
-their supervisors reconnect. `--no-takeover` refuses instead of stopping
-anything; to pick up new binaries without rewriting the unit, use
+definition is the one that runs. Sessions survive it: their agent hosts keep
+running and the new daemon attaches to them again. `--no-takeover` refuses
+instead of stopping anything; to pick up new binaries without rewriting the
+unit, use
 `codeconnect daemon restart`."
     );
 }
@@ -212,7 +214,7 @@ fn install(args: &[String]) -> Result<()> {
                  it — the {DEFINITION} cannot be replaced under a live job.\n  \
                  To pick up new binaries without rewriting the {DEFINITION}: `codeconnect daemon restart`.\n  \
                  To go ahead anyway: drop --no-takeover.\n\
-                 Sessions survive either way; they live in tmux and reconnect.",
+                 Sessions survive either way; their agent hosts keep running.",
                 info.pid
             );
         }
@@ -1235,8 +1237,8 @@ fn wait_for_daemon_to_stop(timeout: Duration) -> Result<()> {
 /// Ask a hand-started daemon to exit, and wait until its socket is free.
 ///
 /// SIGTERM, not SIGKILL: `ccd` handles it, removes its socket and exits
-/// cleanly, and nothing it owns needs a forced kill — the sessions are in tmux
-/// and the log is in SQLite. If it will not go, that is reported rather than
+/// cleanly, and nothing it owns needs a forced kill — the sessions are in their
+/// agent hosts and the log is in SQLite. If it will not go, that is reported rather than
 /// escalated, because a daemon that ignores SIGTERM is a bug worth seeing.
 fn stop_daemon(pid: u32) -> Result<()> {
     if pid == 0 {
@@ -1305,8 +1307,8 @@ pub(crate) fn plist_document(ccd: &Path, path_value: &str) -> String {
     keychain (APNs .p8) and for the tailnet identity.
   * KeepAlive/SuccessfulExit=false restarts ccd after a crash but respects a
     clean exit, so `launchctl bootout` does not fight a restart loop.
-  * ccd is deliberately NOT the parent of any agent. Sessions live in the
-    `tmux -L codeconnect` server; restarting this job costs a reconnect.
+  * ccd is deliberately NOT the parent of any agent. Each session's agent host
+    runs in a session of its own; restarting this job costs a reconnect.
   * The log files are truncated in place by ccd itself once they pass its cap.
     launchd holds them open, so rotating by rename would leave it appending to
     an unlinked inode.

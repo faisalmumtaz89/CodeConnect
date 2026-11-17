@@ -149,15 +149,13 @@ fn report(
         }
     }
     // Always said, including when nothing was removed: "nothing to prune" and
-    // "nothing here has ended yet" are different situations, and the second is
-    // the one where a fleet full of `live` rows might mean the daemon cannot
-    // see tmux rather than that the agents are working.
+    // "nothing here has ended yet" are different situations.
     println!();
     println!("kept {kept_live} still running, {kept_unknown} whose state could not be established");
     if kept_held > 0 {
         println!(
             "  {kept_held} ended run(s) were held back: the daemon still has live state for them \
-             — a supervisor attached, or an approval still open. Deleting the record while it \
+             — an approval still open. Deleting the record while it \
              holds the state would strand it. They are released once the approval ages out \
              (15 minutes), so run this again shortly."
         );

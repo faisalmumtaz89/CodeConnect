@@ -1455,6 +1455,9 @@ public final class AppModel {
         /// arms timers and dials — none of which a test about restore wants.
         func loadCachedFleetForTesting() async { await loadCachedFleet() }
 
+        /// Test seam: wait for every cache write queued so far.
+        func cacheSettledForTesting() async { await cacheSettled() }
+
         /// Test seam: start from a known fleet without a `sessions` frame.
         ///
         /// `summaries` is `private(set)` because the daemon owns it. A removal
@@ -2324,10 +2327,8 @@ public final class AppModel {
     /// A `codeconnect://session/…` URL may carry either: a uid (which survives
     /// a name being reused — a notification never sends one) or a tmux
     /// name (what a person types, and what every link written before uids
-    /// existed says). A name is resolved the way the daemon resolves one —
-    /// prefer the run with a supervisor attached, else the newest — because that
-    /// is the run somebody following the link means, and `mac/README.md` makes
-    /// that the contract.
+    /// existed says). A name is resolved to the run whose link is attached, else
+    /// the newest, because that is the run somebody following the link means.
     ///
     /// During a catch-up a name waits — nil — for the list the catch-up ends
     /// on: until then the name may still belong to a run that has gone.
@@ -3620,8 +3621,8 @@ public final class AppModel {
 
     /// `key` is a run, not a name. It reaches the daemon as the `session_uid`
     /// wherever there is one, because a name resolves to whichever run holds it
-    /// *now* — and typing into the wrong agent's TTY is not a mistake that can
-    /// be taken back.
+    /// *now* — and sending to the wrong agent is not a mistake that can be
+    /// taken back.
     public func send(text: String, to key: String, submit: Bool = true) async -> ComposeAttempt {
         // A Codex run has no Claude slash vocabulary and refuses `send_text` by name; a message to it — a
         // diff comment, or any other caller here — goes through the Codex compose path instead, its outcome
@@ -3630,10 +3631,9 @@ public final class AppModel {
             return await composeComment(text: text, to: key)
         }
         // The policy stands between EVERY caller and the wire — the composer,
-        // a denial reason, a diff comment. A deny reason that happens to
-        // start with `/config` would otherwise recreate the measured Mac
-        // dialog lockout through the side door.
-        switch ClaudeCommandPolicy.action(for: text, runSettings: runSettings(for: key)) {
+        // a denial reason, a diff comment — so a command this app answers
+        // itself is never typed through a side door.
+        switch ClaudeCommandPolicy.action(for: text) {
         case .nativeModel:
             return .refused("/model has its own control in the app — the run's settings.")
         case .nativeDiff:

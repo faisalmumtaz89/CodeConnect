@@ -1,10 +1,11 @@
 //! `ccd` — the CodeConnect daemon.
 //!
 //! It is a notifier, card-builder and event log. It is deliberately *not* a
-//! connectivity layer (Tailscale is) and deliberately *not* the agents' parent
-//! (the per-session supervisor connects out to it). `kill -9 ccd` must cost
-//! nothing but a reconnect, which is why every piece of session state either
-//! lives in SQLite or is re-derived when a supervisor re-registers.
+//! connectivity layer (Tailscale is), and the runs it starts outlive it: each
+//! run's agent host or app-server keeps running, and a restarted ccd attaches to
+//! it again. `kill -9 ccd` must cost nothing but a reconnect, which is why every
+//! piece of session state either lives in SQLite or is re-derived when ccd
+//! attaches again.
 
 mod apns;
 mod apns_sender;
@@ -13,11 +14,6 @@ mod codex_adapter;
 mod codex_approval;
 mod codex_client;
 mod codex_host;
-mod codex_link;
-/// The gated live gate for the control link — a real codex, a real coordinator, a
-/// real broker. Test-only, and never built into the daemon.
-#[cfg(test)]
-mod codex_link_live;
 mod codex_refusals;
 mod codex_wake;
 mod db;
@@ -25,7 +21,6 @@ mod folder_access;
 mod git;
 mod ipc_server;
 mod legacy_credentials;
-mod liveness;
 mod log;
 mod logrotate;
 mod machine;
@@ -193,31 +188,26 @@ async fn main() -> Result<()> {
             }
         });
     }
-    // The backstop for every way a session can end without anybody being left
-    // to say so: the daemon down at the moment of death, a supervisor killed, a
-    // Mac that slept through it. Every session this process inherited was last
-    // seen by a *previous* one, and the ones whose agents died meanwhile are
-    // indistinguishable in the database from the ones still running — so the
-    // first pass runs immediately, and the ticker takes over from there.
+    // The backstop for every way a hosted run can end without anybody being left
+    // to say so: the daemon down at the moment its host died, a Mac that slept
+    // through it. Every run this process inherited was last seen by a *previous*
+    // one, and the ones whose hosts died meanwhile are indistinguishable in the
+    // database from the ones still running — so the first pass runs immediately,
+    // and the ticker takes over from there.
     //
-    // **Concurrently with the listeners, not before them.** It is the only task
-    // here that shells out, and it deliberately waits between the confirmations
-    // an exit needs — up to two seconds. Holding the sockets shut for that long
-    // would put a two-second hole in the local socket on every restart, and this
-    // daemon's central promise is that `kill -9` costs nothing but a reconnect.
-    // Nothing is lost by publishing late: a client connected during the sweep
-    // learns each end through the ordinary event path, which is the whole point
-    // of emitting `SessionEnd` rather than mutating the row.
+    // **Concurrently with the listeners, not before them.** Nothing is lost by
+    // publishing late: a client connected during the pass learns each end through
+    // the ordinary event path, which is the whole point of emitting `SessionEnd`
+    // rather than mutating the row.
     let liveness = {
         let daemon = Arc::clone(&daemon);
         let period = daemon.config.liveness_sweep_secs;
         tokio::spawn(async move {
             daemon.watch_hosted_runs().await;
-            report_liveness(&daemon.reconcile_liveness().await);
             if period == 0 {
                 crate::log_warn!(
-                    "liveness_sweep_secs is 0: session state will not be reconciled after \
-                     startup, so a session that ends while nothing is watching will keep \
+                    "liveness_sweep_secs is 0: hosted runs will not be checked after \
+                     startup, so a run whose host ends while nothing is watching will keep \
                      reporting as running"
                 );
                 std::future::pending::<()>().await;
@@ -233,80 +223,6 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 daemon.watch_hosted_runs().await;
-                let sweep = daemon.reconcile_liveness().await;
-                // Only when it changed something or could not see. A quiet
-                // fleet must not write a line a minute into the log it shares
-                // with everything else.
-                if sweep.gone > 0 || sweep.unknown > 0 || sweep.unconfirmed > 0 {
-                    report_liveness(&sweep);
-                }
-            }
-        })
-    };
-
-    // **Owed links.** A registration whose parked link will not stop inside the link stop
-    // budget is accepted with no link installed: Live in the fleet, observed by
-    // nothing. No other part of the daemon ever builds that link — `codex_link::run`
-    // never returns on its own, so a link never vacates the slot, and the only other
-    // builder is the next registration for that uid. This is the retry.
-    //
-    // **The other half — WHICH thread the rebuilt link binds — is closed now,
-    // and the fix is not here.** This ticker only guarantees that a link gets
-    // BUILT. Which thread it then binds used to be open, and open in the worst way:
-    // a first thread or a `/new` emitting its one-shot `thread/started` during the
-    // accepted observer gap was seen by nobody, and recovery had only the
-    // predecessor's carry and the registration's hint to chase — neither of which
-    // can name a thread that appeared while nothing was watching. With no hint the
-    // link stayed unbound; with a stale hint the broker accepts a resume of a
-    // RETIRED thread (`is_session_thread` widens resume to retired threads on
-    // purpose, for thread switching) while the active head went undiscovered.
-    //
-    // The blocker was that ccd cannot ask: the head lives in the broker's own
-    // `Binding::creation`, and no ccd-allowlisted method reports it. What was
-    // missing was not a query but the *announcement*, and the broker still had it —
-    // so it keeps the `thread/started` it forwarded and replays those exact bytes
-    // to a `ccd` leg, gated on the thread they name being the binding the broker
-    // itself verified (`codex_broker::relay::deliver_head`). Delivery is on the
-    // BIND, not on the subscribe: a leg that arrives while a creation is still in
-    // flight has no head to be given and misses the live broadcast too (the
-    // announcement precedes the creation response — `thread-switch.jsonl:31`), so
-    // the broker asks again every time the head moves, for as long as the leg is
-    // there. Every link this ticker rebuilds therefore learns the head, and so does
-    // the link a daemon restart builds, whether the head was bound before it
-    // connected or binds after.
-    //
-    // What that does NOT cover, stated so the next reader does not over-read it: a
-    // gap in which the **broker itself** is replaced. The replay lives as long as
-    // the broker does, which is as long as the host and therefore the session does,
-    // so there is no such gap today — but a broker that restarted under a live
-    // session would be back to having nothing to replay. The registration hint
-    // still has no production producer (the supervisor sends
-    // `codex_thread_id: None`).
-    //
-    // Its own ticker rather than a limb of the liveness sweep: that one shells out
-    // and can be turned off entirely (`liveness_sweep_secs: 0`), and this must keep
-    // running when it is.
-    //
-    // Ten seconds. Each attempt can pay the full stop budget for the session it is
-    // retrying, so a shorter period buys nothing but contention on that session's
-    // registration gate; and a pass is a single uncontended lock while nothing is
-    // owed, which in production today is always.
-    let codex_recovery = {
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(10));
-            // Delay rather than burst, exactly as the liveness sweep does — but for
-            // the reason it actually gives, which is not the one this comment used
-            // to claim. `Delay` does NOT withhold the overdue tick: measured, a pass
-            // that outran its period gets its next tick in ~1µs under all three
-            // behaviours. What it withholds is the CATCH-UP — the tick after the
-            // overdue one is a full period away (~103ms) instead of instant (~125ns
-            // under `Burst`). Every tick's work here is identical, so a burst of
-            // them buys nothing and only contends on the registration gates.
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                daemon.recover_stalled_codex_links().await;
             }
         })
     };
@@ -341,7 +257,6 @@ async fn main() -> Result<()> {
         result = ipc => Stop::Task(format!("ipc server exited: {result:?}")),
         result = ws => Stop::Task(format!("ws server exited: {result:?}")),
         result = liveness => Stop::Task(format!("liveness sweeper exited: {result:?}")),
-        result = codex_recovery => Stop::Task(format!("codex link recovery exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
         result = mail_sweep => Stop::Task(format!("mail sweeper exited: {result:?}")),
         // The one arm that is a deliberate exit rather than a failure: a
@@ -384,8 +299,8 @@ enum Stop {
 /// that reaches it has already run recovery against the live one's database,
 /// settling that daemon's in-flight answers as indeterminate, and when its
 /// listeners fail, the shutdown path unlinks the socket the live daemon is
-/// still serving — every local client and supervisor then fails to connect to a daemon
-/// that never stopped.
+/// still serving — every local client then fails to connect to a daemon that never
+/// stopped.
 ///
 /// `flock(2)` on `ccd.lock`, held until the process exits. The kernel releases
 /// it however the process ends, `kill -9` included, so a crash leaves nothing
@@ -499,23 +414,6 @@ fn sidecar(db: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = db.as_os_str().to_os_string();
     name.push(suffix);
     std::path::PathBuf::from(name)
-}
-
-/// Say what a liveness sweep established.
-///
-/// A sweep that proved nothing is as worth reporting as one that marked rows
-/// exited: "26 sessions could not be established" and "26 sessions are running"
-/// look identical in a fleet listing and are opposite facts about the daemon's
-/// health. Which level it is logged at follows from that — a sweep that could
-/// not see is a warning, a sweep that found deaths is news, a quiet one is not
-/// worth a line.
-fn report_liveness(sweep: &state::LivenessSweep) {
-    let summary = sweep.summary();
-    if sweep.unknown > 0 {
-        crate::log_warn!("liveness: {summary}");
-    } else {
-        crate::log_info!("liveness: {summary}");
-    }
 }
 
 /// Say, at startup, whether the log is internally consistent.
@@ -2041,8 +1939,6 @@ mod tests {
         let row = SessionRow {
             session_uid: key.uid.clone(),
             session_id: key.name.clone(),
-            tmux_session: String::new(),
-            tmux_socket: String::new(),
             cwd: "/tmp".into(),
             claude_session_id: None,
             transcript_path: None,
@@ -2051,7 +1947,6 @@ mod tests {
             updated_at: now,
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
-            codex_socket: None,
         };
         assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);
         for i in 0..events {

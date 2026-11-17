@@ -1514,13 +1514,8 @@ struct SessionDetailView: View {
         }
     }
 
-    /// **Stop the running turn.**
-    ///
-    /// This exists, and the comment at the top of this file that says it cannot
-    /// has been amended rather than worked around: *"an injected message needs
-    /// the Mac's composer to be present, so it cannot interrupt a running turn"*
-    /// is a fact about `send_text` and Claude's TTY. Codex's `interrupt` really
-    /// aborts the turn, over its own control link, with no keyboard involved.
+    /// **Stop the running turn.** Codex's `interrupt` aborts the turn over its
+    /// own link, with no keyboard involved.
     private func stopCodexTurn() {
         Task { await model.stopCodexTurn(sessionKey: key) }
     }

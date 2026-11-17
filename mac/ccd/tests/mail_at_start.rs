@@ -51,6 +51,12 @@ fn a_starting_daemon_reoffers_mail_left_mid_read_and_sweeps_expired_mail() {
 
     let db = rusqlite::Connection::open(home.0.join("events.db")).unwrap();
     let run = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+    // An engine run's mail: an open removes whatever a run with no host record left.
+    db.execute(
+        "INSERT INTO run_hosts(session_uid, request_id) VALUES (?1, ?1)",
+        [run],
+    )
+    .unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

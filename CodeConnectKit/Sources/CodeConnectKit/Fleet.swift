@@ -39,8 +39,8 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
 }
 
 /// Whether an answer typed here can actually reach the agent — reported, never
-/// assumed. The daemon is Claude-only today, so the distinction that matters is
-/// whether a supervisor is attached to type into.
+/// assumed. For a Claude run the distinction that matters is whether its agent
+/// host is attached to take the answer.
 public enum CapabilityBadge: Sendable, Hashable {
     case control
     case observe(reason: String)
@@ -426,9 +426,8 @@ public enum FleetStatusRule {
     /// **Only a Claude run started from the app reaches this.** Its agent host
     /// reports claude's own exit and the daemon files that code, so a non-zero
     /// exit reads `Failed`. Every other `session_end` carries `exit_code: null` —
-    /// the supervisor's because it proves death by tmux absence and never sees a
-    /// status, the daemon's sweep for the same reason, and the daemon's own when a
-    /// run's agent host is gone. Those runs are `Ended`, which is what is known.
+    /// the daemon's own when a run's agent host is gone. Those runs are `Ended`,
+    /// which is what is known.
     /// Inventing a failure from weaker evidence is the defect this replaced.
     private static func endedAbnormally(_ shown: SessionState.Shown?) -> Bool {
         guard let shown else { return false }
@@ -443,7 +442,7 @@ public enum FleetStatusRule {
             return .unknown(
                 reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn't said what it can do yet.")
         }
-        // Before any link reason: an ended run has no supervisor because it has
+        // Before any link reason: an ended run has no agent host because it has
         // ended, and nothing can answer it anywhere, the Mac included. A failed
         // run never started, which ccd counts as ended too.
         if summary.lifecycle == .exited || summary.lifecycle == .failed {

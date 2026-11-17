@@ -152,8 +152,6 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let row = SessionRow {
         session_uid: uid.clone(),
         session_id: uid.clone(),
-        tmux_session: String::new(),
-        tmux_socket: String::new(),
         cwd: run.cwd.to_string(),
         claude_session_id: None,
         transcript_path: None,
@@ -162,7 +160,6 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         updated_at: now,
         agent: AgentKind::Codex,
         codex_thread_id: None,
-        codex_socket: None,
     };
     let model = run.model.filter(|model| *model != "default");
     let trust = serde_json::to_string(&run.trust).expect("a folder answer is always JSON");
@@ -406,9 +403,9 @@ pub(crate) enum InterruptReport {
     NotApplied(String),
     /// The interrupt may have reached the app-server and nothing that survives can
     /// say. Terminal precisely so that it is never sent again: the budget expiring,
-    /// the connection ending, the task being dropped, and, on the tmux link, the turn
-    /// reaching a terminal this ask cannot claim to have caused (the engine records that
-    /// `turn_ended`, an [`InterruptReport::NotApplied`]).
+    /// the connection ending, or the task being dropped. A turn reaching a terminal this
+    /// ask cannot claim to have caused is not one: it is recorded `turn_ended`, an
+    /// [`InterruptReport::NotApplied`].
     Unknown(String),
 }
 
@@ -1337,9 +1334,8 @@ async fn interrupt_turn(
     }
 }
 
-/// What became of a phone's Stop that Codex took, settled from its turn's end, by the rule
-/// the tmux-era link keeps (codex_link's `settle_interrupts_for_turn`): a turn that ended
-/// `interrupted` was stopped by it; any other end was the turn's own.
+/// What became of a phone's Stop that Codex took, settled from its turn's end: a turn that
+/// ended `interrupted` was stopped by it; any other end was the turn's own.
 async fn settle_stop(daemon: &Daemon, uid: &str, stop: WaitingStop, status: &str) {
     use crate::codex_refusals as says;
     let (outcome, report) = if status == "interrupted" {
@@ -3583,8 +3579,6 @@ mod tests {
         let row = SessionRow {
             session_uid: uid.clone(),
             session_id: uid.clone(),
-            tmux_session: String::new(),
-            tmux_socket: String::new(),
             cwd: rig.project.clone(),
             claude_session_id: None,
             transcript_path: None,
@@ -3593,7 +3587,6 @@ mod tests {
             updated_at: now,
             agent: AgentKind::Codex,
             codex_thread_id: None,
-            codex_socket: None,
         };
         let begun = rig
             .daemon
@@ -6632,9 +6625,9 @@ mod tests {
     }
 
     /// **The mail item's D1 and D2 on Codex: a run started on the engine takes mail from the
-    /// moment its first send makes it `live`.** It is kept with this build's minor, as a run of
-    /// this build's supervisor is, so it is listed and mail from another run on this computer
-    /// waits for it. A start whose first send fails is never kept, and mail for it is refused.
+    /// moment its first send makes it `live`.** It is kept with this build's minor, so it is
+    /// listed and mail from another run on this computer waits for it. A start whose first send
+    /// fails is never kept, and mail for it is refused.
     #[tokio::test]
     async fn an_engine_codex_run_takes_mail_once_live_and_a_failed_start_never_does() {
         let (live, failing) = (rig(), rig());

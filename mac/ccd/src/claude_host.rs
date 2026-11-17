@@ -177,8 +177,6 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let row = SessionRow {
         session_uid: uid.clone(),
         session_id: uid.clone(),
-        tmux_session: String::new(),
-        tmux_socket: String::new(),
         cwd: run.cwd.to_string(),
         claude_session_id: None,
         transcript_path: None,
@@ -187,7 +185,6 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         updated_at: now,
         agent: AgentKind::Claude,
         codex_thread_id: None,
-        codex_socket: None,
     };
     match daemon
         .db
@@ -3902,8 +3899,6 @@ mod tests {
         let row = SessionRow {
             session_uid: uid.clone(),
             session_id: uid.clone(),
-            tmux_session: String::new(),
-            tmux_socket: String::new(),
             cwd: cwd.to_string(),
             claude_session_id: None,
             transcript_path: None,
@@ -3912,7 +3907,6 @@ mod tests {
             updated_at: now,
             agent: AgentKind::Claude,
             codex_thread_id: None,
-            codex_socket: None,
         };
         let line = serde_json::to_string(&start).unwrap();
         assert_eq!(
@@ -4490,7 +4484,7 @@ mod tests {
 
     /// **G6: a detached host's death (H7).** The run's link has ended with its host alive;
     /// then the host is killed while ccd runs. Once its pid is free, one pass of the
-    /// hosted-run watch, which the liveness tick runs beside the tmux sweep, finds it gone:
+    /// hosted-run watch, which the liveness tick runs, finds it gone:
     /// its group is signalled and the run ends.
     #[tokio::test]
     async fn a_detached_hosts_death_ends_its_run_on_the_next_watch() {
@@ -4973,9 +4967,9 @@ mod tests {
     }
 
     /// **The mail item's D1 and D2 on Claude: a hosted run takes mail from the moment its start
-    /// is answered `done`.** It is kept with this build's minor, as a run of this build's
-    /// supervisor is, so it is listed and mail from another run on this computer waits for it.
-    /// A start the host refuses is never kept, and mail for it is refused.
+    /// is answered `done`.** It is kept with this build's minor, so it is listed and mail from
+    /// another run on this computer waits for it. A start the host refuses is never kept, and
+    /// mail for it is refused.
     #[tokio::test]
     async fn a_hosted_claude_run_takes_mail_once_live_and_a_refused_start_never_does() {
         for (status, kept, told) in [
@@ -8375,8 +8369,8 @@ mod tests {
     /// the turn the host runs, no connection); the person's row of a message, with its
     /// request id; and the notice for that message, which the Stop cancelled. And the
     /// fleet's session summaries an app decides from: the hosted run live, with the turn the
-    /// Interrupt names running, and its events then; a tmux Claude run on the same daemon;
-    /// and the hosted run once its host is gone and the run has ended.
+    /// Interrupt names running, and its events then; and the hosted run once its host is
+    /// gone and the run has ended.
     async fn derived_minor_37_wire() -> serde_json::Value {
         let rig = rig();
         let mut played = live_run(&rig).await;
@@ -8449,13 +8443,6 @@ mod tests {
         until_ended(&rig, &uid, "exited", None).await;
         let hosted_ended =
             pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
-        let tmux = register_tmux_run(&rig).await;
-        let tmux_live = pinned_summary(
-            &summary(&rig.daemon, &tmux).await,
-            &tmux,
-            "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
-            &rig.root,
-        );
         let payload = |find: &dyn Fn(&serde_json::Value) -> bool| {
             events
                 .iter()
@@ -8482,7 +8469,6 @@ mod tests {
             "send_not_sent": payload(&|event| event["payload"]["notification_type"] == "send_not_sent"),
             "session_hosted_live": hosted_live,
             "session_hosted_live_events": hosted_live_events,
-            "session_tmux_live": tmux_live,
             "session_hosted_ended": hosted_ended,
         })
     }
@@ -8790,33 +8776,6 @@ mod tests {
         })
     }
 
-    /// A tmux Claude run `cc-1` on the rig's daemon, registered as its supervisor registers
-    /// it: its uid.
-    async fn register_tmux_run(rig: &Rig) -> String {
-        rig.daemon
-            .register_supervisor(protocol::ipc::RegisterSession {
-                session_id: "cc-1".into(),
-                session_uid: None,
-                tmux_session: "cc-1".into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                supervisor_pid: 4242,
-                claude_bin: None,
-                agent: AgentKind::Claude,
-                agent_bin: None,
-                codex_thread_id: None,
-                codex_socket: None,
-                codex_generation: None,
-                started_at: protocol::time::now_rfc3339(),
-                protocol_minor: protocol::PROTOCOL_MINOR,
-                exit_replay: false,
-            })
-            .await
-            .unwrap()
-            .session
-            .uid
-    }
-
     /// The host's side of one settings line: it reads it, then answers `status` (with
     /// `detail`) as message `seq` and reads ccd's ack. The line, its uuid cleared.
     async fn host_answers_setting(
@@ -8885,8 +8844,7 @@ mod tests {
     /// **B8 part 2 S2, and 215 G1: a setting is checked before anything reaches the host.** A
     /// change naming nothing, a model or an effort the run's menus do not list, a mode not
     /// among the four, and `bypassPermissions` without the person's confirmation are refused
-    /// with nothing sent; so is any change to a run not running, and to a Claude run in a
-    /// terminal.
+    /// with nothing sent; so is any change to a run not running.
     #[tokio::test]
     async fn a_setting_is_checked_before_anything_reaches_the_host() {
         let rig = rig();
@@ -8931,21 +8889,6 @@ mod tests {
                     .await
             ),
             "This session isn't running, so nothing was changed."
-        );
-        let tmux = register_tmux_run(&rig).await;
-        assert_eq!(
-            refusal(
-                rig.daemon
-                    .set_setting(
-                        &tmux,
-                        Setting::Mode {
-                            mode: "plan".into(),
-                            confirmed: false
-                        }
-                    )
-                    .await
-            ),
-            NOT_FROM_THE_APP
         );
         stop(&played.dir);
     }
@@ -9221,7 +9164,7 @@ mod tests {
 
     /// **B8 part 2 S5: a hosted run's menus are its start's answer's.** Each model's value,
     /// name, description and efforts, and the four modes with their names, the one that asks
-    /// nothing (`bypassPermissions`) marked `confirm`; a tmux run has none.
+    /// nothing (`bypassPermissions`) marked `confirm`.
     #[tokio::test]
     async fn a_hosted_runs_menus_are_its_starts_answers() {
         let rig = rig();
@@ -9265,8 +9208,6 @@ mod tests {
                 selected_model: None,
             })
         );
-        let tmux = register_tmux_run(&rig).await;
-        assert_eq!(summary(&rig.daemon, &tmux).await.menus, None);
         stop(&played.dir);
     }
 
@@ -9552,8 +9493,8 @@ mod tests {
     /// minor 37's are: the run still starting (no menus yet), the run with its menus, the
     /// effort set and claude's echoes of the model and the mode filed, then after claude's
     /// next init (the model by its full id, the menu's choice found by its `resolvedModel`),
-    /// that run as an older daemon sends it (minor 38's summary has neither `effort` nor
-    /// `menus`), and a tmux Claude run (none).
+    /// and that run as an older daemon sends it (minor 38's summary has neither `effort` nor
+    /// `menus`).
     async fn derived_minor_39_wire() -> serde_json::Value {
         let rig = rig();
         let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
@@ -9662,13 +9603,6 @@ mod tests {
             .find(|event| event["payload"]["notification_type"] == "model_set")
             .map(|event| event["payload"].clone())
             .expect("the effort's notice");
-        let tmux = register_tmux_run(&rig).await;
-        let tmux_live = pinned_summary(
-            &summary(&rig.daemon, &tmux).await,
-            &tmux,
-            "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
-            &rig.root,
-        );
         let dir = played.dir.clone();
         let (lost, _) = tokio::join!(
             rig.daemon.set_setting(
@@ -9728,7 +9662,6 @@ mod tests {
             "session_hosted_live": hosted,
             "session_hosted_live_init": hosted_init,
             "session_hosted_live_minor_38": older,
-            "session_tmux_live": tmux_live,
         })
     }
 

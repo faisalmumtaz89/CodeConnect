@@ -5,10 +5,9 @@
 //! name ([`protocol::tailnet`]). It sends with the `codeconnect` tool's
 //! `send_message` and reads its own with `read_messages`. A session's
 //! `cc-N@<computer>` is its label, for reading only: another run, later, can carry
-//! the same one. Only a run launched able to read mail is listed and sent to: one
-//! whose supervisor speaks [`MAIL_MINOR`] or later, or one CodeConnect started on its
-//! engine, from the moment it goes live ([`Daemon::mail_run_live`]); any other is
-//! neither listed nor sent to. The receiving computer's daemon keeps each
+//! the same one. Only a run CodeConnect started is listed and sent to, from the moment
+//! it goes live ([`Daemon::mail_run_live`]); any other is neither listed nor sent to.
+//! The receiving computer's daemon keeps each
 //! message (`mail` in [`crate::store`]) until that session reads it, the session
 //! ends, or a day passes; the sending computer's daemon keeps what its agent sent
 //! (`mail_sent`), written before the message goes anywhere, and what that agent has
@@ -63,10 +62,6 @@ pub(crate) const LIMITS: MailLimits = MailLimits {
     per_pair_per_hour: 30,
     settled_ms: 7 * 24 * 60 * 60 * 1000,
 };
-
-/// The protocol minor from which a run is launched with the `codeconnect` tool and its
-/// mail: its supervisor's, or this build's for a run started on the engine.
-const MAIL_MINOR: u32 = 27;
 
 /// How often unread mail is expired, messages no other computer has taken yet are
 /// offered again, and senders on other computers are told what changed.
@@ -293,7 +288,7 @@ impl Daemon {
                 return refuse("CodeConnect could not read its sessions".into());
             }
         };
-        let Some((target, minor)) = runs.into_iter().find(|(row, _)| row.session_uid == run) else {
+        let Some((target, _)) = runs.into_iter().find(|(row, _)| row.session_uid == run) else {
             return refuse(format!(
                 "{run} is not a running session: it has ended, or never ran here"
             ));
@@ -302,12 +297,6 @@ impl Daemon {
         // As `list_agents` leaves the asker out.
         if from.computer.is_empty() && target.session_uid == from.uid {
             return refuse("that is this session's own address".into());
-        }
-        if minor < MAIL_MINOR {
-            return refuse(format!(
-                "{label} was started before this computer's CodeConnect could give it messages; \
-                 it can be messaged once it is restarted"
-            ));
         }
         if let AgentKind::Unsupported(agent) = &target.agent {
             return refuse(format!(
@@ -742,9 +731,8 @@ impl Daemon {
             .mail_runs()
             .await?
             .into_iter()
-            .filter(|(row, minor)| {
-                *minor >= MAIL_MINOR
-                    && Some(row.session_uid.as_str()) != except_uid
+            .filter(|(row, _)| {
+                Some(row.session_uid.as_str()) != except_uid
                     && !matches!(row.agent, AgentKind::Unsupported(_))
             })
             .map(|(row, _)| entry(&row, this_computer))
@@ -868,10 +856,9 @@ pub(crate) async fn note_filed_event(
 
 impl Daemon {
     /// **A run CodeConnect started on its engine went live**, of either agent: from now on
-    /// it is listed and takes mail, as a run of this build's supervisor is, with this
-    /// build's minor. Each host calls it once, at the step that makes its run `live`; a start
-    /// that fails never reaches it. The run stops taking mail at its end, as every hosted
-    /// run ends ([`Daemon::end_hosted_run`]).
+    /// it is listed and takes mail, with this build's minor. Each host calls it once, at
+    /// the step that makes its run `live`; a start that fails never reaches it. The run
+    /// stops taking mail at its end, as every hosted run ends ([`Daemon::end_hosted_run`]).
     pub(crate) async fn mail_run_live(&self, run_uid: &str) {
         if let Err(err) = self
             .db

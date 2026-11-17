@@ -11,9 +11,9 @@
 //!   * **The quiet-state ticket** is per session: a run is in one quiet state
 //!     at a time, so a new one retires the run's older quiet-state push, held
 //!     or in its grace, and the run demonstrably moving retires one still
-//!     waiting — it never rings a state the run has left. Moving is a turn or a
-//!     Codex thread starting ([`PushGate::note_progress`]), and a decision or a turn
-//!     end, whose admissions take the same step ([`PushGate::admit_decision`],
+//!     waiting — it never rings a state the run has left. Moving is a turn
+//!     starting ([`PushGate::note_progress`]), and a decision or a turn end, whose
+//!     admissions take the same step ([`PushGate::admit_decision`],
 //!     [`PushGate::admit_turn_end`]).
 //!
 //! Permission requests are not quiet states: a second approval is a second
@@ -132,9 +132,9 @@ impl PushGate {
         }
     }
 
-    /// The run demonstrably moved — a turn or a Codex thread started. Any
-    /// quiet-state push still waiting out its grace is stale and must not ring:
-    /// the wait it announces is over.
+    /// The run demonstrably moved — a turn started. Any quiet-state push still
+    /// waiting out its grace is stale and must not ring: the wait it announces is
+    /// over.
     pub fn note_progress(&self, session_uid: &str) {
         let mut epochs = self.epochs.lock().unwrap();
         epochs.entry(session_uid.to_string()).or_default().1 += 1;

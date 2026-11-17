@@ -4,9 +4,8 @@ import XCTest
 @testable import CodeConnectKit
 
 /// The slash-command policy: native adapters for the five commands the app
-/// answers itself, a static guard for the dialog class whose injection
-/// measured as a phone lockout, and untouched passage for everything else —
-/// prose and the user's own skills included.
+/// answers itself, and untouched passage for everything else — Claude's other
+/// commands, prose and the user's own skills included.
 final class ClaudeCommandPolicyTests: XCTestCase {
 
     private func action(_ text: String) -> CommandAction {
@@ -52,66 +51,23 @@ final class ClaudeCommandPolicyTests: XCTestCase {
         XCTAssertTrue(reason.contains("without arguments"), reason)
     }
 
-    /// `/status`, `/usage` and `/cost` are measured dialog commands like the rest, refused before typing: the app has no
-    /// view of its own for them.
-    func testStatusUsageAndCostAreRefusedAsDialogCommands() {
-        for command in ["status", "usage", "cost"] {
-            guard case .blocked(let blocked, let reason) = action("/\(command)") else {
-                return XCTFail("/\(command) must be refused")
-            }
-            XCTAssertEqual(blocked, command)
-            XCTAssertTrue(reason.contains("take over this composer"), reason)
-        }
-    }
-
-    /// Every command in the refuse set was MEASURED to take the Mac's
-    /// composer away (needle absent at 50/100/200/400/800/1200ms).
-    func testMeasuredDialogCommandsAreRefusedBeforeTyping() {
-        for command in ["help", "export", "permissions", "memory", "hooks", "ide", "mcp"] {
-            guard case .blocked(let blocked, let reason) = action("/\(command)") else {
-                return XCTFail("/\(command) must be refused")
-            }
-            XCTAssertEqual(blocked, command)
-            XCTAssertTrue(reason.contains("take over this composer"), reason)
-        }
-    }
-
-    /// The two measured to survive Escape —
-    /// `/keybindings` opens vim, where Escape is a mode key.
-    func testUnrecoverableCommandsSayWhyTheyAreDifferent() {
-        for command in ["config", "keybindings"] {
-            guard case .blocked(_, let reason) = action("/\(command)") else {
-                return XCTFail("/\(command) must be refused")
-            }
-            XCTAssertTrue(reason.contains("Esc does not close"), reason)
-        }
-    }
-
-    /// Measured inline, so no block — a hand-written list once claimed all
-    /// three were dialogs. `/effort <arg>` is deliberately not here: its
-    /// routing is owned by `testEffortSplitsOnBareVersusArguments`, and it is
-    /// not an inline command.
-    func testMeasuredInlineCommandsPassThrough() {
-        for command in ["context", "agents", "focus"] {
-            XCTAssertEqual(action("/\(command)"), .passThrough, "/\(command)")
+    /// Every command without a control of its own is typed: Claude Code answers it on a run CodeConnect started.
+    func testEveryOtherCommandIsTyped() {
+        for typed in [
+            "/status", "/usage", "/cost", "/help", "/config autoCompact=false", "/keybindings", "/mcp",
+            "/rename new-name", "/context", "/agents",
+        ] {
+            XCTAssertEqual(action(typed), .passThrough, typed)
         }
     }
 
     /// Neither app has a terminal, so no refusal sends the reader to one: each ends at why the command is not
     /// available here.
     func testNoRefusalSendsTheReaderToATerminal() {
-        for typed in ["/clear everything", "/status", "/help", "/config", "/rename new"] {
+        for typed in ["/clear everything"] {
             guard case .blocked(_, let reason) = action(typed) else { return XCTFail("\(typed) must be refused") }
             XCTAssertFalse(reason.localizedCaseInsensitiveContains("terminal"), "\(typed): \(reason)")
         }
-    }
-
-    /// Refused for a different reason: the app cannot observe the result.
-    func testRenameIsRefusedAsUnobservable() {
-        guard case .blocked(_, let reason) = action("/rename new-name") else {
-            return XCTFail("rename must be refused")
-        }
-        XCTAssertTrue(reason.contains("cannot yet observe"), reason)
     }
 
     /// A custom skill is nobody's business but the user's.
@@ -128,26 +84,6 @@ final class ClaudeCommandPolicyTests: XCTestCase {
         XCTAssertEqual(ClaudeCommandPolicy.firstToken("/MODEL sonnet"), "model")
         XCTAssertEqual(ClaudeCommandPolicy.firstToken("hello"), nil)
         XCTAssertEqual(ClaudeCommandPolicy.firstToken("/"), nil)
-    }
-
-    /// **Decision 227: a run CodeConnect started sends every command; the dialog refusals guard only a
-    /// terminal composer.** The refusal applies exactly where `runSettings` defers — a terminal-attached
-    /// run or an unknown one (fail-safe, the parameter's default, which every test above exercises). A
-    /// hosted run (`.hostedLive`/`.hostedReadOnly`) passes /config, /usage and the rest straight through,
-    /// while its native commands stay native.
-    func testAHostedRunSendsEveryCommandWhereADeferredRunRefusesTheDialogOnes() {
-        let hosted = RunSettings.hostedReadOnly(model: nil)
-        for typed in ["/config autoCompact=false", "/usage", "/help", "/status", "/mcp"] {
-            XCTAssertEqual(
-                ClaudeCommandPolicy.action(for: typed, runSettings: hosted), .passThrough,
-                "\(typed) is sent on a hosted run")
-        }
-        XCTAssertEqual(
-            ClaudeCommandPolicy.action(for: "/model", runSettings: hosted), .nativeModel,
-            "a native command stays native on a hosted run")
-        guard case .blocked = ClaudeCommandPolicy.action(for: "/config", runSettings: .deferToOtherPath) else {
-            return XCTFail("a deferred run still refuses /config")
-        }
     }
 }
 

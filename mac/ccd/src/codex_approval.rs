@@ -17,8 +17,7 @@
 //!   TUI-only, so a ccd answer to it would forward zero bytes. What it asks for
 //!   is a permission *profile* — a filesystem and network shape — and not a
 //!   yes/no about one action, so it carries no `availableDecisions` and there is
-//!   no set of buttons a phone could be honestly offered. It is named as
-//!   observed and logged where it arrives; see [`is_observe_only`].
+//!   no set of buttons a phone could be honestly offered.
 //! * `item/tool/requestUserInput` and `mcpServer/elicitation/request` — **never
 //!   delivered.** Neither ends in `/requestApproval`, so the broker tombstones
 //!   the id and answers the app-server itself with a method-unavailable error
@@ -135,6 +134,7 @@
 //!   card is filed and retired under, and they ride the `request_id` a phone
 //!   echoes back rather than the payload hash.
 
+#[cfg(test)]
 use protocol::composite_id::{CompositeId, ServerRequestId};
 use protocol::ws::AnswerDecision;
 use serde_json::{Map, Value};
@@ -154,65 +154,6 @@ pub(crate) const QUESTION_METHOD: &str = "item/tool/requestUserInput";
 pub(crate) const QUESTION_TOOL_NAME: &str = "request_user_input";
 /// The `_meta.codex_approval_kind` that makes an elicitation an MCP tool approval.
 const MCP_TOOL_APPROVAL_KIND: &str = "mcp_tool_call";
-/// The ending that makes a server request one the broker will hand to this leg.
-///
-/// The broker binds and relays **any** method with this suffix, named or not, so
-/// this is the shape of everything a subscribed leg can be given.
-pub(crate) const REQUEST_APPROVAL_SUFFIX: &str = "/requestApproval";
-
-/// The requests that reach this leg, are deliberately not carded, and have a
-/// sentence of their own for why.
-///
-/// The list does not decide WHETHER a request is observed — the shape does, see
-/// [`is_observe_only`] — it decides what is said about it. An entry here is a
-/// family somebody looked at and declined; anything a phone could answer belongs
-/// in [`Family`] instead. See this module's header for what was measured.
-const OBSERVE_ONLY_REASONS: &[(&str, &str)] = &[(
-    "item/permissions/requestApproval",
-    "it asks for a permission profile rather than a decision about one action, so \
-     there is nothing a card could offer and it must be answered at the computer",
-)];
-
-/// Is this a request this leg is handed and this daemon does not card?
-///
-/// **Shape, not membership, and that is the whole point.** The broker delivers
-/// every `*/requestApproval` it sees, including one this build has never heard
-/// of, so a list-shaped test would send a future sibling down the dispatch's
-/// unmatched arm — where it is dropped without a trace, which is precisely the
-/// silence this observer exists to end. A method with the right shape and no
-/// [`Family`] is therefore observed whether it is named below or not; being
-/// named only changes the sentence.
-///
-/// **A residual, recorded where it belongs rather than fixed here.** The broker
-/// binds these to the terminal, so the exchange the app-server opened is one only
-/// a TUI leg can close. If the TUI leg goes while a ccd leg is still subscribed,
-/// nothing left can answer, and the request can stay pending upstream until the
-/// host tears the session down. That is the broker's existing terminal-only
-/// semantics, not something this observer introduces or could repair — a card
-/// here would not close it either, since a phone answer to a terminal-only grant
-/// forwards zero bytes.
-pub(crate) fn is_observe_only(method: &str) -> bool {
-    method.ends_with(REQUEST_APPROVAL_SUFFIX) && Family::of_method(method).is_none()
-}
-
-/// Why this particular request is not carded.
-///
-/// A named family gets the reason somebody established for it. An unnamed one
-/// gets the true thing that can be said without having looked at it: this build
-/// does not know what to offer for it. Both sentences say the request must be
-/// answered at the Mac, because both are true of a request nothing here answers
-/// — and neither says it *was* answered there, which this leg cannot observe.
-pub(crate) fn observe_only_reason(method: &str) -> &'static str {
-    OBSERVE_ONLY_REASONS
-        .iter()
-        .find(|(known, _)| *known == method)
-        .map(|(_, why)| *why)
-        .unwrap_or(
-            "this build has no card for it — it is an approval family that arrived \
-             after the two a phone answers, so nothing here knows what to offer for \
-             it and it must be answered at the computer",
-        )
-}
 
 /// How much of one command may ride in a card.
 ///
@@ -1232,18 +1173,10 @@ impl Approval {
         })
     }
 
-    /// The opaque wire id this card is answered by.
-    ///
-    /// **Derived from the item, never read off the frame.** A Codex
-    /// `serverRequest` id is a per-connection integer from zero, shared across
-    /// families: the very same approval re-delivered to a reconnecting link
-    /// arrives as `id: 0` again, so it identifies nothing across the one event
-    /// — a daemon bounce — that most needs it to. What is stable is `itemId`, a
-    /// uuid measured byte-identical across that re-delivery, and it goes into
-    /// [`CompositeId`]'s request-id slot in its `Text` form, which is
-    /// type-tagged and so can never collide with a numeric id that prints the
-    /// same. The visit generation is in there for the reason it always was: an
-    /// A→B→A revisit reuses the thread id and must not reuse the activation.
+    /// **Test-only.** A request id for this card derived from the item and the visit,
+    /// as the committed card fixtures carry it: `itemId` goes into [`CompositeId`]'s
+    /// request-id slot in its `Text` form.
+    #[cfg(test)]
     pub(crate) fn request_id(
         &self,
         session_uid: &str,
@@ -2376,53 +2309,6 @@ mod tests {
             "item/started",
         ] {
             assert_eq!(Family::of_method(other), None);
-        }
-
-        // **And an approval with no card is observed, named or not.** A frame
-        // that falls off the end of the dispatch reads in a log exactly like one
-        // nobody has considered; this is what keeps the two apart. The test is
-        // the SHAPE the broker delivers by, so a sibling this build has never
-        // heard of is observed too — being named only picks the sentence.
-        assert!(is_observe_only("item/permissions/requestApproval"));
-        assert!(
-            is_observe_only("some/future/requestApproval"),
-            "the broker binds every request with this suffix, so one nobody has \
-             named still arrives here — and a list-shaped test would drop it"
-        );
-        assert_ne!(
-            observe_only_reason("item/permissions/requestApproval"),
-            observe_only_reason("some/future/requestApproval"),
-            "a family somebody looked at says why; one nobody has says so"
-        );
-        for reason in [
-            observe_only_reason("item/permissions/requestApproval"),
-            observe_only_reason("some/future/requestApproval"),
-        ] {
-            assert!(
-                reason.contains("must be answered at the computer"),
-                "an arrival is all this leg sees, so the sentence may not claim an \
-                 answer it never watched: {reason}"
-            );
-        }
-        // The other two families the bundle declares do not have the delivered
-        // shape: the broker answers them upstream, so nothing here can receive
-        // one and an opinion about them would describe a frame this code cannot
-        // see.
-        for delivered_to_nobody in [
-            "item/tool/requestUserInput",
-            "mcpServer/elicitation/request",
-        ] {
-            assert!(
-                !is_observe_only(delivered_to_nobody),
-                "{delivered_to_nobody} never reaches this leg, so it is not this \
-                 module's to declare an opinion about"
-            );
-        }
-        for carded in [COMMAND_METHOD, FILE_CHANGE_METHOD] {
-            assert!(
-                !is_observe_only(carded),
-                "a family with a card is not an observe-only one"
-            );
         }
 
         // **And `of_item_type` is the exact inverse of `as_str`**, which is what

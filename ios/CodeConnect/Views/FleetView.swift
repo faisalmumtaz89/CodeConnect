@@ -2385,8 +2385,8 @@ struct FleetRowView: View {
     /// Absent, not disabled, when there is nothing running: a control whose only
     /// behaviour is refusing the tap is the item this product does not ship.
     /// Present-and-greyed is for the bounded window after a link-state refusal,
-    /// where the daemon's own sentence has just said to try again shortly — and
-    /// there the reason is drawn, never merely hinted.
+    /// when the same ask may work shortly — and there the reason is drawn, never
+    /// merely hinted.
     ///
     /// **What became of a stop takes the control's place**, as a word, with its
     /// title and sentence a tap away. On a line of its own under the run, a late

@@ -368,10 +368,10 @@ public enum TimelineBuilder {
         var items: [TimelineItem] = []
         items.reserveCapacity(events.count)
         /// Whether the link has been anything but attached. Until then an
-        /// `attached` is the supervisor registering at spawn, which says
+        /// `attached` is the agent host registering at spawn, which says
         /// nothing to the reader; after it, `attached` is the recovery.
         var linkWasDown = false
-        /// Whether the run has ended. Its supervisor's link coming and going
+        /// Whether the run has ended. Its agent host's link coming and going
         /// around the end — it lets go of the daemon to say the run is over —
         /// is the ending itself, which the end's own row already says; until a
         /// new start, the link says nothing about anything still running.

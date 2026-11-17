@@ -1329,7 +1329,7 @@ enum RenderCatalog {
             }),
         // **The refusal after the fact**, which is a different screen and a
         // different author. The summary said `subscribed`, the frame left, and
-        // the Mac answered that its own link had gone down in between.
+        // the Mac answered that it had no connection to the run.
         codexScenario(
             "stop-refused-late",
             purpose:
@@ -1337,7 +1337,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.fleet(app)
                 try driver.require(
-                    driver.element(containing: "try again shortly", in: app),
+                    driver.element(containing: "no connection to this run", in: app),
                     "the daemon's own sentence, unedited")
             }),
         // **What a refusal said, opened from Stop's place on the row**, with
@@ -1350,7 +1350,8 @@ enum RenderCatalog {
                 try driver.fleet(app)
                 try driver.require(app.buttons["stop-outcome-\(codexSessionKey)"], "the outcome's word").tap()
                 try driver.require(
-                    driver.text(containing: "try again shortly", in: app), "the daemon's own sentence, unedited")
+                    driver.text(containing: "no connection to this run", in: app),
+                    "the daemon's own sentence, unedited")
                 // Stop itself, on screen with nothing over it: while a word
                 // stands in its place on the row, this is the way to stop the
                 // turn.
@@ -1442,7 +1443,7 @@ enum RenderCatalog {
             route: "session",
             reach: { app, driver in
                 try driver.require(
-                    driver.element(containing: "not yet watching its thread", in: app),
+                    driver.element(containing: "no connection to this run", in: app),
                     "the refusal, verbatim")
             }),
         codexScenario(

@@ -29,10 +29,10 @@
 //!     run, the request id is spent, or the outcome is already recorded.
 //!     Retrying changes nothing, and for the `indeterminate` ones retrying is
 //!     the one thing that must not happen.
-//!   * `wire_code` — the app-server or the broker refused the write and the
-//!     sentence carries their numeric code. The code is structural and is
-//!     passed on; their *message* never is, because it has been measured
-//!     naming a turn id the phone never sent.
+//!   * `wire_code` — the app-server refused the write and the sentence carries
+//!     its numeric code. The code is structural and is passed on; its *message*
+//!     never is, because it has been measured naming a turn id the phone never
+//!     sent.
 //!   * `transient_local` — this Mac's own store or lookup failed, and it failed
 //!     *before* anything was written: nothing reached Codex, no claim was
 //!     taken, and the same ask may well succeed on a retry. Distinct from
@@ -58,9 +58,9 @@ pub(crate) fn unknown_session(session_ref: &str) -> String {
 /// A `Display` on this daemon's store is an anyhow chain whose open paths name
 /// absolute filesystem locations, and this sentence used to interpolate one — so a
 /// phone learned where this Mac keeps its database from a bad disk day. A const
-/// rather than a formatter for [`COMPOSE_OUTCOME_UNRECORDED`]'s reason: with nothing
-/// to interpolate there is nothing to leak by accident, and the rule is enforced by
-/// the shape of the item rather than by every caller remembering it. Each caller logs
+/// rather than a formatter: with nothing to interpolate there is nothing to leak by
+/// accident, and the rule is enforced by the shape of the item rather than by every
+/// caller remembering it. Each caller logs
 /// the error itself with `{err:#}` before saying this, which is where an operator is
 /// entitled to read it.
 pub(crate) const SESSION_LOOKUP_FAILED: &str = "session lookup failed";
@@ -100,27 +100,6 @@ pub(crate) const INTERRUPT_ALREADY_SENT_UNKNOWN: &str =
 
 // ---- The link's state as the daemon reads it, before it writes ---------------
 
-pub(crate) const INTERRUPT_LINK_BOUND: &str =
-    "the computer is connected to the Codex session but is not yet watching \
-    its thread, so a stop cannot be confirmed; nothing was sent";
-
-pub(crate) const INTERRUPT_LINK_RECONNECTING: &str =
-    "the computer has lost its control link to the Codex session and is \
-    reconnecting, so nothing was sent; try again shortly, or stop the \
-    turn at the computer";
-
-pub(crate) const INTERRUPT_LINK_NOT_REACHED: &str =
-    "the computer has not yet reached the Codex session, so nothing was \
-    sent; try again shortly, or stop the turn at the computer";
-
-pub(crate) const LINK_STILL_PICKING_UP_THREAD: &str =
-    "the computer is connected to the Codex session and is still picking up \
-    its thread, so nothing was sent; try again in a few seconds";
-
-pub(crate) const INTERRUPT_NO_LINK: &str =
-    "there is no live link to this Codex session, so nothing was sent; \
-    stop the turn at the computer";
-
 /// A run started on the engine whose link is not attached, before its reconnect or after one
 /// that failed: an answer, a stop or a message is refused with the fact alone. Such a run has
 /// no screen at the computer to send the person to.
@@ -151,36 +130,7 @@ pub(crate) const COMPOSE_STALE_HASH: &str =
     "stale payload_hash: the message you asked to send is not the one this \
     request names; nothing was sent";
 
-pub(crate) const COMPOSE_LINK_BOUND: &str =
-    "the computer is connected to the Codex session but is not yet watching its \
-    thread, so a message cannot be confirmed; nothing was sent";
-
-pub(crate) const COMPOSE_LINK_RECONNECTING: &str =
-    "the computer has lost its control link to the Codex session and is \
-    reconnecting, so nothing was sent; try again shortly, or say it at the \
-    computer";
-
-pub(crate) const COMPOSE_LINK_NOT_REACHED: &str =
-    "the computer has not yet reached the Codex session, so nothing was sent; try \
-    again shortly, or say it at the computer";
-
-pub(crate) const COMPOSE_NO_LINK: &str =
-    "there is no live link to this Codex session, so nothing was sent; say it \
-    at the computer";
-
 // ---- The channel to the link task, and the teardown that drains it -----------
-
-pub(crate) const INTERRUPT_LINK_NOT_RUNNING: &str =
-    "the link to this Codex session is not running, so nothing was sent; \
-    stop the turn at the computer";
-
-pub(crate) const INTERRUPT_LINK_STOPPED_MID_WRITE: &str =
-    "the link stopped while this interrupt was being written, so whether it \
-    reached Codex is not known; it will not be sent again. Check the computer.";
-
-pub(crate) const INTERRUPT_NO_CONNECTION: &str =
-    "the link to this Codex session has no live connection, so nothing was \
-    sent; stop the turn at the computer";
 
 pub(crate) fn interrupt_settled_unknown(cause: &str) -> String {
     format!(
@@ -189,29 +139,6 @@ pub(crate) fn interrupt_settled_unknown(cause: &str) -> String {
     )
 }
 
-/// [`compose_settled_unrecorded`]'s twin, and it takes the same one argument for the
-/// same reason: the `cause` is this build's own fixed vocabulary, and the store error
-/// that made the record unwritable is logged at the call site and never carried here.
-pub(crate) fn interrupt_settled_unrecorded(cause: &str) -> String {
-    format!(
-        "{cause}, and the computer could not record that either, so it \
-        cannot say what became of it. Check the computer."
-    )
-}
-
-pub(crate) const COMPOSE_LINK_WENT_AWAY: &str =
-    "the computer's link to the Codex session went away before that message was \
-    written, so nothing was said; try again";
-
-pub(crate) const COMPOSE_LINK_STOPPED_MID_WRITE: &str =
-    "the computer's link to the Codex session stopped while that message was in \
-    flight, so whether it was said is not known; it will not be sent again. \
-    Check the computer.";
-
-pub(crate) const COMPOSE_NO_CONNECTION: &str =
-    "the link to this Codex session has no live connection, so nothing was \
-    said; say it at the computer";
-
 pub(crate) fn compose_settled_unknown(cause: &str) -> String {
     format!(
         "{cause}, so whether that message reached the model is not known; it will \
@@ -219,46 +146,11 @@ pub(crate) fn compose_settled_unknown(cause: &str) -> String {
     )
 }
 
-pub(crate) fn compose_settled_unrecorded(cause: &str) -> String {
-    format!(
-        "{cause}, and the computer could not record that either, so it cannot say \
-        what became of it. Check the computer."
-    )
-}
-
 // ---- What the link refuses with the facts in hand, before the write ----------
-
-/// **Not catalogued, for [`REPLAY_INTERRUPT_ABORTED`]'s reason in the other direction.**
-///
-/// [`crate::state::Daemon::interrupt`] refuses an empty `turn_id` with
-/// [`INTERRUPT_NAMES_NO_TURN`] several steps before it builds the only
-/// [`crate::store::ClaimedMaterial`] an interrupt is ever claimed with, so nothing that
-/// clears admission can reach this guard with an empty target. The guard stays: it is the
-/// link's own statement of what it requires, and a future caller that builds material
-/// elsewhere should meet a sentence rather than a write. It carries no row because the
-/// fixture describes what a phone can be told, not what the code can defend against.
-pub(crate) const LINK_INTERRUPT_NAMES_NO_TURN: &str =
-    "this request names no turn, so there is nothing to stop; nothing was sent";
-
-pub(crate) const INTERRUPT_RECONNECTED_IN_FLIGHT: &str =
-    "the computer's link to the Codex session reconnected while that request was \
-    in flight, so nothing was sent; try again";
-
-pub(crate) const INTERRUPT_OTHER_THREAD: &str =
-    "this Codex session is not on the thread that turn belongs to, so nothing was \
-    sent; stop it at the computer";
-
-pub(crate) const INTERRUPT_VISIT_MOVED_ON: &str =
-    "this Codex session has moved on since that turn was shown, so nothing was \
-    sent; open the run again";
 
 pub(crate) const INTERRUPT_TURN_NOT_RUNNING: &str =
     "that turn is not the one this Codex session is running, so nothing was \
     sent; it may have finished already";
-
-pub(crate) const INTERRUPT_THREAD_SWITCHING: &str =
-    "this Codex session is moving to another thread, so nothing was sent; try \
-    again once it has settled";
 
 /// [`INTERRUPT_TURN_NOT_RUNNING`]'s twin for a Claude run CodeConnect started: its agent host
 /// is not running that turn (another one, or the turn has ended), so nothing reached claude.
@@ -269,50 +161,6 @@ pub(crate) const CLAUDE_TURN_NOT_RUNNING: &str =
 pub(crate) const INTERRUPT_ALREADY_WAITING: &str =
     "an interrupt for that turn is already waiting to take effect, so nothing \
     was sent again";
-
-pub(crate) const COMPOSE_RECONNECTED_IN_FLIGHT: &str =
-    "the computer's link to the Codex session reconnected while that message was in \
-    flight, so nothing was said; try again";
-
-pub(crate) const COMPOSE_OTHER_THREAD: &str =
-    "this Codex session is not on the thread that message was addressed to, so \
-    nothing was said; say it at the computer";
-
-pub(crate) const COMPOSE_VISIT_MOVED_ON: &str =
-    "this Codex session has moved on since that message was composed, so nothing \
-    was said; open the run again";
-
-pub(crate) const COMPOSE_THREAD_SWITCHING: &str =
-    "this Codex session is moving to another thread, so nothing was said; try \
-    again once it has settled";
-
-/// The one thing a link cannot do on a thread the wire says has never run a turn.
-///
-/// Reached only if the two facts behind that state contradict each other — see
-/// [`crate::codex_link::compose_route`], which is where the contradiction is refused
-/// rather than resolved.
-pub(crate) const COMPOSE_NO_TURN_TO_STEER: &str =
-    "this Codex thread has not run a turn yet, so there is nothing for that \
-    message to join; nothing was said, and it can be sent again once the thread \
-    is running";
-
-/// **The first turn is already going out, and this Mac has not caught up with it.**
-///
-/// A phone's compose was written as a `turn/start` from the one un-subscribed state that
-/// admits one ([`crate::codex_link::CodexAddressee::BoundNotStarted`]), which SPENDS the
-/// proof that admitted it. A second compose arriving before this link has caught up —
-/// before an accepted `thread/resume` subscribes it, or the turn ends — has nothing left
-/// to stand on: the connection is still handed no `turn/*` frame, so there is no running
-/// turn to join, and another `turn/start` would be a second first turn.
-///
-/// **It names the phone deliberately.** The other refusals in this family describe the
-/// link ("not yet watching its thread"); this one describes something the operator
-/// themselves just did, and saying so is what makes the wait make sense rather than look
-/// like a fault. It carries `try again shortly` because it is exactly that kind of fact —
-/// the same ask a moment later is written.
-pub(crate) const COMPOSE_START_IN_FLIGHT: &str =
-    "the first turn on this Codex thread was just started from a phone and the computer \
-    has not caught up with it yet, so nothing was said; try again shortly";
 
 pub(crate) const INTERRUPT_ID_REUSED_ON_LINK: &str =
     "this request id has already been used for a different stop on this \
@@ -366,21 +214,6 @@ pub(crate) const INTERRUPT_WIRE_REMEDY: &str = "the turn can be stopped again fr
 
 pub(crate) const COMPOSE_WIRE_REMEDY: &str = "it can be sent again from the phone";
 
-// ---- The broker's refusal while Codex is stopped at the Mac (Ctrl+Z) -----------
-//
-// Its own sentence rather than the code, because the remedy is not the wire refusal's:
-// Codex comes back with `fg` at the Mac, and the same ask is a first attempt then. The
-// broker's message is how the daemon tells this refusal apart, and like every refuser's
-// message it is never passed on.
-
-pub(crate) const INTERRUPT_PAUSED: &str =
-    "Codex is paused at the computer (Ctrl+Z), so that stop was not sent; it continues after \
-     fg there, and the turn can be stopped then";
-
-pub(crate) const COMPOSE_PAUSED: &str =
-    "Codex is paused at the computer (Ctrl+Z), so that message was not sent; it continues after \
-     fg there, and the message can be sent again then";
-
 // ---- After the write, when the evidence is missing or contradicts ------------
 
 pub(crate) fn interrupt_turn_ended_itself(status: &str) -> String {
@@ -391,9 +224,8 @@ pub(crate) fn interrupt_turn_ended_itself(status: &str) -> String {
     )
 }
 
-/// [`COMPOSE_OUTCOME_UNRECORDED`]'s twin, and a const for the same reason. The
-/// settlement that failed logged the store's own `Display` where it failed; what
-/// crosses the wire is the fact and the remedy.
+/// A const rather than a formatter: the settlement that failed logged the store's own
+/// `Display` where it failed; what crosses the wire is the fact and the remedy.
 pub(crate) const INTERRUPT_OUTCOME_UNRECORDED: &str =
     "the computer could not record what became of that request to stop the turn, so it \
     cannot say; it will not be sent again. Check the computer.";
@@ -402,36 +234,10 @@ pub(crate) const INTERRUPT_SETTLED_ELSEWHERE: &str =
     "this request to stop the turn was already settled elsewhere and what \
     became of it is not known; it will not be sent again. Check the computer.";
 
-pub(crate) const INTERRUPT_SETTLED_ELSEWHERE_UNREADABLE: &str =
-    "this request to stop the turn was settled elsewhere and the computer cannot \
-    read what became of it; it will not be sent again. Check the computer.";
-
-pub(crate) const INTERRUPT_BOUNDARY_UNRECORDED: &str =
-    "the computer could not record that the turn ended (turn boundary \
-    unrecorded), so it cannot say the turn was stopped from here; \
-    it will not be sent again. Check the computer.";
-
-pub(crate) const INTERRUPT_BOUNDARY_UNREADABLE: &str =
-    "the computer could not read whether the turn boundary was recorded, so it \
-    cannot say the turn was stopped from here; it will not be sent \
-    again. Check the computer.";
-
 pub(crate) const COMPOSE_ANSWER_UNREADABLE: &str =
     "Codex answered this message with something the computer could not read, \
     so it cannot say what became of it; it will not be sent again. Check \
     the computer.";
-
-pub(crate) const COMPOSE_SETTLED_ELSEWHERE: &str =
-    "this message was sent and what became of it is not known; it will \
-    not be sent again. Check the computer.";
-
-pub(crate) const COMPOSE_SETTLED_ELSEWHERE_UNREADABLE: &str =
-    "this message was sent and the computer could not read what became of it; \
-    it will not be sent again. Check the computer.";
-
-pub(crate) const COMPOSE_OUTCOME_UNRECORDED: &str =
-    "this message was sent and the computer could not record what became of it; \
-    it will not be sent again. Check the computer.";
 
 // ---- Replaying a ledger row that is already terminal -------------------------
 
@@ -486,14 +292,11 @@ pub(crate) const INTERRUPT_CONNECTION_ENDED: &str =
 pub(crate) const COMPOSE_CONNECTION_ENDED: &str =
     "the link's connection to Codex ended while this message was in flight";
 
-/// **What a phone is told when the app-server or the broker refused the write,
-/// and it is the CODE.**
+/// **What a phone is told when the app-server refused the write, and it is the
+/// CODE.**
 ///
-/// Split out of [`crate::codex_link`]'s own frame reader so the assembled
-/// sentence can be built from a token in the table without a frame to read it
-/// from. The rule it enforces is that reader's, unchanged: the refusing party's
-/// `message` is logged on the machine entitled to it and never interpolated
-/// into what a phone reads.
+/// The refusing party's `message` is logged on the machine entitled to it and never
+/// interpolated into what a phone reads.
 pub(crate) fn wire_refused(code: &str, what: &str, remedy: &str) -> String {
     format!("{what} was refused (code {code}) and nothing was changed; {remedy}")
 }
@@ -517,10 +320,7 @@ pub(crate) struct Refusal {
 ///
 /// **No row is built from a local error.** There is no `{err}` token, because a
 /// `Display` on this daemon's store is an anyhow chain whose open paths name
-/// absolute filesystem locations and a phone is entitled to none of them. Five
-/// sentences carried one and no longer do; the invariant is pinned by
-/// [`crate::codex_link`]'s
-/// `a_store_error_never_reaches_the_phone_from_a_compose_an_interrupt_or_an_answer`.
+/// absolute filesystem locations and a phone is entitled to none of them.
 #[cfg(test)]
 pub(crate) fn catalogue() -> Vec<Refusal> {
     fn row(
@@ -638,109 +438,11 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             COMPOSE_STALE_HASH.to_string(),
         ),
         row(
-            "interrupt_link_bound",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_LINK_BOUND.to_string(),
-        ),
-        row(
-            "interrupt_link_reconnecting",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_LINK_RECONNECTING.to_string(),
-        ),
-        row(
-            "interrupt_link_not_reached",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_LINK_NOT_REACHED.to_string(),
-        ),
-        row(
-            "link_still_picking_up_thread",
-            "both",
-            "rejected",
-            "link_state",
-            LINK_STILL_PICKING_UP_THREAD.to_string(),
-        ),
-        row(
-            "interrupt_no_link",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_NO_LINK.to_string(),
-        ),
-        row(
             "engine_no_connection",
             "both",
             "rejected",
             "link_state",
             ENGINE_NO_CONNECTION.to_string(),
-        ),
-        row(
-            "compose_link_bound",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_LINK_BOUND.to_string(),
-        ),
-        row(
-            "compose_start_in_flight",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_START_IN_FLIGHT.to_string(),
-        ),
-        row(
-            "compose_no_turn_to_steer",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_NO_TURN_TO_STEER.to_string(),
-        ),
-        row(
-            "compose_link_reconnecting",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_LINK_RECONNECTING.to_string(),
-        ),
-        row(
-            "compose_link_not_reached",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_LINK_NOT_REACHED.to_string(),
-        ),
-        row(
-            "compose_no_link",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_NO_LINK.to_string(),
-        ),
-        row(
-            "interrupt_link_not_running",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_LINK_NOT_RUNNING.to_string(),
-        ),
-        row(
-            "interrupt_link_stopped_mid_write",
-            "interrupt",
-            "indeterminate",
-            "permanent",
-            INTERRUPT_LINK_STOPPED_MID_WRITE.to_string(),
-        ),
-        row(
-            "interrupt_no_connection",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_NO_CONNECTION.to_string(),
         ),
         row(
             "interrupt_settled_unknown",
@@ -757,67 +459,11 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             interrupt_settled_unknown(CLAUDE_CONNECTION_ENDED),
         ),
         row(
-            "interrupt_settled_unrecorded",
-            "interrupt",
-            "indeterminate",
-            "permanent",
-            interrupt_settled_unrecorded(INTERRUPT_CONNECTION_ENDED),
-        ),
-        row(
-            "compose_link_went_away",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_LINK_WENT_AWAY.to_string(),
-        ),
-        row(
-            "compose_link_stopped_mid_write",
-            "compose",
-            "indeterminate",
-            "permanent",
-            COMPOSE_LINK_STOPPED_MID_WRITE.to_string(),
-        ),
-        row(
-            "compose_no_connection",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_NO_CONNECTION.to_string(),
-        ),
-        row(
             "compose_settled_unknown",
             "compose",
             "indeterminate",
             "permanent",
             compose_settled_unknown(COMPOSE_CONNECTION_ENDED),
-        ),
-        row(
-            "compose_settled_unrecorded",
-            "compose",
-            "indeterminate",
-            "permanent",
-            compose_settled_unrecorded(COMPOSE_CONNECTION_ENDED),
-        ),
-        row(
-            "interrupt_reconnected_in_flight",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_RECONNECTED_IN_FLIGHT.to_string(),
-        ),
-        row(
-            "interrupt_other_thread",
-            "interrupt",
-            "rejected",
-            "permanent",
-            INTERRUPT_OTHER_THREAD.to_string(),
-        ),
-        row(
-            "interrupt_visit_moved_on",
-            "interrupt",
-            "rejected",
-            "permanent",
-            INTERRUPT_VISIT_MOVED_ON.to_string(),
         ),
         row(
             "interrupt_turn_not_running",
@@ -834,46 +480,11 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             CLAUDE_TURN_NOT_RUNNING.to_string(),
         ),
         row(
-            "interrupt_thread_switching",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_THREAD_SWITCHING.to_string(),
-        ),
-        row(
             "interrupt_already_waiting",
             "interrupt",
             "rejected",
             "transient_local",
             INTERRUPT_ALREADY_WAITING.to_string(),
-        ),
-        row(
-            "compose_reconnected_in_flight",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_RECONNECTED_IN_FLIGHT.to_string(),
-        ),
-        row(
-            "compose_other_thread",
-            "compose",
-            "rejected",
-            "permanent",
-            COMPOSE_OTHER_THREAD.to_string(),
-        ),
-        row(
-            "compose_visit_moved_on",
-            "compose",
-            "rejected",
-            "permanent",
-            COMPOSE_VISIT_MOVED_ON.to_string(),
-        ),
-        row(
-            "compose_thread_switching",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_THREAD_SWITCHING.to_string(),
         ),
         row(
             "interrupt_id_reused_on_link",
@@ -939,20 +550,6 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             wire_refused("{n}", COMPOSE_WIRE_SUBJECT, COMPOSE_WIRE_REMEDY),
         ),
         row(
-            "interrupt_paused",
-            "interrupt",
-            "rejected",
-            "link_state",
-            INTERRUPT_PAUSED.to_string(),
-        ),
-        row(
-            "compose_paused",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_PAUSED.to_string(),
-        ),
-        row(
             "interrupt_turn_ended_itself",
             "interrupt",
             "rejected",
@@ -974,53 +571,11 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             INTERRUPT_SETTLED_ELSEWHERE.to_string(),
         ),
         row(
-            "interrupt_settled_elsewhere_unreadable",
-            "interrupt",
-            "indeterminate",
-            "permanent",
-            INTERRUPT_SETTLED_ELSEWHERE_UNREADABLE.to_string(),
-        ),
-        row(
-            "interrupt_boundary_unrecorded",
-            "interrupt",
-            "indeterminate",
-            "permanent",
-            INTERRUPT_BOUNDARY_UNRECORDED.to_string(),
-        ),
-        row(
-            "interrupt_boundary_unreadable",
-            "interrupt",
-            "indeterminate",
-            "permanent",
-            INTERRUPT_BOUNDARY_UNREADABLE.to_string(),
-        ),
-        row(
             "compose_answer_unreadable",
             "compose",
             "indeterminate",
             "permanent",
             COMPOSE_ANSWER_UNREADABLE.to_string(),
-        ),
-        row(
-            "compose_settled_elsewhere",
-            "compose",
-            "indeterminate",
-            "permanent",
-            COMPOSE_SETTLED_ELSEWHERE.to_string(),
-        ),
-        row(
-            "compose_settled_elsewhere_unreadable",
-            "compose",
-            "indeterminate",
-            "permanent",
-            COMPOSE_SETTLED_ELSEWHERE_UNREADABLE.to_string(),
-        ),
-        row(
-            "compose_outcome_unrecorded",
-            "compose",
-            "indeterminate",
-            "permanent",
-            COMPOSE_OUTCOME_UNRECORDED.to_string(),
         ),
         row(
             "replay_interrupt_turn_ended",
@@ -1114,7 +669,7 @@ pub(crate) fn fixture() -> serde_json::Value {
                  test requires this file to be byte-identical to what the build emits.",
         "tokens": {
             "{uid}": "a session uid",
-            "{ref}": "the session reference the caller used (a uid or a tmux name)",
+            "{ref}": "the session reference the caller used (a uid or a name)",
             "{agent}": "the name of an agent kind this build does not support",
             "{n}": "a number — the size of the thing asked about, or a wire error code",
             "{max}": "a ceiling this build enforces (today only MAX_COMPOSE_BYTES)",
@@ -1127,8 +682,8 @@ pub(crate) fn fixture() -> serde_json::Value {
                            moment later may well be written",
             "permanent": "a settled fact — the ask was wrong, the id is spent, or \
                           the outcome is already recorded",
-            "wire_code": "the app-server or the broker refused the write; the \
-                          sentence carries their numeric code and never their message",
+            "wire_code": "the app-server refused the write; the sentence carries \
+                          its numeric code and never its message",
             "transient_local": "the computer's own store or lookup failed BEFORE anything \
                                 was written; nothing reached Codex and the same ask may \
                                 well succeed on a retry"

@@ -89,13 +89,9 @@ pub enum ClientMessage {
     /// Deliberately the only verb that removes a run's record, and deliberately
     /// narrow: `session_uid`, never a tmux name, because a name is handed to the
     /// next run and a phone that deleted "cc-1" could destroy a session it never
-    /// saw. A **hosted** run (in tmux, or through the agent host ccd started for
-    /// it) is refused until it has ended: `exited`, or `failed` for a start that
-    /// never began (its host did not come up, or its start was refused). An
-    /// **adopted** one (no host of
-    /// ccd's — CodeConnect never launched it, so no proof of its end can ever
-    /// exist) is accepted at any lifecycle, and its deletion also stops
-    /// observation of that conversation until a new session start re-adopts it.
+    /// saw. A run is refused until it has ended: `exited`, or `failed` for a
+    /// start that never began (its host did not come up, or its start was
+    /// refused).
     ///
     /// It removes CodeConnect's own record, not the conversation: Claude Code
     /// keeps its transcript under `~/.claude/projects`, so `claude --resume` still
@@ -204,8 +200,8 @@ pub enum ClientMessage {
         /// Claude Code opens rather than dismissing it. Minor 10.
         ///
         /// Default false, and it is a *permission*, not an instruction: the
-        /// daemon still intersects it with its own allowlist and its
-        /// supervisor gate, so a client cannot nominate a command. It exists
+        /// daemon still intersects it with its own allowlist, so a client
+        /// cannot nominate a command. It exists
         /// because a client that predates the disclosure must not trigger a
         /// committing keystroke it never told anybody about.
         #[serde(default)]

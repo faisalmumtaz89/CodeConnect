@@ -527,9 +527,8 @@ extension Event {
         return texts.isEmpty ? nil : texts.joined(separator: "\n")
     }
 
-    /// A `tool_result` from the model's own message stream — the transcript on the
-    /// tmux engine, the SDK stream on the host engine — which carry the identical
-    /// `message.content[]` shape. Unlike the PostToolUse hook it carries Claude's
+    /// A `tool_result` from the model's own message stream — the SDK stream on the
+    /// host engine, in the `message.content[]` shape. Unlike the PostToolUse hook it carries Claude's
     /// own `is_error` verdict. (The hook's copy of the output is read separately.)
     public var transcriptToolResult: (toolUseID: String, isError: Bool, text: String?)? {
         guard kind == .toolResult, source == .transcript || source == .sdk,

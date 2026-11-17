@@ -1546,13 +1546,12 @@ enum CodexFixtures {
     static func interruptResult(_ state: State) -> InterruptResult? {
         switch state {
         case .stopAborted: return .aborted(turnID: turnID)
-        // Verbatim from `state.rs`. The button greys for ten seconds and comes
-        // back — the sentence itself says to try again shortly.
+        // The daemon's `engine_no_connection` row, verbatim: a link-state
+        // refusal, so the button greys for ten seconds and comes back.
         case .stopRefusedLate:
             return .rejected(
                 reason:
-                    "the computer has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the computer")
+                    "CodeConnect has no connection to this run right now, so nothing was sent.")
         case .stopIndeterminate:
             return .indeterminate(
                 reason:
@@ -1571,10 +1570,7 @@ enum CodexFixtures {
         // they landed, not the one that would be true now.
         case .composeDuplicate: return .duplicate(turnID: turnID, started: false)
         case .composeRejected:
-            return .rejected(
-                reason:
-                    "the computer is connected to the Codex session but is not yet watching its thread, "
-                    + "so a message cannot be confirmed; nothing was sent")
+            return .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent.")
         // **`compose_already_sent_unknown`, verbatim.** This was a hand-written
         // approximation — "that message was written and what became of it is
         // not known" — which is no row the daemon has ever had, so the render

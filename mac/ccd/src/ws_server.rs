@@ -211,7 +211,7 @@ async fn accept_loop(
 /// Both halves are needed and neither is sufficient. Without the global cap,
 /// anything that can reach the tailnet port holds the daemon's entire
 /// file-descriptor budget open — and the *local* IPC socket, which carries the
-/// CLI and every supervisor link, lives on the same budget. Without the
+/// CLI, lives on the same budget. Without the
 /// per-peer share, one misbehaving client reaches the global cap by itself and
 /// every other device is refused.
 ///
@@ -2185,28 +2185,19 @@ mod tests {
     /// rather than guessing.
     fn hosting_a_claude_run(daemon: &Arc<Daemon>, uid: &str) {
         let now = protocol::time::now_rfc3339();
-        daemon
-            .store
-            .upsert_session_at_generation(
-                &crate::store::SessionRow {
-                    session_uid: uid.to_string(),
-                    session_id: "cc-term".into(),
-                    tmux_session: "cc-term".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Live,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    agent: protocol::agent::AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                },
-                None,
-            )
-            .unwrap()
-            .assert_present();
+        let row = crate::store::SessionRow {
+            session_uid: uid.to_string(),
+            session_id: "cc-term".into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: protocol::event::Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+        };
+        assert_eq!(daemon.store.begin_run(&row, uid, None).unwrap(), None);
     }
 
     /// A daemon with a private store holding exactly one paired device.
@@ -2582,34 +2573,24 @@ mod tests {
         }
     }
 
-    /// A Codex run registered the way its coordinator registers it, on a daemon a
-    /// test drives; its link reaches no app-server, so a message to it waits.
+    /// A live Codex run begun as the engine begins one and taking mail, on a daemon
+    /// a test drives; no link is attached, so a message to it waits.
     async fn codex_run(daemon: &Arc<Daemon>, uid: &str, name: &str) {
-        daemon
-            .register_supervisor(protocol::ipc::RegisterSession {
-                session_id: name.into(),
-                session_uid: Some(uid.into()),
-                tmux_session: name.into(),
-                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
-                supervisor_pid: 4242,
-                claude_bin: None,
-                agent: protocol::agent::AgentKind::Codex,
-                agent_bin: None,
-                codex_thread_id: None,
-                codex_socket: Some(
-                    std::env::temp_dir()
-                        .join(format!("ccd-peer-{uid}-nothing-listens.sock"))
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                codex_generation: Some(1),
-                started_at: protocol::time::now_rfc3339(),
-                protocol_minor: protocol::PROTOCOL_MINOR,
-                exit_replay: false,
-            })
-            .await
-            .expect("a Codex registration is accepted");
+        let now = protocol::time::now_rfc3339();
+        let row = crate::store::SessionRow {
+            session_uid: uid.to_string(),
+            session_id: name.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: protocol::event::Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Codex,
+            codex_thread_id: None,
+        };
+        assert_eq!(daemon.store.begin_run(&row, uid, None).unwrap(), None);
+        daemon.mail_run_live(uid).await;
     }
 
     /// The next text frame, `peers` included, or `None` for silence or closure.
@@ -3783,8 +3764,8 @@ mod tests {
     fn the_accept_loop_stops_admitting_at_the_global_cap() {
         // The defect: `listener.accept()` spawned unconditionally, so anything
         // that could reach the tailnet port held file descriptors without a
-        // ceiling — and the *local* IPC socket, which carries the CLI and every
-        // supervisor link, lives on the same budget.
+        // ceiling — and the *local* IPC socket, which carries the CLI, lives on
+        // the same budget.
         let limiter = Arc::new(ConnectionLimiter::new(3, 3));
         let permits: Vec<_> = (0..3)
             .map(|i| limiter.admit(ip(i)).expect("under the cap"))
@@ -4022,8 +4003,6 @@ mod tests {
         let row = crate::store::SessionRow {
             session_uid: uid.clone(),
             session_id: "cc-backlog".into(),
-            tmux_session: String::new(),
-            tmux_socket: String::new(),
             cwd: "/tmp".into(),
             claude_session_id: None,
             transcript_path: None,
@@ -4032,7 +4011,6 @@ mod tests {
             updated_at: now.clone(),
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
-            codex_socket: None,
         };
         assert_eq!(daemon.store.begin_run(&row, &uid, None).unwrap(), None);
         let pendings: Vec<PendingEvent> = (0..events)
@@ -5026,8 +5004,6 @@ mod tests {
             let row = crate::store::SessionRow {
                 session_uid: uid.clone(),
                 session_id: "cc-1".into(),
-                tmux_session: String::new(),
-                tmux_socket: String::new(),
                 cwd: cwd.display().to_string(),
                 claude_session_id: None,
                 transcript_path: None,
@@ -5036,7 +5012,6 @@ mod tests {
                 updated_at: at.into(),
                 agent: protocol::agent::AgentKind::Claude,
                 codex_thread_id: None,
-                codex_socket: None,
             };
             assert_eq!(server.store.begin_run(&row, &uid, None).unwrap(), None);
         }
@@ -5191,27 +5166,19 @@ mod tests {
     /// The session a fixture's start outcome names, in `cwd`. Filed long ago, so the
     /// project list's order and dates are the fixture's own.
     fn register_stub_session(store: &crate::store::Store, cwd: String) {
-        let filed = store
-            .upsert_session_at_generation(
-                &crate::store::SessionRow {
-                    session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
-                    session_id: "cc-9".into(),
-                    tmux_session: "cc-9".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd,
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: "2026-01-01T00:00:00.000Z".into(),
-                    updated_at: "2026-01-01T00:00:00.000Z".into(),
-                    agent: protocol::agent::AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                },
-                None,
-            )
-            .unwrap();
-        assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        let row = crate::store::SessionRow {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            session_id: "cc-9".into(),
+            cwd,
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: protocol::event::Lifecycle::Exited,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+        };
+        assert_eq!(store.begin_run(&row, &row.session_uid, None).unwrap(), None);
     }
 
     /// **The start-session wire a minor-28 daemon sent, still in what this build
@@ -5724,28 +5691,25 @@ mod tests {
         };
         let (server, _device) = live_server(protocol::config::Config::default()).await;
         for cwd in [at(&app), at(&notes)] {
-            let filed = server
-                .store
-                .upsert_session_at_generation(
-                    &crate::store::SessionRow {
-                        session_uid: protocol::uid::new().unwrap(),
-                        session_id: "cc-1".into(),
-                        tmux_session: "cc-1".into(),
-                        tmux_socket: "codeconnect".into(),
-                        cwd,
-                        claude_session_id: None,
-                        transcript_path: None,
-                        lifecycle: protocol::event::Lifecycle::Exited,
-                        created_at: "2026-11-04T09:00:00.000Z".into(),
-                        updated_at: "2026-11-04T09:00:00.000Z".into(),
-                        agent: AgentKind::Claude,
-                        codex_thread_id: None,
-                        codex_socket: None,
-                    },
-                    None,
-                )
-                .unwrap();
-            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+            let row = crate::store::SessionRow {
+                session_uid: protocol::uid::new().unwrap(),
+                session_id: "cc-1".into(),
+                cwd,
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Exited,
+                created_at: "2026-11-04T09:00:00.000Z".into(),
+                updated_at: "2026-11-04T09:00:00.000Z".into(),
+                agent: AgentKind::Claude,
+                codex_thread_id: None,
+            };
+            assert_eq!(
+                server
+                    .store
+                    .begin_run(&row, &row.session_uid, None)
+                    .unwrap(),
+                None
+            );
         }
 
         register_stub_session(&server.store, at(&app));
@@ -5881,28 +5845,25 @@ mod tests {
             (&notes, "2026-11-03T18:30:00.000Z", AgentKind::Claude),
             (&gone, "2026-10-01T08:00:00.000Z", AgentKind::Claude),
         ] {
-            let filed = server
-                .store
-                .upsert_session_at_generation(
-                    &crate::store::SessionRow {
-                        session_uid: protocol::uid::new().unwrap(),
-                        session_id: "cc-1".into(),
-                        tmux_session: "cc-1".into(),
-                        tmux_socket: "codeconnect".into(),
-                        cwd: cwd.display().to_string(),
-                        claude_session_id: None,
-                        transcript_path: None,
-                        lifecycle: protocol::event::Lifecycle::Exited,
-                        created_at: at.into(),
-                        updated_at: at.into(),
-                        agent,
-                        codex_thread_id: None,
-                        codex_socket: None,
-                    },
-                    None,
-                )
-                .unwrap();
-            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+            let row = crate::store::SessionRow {
+                session_uid: protocol::uid::new().unwrap(),
+                session_id: "cc-1".into(),
+                cwd: cwd.display().to_string(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Exited,
+                created_at: at.into(),
+                updated_at: at.into(),
+                agent,
+                codex_thread_id: None,
+            };
+            assert_eq!(
+                server
+                    .store
+                    .begin_run(&row, &row.session_uid, None)
+                    .unwrap(),
+                None
+            );
         }
         server.daemon.agents.set(vec![
             AgentAvailability {
