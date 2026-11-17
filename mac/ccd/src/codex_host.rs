@@ -8449,10 +8449,58 @@ mod tests {
 
     // ------------------------------- an engine turn's end as a doorbell
 
-    /// How many doorbells `capture` holds once a dispatch grace, and some, has passed.
-    async fn rung_after_grace(capture: &crate::apns::CaptureSender) -> usize {
-        tokio::time::sleep(Duration::from_millis(700)).await;
+    /// How many doorbells `capture` holds once the grace `hold` keeps is ended and `n` have
+    /// rung, or 10 s have passed, and 300 ms more for any ring beyond them.
+    async fn rung(
+        capture: &crate::apns::CaptureSender,
+        hold: &crate::push_gate::GraceHold,
+        n: usize,
+    ) -> usize {
+        hold.end();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while capture.0.lock().unwrap().len() < n && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
         capture.0.lock().unwrap().len()
+    }
+
+    /// The stand-in tells the run on `thread` one agent message `id`, in its turn `turn`, and
+    /// the test waits until ccd has filed it: the link reads a run's frames in order, so every
+    /// frame told before it has been read, and every push it admitted has taken its grace.
+    async fn read_up_to_here(
+        daemon: &Daemon,
+        uid: &str,
+        ws: &mut Socket,
+        thread: &str,
+        turn: &str,
+        id: &str,
+    ) {
+        tell(
+            ws,
+            &json!({"method": "item/completed", "params": {"threadId": thread, "turnId": turn,
+                "item": {"type": "agentMessage", "id": id, "text": "read up to here",
+                    "phase": "final_answer", "memoryCitation": null}}}),
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let events = daemon
+                .db
+                .events_after(uid.to_string(), 0, 10_000)
+                .await
+                .unwrap();
+            if events.iter().any(|event| {
+                event
+                    .source_event_id
+                    .as_deref()
+                    .is_some_and(|filed| filed.ends_with(id))
+            }) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "ccd never filed {id}");
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     /// The stand-in tells the run on `thread` its turn `turn` started.
@@ -8478,21 +8526,25 @@ mod tests {
     /// A rig whose doorbells land in a capture, and an engine run on it holding one approval
     /// card the phone can answer, its own doorbell already rung: the decision open elsewhere
     /// a turn's end rings about. The run's uid and the stand-in's end of its link.
-    async fn a_codex_card_open() -> (Rig, Arc<crate::apns::CaptureSender>, String, Socket) {
+    async fn a_codex_card_open() -> (
+        Rig,
+        Arc<crate::apns::CaptureSender>,
+        crate::push_gate::GraceHold,
+        String,
+        Socket,
+    ) {
         let capture = Arc::new(crate::apns::CaptureSender::new());
         let rig = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let hold = rig.daemon.push_gate.hold_grace();
         let frames = frames_of(FILE_FRAMES);
         let (thread, turn, started, asked) = on_the_running_turn(&frames, 17, 19);
         let (uid, mut ws) = engine_run(&rig, "req-card", &thread, &turn).await;
         tell(&mut ws, &started).await;
         tell(&mut ws, &asked).await;
         assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
-        assert_eq!(
-            rung_after_grace(&capture).await,
-            1,
-            "the card's own doorbell"
-        );
-        (rig, capture, uid, ws)
+        read_up_to_here(&rig.daemon, &uid, &mut ws, &thread, &turn, "read-card").await;
+        assert_eq!(rung(&capture, &hold, 1).await, 1, "the card's own doorbell");
+        (rig, capture, hold, uid, ws)
     }
 
     /// **An engine run's turn end rings again about a decision still open, and about
@@ -8505,19 +8557,22 @@ mod tests {
     async fn an_engine_turns_end_rings_only_about_a_decision_open_elsewhere() {
         let capture = Arc::new(crate::apns::CaptureSender::new());
         let quiet = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let hold = quiet.daemon.push_gate.hold_grace();
         let (uid, mut ws) = engine_run(&quiet, "req-quiet", "thr-q", "turn-q1").await;
         turn_starts(&mut ws, "thr-q", "turn-q2").await;
         turn_ends(&mut ws, "thr-q", "turn-q2", "completed").await;
-        assert_eq!(rung_after_grace(&capture).await, 0, "with nothing open");
+        read_up_to_here(&quiet.daemon, &uid, &mut ws, "thr-q", "turn-q2", "read-q2").await;
+        assert_eq!(rung(&capture, &hold, 0).await, 0, "with nothing open");
         drop(ws);
         end_run(&quiet, &uid).await;
 
-        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (rig, capture, hold, asking, asking_ws) = a_codex_card_open().await;
         let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
         turn_starts(&mut ws, "thr-b", "turn-b2").await;
         turn_ends(&mut ws, "thr-b", "turn-b2", "completed").await;
+        read_up_to_here(&rig.daemon, &uid, &mut ws, "thr-b", "turn-b2", "read-b2").await;
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 2).await,
             2,
             "the card's, then the turn's end about it"
         );
@@ -8541,13 +8596,14 @@ mod tests {
     /// **Mutation:** take the push out of the link and nothing rings after the card's.
     #[tokio::test]
     async fn two_engine_turns_ending_inside_one_grace_ring_once() {
-        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (rig, capture, hold, asking, asking_ws) = a_codex_card_open().await;
         let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
         turn_starts(&mut ws, "thr-b", "turn-b2").await;
         turn_ends(&mut ws, "thr-b", "turn-b2", "completed").await;
         turn_starts(&mut ws, "thr-b", "turn-b3").await;
         turn_ends(&mut ws, "thr-b", "turn-b3", "completed").await;
-        assert_eq!(rung_after_grace(&capture).await, 2, "the card's, then one");
+        read_up_to_here(&rig.daemon, &uid, &mut ws, "thr-b", "turn-b3", "read-b3").await;
+        assert_eq!(rung(&capture, &hold, 2).await, 2, "the card's, then one");
         drop((ws, asking_ws));
         end_run(&rig, &uid).await;
         end_run(&rig, &asking).await;
@@ -8559,13 +8615,13 @@ mod tests {
     /// **Mutation:** take `note_turn_running` out of the link and the first turn's end rings.
     #[tokio::test]
     async fn an_engine_turn_starting_inside_the_grace_silences_the_last_ones_doorbell() {
-        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (rig, capture, hold, asking, asking_ws) = a_codex_card_open().await;
         let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
         turn_starts(&mut ws, "thr-b", "turn-b2").await;
         turn_ends(&mut ws, "thr-b", "turn-b2", "completed").await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
         turn_starts(&mut ws, "thr-b", "turn-b3").await;
-        assert_eq!(rung_after_grace(&capture).await, 1, "the card's alone");
+        read_up_to_here(&rig.daemon, &uid, &mut ws, "thr-b", "turn-b3", "read-b3").await;
+        assert_eq!(rung(&capture, &hold, 1).await, 1, "the card's alone");
         drop((ws, asking_ws));
         end_run(&rig, &uid).await;
         end_run(&rig, &asking).await;
@@ -8577,11 +8633,12 @@ mod tests {
     /// **Mutation:** ring any turn's end and the interrupted one rings.
     #[tokio::test]
     async fn an_interrupted_engine_turns_end_rings_nothing() {
-        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (rig, capture, hold, asking, asking_ws) = a_codex_card_open().await;
         let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
         turn_starts(&mut ws, "thr-b", "turn-b2").await;
         turn_ends(&mut ws, "thr-b", "turn-b2", "interrupted").await;
-        assert_eq!(rung_after_grace(&capture).await, 1, "the card's alone");
+        read_up_to_here(&rig.daemon, &uid, &mut ws, "thr-b", "turn-b2", "read-b2").await;
+        assert_eq!(rung(&capture, &hold, 1).await, 1, "the card's alone");
         drop((ws, asking_ws));
         end_run(&rig, &uid).await;
         end_run(&rig, &asking).await;
@@ -8594,13 +8651,14 @@ mod tests {
     /// **Mutation:** ring a resume's filed turn end too, and it rings.
     #[tokio::test]
     async fn a_turns_end_a_restarted_ccd_files_from_a_resume_rings_nothing() {
-        let (rig, _, uid, ws) = a_codex_card_open().await;
+        let (rig, _, _, uid, ws) = a_codex_card_open().await;
         let capture = Arc::new(crate::apns::CaptureSender::new());
         let restarted = daemon_sending(
             &rig.root,
             "/usr/bin/false",
             Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
         );
+        let hold = restarted.push_gate.hold_grace();
         let follow_up: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
         let mut finished = follow_up["answerMidTurn"]["result"]["thread"]["turns"][0].clone();
         assert_eq!(finished["status"], "completed");
@@ -8628,7 +8686,7 @@ mod tests {
             1,
             "the card stands"
         );
-        assert_eq!(rung_after_grace(&capture).await, 0, "the resume's end");
+        assert_eq!(rung(&capture, &hold, 0).await, 0, "the resume's end");
         drop(ws);
         end_run(&rig, &uid).await;
     }

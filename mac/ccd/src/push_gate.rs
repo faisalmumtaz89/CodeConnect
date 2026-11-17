@@ -25,6 +25,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Duration;
+
+/// How long a push waits before it is dispatched, so a state the run leaves at once is never
+/// rung: a turn that ends and another that starts inside it, or a card answered inside it.
+pub const GRACE: Duration = Duration::from_millis(400);
 
 /// What a scheduled push captures at gating time and re-checks at dispatch,
 /// so the grace window cannot deliver a fact the world has moved past.
@@ -52,6 +57,21 @@ pub struct PushGate {
     /// after its grace compares its ticket against these — see
     /// `exclusions_if_valid`.
     epochs: Mutex<HashMap<String, (u64, u64)>>,
+    /// A test's hold on every push's grace ([`PushGate::hold_grace`]): each grace taken while
+    /// it is held ends when the test ends it, not after [`GRACE`].
+    #[cfg(test)]
+    held: Mutex<Option<tokio::sync::watch::Receiver<u64>>>,
+}
+
+/// A test's hold on the gate's grace: [`GraceHold::end`] ends every grace taken so far.
+#[cfg(test)]
+pub struct GraceHold(tokio::sync::watch::Sender<u64>);
+
+#[cfg(test)]
+impl GraceHold {
+    pub fn end(&self) {
+        self.0.send_modify(|ended| *ended += 1);
+    }
 }
 
 fn ticket_under_lock(epochs: &HashMap<String, (u64, u64)>, session_uid: &str) -> Ticket {
@@ -71,6 +91,34 @@ fn quiet_ticket(epochs: &mut HashMap<String, (u64, u64)>, session_uid: &str) -> 
 impl PushGate {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The grace a push admitted now waits out before it is dispatched: [`GRACE`] from when its
+    /// dispatch task starts, or, while a test holds the gate's grace, until the test next ends
+    /// it. A test's hold is read at admission, so ending it cannot race the task's start.
+    pub fn grace(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        #[cfg(test)]
+        let held = self.held.lock().unwrap().clone().map(|mut ended| {
+            let at = *ended.borrow_and_update();
+            (ended, at)
+        });
+        async move {
+            #[cfg(test)]
+            if let Some((mut ended, at)) = held {
+                let _ = ended.wait_for(|now| *now > at).await;
+                return;
+            }
+            tokio::time::sleep(GRACE).await;
+        }
+    }
+
+    /// Hold every push's grace until the test ends it ([`GraceHold::end`]), so a test orders
+    /// what happens inside the grace itself rather than racing the clock.
+    #[cfg(test)]
+    pub fn hold_grace(&self) -> GraceHold {
+        let (end, ended) = tokio::sync::watch::channel(0);
+        *self.held.lock().unwrap() = Some(ended);
+        GraceHold(end)
     }
 
     /// A frame reached this device. Monotonic: a second connection replaying
