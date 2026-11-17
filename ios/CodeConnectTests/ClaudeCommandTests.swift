@@ -129,6 +129,26 @@ final class ClaudeCommandPolicyTests: XCTestCase {
         XCTAssertEqual(ClaudeCommandPolicy.firstToken("hello"), nil)
         XCTAssertEqual(ClaudeCommandPolicy.firstToken("/"), nil)
     }
+
+    /// **Decision 227: a run CodeConnect started sends every command; the dialog refusals guard only a
+    /// terminal composer.** The refusal applies exactly where `runSettings` defers — a terminal-attached
+    /// run or an unknown one (fail-safe, the parameter's default, which every test above exercises). A
+    /// hosted run (`.hostedLive`/`.hostedReadOnly`) passes /config, /usage and the rest straight through,
+    /// while its native commands stay native.
+    func testAHostedRunSendsEveryCommandWhereADeferredRunRefusesTheDialogOnes() {
+        let hosted = RunSettings.hostedReadOnly(model: nil)
+        for typed in ["/config autoCompact=false", "/usage", "/help", "/status", "/mcp"] {
+            XCTAssertEqual(
+                ClaudeCommandPolicy.action(for: typed, runSettings: hosted), .passThrough,
+                "\(typed) is sent on a hosted run")
+        }
+        XCTAssertEqual(
+            ClaudeCommandPolicy.action(for: "/model", runSettings: hosted), .nativeModel(prefillArgs: ""),
+            "a native command stays native on a hosted run")
+        guard case .blocked = ClaudeCommandPolicy.action(for: "/config", runSettings: .deferToOtherPath) else {
+            return XCTFail("a deferred run still refuses /config")
+        }
+    }
 }
 
 /// The palette's content rule: bare `/` is discovery (every available row

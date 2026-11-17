@@ -93,6 +93,24 @@ final class HostedRunRowsTests: XCTestCase {
         XCTAssertEqual(shape(TimelineBuilder.build(events)), ["you:Fix the build", "notice:Session started"])
     }
 
+    /// **Decision 227: a hosted command whose end carries no `local_command` draws no stray "Turn complete".**
+    /// A declined `/help` (seq 8, a plain person-row since ccd marks no command) draws claude's "Command output"
+    /// (seq 10), then a turn end with no `local_command` (seq 11). The output row already ends the turn on
+    /// screen, so no "Turn complete" follows — two rows, not three. `/cost` (16) and `/config` (21) carry
+    /// `local_command` and were already silent. From the daemon's `hosted-clear-wire.json`. Must-fail: today the
+    /// stray "Turn complete" shows.
+    func testADeclinedCommandsTurnEndDrawsNoTurnCompleteRow() async throws {
+        let session = await state(try events("hosted-clear-wire"))
+        // `drawn` is the display transform; the item stays in `timeline` for fleet status.
+        let helpRows = shape(TimelineBuilder.drawn(session.timeline).filter { (8...12).contains($0.seq) })
+        XCTAssertEqual(
+            helpRows, ["you:/help", "notice:Command output"],
+            "a declined /help draws its message and its Command output, no stray Turn complete")
+        XCTAssertFalse(
+            helpRows.contains("notice:Turn complete"),
+            "a turn end directly after a Command output row draws none")
+    }
+
     /// The fleet reads the run as it did with the row drawn: Running through the woken turn, done when it ends. The
     /// preview after the woken turn's start is the mail notice, where it was "Session started".
     func testAHostedRunsStatusAndPreviewThroughAWokenTurn() async throws {

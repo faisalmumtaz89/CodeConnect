@@ -265,6 +265,10 @@ public enum TimelineBuilder {
             switch items[index - 1].content {
             case .agentMessage: return nil
             case .notice(let before) where before.kind == .turnInterrupted: return nil
+            // A command's output row (`terminal-window`, its only user) already ends the turn on screen,
+            // so a hosted command whose end carries no `local_command` — a declined `/help`, whose words
+            // are the daemon's not claude's — draws no second "Turn complete" after it.
+            case .notice(let before) where before.symbol == "terminal-window": return nil
             default: return item
             }
         }
