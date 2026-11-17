@@ -8,10 +8,12 @@ test (`the_workspace_version_is_parseable` in
 `mac/codeconnect/src/update_check.rs`) fails CI if the workspace version
 ever stops being a plain `X.Y.Z`.
 
-The iPhone app is a separate track: it ships through the App Store, and
-nothing here touches it. Within a protocol major, the app
+The iPhone app ships through the App Store, on a track of its own
+([The iPhone app](#the-iphone-app)). Within a protocol major, the app
 tolerates an older daemon per surface — newer features hide or say what to
-update; a protocol-*major* mismatch is refused outright, on both sides.
+update; a protocol-*major* mismatch is refused outright, on both sides, so a
+release that changes `PROTOCOL_VERSION` goes live together with the iPhone
+app that speaks it.
 
 ## The contract
 
@@ -26,10 +28,11 @@ update; a protocol-*major* mismatch is refused outright, on both sides.
   of publication — and why a release must never be published by hand.
 * A published release is never deleted or retagged. Machines have already
   compared against it; rewriting it rewrites their history.
-* **Version numbers move with capability, not only with releases.** Any
-  commit that bumps `PROTOCOL_MINOR` bumps the workspace version in the same
-  commit, and every release's version is strictly above the last published
-  one. Between releases the binaries stay tellable-apart anyway: every build
+* **Every release's version is strictly above the last published one.**
+  Between releases `PROTOCOL_MINOR`, and `PROTOCOL_VERSION` with it, may move
+  while the workspace version stands still; the release commit (step 2)
+  raises the workspace version, so no two published releases share one.
+  Between releases the binaries stay tellable-apart anyway: every build
   embeds its git commit — `codeconnect --version` prints
   `codeconnect X.Y.Z (<12-hex commit>)`, `-dirty` when built from an edited
   tree, `(build unknown)` outside a checkout — so two builds that share a
@@ -56,8 +59,10 @@ Each block starts from the repository root.
      -only-testing:CodeConnectUITests CODE_SIGNING_ALLOWED=NO)
    ```
 
-   CI does not build the Mac app, so build it once here; the release builds it
-   again for Release and checks the `.dmg` (step 4):
+   CI builds the Mac app (`mac-app`: Debug, and again without the `DEBUG`
+   condition) and runs no tests of it, since it has none; build it here as
+   Debug, and the release builds it again for Release and checks the `.dmg`
+   (step 4):
 
    ```sh
    xcodebuild -project macos/CodeConnect.xcodeproj -scheme CodeConnect -configuration Debug \
@@ -209,7 +214,7 @@ Each block starts from the repository root.
    gh api 'repos/{owner}/{repo}/releases/latest' --jq .tag_name   # must print vX.Y.Z
    ```
 
-7. **Update this machine**, so your own launches stay quiet. Where
+7. **Update this machine.** Where
    CodeConnect.app installed CodeConnect, update the app (CodeConnect › Check
    for Updates…): it installs the new binaries when it next opens, and
    `codeconnect update` refuses there. Elsewhere:
@@ -217,10 +222,24 @@ Each block starts from the repository root.
    ```sh
    codeconnect update             # installs the release, restarts the daemon
    codeconnect --version          # prints X.Y.Z
-   codeconnect daemon status      # no STALE line, no upgrade note
+   codeconnect daemon status      # "daemon   pid … · version X.Y.Z · build …"
    ```
 
-   Silence from the update notice is the success state: installed equals
-   latest. A machine still on the old build learns of the release across
-   its next launches — a launch at least a day after its previous check
-   fetches in the background, and the launch after that shows the notice.
+   Nothing tells a machine installed from the command line that a release
+   exists: it moves when someone runs `codeconnect update` there. A Mac where
+   CodeConnect.app installed CodeConnect learns of it from the app's daily
+   update check (Sparkle, `SUEnableAutomaticChecks` in `macos/Info.plist`).
+
+## The iPhone app
+
+* **Xcode Cloud archives `main`** (its workflow lives in App Store Connect).
+  `ios/ci_scripts/ci_post_clone.sh` gives each archive the build number
+  `CI_BUILD_NUMBER` and leaves `MARKETING_VERSION` alone. Once an App Store
+  version is approved its train is closed, and every later archive's upload
+  is refused until `MARKETING_VERSION` — eight settings in
+  `ios/CodeConnect.xcodeproj/project.pbxproj` — is raised: raise it in the
+  first push to `main` after an approval.
+* **App Review pairs with the demo daemon** (`mac/demo-daemon`, a scripted
+  fleet deployed on Render), so it must speak the protocol the submitted app
+  speaks: after a change to `PROTOCOL_VERSION`, redeploy it from the commit the
+  app was archived from before submitting the app.
