@@ -8827,10 +8827,9 @@ mod tests {
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
             answered_on: None,
-            applied_via: AnswerPath::SendKeys,
+            applied_via: AnswerPath::HookReturn,
             resolved_at: protocol::time::now_rfc3339(),
             detail: None,
-            inferred: false,
             indeterminate: false,
         };
         store
@@ -9980,10 +9979,9 @@ mod tests {
             decision,
             resolved_by: ResolvedBy::Phone,
             answered_on: None,
-            applied_via: AnswerPath::SendKeys,
+            applied_via: AnswerPath::HookReturn,
             resolved_at: protocol::time::now_rfc3339(),
             detail: None,
-            inferred: false,
             indeterminate: false,
         }
     }

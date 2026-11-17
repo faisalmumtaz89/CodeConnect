@@ -1154,14 +1154,10 @@ pub enum AnswerPath {
     /// return to the SDK's `canUseTool` request. The value names the
     /// confirmation, not the carrier.
     HookReturn,
-    /// Keystrokes into the live prompt. Older daemons answered approvals this
-    /// way; from minor 22 it describes only an answer made at the Mac's own
-    /// keyboard, or one an older daemon typed.
-    SendKeys,
     /// The JSON-RPC response to the app-server's own `requestApproval`, written
     /// on the Codex link's socket.
     ///
-    /// Neither of the two above can describe it, and the difference is not
+    /// The one above cannot describe it, and the difference is not
     /// cosmetic: nothing is rendered and nothing is typed, so "first answer wins"
     /// is a property of the broker's arbiter rather than of a TTY, and the loser
     /// of that race is a fact this daemon is *told* rather than one it infers.
@@ -1234,9 +1230,7 @@ pub struct QuestionAnswer {
 /// Whether the phone can answer a Claude card: an `AskUserQuestion` card from
 /// minor 21, every Claude card from minor 22.
 ///
-/// Present on such a card and on its `question_hold` events, absent on a Codex
-/// card. The latest `question_hold` event for a request wins over the value the
-/// card was created with.
+/// Present on such a card, absent on a Codex card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionHold {
@@ -1244,13 +1238,6 @@ pub enum QuestionHold {
     /// it. For the main conversation the Mac shows the same question at the same
     /// time, and the first complete answer wins.
     Held,
-    /// The question is on the Mac and only the Mac can answer it: a background
-    /// agent's question while someone is at the Mac, or one released to the Mac
-    /// when they came back.
-    AtMac,
-    /// The phone's hold on it ended, as an earlier daemon recorded it (Claude's
-    /// hook timed out, or the daemon restarted). The question may still be open at the Mac.
-    Ended,
 }
 
 impl QuestionHold {
@@ -1258,8 +1245,6 @@ impl QuestionHold {
     pub fn as_str(self) -> &'static str {
         match self {
             QuestionHold::Held => "held",
-            QuestionHold::AtMac => "at_mac",
-            QuestionHold::Ended => "ended",
         }
     }
 }
@@ -1315,21 +1300,13 @@ pub struct AnswerOutcome {
     pub resolved_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// True when `decision` was an earlier daemon's *inference* rather than an
-    /// observed answer, where all it knew is that the prompt was gone. Recording a
-    /// guess without labelling it as one would make
-    /// the ledger lie, and the ledger is the thing a later duplicate tap is
-    /// answered from.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub inferred: bool,
     /// True when the daemon knows *what* was decided but not whether it landed:
     /// it was killed between claiming the answer and recording its outcome, or
     /// (from minor 22, on an earlier daemon) it is a phone answer to a Claude
     /// approval, sent to the call's own hook, which Claude may not use because it
     /// takes the first answer (detail "Sent to Claude from a phone").
     ///
-    /// Distinct from `inferred`, which is uncertainty about the decision. This
-    /// is uncertainty about the *actuation*, and it is the reason such a request
+    /// It is uncertainty about the *actuation*, and it is the reason such a request
     /// is never retried: an answer sent twice cannot be taken back.
     #[serde(default, skip_serializing_if = "is_false")]
     pub indeterminate: bool,
@@ -2211,7 +2188,7 @@ mod tests {
         // an offer.
         let direct = r#"{"type":"hello_ack","protocol_version":1,"protocol_minor":13,
             "server_time":"t","capabilities":{"can_approve_reliably":true,
-            "fail_mode":"fail_open","answer_path":"send_keys","hold_secs":0,
+            "fail_mode":"fail_open","answer_path":"hook_return","hold_secs":0,
             "send_text":true,"capture":true,"push":true,"test_push":true,"tls":false}}"#;
         match serde_json::from_str::<ServerMessage>(direct).unwrap() {
             ServerMessage::HelloAck {
@@ -2337,7 +2314,7 @@ mod tests {
         let ack: ServerMessage = serde_json::from_str(
             r#"{"type":"hello_ack","protocol_version":1,"server_time":"t",
                 "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",
-                "answer_path":"send_keys","hold_secs":0,"send_text":true,
+                "answer_path":"hook_return","hold_secs":0,"send_text":true,
                 "capture":true,"push":false,"tls":false}}"#,
         )
         .unwrap();
@@ -2466,10 +2443,9 @@ mod tests {
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
             answered_on: None,
-            applied_via: AnswerPath::SendKeys,
+            applied_via: AnswerPath::HookReturn,
             resolved_at: "t".into(),
             detail: None,
-            inferred: false,
             indeterminate: true,
         };
         assert!(serde_json::to_string(&outcome)
@@ -2531,10 +2507,21 @@ mod tests {
         );
     }
 
+    /// **A hold is `held`**, spelled by hand, and `at_mac` and `ended` do not decode.
     #[test]
-    fn a_hold_is_spelled_as_it_serialises() {
-        for hold in [QuestionHold::Held, QuestionHold::AtMac, QuestionHold::Ended] {
-            assert_eq!(serde_json::json!(hold), hold.as_str());
+    fn a_hold_is_held() {
+        let encoded = serde_json::to_string(&QuestionHold::Held).unwrap();
+        assert_eq!(encoded, "\"held\"");
+        assert_eq!(encoded, format!("\"{}\"", QuestionHold::Held.as_str()));
+        assert_eq!(
+            serde_json::from_str::<QuestionHold>(&encoded).unwrap(),
+            QuestionHold::Held
+        );
+        for gone in ["\"at_mac\"", "\"ended\""] {
+            assert!(
+                serde_json::from_str::<QuestionHold>(gone).is_err(),
+                "{gone}"
+            );
         }
     }
 
@@ -2552,10 +2539,10 @@ mod tests {
             .unwrap()
             .contains("question_hold"));
         let mut question = card.clone();
-        question.question_hold = Some(QuestionHold::AtMac);
+        question.question_hold = Some(QuestionHold::Held);
         assert!(serde_json::to_string(&question)
             .unwrap()
-            .contains(r#""question_hold":"at_mac""#));
+            .contains(r#""question_hold":"held""#));
     }
 
     #[test]
@@ -2575,7 +2562,7 @@ mod tests {
         Capabilities {
             can_approve_reliably: true,
             fail_mode: "fail_open".into(),
-            answer_path: AnswerPath::SendKeys,
+            answer_path: AnswerPath::HookReturn,
             hold_secs: 0,
             send_text: true,
             delete_session: true,
@@ -2619,21 +2606,20 @@ mod tests {
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
             answered_on: None,
-            applied_via: AnswerPath::SendKeys,
+            applied_via: AnswerPath::HookReturn,
             resolved_at: "2026-08-18T00:00:00.000Z".into(),
             detail: None,
-            inferred: false,
             indeterminate: false,
         };
         assert_eq!(
             serde_json::to_string(&outcome).unwrap(),
-            r#"{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"send_keys","resolved_at":"2026-08-18T00:00:00.000Z"}"#
+            r#"{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"hook_return","resolved_at":"2026-08-18T00:00:00.000Z"}"#
         );
 
         let applied = AnswerResult::Applied { outcome };
         assert_eq!(
             serde_json::to_string(&applied).unwrap(),
-            r#"{"status":"applied","outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"send_keys","resolved_at":"2026-08-18T00:00:00.000Z"}}"#
+            r#"{"status":"applied","outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"hook_return","resolved_at":"2026-08-18T00:00:00.000Z"}}"#
         );
     }
 
@@ -2676,7 +2662,7 @@ mod tests {
         // empty, which a client reads as Claude-only.
         let older = serde_json::json!({
             "can_approve_reliably": true, "fail_mode": "fail_open",
-            "answer_path": "send_keys", "hold_secs": 0, "send_text": true,
+            "answer_path": "hook_return", "hold_secs": 0, "send_text": true,
             "capture": true, "push": false, "tls": true
         });
         let caps: Capabilities = serde_json::from_value(older).expect("decodes");
@@ -2935,7 +2921,7 @@ mod tests {
     fn private_transport_is_false_when_absent() {
         let old_ack = r#"{"type":"hello_ack","protocol_version":1,"server_time":"t",
             "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",
-            "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,
+            "answer_path":"hook_return","hold_secs":0,"send_text":true,"capture":true,
             "push":false,"tls":false}}"#;
         match serde_json::from_str::<ServerMessage>(old_ack).unwrap() {
             ServerMessage::HelloAck { capabilities, .. } => {
@@ -3522,26 +3508,12 @@ mod tests {
         assert_eq!(card, serde_json::from_str(&encoded).unwrap());
     }
 
+    /// **An outcome carries no `inferred`**: one recorded with it reads back without it.
     #[test]
-    fn an_inferred_outcome_is_labelled_and_an_observed_one_is_not() {
-        let mut outcome = AnswerOutcome {
-            request_id: "toolu_1".into(),
-            session_id: "cc-1".into(),
-            decision: AnswerDecision::Deny,
-            resolved_by: ResolvedBy::Timeout,
-            answered_on: None,
-            applied_via: AnswerPath::SendKeys,
-            resolved_at: "t".into(),
-            detail: Some("prompt left the pane".into()),
-            inferred: true,
-            indeterminate: false,
-        };
-        assert!(serde_json::to_string(&outcome)
-            .unwrap()
-            .contains("\"inferred\":true"));
-
-        outcome.inferred = false;
-        // The common case stays off the wire entirely.
+    fn an_outcome_reads_back_without_inferred() {
+        let recorded = r#"{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"deny"},
+            "resolved_by":"timeout","applied_via":"hook_return","resolved_at":"t","inferred":true}"#;
+        let outcome: AnswerOutcome = serde_json::from_str(recorded).unwrap();
         assert!(!serde_json::to_string(&outcome)
             .unwrap()
             .contains("inferred"));
@@ -3561,6 +3533,21 @@ mod tests {
             assert_eq!(serde_json::from_str::<ResolvedBy>(&encoded).unwrap(), by);
         }
         assert!(serde_json::from_str::<ResolvedBy>("\"local\"").is_err());
+    }
+
+    /// **An answer is applied as `hook_return` or `codex_response`**, spelled by hand,
+    /// and `send_keys` does not decode.
+    #[test]
+    fn an_answer_is_applied_as_a_hook_return_or_a_codex_response() {
+        for (path, word) in [
+            (AnswerPath::HookReturn, "hook_return"),
+            (AnswerPath::CodexResponse, "codex_response"),
+        ] {
+            let encoded = serde_json::to_string(&path).unwrap();
+            assert_eq!(encoded, format!("\"{word}\""));
+            assert_eq!(serde_json::from_str::<AnswerPath>(&encoded).unwrap(), path);
+        }
+        assert!(serde_json::from_str::<AnswerPath>("\"send_keys\"").is_err());
     }
 
     #[test]
@@ -3596,10 +3583,9 @@ mod tests {
             decision: AnswerDecision::Allow,
             resolved_by: ResolvedBy::Phone,
             answered_on: None,
-            applied_via: AnswerPath::SendKeys,
+            applied_via: AnswerPath::HookReturn,
             resolved_at: "2026-07-30T16:36:58.412Z".into(),
             detail: None,
-            inferred: false,
             indeterminate: false,
         };
         let result = AnswerResult::Duplicate {

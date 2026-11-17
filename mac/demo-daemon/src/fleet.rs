@@ -338,9 +338,7 @@ impl Fleet {
             applied_via: APPLIED_VIA,
             resolved_at: protocol::time::now_rfc3339(),
             detail: Some("answered from the phone".into()),
-            // Neither is true here and both mean something specific, so both stay
-            // false: the decision is the one that arrived, and it was applied.
-            inferred: false,
+            // Not true here: the answer that arrived was applied.
             indeterminate: false,
         };
         run.answers.insert(
@@ -1039,7 +1037,7 @@ mod tests {
         };
         assert_eq!(applied.resolved_by, ResolvedBy::Phone);
         assert_eq!(applied.applied_via, AnswerPath::HookReturn);
-        assert!(!applied.inferred && !applied.indeterminate);
+        assert!(!applied.indeterminate);
         // Named by the run's scripted name.
         assert_eq!(applied.session_id, "cc-1");
 
