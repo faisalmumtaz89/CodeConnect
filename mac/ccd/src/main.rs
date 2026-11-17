@@ -825,13 +825,16 @@ fn managed_by_codeconnect_job() -> bool {
 /// The environment is process-global and `cargo test` runs the crate's tests on a
 /// thread pool. Two helpers change it: `legacy_credentials::test_support::FakeHome`
 /// sets `HOME`, and [`LaunchdLabelEnv`] sets [`state::SERVICE_LABEL_VAR`]. A test
-/// that lists or starts through a live server reaches `phone_environment`, which
+/// that lists, starts, relaunches or wakes a run reaches `phone_environment`, which
 /// copies the whole environment, so a probe that ran while a writer held it ran in a
 /// fake (or already deleted) `HOME`, or took the service branch; a test that reads
 /// `HOME` twice saw two homes. A lock that only the writers take excludes nothing
 /// from those readers. So writers take this for writing, through those two helpers,
 /// and those readers take it for reading, through [`ProcessEnvRead`]: readers still
-/// run side by side, a writer waits for them, and they wait for it.
+/// run side by side, a writer waits for them, and they wait for it. In a test,
+/// `phone_environment` refuses to copy the environment on a thread that holds no
+/// [`ProcessEnvRead`], so a reader that forgets fails every time rather than when a
+/// writer happens to run beside it.
 ///
 /// It lives at the crate root, where every module reaches it the same way.
 /// `#[cfg(test)]` because production reads its environment and never writes it.
@@ -855,10 +858,23 @@ pub(crate) struct ProcessEnvRead {
 #[cfg(test)]
 impl ProcessEnvRead {
     pub(crate) fn take() -> Self {
-        Self {
-            _lock: PROCESS_ENV.read().unwrap_or_else(|held| held.into_inner()),
-        }
+        let lock = PROCESS_ENV.read().unwrap_or_else(|held| held.into_inner());
+        READING_ENV.with(|held| held.set(held.get() + 1));
+        Self { _lock: lock }
     }
+}
+
+#[cfg(test)]
+impl Drop for ProcessEnvRead {
+    fn drop(&mut self) {
+        READING_ENV.with(|held| held.set(held.get() - 1));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many [`ProcessEnvRead`]s this thread holds; `phone_environment` requires one.
+    pub(crate) static READING_ENV: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Exclusive use of [`state::SERVICE_LABEL_VAR`] for as long as this value is alive:

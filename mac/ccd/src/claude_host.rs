@@ -11068,6 +11068,7 @@ mod tests {
     /// `Duplicate`, and the new init says `resume`. Its next end is filed as a second end.
     #[tokio::test]
     async fn a_message_relaunches_a_run_whose_claude_ended_on_its_own() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let ended = ended_on_its_own(&rig).await;
         let uid = ended.uid.clone();
@@ -11150,6 +11151,7 @@ mod tests {
     /// host's pid still runs here; the next message relaunches it all the same.
     #[tokio::test]
     async fn a_host_recorded_before_this_boot_is_not_consulted() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
         let uid = played.uid.clone();
@@ -11196,6 +11198,7 @@ mod tests {
     /// sent, the other refused with nothing sent, and only the sent one's words are filed.
     #[tokio::test]
     async fn two_messages_at_once_relaunch_the_run_once() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let ended = ended_on_its_own(&rig).await;
         let uid = ended.uid.clone();
@@ -11243,6 +11246,7 @@ mod tests {
     /// reads the committed bytes; gate two re-derives the file and requires the same bytes.
     #[tokio::test]
     async fn the_hosted_relaunch_fixture_is_what_this_build_emits() {
+        let _env = crate::ProcessEnvRead::take();
         let committed: serde_json::Value =
             serde_json::from_str(HOSTED_RELAUNCH).expect("the fixture must be JSON");
         let summary = |key: &str| -> protocol::event::SessionSummary {
@@ -11295,6 +11299,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "generator, not a gate"]
     async fn regenerate_the_hosted_relaunch_fixture() {
+        let _env = crate::ProcessEnvRead::take();
         let wire = serde_json::to_string_pretty(&hosted_relaunch().await).unwrap();
         std::fs::write(
             concat!(
@@ -11395,6 +11400,7 @@ mod tests {
     /// number means nothing now.
     #[tokio::test]
     async fn a_run_live_before_a_restart_is_relaunched_by_a_message() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
         let uid = played.uid.clone();
@@ -11441,6 +11447,7 @@ mod tests {
     /// is put back `exited`, nothing sent.
     #[tokio::test]
     async fn a_message_relaunches_no_other_ended_run() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let not_running = SendTextResult::Refused {
             reason: "This session isn't running, so nothing was sent.".into(),
@@ -11507,6 +11514,7 @@ mod tests {
     /// own `exited` is acknowledged so it ends; the next message relaunches again.
     #[tokio::test]
     async fn a_refused_relaunch_leaves_the_run_relaunchable() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let ended = ended_on_its_own(&rig).await;
         let uid = ended.uid.clone();
@@ -11566,6 +11574,7 @@ mod tests {
     /// relaunched exactly once.
     #[tokio::test]
     async fn a_second_message_meets_the_relaunch_starting() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let ended = ended_on_its_own(&rig).await;
         let uid = ended.uid.clone();

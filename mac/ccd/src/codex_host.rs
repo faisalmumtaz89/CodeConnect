@@ -6627,6 +6627,7 @@ mod tests {
     /// fails is never kept, and mail for it is refused.
     #[tokio::test]
     async fn an_engine_codex_run_takes_mail_once_live_and_a_failed_start_never_does() {
+        let _env = crate::ProcessEnvRead::take();
         let (live, failing) = (rig(), rig());
         let (uid, ws) = engine_run(&live, "req-mail", "thr-mail", "turn-1").await;
         // The link attaches after the run is kept.
@@ -6788,6 +6789,7 @@ mod tests {
     /// ends nothing, and `misses` stays 0.
     #[tokio::test]
     async fn an_engine_nudge_turn_described_by_a_resume_answer_ends_the_outstanding_wake_once() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
         let thread = &capture["answerAfter"]["result"]["thread"];
@@ -6841,6 +6843,7 @@ mod tests {
     /// three and the mail is never woken for again.
     #[tokio::test]
     async fn a_persons_message_to_an_engine_run_resumes_wakes_that_had_stopped() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let (uid, mut ws) = engine_run_woken(&rig, "req-person", "thr-person", "turn-1").await;
         for miss in 1..=3 {
@@ -6880,6 +6883,7 @@ mod tests {
     /// nothing of what it filed, the first wake stayed outstanding for ever.
     #[tokio::test]
     async fn an_engine_run_woken_once_is_woken_again_for_new_mail() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let (uid, mut ws) = engine_run_woken(&rig, "req-twice", LIFECYCLE_THREAD, "turn-1").await;
         for frame in lifecycle_turn(protocol::ipc::MAIL_NUDGE_ACT) {
@@ -7277,6 +7281,7 @@ mod tests {
     /// ends in turn, its end is filed beside the first, under its own id.
     #[tokio::test]
     async fn a_message_relaunches_an_engine_run_whose_app_server_ended() {
+        let _env = crate::ProcessEnvRead::take();
         use protocol::event::CodexLink;
         let rig = rig();
         let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
@@ -7488,6 +7493,7 @@ mod tests {
     /// nothing is claimed, and the run is `exited` and relaunchable again.
     #[tokio::test]
     async fn a_relaunch_that_fails_puts_the_run_back_with_nothing_claimed() {
+        let _env = crate::ProcessEnvRead::take();
         use protocol::event::CodexLink;
         let rig = rig();
         let (uid, ws) = engine_run(&rig, "req-fails", "thr-fails", "turn-1").await;
@@ -7626,6 +7632,7 @@ mod tests {
     /// process has that number; it is not consulted, and nothing of it is signalled.
     #[tokio::test]
     async fn a_run_recorded_in_an_earlier_boot_is_relaunched_whatever_holds_its_old_group_number() {
+        let _env = crate::ProcessEnvRead::take();
         use std::os::unix::process::CommandExt;
         let rig = rig();
         let (uid, ws) = engine_run(&rig, "req-boot", "thr-boot", "turn-1").await;
@@ -7826,6 +7833,7 @@ mod tests {
     /// and no end is filed.
     #[tokio::test]
     async fn a_stale_end_for_the_old_app_server_leaves_a_relaunched_run_live() {
+        let _env = crate::ProcessEnvRead::take();
         use protocol::event::CodexLink;
         let rig = rig();
         let (uid, ws) = engine_run(&rig, "req-r2", "thr-r2", "turn-1").await;
@@ -7870,6 +7878,7 @@ mod tests {
     /// the apps, and an answer to it reaches Codex.
     #[tokio::test]
     async fn a_relaunched_runs_first_approval_is_a_new_card_an_answer_reaches() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let frames = frames_of(LIVE_FRAMES);
         let thread = frames[1]["params"]["thread"]["id"].as_str().unwrap();
@@ -8162,6 +8171,7 @@ mod tests {
     /// with the preset Default, as its start was.
     #[tokio::test]
     async fn a_relaunched_codex_run_resumes_at_default() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
         tell(
