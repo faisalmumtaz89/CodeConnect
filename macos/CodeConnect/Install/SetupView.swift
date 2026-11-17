@@ -88,7 +88,7 @@ struct SetupView: View {
             }
             if case .missing = setup.commandLine, let installer = setup.installer {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("Set up lets new Terminal windows start agents through CodeConnect.")
+                    Text("Set up puts the codeconnect command on the PATH of new Terminal windows.")
                         .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
