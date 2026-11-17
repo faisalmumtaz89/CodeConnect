@@ -18,7 +18,7 @@ final class UnknownComputerTests: XCTestCase {
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"\(uid)","session_id":"cc-1","tmux_session":"cc-1",
+                {"session_uid":"\(uid)","session_id":"cc-1",
                  "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
                  "last_seq":1,"created_at":"2026-10-29T10:00:00Z",
                  "updated_at":"2026-10-29T10:00:00Z","blocked_on":[],

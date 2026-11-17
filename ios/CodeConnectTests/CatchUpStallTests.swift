@@ -56,7 +56,7 @@ final class CatchUpStallTests: XCTestCase {
     private func list(_ rows: [(uid: String, lastSeq: Int)]) -> ServerMessage {
         let body = rows.enumerated().map { index, row in
             """
-            {"session_uid":"\(row.uid)","session_id":"cc-\(index)","tmux_session":"cc-\(index)",\
+            {"session_uid":"\(row.uid)","session_id":"cc-\(index)",\
             "cwd":"/tmp/\(index)","lifecycle":"live","link":"attached","last_seq":\(row.lastSeq),\
             "created_at":"2026-10-16T10:00:00Z","updated_at":"2026-10-16T10:00:00Z","blocked_on":[]}
             """

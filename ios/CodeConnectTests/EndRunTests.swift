@@ -6,9 +6,8 @@ import XCTest
 /// **End run, against the daemon's own bytes**: which runs offer it, which can be removed,
 /// what a run being ended reads, and what the person is told.
 ///
-/// `minor-37-wire.json` carries the summaries ccd emits for a live run CodeConnect started,
-/// a live run in tmux and an ended run CodeConnect started; `minor-35-wire.json` a run that
-/// is stopping and each `stop_run` answer. Both are copied byte for byte from `fixtures/claude/`.
+/// `minor-37-wire.json` carries the summaries ccd emits for a live and an ended run CodeConnect
+/// started; `minor-35-wire.json` a run that is stopping and each `stop_run` answer. Both are copied byte for byte from `fixtures/claude/`.
 @MainActor
 final class EndRunTests: XCTestCase {
 
@@ -69,10 +68,7 @@ final class EndRunTests: XCTestCase {
 
     func testEndRunIsOfferedOnlyOnALiveRunCodeConnectStarted() throws {
         let (model, _) = try model()
-        XCTAssertTrue(try summary("session_hosted_live").startedByCodeConnect)
-        XCTAssertFalse(try summary("session_tmux_live").startedByCodeConnect)
         XCTAssertTrue(model.canEndRun(try summary("session_hosted_live")))
-        XCTAssertFalse(model.canEndRun(try summary("session_tmux_live")), "ccd did not start a run in tmux")
         XCTAssertFalse(model.canEndRun(try summary("session_hosted_ended")), "it has ended")
         XCTAssertFalse(model.canEndRun(try stopping()), "it is already being ended")
         let (older, _) = try self.model(endsRuns: false)
@@ -81,7 +77,6 @@ final class EndRunTests: XCTestCase {
 
     func testARunIsRemovableOnlyOnceItHasEnded() throws {
         XCTAssertFalse(try summary("session_hosted_live").isRemovable, "ccd refuses a live run it started")
-        XCTAssertFalse(try summary("session_tmux_live").isRemovable)
         XCTAssertFalse(try stopping().isRemovable)
         XCTAssertTrue(try summary("session_hosted_ended").isRemovable)
     }

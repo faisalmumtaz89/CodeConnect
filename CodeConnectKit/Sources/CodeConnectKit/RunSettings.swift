@@ -7,7 +7,7 @@ import Foundation
 /// no menus suppresses the picker rather than falling back to a static family list, which is what keeps
 /// a detached, ended or older-daemon run off a list it cannot act on.
 public enum RunSettings: Sendable, Hashable {
-    /// Not a hosted run these controls own: a terminal (tmux) run, Claude's or Codex's. This entry draws
+    /// Not a run these controls own: an agent they do not know. This entry draws
     /// nothing.
     case deferToOtherPath
     /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
@@ -24,8 +24,7 @@ public enum RunSettings: Sendable, Hashable {
     public static func of(
         summary: SessionSummary, inFlight: Bool = false, lastOutcome: SettingOutcome? = nil
     ) -> RunSettings {
-        guard summary.agent == .claude || summary.agent == .codex, summary.tmuxSession.isEmpty
-        else { return .deferToOtherPath }
+        guard summary.agent == .claude || summary.agent == .codex else { return .deferToOtherPath }
         guard let menus = summary.menus else { return .hostedReadOnly(model: summary.model?.value) }
 
         // The model the daemon states as chosen — never re-derived from the fact's text here, because

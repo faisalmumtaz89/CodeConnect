@@ -136,7 +136,7 @@ final class TaskNotificationTests: XCTestCase {
             from: Data(
                 #"""
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
-                 "tmux_session":"cc-1","cwd":"/scratch/work","lifecycle":"live",
+                 "cwd":"/scratch/work","lifecycle":"live",
                  "link":"attached","last_seq":3,"created_at":"2026-10-06T20:29:00Z",
                  "updated_at":"2026-10-06T20:30:00Z","blocked_on":[]}
                 """#.utf8))

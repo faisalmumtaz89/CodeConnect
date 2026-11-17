@@ -317,7 +317,7 @@ public enum CodexProse {
     /// phone already knew were `bound`, `offline` or `none`. Measured at the
     /// send stub. One rule, one reader.
     static func stopUnavailable(
-        agent: AgentKind, daemonHonoursStop: Bool, hosted: Bool, isLive: Bool,
+        agent: AgentKind, daemonHonoursStop: Bool, isLive: Bool,
         link: CodexLinkState, runLink: Link, runningTurn: String?
     ) -> String? {
         switch agent {
@@ -330,11 +330,10 @@ public enum CodexProse {
             guard runningTurn != nil else { return "Nothing is running to stop." }
             return link.blockedReason(for: .stop)
         case .claude:
-            // A Claude run is stopped only when CodeConnect started it (hosted —
-            // a terminal run's Stop is its own keyboard at the Mac), the run is
-            // live, a turn is actually running, and its own link to the host is
-            // attached. No Codex control-link check — a hosted run's interrupt does
-            // not travel the Codex link — but it does ride ccd's link to the host.
+            // A Claude run is stopped when it is live, a turn is actually running,
+            // and its own link to the host is attached. No Codex control-link
+            // check — its interrupt does not travel the Codex link — but it does
+            // ride ccd's link to the host.
             //
             // These reasons are plain, readable sentences rather than the daemon's
             // own uid-prefixed operator rows because of where they surface: the
@@ -347,12 +346,11 @@ public enum CodexProse {
             guard daemonHonoursStop else {
                 return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Claude turn. Update it."
             }
-            guard hosted else { return "Only a Claude run started from the app can be stopped here." }
             guard isLive else { return "This run has ended, so there is no turn to stop." }
             guard runningTurn != nil else { return "Nothing is running to stop." }
             // The interrupt rides ccd's own link to the host; when that link has dropped the daemon
             // buffers for re-attach and cannot deliver the Stop, so it is not offered. A detached run
-            // stays live with its turn still running, so "hosted + live + a turn" do not catch it — the
+            // stays live with its turn still running, so "live + a turn" do not catch it — the
             // link does (G-1).
             guard runLink == .attached else {
                 return "This run has lost its link to \(HostDevice.current.computer("the computer")), so the Stop cannot reach it."

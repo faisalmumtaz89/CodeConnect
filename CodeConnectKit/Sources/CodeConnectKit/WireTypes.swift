@@ -562,9 +562,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// `sessionID` when a tmux name has been reused, and only this tells them
     /// apart — see the "Session identity" section of `mac/README.md`.
     public let sessionUID: String
-    /// The tmux name. Display and `tmux attach` only.
+    /// The run's name. A run CodeConnect started is named by its uid.
     public let sessionID: String
-    public let tmuxSession: String
     public let cwd: String
     public let lifecycle: Lifecycle
     public let link: Link
@@ -642,7 +641,6 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
         case sessionID = "session_id"
-        case tmuxSession = "tmux_session"
         case cwd
         case lifecycle
         case link
@@ -670,7 +668,6 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessionUID = try c.decodeIfPresent(String.self, forKey: .sessionUID) ?? ""
         sessionID = try c.decode(String.self, forKey: .sessionID)
-        tmuxSession = try c.decode(String.self, forKey: .tmuxSession)
         cwd = try c.decode(String.self, forKey: .cwd)
         lifecycle = try c.decode(Lifecycle.self, forKey: .lifecycle)
         link = try c.decode(Link.self, forKey: .link)
@@ -716,13 +713,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// An adopted run: Claude Code reported it through its hooks, but nothing on
     /// the computer started or hosts it. ccd's own test is the session id's
     /// `claude:` prefix, which the hook mints for a session CodeConnect did not
-    /// launch; such a run has no tmux session either.
+    /// launch.
     var isAdopted: Bool { sessionID.hasPrefix("claude:") }
-
-    /// Started by CodeConnect itself, from an app: ccd's agent host runs it, and
-    /// ccd names it by its uid with no tmux session. A run in tmux, or an adopted
-    /// one, is neither.
-    public var startedByCodeConnect: Bool { tmuxSession.isEmpty && !isAdopted }
 
     /// Whether the phone may offer to remove this run: ccd's own rule.
     ///

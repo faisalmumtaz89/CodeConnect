@@ -134,7 +134,6 @@
             let session: [String: JSONValue] = [
                 "session_uid": first["session_uid"] ?? .null,
                 "session_id": first["session_id"] ?? .null,
-                "tmux_session": first["session_id"] ?? .null,
                 "cwd": .string("/Users/dev/release-planning"),
                 "project_label": .string("release-planning"),
                 "lifecycle": .string("live"), "link": .string("attached"),

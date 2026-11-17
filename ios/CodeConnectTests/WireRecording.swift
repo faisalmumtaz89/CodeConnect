@@ -61,7 +61,7 @@ enum WireRecording {
             from: Data(
                 #"""
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
-                 "tmux_session":"cc-1","cwd":"/scratch/work","lifecycle":"live",
+                 "cwd":"/scratch/work","lifecycle":"live",
                  "link":"attached","last_seq":1,"created_at":"2026-10-22T00:00:00Z",
                  "updated_at":"2026-10-22T00:00:00Z","blocked_on":[]}
                 """#.utf8))

@@ -225,7 +225,7 @@ final class CodexWireDecodeTests: XCTestCase {
             try decode(
                 SessionSummary.self,
                 """
-                {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
+                {"session_uid":"u-1","session_id":"cc-1","cwd":"/x",
                  "lifecycle":"live","link":"attached","last_seq":3,
                  "created_at":"t","updated_at":"t"\(agentClause)}
                 """)
@@ -249,7 +249,7 @@ final class CodexWireDecodeTests: XCTestCase {
         let summary = try decode(
             SessionSummary.self,
             """
-            {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
+            {"session_uid":"u-1","session_id":"cc-1","cwd":"/x",
              "lifecycle":"live","link":"attached","last_seq":3,
              "created_at":"t","updated_at":"t","agent":"gemini","codex_link":"subscribed"}
             """)
@@ -278,7 +278,7 @@ final class CodexWireDecodeTests: XCTestCase {
             try decode(
                 SessionSummary.self,
                 """
-                {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
+                {"session_uid":"u-1","session_id":"cc-1","cwd":"/x",
                  "lifecycle":"live","link":"attached","last_seq":3,
                  "created_at":"t","updated_at":"t"\(extra)}
                 """)

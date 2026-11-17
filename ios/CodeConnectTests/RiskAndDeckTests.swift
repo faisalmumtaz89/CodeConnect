@@ -354,7 +354,7 @@ final class RiskAndDeckTests: XCTestCase {
             from: Data(
                 """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
-                 "tmux_session":"cc-1","cwd":"/tmp/x","lifecycle":"live",
+                 "cwd":"/tmp/x","lifecycle":"live",
                  "link":"attached","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
                  "updated_at":"2026-08-02T10:00:00Z","blocked_on":[]}
                 """.utf8))
@@ -726,7 +726,7 @@ final class FleetCountTests: XCTestCase {
     private func summary(_ id: String, blockedOn: [String], folder: String? = nil) -> SessionSummary {
         let ids = blockedOn.map { "\"\($0)\"" }.joined(separator: ",")
         let json = """
-            {"session_uid":"uid-\(id)","session_id":"\(id)","tmux_session":"\(id)",\
+            {"session_uid":"uid-\(id)","session_id":"\(id)",\
             "cwd":"\(folder ?? "/Users/dev/\(id)")","lifecycle":"live","link":"attached","last_seq":10,\
             "created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z",\
             "blocked_on":[\(ids)]}

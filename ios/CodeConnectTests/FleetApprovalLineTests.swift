@@ -57,7 +57,7 @@ final class FleetApprovalLineTests: XCTestCase {
                     "sessions": .array([
                         .object([
                             "session_uid": .string(WireRecording.uid), "session_id": .string("cc-1"),
-                            "tmux_session": .string("cc-1"), "cwd": .string(cwd),
+                            "cwd": .string(cwd),
                             "project_label": .string("work"), "lifecycle": .string("live"),
                             "link": .string("attached"), "last_seq": .int(Int64(1 + cards)),
                             "created_at": .string("2026-10-08T00:00:00Z"),
@@ -259,7 +259,7 @@ final class FleetApprovalLineTests: XCTestCase {
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"\(uid)","session_id":"cc-1","tmux_session":"cc-1",
+                {"session_uid":"\(uid)","session_id":"cc-1",
                  "cwd":"/tmp/x","lifecycle":"live","link":"attached","last_seq":0,
                  "created_at":"2026-10-28T10:00:00Z","updated_at":"2026-10-28T10:00:00Z",
                  "blocked_on":[]}

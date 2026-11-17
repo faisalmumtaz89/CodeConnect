@@ -332,19 +332,19 @@ final class CodexProseTests: XCTestCase {
     func testWhyStopIsNotOffered() {
         XCTAssertNil(
             CodexProse.stopUnavailable(
-                agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
+                agent: .codex, daemonHonoursStop: true, isLive: true,
                 link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         XCTAssertTrue(
             CodexProse.stopUnavailable(
-                agent: .codex, daemonHonoursStop: false, hosted: true, isLive: true,
+                agent: .codex, daemonHonoursStop: false, isLive: true,
                 link: .subscribed, runLink: .attached, runningTurn: "t-1")!
                 .contains("too old"))
 
         // **The one honest hide**: no turn, nothing to name.
         XCTAssertEqual(
             CodexProse.stopUnavailable(
-                agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
+                agent: .codex, daemonHonoursStop: true, isLive: true,
                 link: .subscribed, runLink: .attached, runningTurn: nil),
             "Nothing is running to stop.")
 
@@ -353,7 +353,7 @@ final class CodexProseTests: XCTestCase {
         ] {
             XCTAssertNotNil(
                 CodexProse.stopUnavailable(
-                    agent: .codex, daemonHonoursStop: true, hosted: true, isLive: true,
+                    agent: .codex, daemonHonoursStop: true, isLive: true,
                     link: link, runLink: .attached, runningTurn: "t-1"),
                 "\(link) cannot be stopped, and the control says why")
         }
@@ -368,31 +368,25 @@ final class CodexProseTests: XCTestCase {
         // consulted, so a `.none` link (never relevant to a hosted run) still offers.
         XCTAssertNil(
             CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                agent: .claude, daemonHonoursStop: true, isLive: true,
                 link: .none, runLink: .attached, runningTurn: "t-1"))
 
         XCTAssertTrue(
             CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: false, hosted: true, isLive: true,
+                agent: .claude, daemonHonoursStop: false, isLive: true,
                 link: .subscribed, runLink: .attached, runningTurn: "t-1")!
                 .contains("too old"))
-
-        // Not hosted (a terminal run): not offered.
-        XCTAssertNotNil(
-            CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: true, hosted: false, isLive: true,
-                link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         // Not live (ended): not offered.
         XCTAssertNotNil(
             CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: false,
+                agent: .claude, daemonHonoursStop: true, isLive: false,
                 link: .subscribed, runLink: .attached, runningTurn: "t-1"))
 
         // The honest hide: no running turn.
         XCTAssertEqual(
             CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                agent: .claude, daemonHonoursStop: true, isLive: true,
                 link: .subscribed, runLink: .attached, runningTurn: nil),
             "Nothing is running to stop.")
 
@@ -400,7 +394,7 @@ final class CodexProseTests: XCTestCase {
         // ccd's link to the host has dropped and the interrupt cannot reach it.
         XCTAssertNotNil(
             CodexProse.stopUnavailable(
-                agent: .claude, daemonHonoursStop: true, hosted: true, isLive: true,
+                agent: .claude, daemonHonoursStop: true, isLive: true,
                 link: .none, runLink: .detached, runningTurn: "t-1"),
             "a detached hosted run cannot be stopped")
     }

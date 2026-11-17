@@ -1387,7 +1387,7 @@ public final class AppModel {
     /// Whether End run is offered on this run: a live run CodeConnect started,
     /// Claude's or Codex's, on a computer whose ccd ends runs (it ends no other).
     public func canEndRun(_ summary: SessionSummary) -> Bool {
-        daemonProfile.endsRuns && summary.lifecycle == .live && summary.startedByCodeConnect
+        daemonProfile.endsRuns && summary.lifecycle == .live
     }
 
     /// End a run CodeConnect started (`stop_run`): what to tell the person who
@@ -3066,7 +3066,6 @@ public final class AppModel {
         return CodexProse.stopUnavailable(
             agent: summary.agent,
             daemonHonoursStop: daemonProfile.honoursStop(for: summary.agent),
-            hosted: summary.tmuxSession.isEmpty,
             isLive: summary.lifecycle == .live,
             link: summary.codexLink,
             runLink: summary.link,
@@ -3080,7 +3079,6 @@ public final class AppModel {
         return CodexProse.stopUnavailable(
             agent: summary.agent,
             daemonHonoursStop: daemonProfile.honoursStop(for: summary.agent),
-            hosted: summary.tmuxSession.isEmpty,
             isLive: summary.lifecycle == .live,
             link: summary.codexLink,
             runLink: summary.link,

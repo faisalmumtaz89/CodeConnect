@@ -420,7 +420,7 @@ enum Fixtures {
             with: "\"machine_name\":\"build-server-eu-west-1\",\"machine_os\":\"linux\"")
         let session = { (id: String, name: String, seq: Int) in
             """
-            {"session_id":"\(id)","tmux_session":"\(id)","cwd":"/home/jordan/\(name)",\
+            {"session_id":"\(id)","cwd":"/home/jordan/\(name)",\
             "project_label":"\(name)","lifecycle":"live","link":"attached",\
             "last_seq":\(seq),"created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
             """
@@ -466,7 +466,7 @@ enum Fixtures {
         let agent = start.agent == .codex ? "\"agent\":\"codex\"," : ""
         let cwd = start.folder ?? Self.newWorktreeFolder(start)
         let summary = """
-            {"session_uid":"\(uid)","session_id":"\(id)","tmux_session":"\(id)",\(agent)\
+            {"session_uid":"\(uid)","session_id":"\(id)",\(agent)\
             "cwd":\(quoted(cwd)),"project_label":\(quoted(start.project.name)),\
             "lifecycle":"live","link":"attached","last_seq":\(start.prompt == nil ? 1 : 2),\
             "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
@@ -547,7 +547,7 @@ enum Fixtures {
                 (variant == .stacked || variant == .wideTool || variant == .mcpApproval) && index == 4
             let agent = codex ? "\"agent\":\"codex\"," : ""
             return """
-                {"session_id":"\(id)","tmux_session":"\(id)",\(agent)\
+                {"session_id":"\(id)",\(agent)\
                 "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"live","link":"attached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
@@ -561,7 +561,7 @@ enum Fixtures {
             let index = variant.sessionCount + offset + 1
             return """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
-                "session_id":"fx-\(index)","tmux_session":"fx-\(index)",\
+                "session_id":"fx-\(index)",\
                 "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"exited","link":"detached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
@@ -572,15 +572,14 @@ enum Fixtures {
         return "{\"type\":\"sessions\",\"sessions\":[\(all)]}"
     }
 
-    /// The one run the `hostedSettings` fixture carries: live, started by this app (empty
-    /// `tmux_session`), with minor-39's menus in their worst shapes — the longest model detail, all
-    /// five efforts, the three permission modes — and the facts that select "sonnet", "high" and
-    /// "plan". Decoded like every other frame, so the sheet draws it through `runSettings` as it would
-    /// a daemon's own summary.
+    /// The one run the `hostedSettings` fixture carries: live, started by this app, with minor-39's
+    /// menus in their worst shapes — the longest model detail, all five efforts, the three permission
+    /// modes — and the facts that select "sonnet", "high" and "plan". Decoded like every other frame,
+    /// so the sheet draws it through `runSettings` as it would a daemon's own summary.
     private static func hostedSettingsSessionsJSON(stamp: String) -> String {
         """
         {"type":"sessions","sessions":[\
-        {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"fx-1","tmux_session":"",\
+        {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"fx-1",\
         "agent":"claude","cwd":"/Users/dev/app","project_label":"app",\
         "lifecycle":"live","link":"attached","last_seq":5,\
         "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[],\
@@ -1203,18 +1202,17 @@ enum CodexFixtures {
         // The captured stream keeps the identity and the working directory the
         // daemon recorded; every hand-made state keeps `cx-1`.
         let key = fleetKey(for: state)
-        let tmux = capturedStream().compactMap(\.event).first?.sessionID ?? key
+        let sessionID = capturedStream().compactMap(\.event).first?.sessionID ?? key
         let cwd = state == .phoneTurnStream ? "/work" : "/work/p-abort-pending"
         let label = state == .phoneTurnStream ? "work" : "p-abort-pending"
         return """
             {"type":"sessions","sessions":[\
-            {"session_uid":"\(key)","session_id":"\(tmux)",\
-            "tmux_session":"\(tmux)","cwd":"\(cwd)",\
+            {"session_uid":"\(key)","session_id":"\(sessionID)","cwd":"\(cwd)",\
             "project_label":"\(label)","lifecycle":"live","link":"attached",\
             "last_seq":\(lastSeq),"created_at":"\(stamp)","updated_at":"\(stamp)",\
             "blocked_on":[\(blocked)],"agent":"codex",\
             "codex_thread_id":"\(threadID)"\(linkClause)},\
-            {"session_uid":"fx-9","session_id":"fx-9","tmux_session":"fx-9",\
+            {"session_uid":"fx-9","session_id":"fx-9",\
             "cwd":"/Users/dev/proj","project_label":"proj","lifecycle":"live",\
             "link":"attached","last_seq":0,"created_at":"\(stamp)",\
             "updated_at":"\(stamp)","blocked_on":[]}]}

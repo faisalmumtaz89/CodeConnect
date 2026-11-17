@@ -2,9 +2,8 @@ import XCTest
 
 @testable import CodeConnectKit
 
-/// **What the apps say when a run's link is down depends on what the link is.** A tmux run's link is its supervisor,
-/// and it can be answered at the computer's pane. A run ccd hosts has neither: its link is ccd's connection to its
-/// agent host. `minor-38-wire.json` carries a hosted run's summary as the daemon emits it, with that connection up
+/// **What the apps say when a run's link is down.** A run's link is ccd's connection to its agent host.
+/// `minor-38-wire.json` carries a hosted run's summary as the daemon emits it, with that connection up
 /// (`session_hosted_live`) and down, the host still running (`session_hosted_detached`).
 @MainActor
 final class HostedLinkSentenceTests: XCTestCase {
@@ -18,14 +17,6 @@ final class HostedLinkSentenceTests: XCTestCase {
         XCTAssertEqual(
             FleetStatusRule.capability(summary: try summary("session_hosted_live"), capabilities: capabilities),
             .control)
-    }
-
-    /// A derived input: the hosted summary with its tmux field set to a name ccd gives a run it starts in tmux.
-    func testATmuxRunWhoseLinkIsDownKeepsItsSupervisorSentence() throws {
-        XCTAssertEqual(
-            reason(try summary("session_hosted_detached", setting: ["tmux_session": "cc-1"])),
-            "No supervisor is attached to this session. "
-                + "It can only be answered at \(HostDevice.current.computer("the computer")).")
     }
 
     /// A run whose start failed never started, and ccd counts it as ended. Its link can still read attached until its

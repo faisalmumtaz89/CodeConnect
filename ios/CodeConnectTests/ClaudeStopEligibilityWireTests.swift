@@ -10,8 +10,7 @@ import XCTest
 /// daemon's real summary does not — the daemon filled `codex_link` only for tmux-era runs, so every
 /// hand-built-summary test passed while a stock app could never offer Stop on an engine Codex run. So the
 /// Claude Stop gate is proved here against the daemon's captured frames: minor 37's `session_hosted_live`
-/// (empty `tmux_session`, lifecycle live, a real running turn), `session_tmux_live` (a hook run) and
-/// `session_hosted_ended`, and minor 38's `session_hosted_detached` (live and mid-turn, but its link to the
+/// (lifecycle live, a real running turn) and `session_hosted_ended`, and minor 38's `session_hosted_detached` (live and mid-turn, but its link to the
 /// host dropped), plus the hello capabilities it advertised.
 @MainActor
 final class ClaudeStopEligibilityWireTests: XCTestCase {
@@ -77,14 +76,6 @@ final class ClaudeStopEligibilityWireTests: XCTestCase {
         XCTAssertNil(
             model.stopUnavailable(for: key),
             "a hosted, live Claude run with a running turn and claude_interrupt is stoppable")
-    }
-
-    /// A tmux (hook-era) Claude run is not hosted, so Stop is not offered — exactly the shape a hand-built
-    /// summary could get wrong.
-    func testATmuxHookClaudeRunIsNotStoppable() async throws {
-        let (model, key) = try await self.model(summaryKey: "session_tmux_live", eventsKey: nil)
-        XCTAssertNotNil(
-            model.stopUnavailable(for: key), "a tmux (hook) run is not hosted, so Stop is not offered")
     }
 
     /// A hosted run that has ended has no turn to stop.

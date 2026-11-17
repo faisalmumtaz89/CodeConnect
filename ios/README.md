@@ -20,10 +20,8 @@ Two consequences worth stating:
 * **Two runs of one name are two sessions.** They get two rows, two timelines
   and two rails. The uid keys them; it never names them. A row is called by the
   **project** the daemon resolved (`RunLabel`), and where two runs share one
-  project each row adds the time it started — but only when that is both true
-  and useful: never for an adopted run, whose timestamp is a first sighting
-  rather than a start, and never when two runs started in the same minute,
-  because a discriminator that ties is worse than none.
+  project each row adds the time it started — but never when two runs started
+  in the same minute, because a discriminator that ties is worse than none.
 * **An answer names its run** (`answer.session_id`). The daemon refuses an
   unscoped answer when one `request_id` is open in two runs rather than guessing;
   sending the uid means that path is never reached. In-flight answer state is
@@ -587,7 +585,7 @@ id open.
 
 **A hosted Claude run can be stopped too, by its own rule.** `CodexProse.stopUnavailable`
 switches on the agent: a Codex run keeps the gate above, while a hosted Claude run — `claude_interrupt`
-advertised, an empty `tmux_session`, `lifecycle == live`, and a running turn — is offered Stop with
+advertised, `lifecycle == live`, and a running turn — is offered Stop with
 **no `codex_link` check**, because a hosted run has no Codex link. The stop outcome shows in the same
 slot and names Claude, and a committed send after a Stop retires that note so it cannot shadow the send's
 own outcome. When a Stop cancels a send, the daemon's `send_not_sent {reason: "stopped"}` marks the

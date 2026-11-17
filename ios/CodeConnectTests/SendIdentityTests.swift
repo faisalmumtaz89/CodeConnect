@@ -56,7 +56,7 @@ final class SendIdempotencyTests: XCTestCase {
     /// way a real session always is while its screen is open.
     private func list(_ keys: [String], in model: AppModel) {
         let rows = keys.map { key in
-            #"{"session_uid":"\#(key)","session_id":"cc-1","tmux_session":"cc-1","cwd":"/tmp","lifecycle":"live","link":"attached","last_seq":0,"created_at":"2026-08-04T20:00:00.000Z","updated_at":"2026-08-04T20:00:00.000Z"}"#
+            #"{"session_uid":"\#(key)","session_id":"cc-1","cwd":"/tmp","lifecycle":"live","link":"attached","last_seq":0,"created_at":"2026-08-04T20:00:00.000Z","updated_at":"2026-08-04T20:00:00.000Z"}"#
         }
         let frame = #"{"type":"sessions","sessions":[\#(rows.joined(separator: ","))]}"#
         model.connection.injectForTesting(
@@ -152,9 +152,9 @@ final class SendIdempotencyTests: XCTestCase {
     /// the wire at all.
     func testABlockedCommandNeverTouchesTheWireFromAnyCaller() async {
         let model = connectedModel { _, _ in .sent(matched: "foragents") }
-        let attempt = await model.send(text: "/help", to: "u-1")
+        let attempt = await model.send(text: "/clear everything", to: "u-1")
         guard case .refused(let reason) = attempt else { return XCTFail("\(attempt)") }
-        XCTAssertTrue(reason.contains("take over this composer"), reason)
+        XCTAssertTrue(reason.contains("without arguments"), reason)
         XCTAssertTrue(
             model.connection.sendTextIdentities.isEmpty,
             "a policy refusal is client-side; nothing may reach the wire")
