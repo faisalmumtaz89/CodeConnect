@@ -120,8 +120,8 @@ pub mod notice {
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     SessionStart,
-    /// The agent's *process* is gone: the supervisor exited or the tmux session
-    /// disappeared. Reserved for that, and only that — a finished turn is
+    /// The agent's *process* is gone: its agent host or app-server ended.
+    /// Reserved for that, and only that — a finished turn is
     /// [`EventKind::TurnComplete`]. Conflating them is what made the phone
     /// render "session ended" after every single reply.
     SessionEnd,
@@ -456,9 +456,10 @@ pub enum CodexLink {
     /// client had to learn and could not use.
     Offline,
     /// **No Codex control link belongs to this run at all.** Every Claude session,
-    /// every run whose supervisor has disconnected, and any summary from a daemon
-    /// predating this field. The default, so an older daemon's fleet decodes as
-    /// what it is: nothing here can be stopped over a Codex link.
+    /// every Codex run with no link attached that a message would not relaunch, and
+    /// any summary from a daemon predating this field. The default, so an older
+    /// daemon's fleet decodes as what it is: nothing here can be stopped over a
+    /// Codex link.
     #[default]
     None,
 }
@@ -527,10 +528,7 @@ pub struct SessionSummary {
     /// daemon predating this field — decodes as `None`, which is what such a
     /// daemon's fleet is to a client that cannot address any of it.
     ///
-    /// **It is not a lifecycle claim, and a client must read `lifecycle` too.** The
-    /// link is retired when the run's supervisor disconnects, not when the run is
-    /// marked [`Lifecycle::Exited`] — so a run the liveness sweep has ended while its
-    /// supervisor is still connected goes on reporting whatever its link is doing.
+    /// **It is not a lifecycle claim, and a client must read `lifecycle` too.**
     /// The two fields answer different questions: this one whether an ask could be
     /// delivered, `lifecycle` whether there is still a run to deliver it to.
     #[serde(default)]

@@ -113,9 +113,6 @@ db_ops! {
     /// The settings Codex last named for a Codex run's thread, as filed.
     fn newest_codex_settings(session_uid: String) -> Option<serde_json::Value>;
     fn get_session(session_uid: String) -> Option<SessionRow>;
-    /// The durable Codex generation high-water for one uid, or
-    /// `None` when nothing provable has been adopted under it.
-    fn codex_generation(session_uid: String) -> Option<u64>;
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
     fn projects() -> Vec<crate::store::ProjectRow>;
@@ -146,7 +143,6 @@ db_ops! {
     /// transport attempt — which is about one device id and must not pay for
     /// the whole fleet.
     fn push_target_for(device_id: String) -> Option<crate::store::PushRegistration>;
-    fn recover_text_mutations(at: String) -> usize;
     fn mail_context(session_uid: String, message_id: String) -> Option<String>;
     fn read_mail(offer: String) -> usize;
     fn release_mail(offer: String) -> ();
@@ -165,22 +161,6 @@ db_ops! {
 // value. Written out rather than bent into the macro, because a macro contorted
 // to fit every case is harder to read than the six functions it saves.
 impl Db {
-    /// Write a session row **and** the Codex generation its registration was
-    /// accepted at, in one statement.
-    ///
-    /// Hand-written rather than a `db_ops!` entry because the macro passes every
-    /// argument to the store by reference, and the generation is a `Copy` scalar
-    /// the store takes by value — bending the macro to express one call's
-    /// argument kind is the contortion the note above declines.
-    pub async fn upsert_session_at_generation(
-        &self,
-        row: SessionRow,
-        codex_generation: Option<u64>,
-    ) -> Result<crate::store::SessionUpsert> {
-        self.run(move |store| store.upsert_session_at_generation(&row, codex_generation))
-            .await
-    }
-
     pub async fn events_after(
         &self,
         session_uid: String,
@@ -198,22 +178,6 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<Event>> {
         self.run(move |store| store.events_before(&session_uid, before_seq, limit))
-            .await
-    }
-
-    /// Write down the thread the control link at `generation` has adopted. `false`
-    /// when nothing changed — already recorded, or a generation this link does not
-    /// speak for.
-    ///
-    /// Hand-written rather than declared in `db_ops!`, which passes every argument
-    /// to the store by reference: this one takes a `u64` by value.
-    pub async fn bind_codex_thread(
-        &self,
-        session_uid: String,
-        generation: u64,
-        thread_id: String,
-    ) -> Result<bool> {
-        self.run(move |store| store.bind_codex_thread(&session_uid, generation, &thread_id))
             .await
     }
 
@@ -627,8 +591,8 @@ impl Db {
         .await
     }
 
-    // Hand-written for the reason [`Db::upsert_session_at_generation`] is: these
-    // take scalars and a state by value.
+    // Hand-written because the store takes these scalars and a state by value, and
+    // `db_ops!` passes every argument by reference.
 
     pub async fn take_mail(
         &self,
@@ -774,26 +738,6 @@ impl Db {
                 &session_uid,
                 &request_id,
                 outcome,
-                &now,
-            )
-        })
-        .await
-    }
-
-    /// Make one answer claim terminal without being able to say what it did.
-    /// Reached only for a claim whose card is already gone; one that still has a
-    /// card is settled inside the retirement's own transaction.
-    pub async fn settle_answer_indeterminate(
-        &self,
-        session_uid: String,
-        request_id: String,
-        now: String,
-    ) -> Result<bool> {
-        self.run(move |store| {
-            store.settle_mutation_indeterminate(
-                crate::store::OPERATION_ANSWER,
-                &session_uid,
-                &request_id,
                 &now,
             )
         })
@@ -1068,16 +1012,6 @@ impl Db {
             .await
     }
 
-    /// See [`crate::store::Store::turn_terminal_filed`].
-    pub async fn turn_terminal_filed(
-        &self,
-        session_uid: String,
-        terminal_source_event_id: String,
-    ) -> Result<bool> {
-        self.run(move |store| store.turn_terminal_filed(&session_uid, &terminal_source_event_id))
-            .await
-    }
-
     /// See [`crate::store::Store::codex_turn_messages`].
     pub async fn codex_turn_messages(
         &self,
@@ -1085,15 +1019,6 @@ impl Db {
         turn_id: String,
     ) -> Result<(bool, usize)> {
         self.run(move |store| store.codex_turn_messages(&session_uid, &turn_id))
-            .await
-    }
-
-    /// See [`crate::store::Store::codex_source_event_ids`].
-    pub async fn codex_source_event_ids(
-        &self,
-        session_uid: String,
-    ) -> Result<std::collections::HashSet<String>> {
-        self.run(move |store| store.codex_source_event_ids(&session_uid))
             .await
     }
 
@@ -1141,8 +1066,6 @@ mod tests {
         let row = SessionRow {
             session_uid: key.uid.clone(),
             session_id: key.name.clone(),
-            tmux_session: String::new(),
-            tmux_socket: String::new(),
             cwd: "/tmp".into(),
             claude_session_id: None,
             transcript_path: None,
@@ -1151,7 +1074,6 @@ mod tests {
             updated_at: now,
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
-            codex_socket: None,
         };
         let store = db.blocking();
         assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);

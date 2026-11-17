@@ -9,9 +9,6 @@ use serde::{Deserialize, Serialize};
 fn default_ws_port() -> u16 {
     8787
 }
-fn default_stale_after_ms() -> u64 {
-    30_000
-}
 fn default_max_payload_bytes() -> usize {
     512 * 1024
 }
@@ -35,9 +32,6 @@ fn default_log_max_bytes() -> u64 {
 }
 fn default_log_rotate_secs() -> u64 {
     300
-}
-fn default_tmux_history_limit() -> u32 {
-    50_000
 }
 fn default_ws_max_connections() -> usize {
     64
@@ -136,8 +130,6 @@ pub struct Config {
     #[serde(default)]
     pub apns_topic: Option<String>,
 
-    #[serde(default = "default_stale_after_ms")]
-    pub stale_after_ms: u64,
     #[serde(default = "default_max_payload_bytes")]
     pub max_payload_bytes: usize,
 
@@ -234,19 +226,17 @@ pub struct Config {
     #[serde(default = "default_pairing_ttl_secs")]
     pub pairing_ttl_secs: u64,
 
-    /// How often the daemon proves each session's `lifecycle` against tmux.
+    /// How often the daemon checks each hosted run's recorded host against the
+    /// process it names.
     ///
-    /// This is the backstop for the case a supervisor cannot report: the daemon
-    /// was down when the agent died, the supervisor was killed, or the Mac
-    /// slept. Without it a row that nobody reported the end of stayed `live` for
-    /// ever, and the fleet confidently showed agents that had been gone for
-    /// days.
+    /// This is the backstop for an end nobody reported: the daemon was down
+    /// when the host died, or the Mac slept. Without it a run whose end nobody
+    /// reported stays `live` for ever, and the fleet confidently shows agents
+    /// that have been gone for days.
     ///
-    /// A sweep costs one short-lived `tmux has-session` per *distinct tmux
-    /// name*, one at a time, so a minute is unnoticeable even on a machine with
-    /// a long history. `0` turns it off, which leaves only the startup pass —
-    /// and turning it off entirely restores the defect, so it is spelled as a
-    /// deliberate choice rather than offered as a tuning knob.
+    /// `0` turns it off, which leaves only the startup pass — and turning it off
+    /// entirely restores the defect, so it is spelled as a deliberate choice
+    /// rather than offered as a tuning knob.
     #[serde(default = "default_liveness_sweep_secs")]
     pub liveness_sweep_secs: u64,
 
@@ -291,30 +281,12 @@ pub struct Config {
     #[serde(default = "default_log_rotate_secs")]
     pub log_rotate_secs: u64,
 
-    /// Show tmux's status bar inside the session. Off by default: `codeconnect codex`
-    /// is meant to be visually indistinguishable from plain `codex`, and a
-    /// status line is the one thing that gives the hosting away.
-    pub tmux_status: bool,
-
-    /// Lines of scrollback each hosted pane keeps.
-    ///
-    /// This is what the wheel scrolls: Claude Code renders inline under tmux,
-    /// so the conversation *is* the pane's history, and tmux's stock 2,000
-    /// lines silently amputated everything older on a long run. Fixed at pane
-    /// creation by tmux, so it reaches the server before the first pane —
-    /// raising it later cannot enlarge panes that already exist.
-    ///
-    /// 50,000 dense 120-column lines cost roughly 30 MiB per pane; the ceiling
-    /// exists so a typo in a config file cannot commit gigabytes.
-    #[serde(default = "default_tmux_history_limit")]
-    pub tmux_history_limit: u32,
-
     /// How many tailnet WebSocket connections may exist at once.
     ///
     /// The accept loop used to `spawn` unconditionally, so anything that could
     /// reach the tailnet port could hold the daemon's whole file-descriptor
     /// budget open — and the *local* IPC socket, which carries the CLI and
-    /// every supervisor link, lives on that same budget.
+    /// every run's mail server, lives on that same budget.
     ///
     /// The numbers come from that budget rather than from taste. ccd raises its
     /// soft `RLIMIT_NOFILE` to [`crate::fdlimit::TARGET`] as it starts, where
@@ -346,14 +318,10 @@ pub struct Config {
     /// How many local IPC connections may exist at once.
     ///
     /// The larger share of the descriptor budget, because this is the side that
-    /// must never starve: every `cc` invocation and every supervisor
-    /// is one of these. The socket is `0600`, so reaching it already means being
-    /// the owner of this account — this bounds a runaway, not an attacker.
-    ///
-    /// It is also the fleet size. Every live session holds one for its
-    /// supervisor, so `4096` bounds the sessions one computer admits, inside the
-    /// raised file limit, while a runaway still holds a small fraction of the
-    /// machine's open files.
+    /// must never starve: every `codeconnect` invocation and every request from a
+    /// run's mail server is one of these. The socket is `0600`, so reaching it
+    /// already means being the owner of this account — this bounds a runaway, not
+    /// an attacker.
     #[serde(default = "default_ipc_max_connections")]
     pub ipc_max_connections: usize,
     /// Frames one IPC connection may have queued for writing.
@@ -386,7 +354,6 @@ impl Default for Config {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
-            stale_after_ms: default_stale_after_ms(),
             max_payload_bytes: default_max_payload_bytes(),
             tls: true,
             tls_required: false,
@@ -404,8 +371,6 @@ impl Default for Config {
             tailscale_bin: None,
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
-            tmux_history_limit: default_tmux_history_limit(),
-            tmux_status: false,
             ws_max_connections: default_ws_max_connections(),
             ws_max_per_peer: default_ws_max_per_peer(),
             ipc_max_connections: default_ipc_max_connections(),
@@ -517,25 +482,12 @@ impl Config {
                 self.ws_bind = None;
             }
         }
-        // Below 1,000 the wheel hits a wall mid-conversation and the scroll fix
-        // this exists for is silently undone; above 200,000 a handful of panes
-        // can hold gigabytes of one agent's stdout.
-        if !(1_000..=200_000).contains(&self.tmux_history_limit) {
-            let clamped = self.tmux_history_limit.clamp(1_000, 200_000);
-            eprintln!(
-                "codeconnect: tmux_history_limit {} is outside 1000..=200000; using {clamped}",
-                self.tmux_history_limit
-            );
-            self.tmux_history_limit = clamped;
-        }
         self.max_payload_bytes = self.max_payload_bytes.clamp(4 * 1024, 8 * 1024 * 1024);
         // A pairing code is a weak secret whose safety comes from its lifetime;
         // an hour-long "temporary" code is a standing invitation.
         self.pairing_ttl_secs = self.pairing_ttl_secs.clamp(30, 3_600);
         // Zero is meaningful — it disables the sweep — so only a non-zero value
-        // is clamped. The floor is above the confirmation delay a single sweep
-        // spends inside itself, so a sweep can never be asked to start before
-        // the previous one has had time to finish deciding.
+        // is clamped.
         if self.liveness_sweep_secs != 0 {
             self.liveness_sweep_secs = self.liveness_sweep_secs.clamp(10, 86_400);
         }

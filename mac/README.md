@@ -1,13 +1,12 @@
 # CodeConnect — Mac side
 
-Two shipped binaries and two shared libraries in one cargo workspace.
+Two shipped binaries and a shared library in one cargo workspace.
 
 | Crate | What it is |
 |---|---|
 | `protocol` | Shared wire types: event envelope, unix-socket frames, WebSocket protocol, session identity, config. |
 | `ccd` | The daemon: SQLite event log, agent hosts, tailnet WebSocket server, push. |
 | `codeconnect` | The command line: the daemon's LaunchAgent lifecycle, pairing, sessions, the mail tools an agent calls (`mcp`) and updates. |
-| `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. |
 
 ## Run it
 
@@ -21,12 +20,9 @@ export PATH="$HOME/.codeconnect/bin:$PATH"
 codeconnect daemon install                 # start the daemon now and at login, restart it on crash
 ```
 
-A source build runs on the Mac's own tmux (`brew install tmux`); only a release
-installs CodeConnect's, `cc-tmux`, beside the binaries. Every CodeConnect process
-uses `$CODECONNECT_TMUX` when set, then a `cc-tmux` beside its own binary, then a
-system tmux. Both install the agent host, `cc-agent-host`, beside the binaries:
-ccd runs it for every Claude run started from the app. A source build builds it
-with `agent-host/build.sh`, which fetches the Bun it pins.
+A source build and a release both install the agent host, `cc-agent-host`, beside
+the binaries: ccd runs it for every Claude run started from the app. A source build
+builds it with `agent-host/build.sh`, which fetches the Bun it pins.
 
 ## Codex sessions
 
@@ -102,8 +98,7 @@ log and continued its `seq`. Two things were wrong with that:
 Both identities ride every `event` and every entry in `sessions`. Anything that
 names a session — `subscribe`, `answer`, `send_text`, `get_diff` —
 accepts either, so a client that only knows `cc-1` keeps working. A bare name
-resolves to the run with a supervisor attached, and failing that to the newest
-run under the name. `lifecycle` is deliberately not consulted: a session that
+resolves to the newest run under the name. `lifecycle` is deliberately not consulted: a session that
 ended while the daemon was down was never *observed* exiting, so it reads `Live`
 forever, and ranking on it would put that ghost above the run that is really
 there. A client on `protocol_minor >= 2` should send the uid and key its own
@@ -138,31 +133,6 @@ Open approval cards are persisted too. They used to be memory-only, so a restart
 answered "unknown or already-resolved request" to a tap on a card that was still
 on the screen. A recovered card is answered again once its run's agent host is
 attached again, or, on a Codex run, once Codex asks for it again.
-
-## Never claiming what it does not know
-
-Two places used to turn "we could not tell" into a confident answer. Each one
-is now three-valued.
-
-**A tmux error is not proof of death.** `has-session` exits non-zero for "there
-is no such session" *and* for every way it can fail to look — a moved binary, an
-unreachable socket, a process out of descriptors, a server mid-restart. Any
-non-zero status was read as absence, and the supervisor turned absence straight
-into a durable `SessionEnd`. Now tmux's own message is parsed: only a recognised
-"no such session" wording counts as gone, anything else is *unknown* and logged,
-and an exit is reported only after two consecutive confirmations (about four
-seconds at the 2-second poll). A reported exit is a fact that cannot be
-withdrawn, which is what makes the second look worth the wait.
-
-**A session that starts and ends while `ccd` is down still lands.** It was never
-registered, so the daemon had no row to attach the exit to, logged "exit
-reported for unknown session" and dropped the frame: the run vanished entirely —
-not in the fleet, no event log, nothing anywhere saying an agent had run. The
-supervisor now replays its registration on the same connection, immediately
-before the exit, so the daemon has something to record against. Idempotent by
-construction: a session that *was* registered normally is simply re-registered
-under the same uid, which is the path a supervisor reconnecting after a daemon
-restart already takes.
 
 ## Build identity
 
@@ -254,8 +224,10 @@ Three things behave differently on a Mac that has been running for a while.
 * **A rollback keeps what a newer build added to the credential tables.** The
   migration that clears the columns this project retired is drop-only: one
   `ALTER TABLE … DROP COLUMN` per retired column — `devices.ssh_key_installed`,
-  `devices.ssh_fingerprint` and `pairing_codes.allow_ssh` — named one at a time,
-  never every column this build does not recognise. Nothing is rebuilt, no table
+  `devices.ssh_fingerprint` and `pairing_codes.allow_ssh`, and on both session
+  tables the tmux-era engine's `tmux_session`, `tmux_socket`, `codex_socket` and
+  `codex_generation` — named one at a time, never every column this build does
+  not recognise. In the credential tables nothing is rebuilt, no table
   is dropped and no row is deleted, so a column a newer build added is never so
   much as looked at: it survives a run of an older one and is still there on the
   way back up. It survives the awkward case too, where the same table *also*
@@ -270,13 +242,16 @@ Three things behave differently on a Mac that has been running for a while.
   with a leftover `allow_ssh` in place, because that `INSERT` names the column
   explicitly with a literal `0` for as long as it is present. To be rid of the
   column, drop whatever depends on it — the logged error names it — and restart.
-  Nothing is written at all when nothing is retired, which is every boot after
-  the first. Two writes run on every open, outside those tables and outside that
-  guarantee. Adopted sessions — the `claude:*` rows an earlier cc-hook minted for runs this
-  daemon did not launch — have `tmux_session` and `tmux_socket` cleared, because
-  empty is the honest answer for a process this daemon cannot locate; a location
-  a newer build recorded there does not survive the trip down. And
-  `user_version` is stamped with this build's number.
+  A refused drop of a session table's column fails the open instead:
+  `tmux_session` and `tmux_socket` are `NOT NULL` with no default, so a table
+  still carrying one refuses every run this build begins. Nothing is written at
+  all when nothing is retired, which is every boot after the first. Outside those
+  tables and outside that guarantee, every open removes each run with no engine
+  host record — the runs the tmux-era engine made — with everything filed under
+  it, drops the tables an earlier build kept for its transcript tailer and its
+  deletions, and stamps `user_version` with this build's number. Rolling back
+  across the session tables' retirement is one-way: an earlier build's
+  statements name the columns this one drops.
 
   **The push tuple is the one exception to "an added column survives a
   rollback untouched," and deliberately so.** `(push_token, push_environment,
@@ -301,12 +276,13 @@ with `RunAtLoad`, `KeepAlive{SuccessfulExit: false}` and a five-second
 `ThrottleInterval`, then bootstraps it. Measured over three soak runs (15 kills):
 `kill -9` on the daemon is recovered in 0.4–4.7s — the spread is
 `ThrottleInterval`, which is launchd's floor between restarts and the price of
-not letting a crash-looping job spin a core. Every session survives it: they live
-in tmux, and their supervisors reconnect (3.1–4.5s observed).
+not letting a crash-looping job spin a core. Every session survives it: its agent
+host or Codex app-server keeps running, and the restarted daemon attaches to it
+again.
 
 Paths are resolved **at install time**, because launchd hands a process no shell
 `PATH` at all. The plist names the ccd binary absolutely and carries a `PATH`
-built from wherever `tmux`, `git`, `tailscale` and `claude` actually are on this
+built from wherever `git`, `tailscale` and `claude` actually are on this
 machine; the daemon separately resolves those from absolute candidate lists in
 code, because the two failures look identical from the outside.
 
@@ -316,7 +292,7 @@ wait for the socket; a managed one gets `launchctl bootout` and the same wait.
 Two daemons never share one `~/.codeconnect`: the new one refuses to start while
 the old one holds `ccd.lock`, and launchd starts it again a few seconds later. The
 wait lets the new one start at once instead. Nothing is lost either way — the
-sessions are in tmux and the log is in SQLite.
+sessions are in their agent hosts and the log is in SQLite.
 
 `--no-takeover` refuses instead of stopping anything; `codeconnect daemon restart` picks
 up new binaries without rewriting the plist. A daemon too old to answer
@@ -1187,8 +1163,8 @@ visit to one can still raise a dialog on the Mac.
 removed in tracked files against `HEAD` (`git diff --numstat`, run with the
 same switches as `get_diff`, so no external diff, textconv or fsmonitor program
 runs; a clean filter configured for a file, such as Git LFS's, does, as it does
-for `get_diff`; a binary file and a file git does not track add nothing). They are read when a turn ends, when the
-run registers and when the daemon starts, never on a `sessions` request, and
+for `get_diff`; a binary file and a file git does not track add nothing). They are read when a turn ends
+and when the daemon starts, never on a `sessions` request, and
 omitted outside a repository, before the first read, and on a detached head
 (the branch). It also answers `get_machine_stats` (the `machine_stats`
 capability, offered to every connection) with one `machine_stats {cpu?,
@@ -1233,14 +1209,10 @@ See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only verb that removes a run's record.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
-run, so it is not an identity a destructive request may be pointed at. For a
-hosted run — started from the app in an agent host the daemon spawned — the
+run, so it is not an identity a destructive request may be pointed at. The
 daemon refuses anything whose lifecycle has
 not ended (`exited`, or `failed` for an app start that never started), and
-anything it still holds a supervisor or an open approval for. An **adopted**
-run — CodeConnect never launched it, so it has neither tmux nor an agent host,
-and no probe can ever prove it ended — is deletable at any lifecycle. Only an earlier `cc-hook`
-recorded such runs.
+anything it still holds an open approval for.
 A refusal is a `delete_session_result`, not an error. It deletes the daemon's own record only:
 Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
 `claude --resume <id>` still works afterwards.
@@ -1296,8 +1268,7 @@ to probe credentials.
   must not be a way to execute anything.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
-  `SessionEnd` now means only what it says: the supervisor exited or the tmux
-  session is gone.
+  `SessionEnd` now means only what it says: the run ended.
 * **`risk_class`** rides on every `approval_request` card as
   `risk{class, matched_pattern}`. `high` for destructive shell patterns, `low`
   for pure read tools, `medium` for everything else — including anything
@@ -1350,9 +1321,7 @@ iPhone, Mac app ──wss:// tailnet (ws:// fallback)──► ccd ──► SQL
 
 `ccd` is never an agent's parent: each run's agent host or app-server starts in a
 session of its own and outlives the daemon, and a restarted `ccd` attaches each
-one still running again, so `kill -9 ccd` costs a reconnect and nothing else. A
-supervisor an earlier build left running can still register over the local
-socket.
+one still running again, so `kill -9 ccd` costs a reconnect and nothing else.
 
 One `ccd` per `~/.codeconnect`. Before it opens the database, the token or the
 socket, the daemon takes an exclusive `flock(2)` on `~/.codeconnect/ccd.lock`;
@@ -1373,7 +1342,6 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_port` | `8787` | WebSocket port. |
 | `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. The QR host is never one known to point somewhere else: bound to loopback the daemon advertises loopback and `codeconnect pair` refuses to print a code, and bound off the tailnet it drops a name this Mac's resolver puts at another address — see [Pairing](#pairing) and [TLS](#tls). |
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
-| `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
 | `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
@@ -1458,22 +1426,20 @@ derived from one shared resource rather than chosen individually.
 
 **File descriptors.** macOS gives a launchd job a soft `RLIMIT_NOFILE` of 256
 under an unlimited hard limit, and a soft limit is a fleet size: every live
-session holds a socket to ccd for its supervisor, and the tmux server one per
-pane. So ccd
+session holds a socket to ccd for its agent host or Codex app-server. So ccd
 raises its soft limit to 10,240 (macOS's `OPEN_MAX`, or the hard limit if lower)
-before it opens anything, and `codeconnect` does the same as it starts, so the
-tmux server a launch forks, typed or from the phone, and every pane under it,
-inherit it. ccd logs the limit it got. On Linux a systemd user service and an
+before it opens anything, and every process it starts inherits it. ccd logs the
+limit it got. On Linux a systemd user service and an
 ssh login both allow far more than 10,240.
 
 The daemon needs a few dozen descriptors for itself — five SQLite connections
 plus their WAL and SHM handles, the listeners, the log files. `ws_max_connections`
 (64, on each of the tailnet and loopback listeners) and `ipc_max_connections`
 (4,096) fit inside the raised limit with room to
-spare. The split is deliberately lopsided: the local socket carries every
-supervisor and every run's mail server, and a supervisor that cannot reach the
-daemon is an agent that stops being observable, so the *remote* side gets the
-smaller share. A test
+spare. The split is deliberately lopsided: the local socket carries the CLI and
+every run's mail server, and a mail server that cannot reach the daemon is an
+agent that cannot send or read its mail, so the *remote* side gets the smaller
+share. A test
 asserts the arithmetic, so raising one of these is a decision rather than an
 accident. Where the limit cannot be raised, a connection past it fails to be
 accepted and the accept loop backs off and tries again.
@@ -1486,7 +1452,7 @@ shares one peer address, so a small share would act as a global cap on all local
 tooling; and a client may legitimately open several sockets at once.
 
 **Queues.** Each IPC connection's writer is fed by a bounded channel. A client
-that stops reading — a client suspended with ctrl-Z, a supervisor whose process
+that stops reading — a client suspended with ctrl-Z, a mail server whose process
 is stopped — used to have the daemon buffer frames on its behalf without limit.
 Now the read loop simply stops taking new work from a peer that is not consuming
 its replies.
@@ -1650,10 +1616,6 @@ shared `/tmp` is not yours to change.
   release, or by hand outside CodeConnect, holds its old ceiling until it next
   starts. And whatever the limits, a Mac has `kern.tty.ptmx_max` (511)
   pseudo-terminals: a typed session takes two and a phone start one.
-* **The migration cannot un-splice history that was already spliced.** Facts
-  recorded before session uids existed are keyed by name, so a name that held
-  two runs becomes *one* migrated run — the log never recorded where one stopped
-  and the next began. The guarantee starts from the migration forwards.
 * **`answer` without a `session_id` is resolved by request id.** A client on
   protocol minor 1 cannot say which run it means; the daemon matches the live
   approvals, then the ledger's most recent entry. Two runs holding the same

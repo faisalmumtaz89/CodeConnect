@@ -35,31 +35,17 @@ const WAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// How much of `codex queue`'s stderr an error carries.
 const STDERR_TAIL: usize = 400;
 
-/// **Wake the Codex run `run_uid`**: queue the mail switch's line on the thread its link
-/// adopted, through its app-server (`as.sock`, beside the run's control socket), with
-/// the `codex` it was launched with; a run CodeConnect started on its engine is woken
-/// by [`wake_engine_run`]. `Ok` means Codex accepted the nudge into the thread's queue,
-/// not that a turn has run. An `Err` (no thread yet, no live supervisor, the CLI
-/// refusing) leaves the wake to the next try.
+/// **Wake the Codex run `run_uid`**, a run CodeConnect started on its engine
+/// ([`wake_engine_run`]). `Ok` means Codex accepted the nudge into the thread's queue,
+/// not that a turn has run. An `Err` (no thread yet, the CLI refusing) leaves the wake to
+/// the next try.
 pub(crate) async fn wake_codex(daemon: &Arc<Daemon>, run_uid: &str) -> Result<()> {
     let row = daemon
         .db
         .get_session(run_uid.to_string())
         .await?
         .context("no such run")?;
-    if daemon.db.hosted_link(run_uid.to_string()).await?.is_some() {
-        return wake_engine_run(daemon, run_uid, &row).await;
-    }
-    let thread = crate::codex_link::real_thread_id(row.codex_thread_id.as_deref())
-        .context("the run has no thread yet")?
-        .to_string();
-    let control = row.codex_socket.context("the run has no control socket")?;
-    let codex = daemon
-        .agent_bin(run_uid)
-        .await
-        .context("the run has no live supervisor")?;
-    let as_sock = Path::new(&control).with_file_name("as.sock");
-    wake(Path::new(&codex), &as_sock, &thread, crate::mail::nudge()).await
+    wake_engine_run(daemon, run_uid, &row).await
 }
 
 /// **Wake a run CodeConnect started on its engine**: the run's own app-server
@@ -105,10 +91,6 @@ fn through_login_shell(
     crate::start_session::login_shell_command(environment, &argv)
 }
 
-async fn wake(codex: &Path, as_sock: &Path, thread_id: &str, nudge: &str) -> Result<()> {
-    queue(codex, as_sock, thread_id, nudge, WAKE_DEADLINE).await
-}
-
 /// The arguments of `codex queue` that put `nudge` on `thread_id` through `as_sock`.
 fn queue_args(as_sock: &Path, thread_id: &str, nudge: &str) -> Vec<OsString> {
     [
@@ -121,18 +103,6 @@ fn queue_args(as_sock: &Path, thread_id: &str, nudge: &str) -> Vec<OsString> {
         OsString::from(nudge),
     ]
     .into()
-}
-
-async fn queue(
-    codex: &Path,
-    as_sock: &Path,
-    thread_id: &str,
-    nudge: &str,
-    deadline: Duration,
-) -> Result<()> {
-    let mut command = tokio::process::Command::new(codex);
-    command.args(queue_args(as_sock, thread_id, nudge));
-    run(command, codex, deadline).await
 }
 
 /// Run a `codex queue` `command` within `deadline`; its stderr's tail is the error.

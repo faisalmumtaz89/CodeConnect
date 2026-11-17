@@ -1,9 +1,9 @@
 //! The client for a Codex app-server: JSON-RPC over a WebSocket on a unix socket, one
 //! connection per run (P3 R1).
 //!
-//! [`dial`] is the one WebSocket dial ccd makes to a Codex socket; codex_link's control link
-//! calls it too. A [`Client`] holds one connection. Its calls carry ids counting from 1, and
-//! its reader task hands each response to the call with that id. A frame with a `method` is
+//! [`dial`] is the one WebSocket dial ccd makes to a Codex socket. A [`Client`] holds one
+//! connection. Its calls carry ids counting from 1, and its reader task hands each response
+//! to the call with that id. A frame with a `method` is
 //! the server's own, never a response, so an id the server puts on its request never takes a
 //! call's answer. Each such frame, a notification (no `id`) or a request (an `id`), is kept
 //! in order for the client's owner ([`Client::server_frame`]), who answers a request with

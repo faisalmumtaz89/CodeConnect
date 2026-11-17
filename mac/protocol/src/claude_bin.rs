@@ -48,8 +48,9 @@ pub fn search_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// [`crate::tmux::path_hits`] over a given `PATH` value and current directory: another
-/// process's, such as a login shell's.
+/// Every executable `name` along a given `PATH` value, in its order, a relative entry
+/// read from `cwd` and skipped without one: another process's lookup, such as a login
+/// shell's.
 pub fn hits_on(path: &std::ffi::OsStr, cwd: Option<&Path>, name: &str) -> Vec<PathBuf> {
     std::env::split_paths(path)
         .filter_map(|dir| match dir.is_absolute() {
