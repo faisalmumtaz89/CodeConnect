@@ -1695,37 +1695,6 @@ final class HistoryPagesTests: XCTestCase {
         XCTAssertEqual(model.deck.first?.questionHold, .unrecognised("ended"), "the Mac's, not the card's own held")
     }
 
-    /// Claude's permission notification names the card's prompt; with the card
-    /// pinned, the notice must not say none arrived.
-    func testAPermissionNotificationForAPinnedCardDoesNotSayNoCardArrived() async throws {
-        let notification = { (seq: UInt64) throws -> ServerMessage in
-            guard seq == 900 else { return try self.event(seq) }
-            let frame = try self.eventFrame(seq)
-            let event = try self.setting(
-                XCTUnwrap(frame.objectValue?["event"]),
-                [
-                    "kind": .string("notification"), "source": .string("hook"),
-                    "payload": .object([
-                        "hook_event_name": .string("Notification"),
-                        "notification_type": .string("permission_prompt"),
-                        "message": .string("Claude needs your permission to use Bash"),
-                        "prompt_id": .string("p1"),
-                    ]),
-                ])
-            return try self.message(self.setting(frame, ["event": event]))
-        }
-        let model = try await pinnedModel(held: notification)
-        func says(_ state: SessionState?) -> Bool {
-            state?.timeline.contains {
-                if case .notice(let notice) = $0.content { return notice.detail?.contains("No card arrived") == true }
-                return false
-            } == true
-        }
-        XCTAssertTrue(says(model.statesForTesting[uid]), "before the card is here, it says so")
-        try await landPin(model)
-        XCTAssertFalse(says(model.statesForTesting[uid]), "the card is pinned")
-    }
-
     func testAReturnKeepsAHeldOpenCardWithoutFetchingIt() async throws {
         let model = try pagingModel()
         model.connection.injectForTesting(

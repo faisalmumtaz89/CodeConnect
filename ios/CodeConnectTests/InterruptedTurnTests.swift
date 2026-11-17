@@ -89,22 +89,6 @@ final class InterruptedTurnTests: XCTestCase {
         XCTAssertEqual(result, .idle)
     }
 
-    /// Nothing after the interrupt revives it: a minute later Claude Code's idle
-    /// reminder arrives, and the session is still not working.
-    func testTheIdleReminderAfterAnInterruptIsNotWork() async throws {
-        var objects = try run("esc-mid-reply").filter { ($0["seq"] as? Int ?? .max) <= 18 }
-        objects.append([
-            "seq": 19, "session_uid": WireRecording.uid, "session_id": "cc-1",
-            "ts": "2026-10-20T11:51:00.000Z", "kind": "notification", "source": "hook",
-            "payload": [
-                "hook_event_name": "Notification", "notification_type": "idle_prompt",
-                "message": "Claude is waiting for your input",
-            ],
-        ])
-        let result = try await status(try WireRecording.decode(objects), reviewedSeq: 18)
-        XCTAssertEqual(result, .idle)
-    }
-
     // MARK: The next prompt is work again
 
     func testTheNextPromptIsWorkAgainAndEndsAsUsual() async throws {

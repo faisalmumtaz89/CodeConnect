@@ -70,14 +70,22 @@ final class ConversationLayoutUITests: XCTestCase {
         let turnComplete = NSPredicate(format: "label CONTAINS 'Turn complete'")
 
         let short = open("fx-6")
-        XCTAssertTrue(short.staticTexts["Claude is waiting for your input"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            short.descendants(matching: .any)
+                .matching(NSPredicate(format: "label BEGINSWITH %@", "Agent said: Hi!")).firstMatch
+                .waitForExistence(timeout: 10),
+            "the last row, Claude's reply")
         XCTAssertEqual(
             short.staticTexts.matching(turnComplete).count, 0,
             "a turn its reply ended still drew a Turn complete line")
         short.terminate()
 
         let long = open("fx-7")
-        XCTAssertTrue(long.staticTexts["Claude is waiting for your input"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            long.descendants(matching: .any)
+                .matching(NSPredicate(format: "label BEGINSWITH %@", "You said: and update the changelog")).firstMatch
+                .waitForExistence(timeout: 10),
+            "the last row, the follow-up a Stop cancelled")
         XCTAssertEqual(
             long.staticTexts.matching(turnComplete).count, 1,
             "the turn that ended on `npm run lint` must keep its line")

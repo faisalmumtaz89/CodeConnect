@@ -385,13 +385,8 @@ public enum FleetStatusRule {
             // it is the daemon reporting that it could not read a transcript line,
             // which is a fact about our observation, not about the agent. Counted
             // as activity it made a finished session look busy for ever.
-            //
-            // A routine idle reminder sits with them too: it follows a turn
-            // that has already ended, and counted as activity it turned every
-            // finished session back to Running a minute later.
-            case .link, .sessionStart, .other, .failure, .agentIdle: return false
-            case .turnComplete, .turnInterrupted, .sessionEnded, .agentWaiting, .agentFinished,
-                .taskReport:
+            case .link, .sessionStart, .other, .failure: return false
+            case .turnComplete, .turnInterrupted, .sessionEnded, .taskReport:
                 return true
             }
         }
@@ -400,7 +395,7 @@ public enum FleetStatusRule {
     private static func isTurnBoundary(_ item: TimelineItem) -> Bool {
         guard case .notice(let notice) = item.content else { return false }
         switch notice.kind {
-        case .turnComplete, .turnInterrupted, .sessionEnded, .agentFinished: return true
+        case .turnComplete, .turnInterrupted, .sessionEnded: return true
         default: return false
         }
     }

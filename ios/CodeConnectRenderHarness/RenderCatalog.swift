@@ -682,7 +682,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.require(
-                    driver.text(containing: "waiting for your input", in: app), "the idle reminder")
+                    driver.element(containing: "What can I help you with", in: app), "Claude's reply")
             }),
         RenderScenario(
             name: "session-conversation-tools",

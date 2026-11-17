@@ -3905,16 +3905,7 @@ public final class AppModel {
     /// something specific to the user rather than "try again".
     static func classify(rejection reason: String) -> AnswerAttempt {
         let lowered = reason.lowercased()
-        if lowered.contains("not on screen") {
-            return .answeredAtKeyboard(reason)
-        }
-        if lowered.contains("already-resolved") || lowered.contains("already being applied") {
-            return .answeredAtKeyboard(reason)
-        }
-        // A question the computer answered first: Claude took the keyboard's
-        // answer and the phone's was not used. A daemon before "the computer"
-        // says "the Mac".
-        if lowered.contains("answered at the mac") || lowered.contains("answered at the computer") {
+        if lowered.contains("already-resolved") {
             return .answeredAtKeyboard(reason)
         }
         if lowered.contains("stale payload_hash") || lowered.contains("out of date") {

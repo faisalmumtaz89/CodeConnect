@@ -631,10 +631,6 @@ function of the events:
 
 * an agent reply is drawn without the blank lines Claude puts around a text block
   (`Event.agentText`); a block that is only blank lines draws no row;
-* Claude Code's routine `idle_prompt` is a neutral row in its own words, retired by
-  the next message, and never counts as activity for the session's status; a real
-  request for input (`agent_needs_input`, a permission prompt with no card) stays a
-  warning;
 * a session's own start (its first start, in a history that begins at seq 1, with
   only link, error and notification events before it; the daemon numbers each run
   from 1 with no gaps), and the link attaching before it was ever down, draw no row;
@@ -740,8 +736,7 @@ and so does a current Mac for a session started from an app, whose agent host
 confirms it), *Unconfirmed*, and
 *Closed* when the question left the Mac (Escape, the session or turn ending)
 without anyone being seen to answer it. Neither age nor a newer prompt closes a
-question card. A refusal saying the question was "answered at the Mac"
-is the Mac winning the race, and reads as *Answered at the Mac*.
+question card.
 
 On the timeline a question is a `QuestionRow` (`Views/TimelineRows.swift`), not an
 approval row: "Question" (or "4 questions") and the first question's words in prose,

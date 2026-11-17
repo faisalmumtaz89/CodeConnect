@@ -472,14 +472,14 @@ final class CodexResolutionTests: XCTestCase {
     private static func hash(of text: String) -> String {
         var probe = ApprovalCard(
             requestID: "", payloadHash: "", toolName: "", toolInput: .null,
-            displayText: text, permissionSuggestions: nil, promptID: nil,
+            displayText: text, permissionSuggestions: nil,
             permissionMode: nil, risk: nil)
         // `verification` compares SHA-256(displayText) to `payloadHash`; binary
         // search is absurd, so the hash is read out of the type that computes it.
         probe = ApprovalCard(
             requestID: "", payloadHash: probe.sha256OfDisplayText, toolName: "",
             toolInput: .null, displayText: text, permissionSuggestions: nil,
-            promptID: nil, permissionMode: nil, risk: nil)
+            permissionMode: nil, risk: nil)
         precondition(probe.verification.hashMatchesDisplayText)
         return probe.payloadHash
     }

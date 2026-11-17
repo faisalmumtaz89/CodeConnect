@@ -351,11 +351,10 @@ enum Fixtures {
 
     // MARK: JSON builders
 
-    /// A current daemon's ack, capability for capability, as a paired device
-    /// sees it. The render harness and the debug fixture flows photograph
-    /// every screen, and a capability withheld here is a screen they cannot
-    /// reach — so this ack advertises the full set and stays level with
-    /// `protocol::PROTOCOL_MINOR` and `ws_server::capabilities`. `push` is
+    /// A minor-14 daemon's ack as a paired device sees it, with the
+    /// capabilities the fixtures turn on. The render harness and the debug
+    /// fixture flows photograph every screen, and a capability withheld here is
+    /// a screen they cannot reach. `push` is
     /// false because a fixture daemon holds no APNs key, and `test_push`
     /// follows it for that reason. The release sample fleet does not use
     /// this ack; see `sampleHelloAckJSON`. `machine_name` and `machine_os`
@@ -364,8 +363,8 @@ enum Fixtures {
     private static let helloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
-        "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-        "answer_path":"hook_return","hold_secs":0,"send_text":true,\
+        "capabilities":{"can_approve_reliably":true,\
+        "send_text":true,\
         "delete_session":true,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,\
@@ -387,8 +386,8 @@ enum Fixtures {
     private static let sampleHelloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
-        "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-        "answer_path":"hook_return","hold_secs":0,"send_text":true,\
+        "capabilities":{"can_approve_reliably":true,\
+        "send_text":true,\
         "delete_session":false,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,\
@@ -777,8 +776,8 @@ enum Fixtures {
     }
 
     /// `timeline`'s two conversations, in the shapes ccd logs for a Claude Code
-    /// run: the transcript's prompt and reply, the hooks' tool calls and Stop,
-    /// and the `idle_prompt` reminder.
+    /// run: the transcript's prompt and reply, and the hooks' tool calls and
+    /// Stop.
     private static func conversationsJSON(now: Date) -> [String] {
         func event(_ session: String, _ seq: Int, _ ago: Double, _ kind: String, _ source: String,
                    _ payload: String) -> String {
@@ -798,14 +797,10 @@ enum Fixtures {
                 + "\"is_error\":false,\"content\":\(quoted(output))}]}}"
         }
         let stop = "{\"hook_event_name\":\"Stop\"}"
-        let idle =
-            "{\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\","
-            + "\"message\":\"Claude is waiting for your input\"}"
         return [
             event("fx-6", 1, 70, "user_message", "transcript", said("hi")),
             event("fx-6", 2, 68, "agent_message", "transcript", reply("Hi! What can I help you with?")),
             event("fx-6", 3, 68, "turn_complete", "hook", stop),
-            event("fx-6", 4, 8, "notification", "hook", idle),
 
             event("fx-7", 1, 300, "user_message", "transcript",
                   said("Run the tests and fix whatever fails.")),
@@ -828,15 +823,14 @@ enum Fixtures {
                   call("toolu_tl_4", "Bash", "{\"command\":\"npm run lint\"}")),
             event("fx-7", 14, 112, "tool_result", "transcript", result("toolu_tl_4", "0 problems")),
             event("fx-7", 15, 112, "turn_complete", "hook", stop),
-            event("fx-7", 16, 50, "notification", "hook", idle),
 
             // A follow-up the person sent during the next turn and then Stopped: the daemon files
             // the person's row carrying its `request_id`, then `send_not_sent {reason:"stopped"}` for
             // the same id. The Kit joins them so the row reads "Not sent: stopped".
-            event("fx-7", 17, 30, "user_message", "hook",
+            event("fx-7", 16, 30, "user_message", "hook",
                   "{\"type\":\"user\",\"request_id\":\"fx-stop-1\","
                       + "\"message\":{\"role\":\"user\",\"content\":\(quoted("and update the changelog"))}}"),
-            event("fx-7", 18, 29, "notification", "daemon",
+            event("fx-7", 17, 29, "notification", "daemon",
                   "{\"notification_type\":\"send_not_sent\",\"request_id\":\"fx-stop-1\","
                       + "\"reason\":\"stopped\",\"message\":\"Not sent: stopped\"}"),
         ]
@@ -1165,8 +1159,8 @@ enum CodexFixtures {
         return """
             {"type":"hello_ack","protocol_version":1,"protocol_minor":\(state.protocolMinor),\
             "server_time":"2026-09-04T21:31:59.000Z",\
-            "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-            "answer_path":"codex_response","hold_secs":0,"send_text":true,\
+            "capabilities":{"can_approve_reliably":true,\
+            "send_text":true,\
             "delete_session":true,"test_push":false,"push":false,"tls":false,\
             "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
             "send_text_idempotent":true,\

@@ -35,9 +35,6 @@ public struct ApprovalItem: Sendable, Hashable, Identifiable {
     /// without claiming something. Both make the card non-actionable; only this
     /// one is allowed to describe a Codex ending.
     public var codexResolution: CodexResolution?
-    /// `capture-pane` text taken when Claude said the prompt was up — the only
-    /// source for the exact option list.
-    public var paneSnapshot: String?
     /// The daemon's own classification, or nil on a daemon too old to send one.
     public var risk: WireRisk?
     /// Whether the phone can answer this card now: the card's own
@@ -74,12 +71,6 @@ public enum NoticeKind: Sendable, Hashable {
     /// after an Esc, Claude writes no other end.
     case turnInterrupted
     case sessionEnded
-    case agentWaiting
-    /// Claude Code's routine `idle_prompt`: a minute after a finished turn, it
-    /// is still waiting for the next message. Not a request — the turn already
-    /// ended — so it says nothing about whether the agent is working.
-    case agentIdle
-    case agentFinished
     /// The run starting again after its first start: a restart or resume under
     /// the reader. Not work, so not activity.
     case sessionStart
@@ -210,8 +201,7 @@ public enum TimelineBuilder {
     /// command's own turn end (`/clear`, `/compact`, `/effort low` on a run
     /// CodeConnect started) draws none either, as a terminal run files none. One
     /// that ends on a tool call, a card or nothing at all has no other end on
-    /// screen until Claude Code's `idle_prompt` — a minute later — so its line
-    /// stays. Only the row goes: the item stays in the timeline, where fleet
+    /// screen, so its line stays. Only the row goes: the item stays in the timeline, where fleet
     /// status reads it.
     public static func drawn(_ items: [TimelineItem]) -> [TimelineItem] {
         items.enumerated().compactMap { index, item in
@@ -236,33 +226,24 @@ public enum TimelineBuilder {
         var resultsByToolUse: [String: ToolOutcome] = [:]
         var outcomesByRequest: [String: AnswerOutcome] = [:]
         var codexResolutionsByRequest: [String: CodexResolution] = [:]
-        var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
         // Where Claude's transcript puts each call. The hook files a call when
         // Claude runs it, which for a prompt queued during a turn can be before
         // the daemon has read the last turn's end; the transcript has the call
         // after that end, in the turn it belongs to.
         var transcriptToolUseSeqs: [String: UInt64] = [:]
-        var approvalPromptIDs: Set<String> = []
         /// Claude's questions, by tool-use id. A question is one thing to the
         /// reader: its card says everything its tool call does — the question,
         /// and how it ended — and the call's own duration is Claude's, not the
         /// minute the reader took to answer.
         var questionToolUseIDs: Set<String> = []
         var lastTurnEndSeq: UInt64 = 0
-        // Each user message by (seq, send request_id), so after the loop the newest
-        // one that was actually sent can be found: a send the daemon reports not-sent
-        // never reached the agent, so it must not retire "Claude is waiting for your
-        // input".
-        var userMessages: [(seq: UInt64, sendRequestID: String?)] = []
         // The sends a Stop cancelled, by request_id: their person-message rows read
         // "Not sent: stopped" and the `send_not_sent` notice itself draws no row.
         var stoppedSends: Set<String> = []
 
         for event in events {
             switch event.kind {
-            case .userMessage:
-                userMessages.append((event.seq, event.sendRequestID))
             case .toolCall:
                 if let id = event.toolUseID { hookToolCallIDs.insert(id) }
             case .agentMessage:
@@ -284,16 +265,10 @@ public enum TimelineBuilder {
                     codexResolutionsByRequest[requestID] = resolution
                 }
             case .approvalRequest:
-                if let promptID = event.approvalCard?.promptID { approvalPromptIDs.insert(promptID) }
                 if let card = event.approvalCard, card.toolName == QuestionCard.toolName {
                     questionToolUseIDs.insert(card.requestID)
                 }
             case .notification:
-                if let pane = event.paneSnapshot,
-                    let promptID = event.payload["prompt_id"]?.stringValue
-                {
-                    panesByPrompt[promptID] = pane
-                }
                 if let requestID = event.sendNotSentStoppedRequestID {
                     stoppedSends.insert(requestID)
                 }
@@ -305,15 +280,6 @@ public enum TimelineBuilder {
                 break
             }
         }
-
-        // The newest user message that was sent. A `send_not_sent {stopped}` send —
-        // the only not-sent the daemon reports — does not count, so an idle notice it
-        // precedes stays; an in-flight send not yet reported not-sent does count, so
-        // the idle hides, because the agent is about to work on it.
-        let lastUserMessageSeq =
-            userMessages
-            .filter { $0.sendRequestID.map { !stoppedSends.contains($0) } ?? true }
-            .map(\.seq).max() ?? 0
 
         var items: [TimelineItem] = []
         items.reserveCapacity(events.count)
@@ -561,7 +527,6 @@ public enum TimelineBuilder {
                                 sessionKey: event.sessionKey,
                                 outcome: outcomesByRequest[card.requestID],
                                 codexResolution: codexResolutionsByRequest[card.requestID],
-                                paneSnapshot: card.promptID.flatMap { panesByPrompt[$0] },
                                 risk: card.risk ?? event.declaredRisk,
                                 questionHold: card.questionHold))))
 
@@ -572,12 +537,9 @@ public enum TimelineBuilder {
                 // A send_not_sent notice is consumed into the person's row it cancelled
                 // (its `notSent`, set above), not drawn as its own row.
                 if event.sendNotSentStoppedRequestID != nil { break }
-                guard let notice = notice(for: event, approvalPromptIDs: approvalPromptIDs) else {
+                guard let notice = notice(for: event) else {
                     break
                 }
-                // Retired by the next message: once you have answered it, "Claude
-                // is waiting for your input" is no longer true of anything.
-                if notice.kind == .agentIdle, event.seq < lastUserMessageSeq { break }
                 items.append(event.item(.notice(notice)))
 
             case .sessionEnd:
@@ -644,8 +606,7 @@ public enum TimelineBuilder {
                                 severity: .failure))))
 
             case .resync, .usage, .reasoning, .other:
-                // resync is a banner, not a row; usage/reasoning are noise; a
-                // question hold is shown on the card it is about
+                // resync is a banner, not a row; usage/reasoning are noise
                 break
             }
 
@@ -765,49 +726,9 @@ public enum TimelineBuilder {
 
     // MARK: Notices
 
-    private static func notice(for event: Event, approvalPromptIDs: Set<String>) -> NoticeItem? {
+    private static func notice(for event: Event) -> NoticeItem? {
         let type = event.notificationType ?? "notification"
-        let promptID = event.payload["prompt_id"]?.stringValue
         switch type {
-        case "permission_prompt":
-            // The approval card carries the same fact with far more detail.
-            if let promptID, approvalPromptIDs.contains(promptID) { return nil }
-            return NoticeItem(
-                kind: .agentWaiting,
-                symbol: "bell-ringing",
-                title: "Claude asked for permission",
-                // Built as a sentence rather than glued to the message with
-                // punctuation: the daemon does not always send one, and a
-                // conjunction with nothing before it reads as a truncated string.
-                detail: [event.notificationMessage, "No card arrived, so it can only be answered at \(HostDevice.current.computer("the computer"))."]
-                    .compactMap { $0 }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " "),
-                severity: .warning)
-        case "idle_prompt":
-            // The turn has already ended and said so; this is a reminder, not
-            // a request. Neutral, and its own words once — the title used to
-            // say "Waiting for you" over a detail saying the same.
-            return NoticeItem(
-                kind: .agentIdle,
-                symbol: "chat-circle-dots",
-                title: event.notificationMessage ?? "Waiting for your next message",
-                detail: nil,
-                severity: .info)
-        case "agent_needs_input":
-            return NoticeItem(
-                kind: .agentWaiting,
-                symbol: "chat-circle-text",
-                title: "Waiting for you",
-                detail: event.notificationMessage,
-                severity: .warning)
-        case "agent_completed":
-            return NoticeItem(
-                kind: .agentFinished,
-                symbol: "seal-check",
-                title: "Agent finished",
-                detail: event.notificationMessage,
-                severity: .success)
         case EngineNotice.conversationCleared:
             // ccd's own notice that a hosted run's `/clear` reset the conversation: the row a terminal run's clear
             // draws, once. Drawn by its type, it said the words twice, as title and detail.

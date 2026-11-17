@@ -805,11 +805,11 @@ final class CodexSendPathTests: XCTestCase {
         let card = ApprovalCard(
             requestID: "rid", payloadHash: "h", toolName: "command",
             toolInput: try! JSONDecoder().decode(JSONValue.self, from: Data(input.utf8)),
-            displayText: display, permissionSuggestions: nil, promptID: nil,
+            displayText: display, permissionSuggestions: nil,
             permissionMode: nil, risk: nil)
         return ApprovalItem(
             card: card, requestedAt: Date(), sessionKey: sessionKey, outcome: nil,
-            codexResolution: nil, paneSnapshot: nil, risk: nil)
+            codexResolution: nil, risk: nil)
     }
 
     // MARK: F2 — a Stop drops the cancelled send's retry identity, so the resend is fresh

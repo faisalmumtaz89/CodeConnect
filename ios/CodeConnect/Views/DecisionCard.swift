@@ -890,21 +890,6 @@ struct DecisionCardView: View {
             } else if isCodexCard {
                 codexDetails
             }
-
-            if let pane = approval.paneSnapshot {
-                CCDisclosure("The computer's screen when Claude asked") {
-                    VStack(alignment: .leading, spacing: CC.space.xs) {
-                        // This block must never imply liveness: no pulsing dot,
-                        // no "live" wording, no auto-refresh.
-                        Text(
-                            "Not live. A snapshot taken at \(approval.requestedAt, format: .dateTime.hour().minute().second())."
-                        )
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.tertiary)
-                        CCMonoBlock(pane.trimmingCharacters(in: .whitespacesAndNewlines))
-                    }
-                }
-            }
         }
     }
 

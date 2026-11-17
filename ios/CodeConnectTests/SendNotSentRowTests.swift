@@ -69,43 +69,4 @@ final class SendNotSentRowTests: XCTestCase {
             items.contains { if case .notice = $0.content { return true } else { return false } },
             "the send_not_sent notice is consumed into the row, not drawn as its own")
     }
-
-    /// **A follow-up that was never sent does not retire "Claude is waiting for your input".**
-    /// fx-7 ends idle, then the person typed a follow-up a Stop dropped (`send_not_sent {stopped}`).
-    /// The idle is still true — the words never reached the agent — so the notice stays; a follow-up
-    /// that WAS sent retires it. The reader is `lastUserMessageSeq`, now the newest *sent* user message.
-    func testAnUnsentFollowUpDoesNotRetireTheIdle() throws {
-        func idle(_ seq: UInt64) throws -> Event {
-            try notificationEvent(seq: seq, payload: [
-                "hook_event_name": .string("Notification"),
-                "notification_type": .string("idle_prompt"),
-                "message": .string("Claude is waiting for your input"),
-            ])
-        }
-        func hasIdle(_ items: [TimelineItem]) -> Bool {
-            items.contains {
-                if case .notice(let n) = $0.content { return n.kind == .agentIdle }
-                return false
-            }
-        }
-        let original = try userMessage(seq: 1, requestID: "req-sent", text: "Run the tests.")
-
-        // A follow-up the person typed and a Stop dropped: never sent, so the idle stays.
-        let stopped = try userMessage(seq: 3, requestID: "req-stopped", text: "and update the changelog")
-        let sendNotSent = try notificationEvent(seq: 4, payload: [
-            "notification_type": .string("send_not_sent"),
-            "request_id": .string("req-stopped"),
-            "reason": .string("stopped"),
-            "message": .string("Not sent: stopped"),
-        ])
-        XCTAssertTrue(
-            hasIdle(TimelineBuilder.build([original, try idle(2), stopped, sendNotSent])),
-            "an unsent follow-up leaves the idle standing")
-
-        // The same follow-up, sent: it retires the idle, as before.
-        let sent = try userMessage(seq: 3, requestID: "req-sent-2", text: "and update the changelog")
-        XCTAssertFalse(
-            hasIdle(TimelineBuilder.build([original, try idle(2), sent])),
-            "a sent follow-up retires the idle")
-    }
 }

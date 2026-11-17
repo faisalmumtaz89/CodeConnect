@@ -30,7 +30,7 @@ final class CodexGateTests: XCTestCase {
         connection.simulateConnectedForTesting()
         connection.simulateCapabilitiesForTesting(
             Capabilities(
-                canApproveReliably: true, failMode: "fail_open", sendText: true,
+                canApproveReliably: true, sendText: true,
                 extra: [
                     "codex_interrupt": .bool(interrupt),
                     "codex_compose": .bool(compose),

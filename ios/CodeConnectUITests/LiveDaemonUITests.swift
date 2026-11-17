@@ -152,9 +152,7 @@ final class LiveDaemonUITests: XCTestCase {
     /// renders it as a finished turn rather than a finished session.
     ///
     /// A finished turn shows as its "Turn complete" line where nothing else ends
-    /// it, and as Claude's idle reminder a minute later where its reply did —
-    /// either one is a turn that finished, and neither may read as a session
-    /// that ended.
+    /// it: a turn that finished, which may not read as a session that ended.
     ///
     /// Skips unless something has actually run a turn — this reads the log, it
     /// does not drive the agent.
@@ -164,7 +162,7 @@ final class LiveDaemonUITests: XCTestCase {
 
         let turn = app.staticTexts.matching(
             NSPredicate(
-                format: "label CONTAINS 'Turn complete' OR label CONTAINS 'waiting for your input'")
+                format: "label CONTAINS 'Turn complete'")
         ).firstMatch
         let ended = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS 'Session ended'")
