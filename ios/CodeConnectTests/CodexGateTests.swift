@@ -665,6 +665,46 @@ final class CodexGateTests: XCTestCase {
     // order-dependent — a Claude summary injected after the card event reshaped the session's window
     // and lost the projection — so it is omitted rather than left flaky.
 
+    /// **A just-taken Stop's outcome outranks the "answer the card first" block.** On a Codex run with a
+    /// card waiting, the compose slot shows the block — but right after the reader taps Stop, the slot
+    /// must show the Stop's own result, not the standing block about a different thing. Red before the fix
+    /// (the block won unconditionally); the slot's precedence is `composeOutcomeOrBlock`.
+    func testAJustTakenStopOutranksTheCardBlockInTheComposeSlot() async {
+        let model = AppModel(
+            cache: EventCache(),
+            codexSpentLedger: CodexSpentLedger(
+                defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(extra: ["codex_interrupt": .bool(true), "codex_compose": .bool(true)]), minor: 19)
+        model.connection.injectForTesting(
+            .sessions([Self.summary(uid: "u", agent: "codex", link: "subscribed", pending: true)]))
+        // A running turn, so Stop has one to name.
+        model.connection.injectForTesting(
+            .event(try! JSONDecoder().decode(Event.self, from: Data(
+                #"{"seq":1,"session_uid":"u","session_id":"u","ts":"2026-09-04T21:31:59.000Z","kind":"tool_call","source":"codex","turn_id":"t1","payload":{}}"#.utf8))))
+        // The settled Stop lands when the interrupt is sent.
+        model.connection.sendStub = { [weak connection = model.connection] message in
+            if case .interrupt(let session, let requestID, _, _) = message {
+                connection?.injectForTesting(
+                    .interruptResult(sessionID: session, requestID: requestID, result: .aborted(turnID: "t1")))
+            }
+        }
+        // Before any action, the card block is in the slot.
+        XCTAssertEqual(
+            model.composeOutcomeOrBlock(for: "u", draft: "", lastSend: nil)?.text,
+            "Answer the card first. Your draft will stay here.", "the card block shows before any action")
+        // The reader taps Stop; its outcome settles.
+        _ = await model.stopCodexTurn(sessionKey: "u")
+        let note = model.composeOutcomeOrBlock(for: "u", draft: "", lastSend: nil)
+        XCTAssertNotEqual(
+            note?.text, "Answer the card first. Your draft will stay here.",
+            "the just-taken Stop outranks the card block")
+        XCTAssertEqual(
+            note?.text, model.outcomeNote(for: "u", lastSend: nil)?.text,
+            "the slot shows the Stop's just-taken outcome")
+    }
+
     // MARK: Helpers
 
     /// An `approval_request` event (daemon shape, as `CatchUpTests`), so the card is built into
