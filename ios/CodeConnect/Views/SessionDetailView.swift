@@ -1237,21 +1237,21 @@ struct SessionDetailView: View {
     @ViewBuilder
     private var sessionNotices: some View {
         let notice = SessionState.silentNotice(permissionMode: model.permissionMode(for: key))
-        let resumeID = summary?.lifecycle == .exited ? summary?.claudeSessionID : nil
-        if notice != nil || resumeID?.isEmpty == false || model.stopUnavailable(for: key) == nil {
+        let resumeID = summary?.resumeSessionID
+        if notice != nil || resumeID != nil || model.stopUnavailable(for: key) == nil {
             VStack(alignment: .leading, spacing: 0) {
                 // **An ended run is not a dead end.** Claude Code keeps its own
                 // transcript under `~/.claude/projects`, so the conversation
-                // outlives our record of it and can be picked up at the Mac.
-                // Shown only when the daemon actually recorded the id — it is
-                // learned from a hook after the run starts, so a run that died
-                // early may not have one, and a command with a blank id would
-                // be worse than none.
+                // outlives our record of it and can be picked up at the computer.
+                // Shown only when the daemon recorded the id, which it learns
+                // from the agent host's first message — a run that died before
+                // that may not have one, and a command with a blank id would be
+                // worse than none.
                 //
-                // Resume happens at the Mac by design: the phone starting
-                // processes on your machine is a different product, and the
-                // daemon spawns nothing today.
-                if let resumeID, !resumeID.isEmpty, let cwd = summary?.shownCwd, !cwd.isEmpty {
+                // Only for an ended run the next message does not relaunch: a
+                // relaunchable one opens its composer instead, so this manual
+                // command would be a second, worse path.
+                if let resumeID, let cwd = summary?.shownCwd, !cwd.isEmpty {
                     VStack(alignment: .leading, spacing: CC.rhythm.text) {
                         Text("Pick this conversation up at the computer")
                             .ccType(CC.type.footnote)

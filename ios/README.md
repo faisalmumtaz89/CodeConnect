@@ -665,9 +665,8 @@ function of the events:
 
 ## Claude's approvals
 
-A Claude approval is answered only through the hook Claude holds for that card's
-own call, or, in a run started in an app, through its agent host, never by typing
-into the prompt on screen, which can be another agent's.
+A Claude approval is answered only through the agent host of the run that asked,
+never by typing into the prompt on screen, which can be another agent's.
 The card is answerable only from a daemon that advertises `hook_only_approvals`
 (protocol minor 22, `DaemonProfile.answersApprovalsByHook`) and only while its
 `question_hold` is `held` (`DecisionCard.answerSurface`); the send path refuses
@@ -699,7 +698,7 @@ says when the answer reached Claude, so the answer is recorded as applied: not
 `indeterminate`, and with no such detail.
 
 `CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
-ccd's own test emits.
+an earlier ccd's test emitted (frozen, never regenerated).
 
 ## Claude's questions
 
@@ -733,8 +732,8 @@ falls back to the approval layout, read-only):
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
 (`AnswerDecision`, `CodeConnectKit/Sources/CodeConnectKit/QuestionCard.swift`). The daemon builds Claude's answer
-from the question it stored and returns it through Claude's held hook, or, for a
-session started from an app, through its agent host; nothing is typed.
+from the question it stored and returns it through the run's agent host; nothing
+is typed.
 
 Whether the phone may answer is the card's `question_hold` — `held`, `at_mac` or
 `ended` — and a later `question_hold` event for the same request overrides it
@@ -764,7 +763,7 @@ is HIGH, where Submit takes Face ID.
 
 | Fixture | Where it runs | What it pins |
 |---|---|---|
-| `fixtures/claude/minor-21-wire.json` | test bundle and app bundle (`CodeConnectTests/Resources/`, `CodeConnect/Resources/`, byte-identical copies) | The five minor-21 events ccd emits — a held card, the phone's answer, a hold ended, a card at the Mac, an answer at the Mac — decoded through the app's types; the phone's encoded answer equals the fixture's `decision` (`QuestionCardTests`). The `-CC_QUESTION` staging replays these events. |
+| `fixtures/claude/minor-21-wire.json` | test bundle and app bundle (`CodeConnectTests/Resources/`, `CodeConnect/Resources/`, byte-identical copies) | The five minor-21 events an earlier ccd emitted (frozen) — a held card, the phone's answer, a hold ended, a card at the Mac, an answer at the Mac — decoded through the app's types; the phone's encoded answer equals the fixture's `decision` (`QuestionCardTests`). The `-CC_QUESTION` staging replays these events. |
 
 `-CC_QUESTION held|at-mac|ended|answered|old-mac` stages one session holding the
 live 2.1.286 four-question card from the daemon's own events, its words lengthened
