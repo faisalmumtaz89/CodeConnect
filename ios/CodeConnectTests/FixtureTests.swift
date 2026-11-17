@@ -49,9 +49,6 @@ final class FixtureTests: XCTestCase {
         XCTAssertTrue(capabilities.sendTextIdempotent)
         XCTAssertTrue(capabilities.servesCommandCatalog)
         XCTAssertTrue(capabilities.classifiesRisk)
-        XCTAssertTrue(
-            capabilities.servesTerminal,
-            "without this the Terminal tab draws its update-the-Mac state and nothing else")
         XCTAssertTrue(capabilities.deletesSessions)
         XCTAssertTrue(capabilities.scopesSessionsByUID)
 
@@ -71,9 +68,6 @@ final class FixtureTests: XCTestCase {
         }
         let capabilities = ack.capabilities
 
-        XCTAssertFalse(
-            capabilities.servesTerminal,
-            "the terminal rides the connection; offered in the sample it asks the reviewer to pair")
         XCTAssertFalse(capabilities.deletesSessions)
         XCTAssertFalse(capabilities.servesCommandCatalog)
 

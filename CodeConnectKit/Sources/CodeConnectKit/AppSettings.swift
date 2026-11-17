@@ -10,18 +10,12 @@ import Observation
 @Observable
 public final class AppSettings {
     private enum Key {
-        static let terminalFontSize = "codeconnect.terminal.fontSize"
         static let diffFontSize = "codeconnect.diff.fontSize"
         static let projectOrder = "codeconnect.fleet.projectOrder"
     }
 
     private let defaults: UserDefaults
 
-    /// Terminal type size, in points. Persisted so a pinch survives the tab
-    /// being closed.
-    public var terminalFontSize: Double {
-        didSet { defaults.set(terminalFontSize, forKey: Key.terminalFontSize) }
-    }
     public var diffFontSize: Double {
         didSet { defaults.set(diffFontSize, forKey: Key.diffFontSize) }
     }
@@ -39,14 +33,10 @@ public final class AppSettings {
     /// asks for it, so one run's drag cannot reorder the next run's fleet.
     private let persistsProjectOrder: Bool
 
-    public static let terminalFontRange: ClosedRange<Double> = 8...22
     public static let diffFontRange: ClosedRange<Double> = 9...24
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let storedTerminal = defaults.double(forKey: Key.terminalFontSize)
-        terminalFontSize =
-            Self.terminalFontRange.contains(storedTerminal) ? storedTerminal : 12
         let storedDiff = defaults.double(forKey: Key.diffFontSize)
         diffFontSize = Self.diffFontRange.contains(storedDiff) ? storedDiff : 12
         var persists = true

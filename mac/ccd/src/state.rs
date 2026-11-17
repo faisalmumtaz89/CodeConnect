@@ -274,19 +274,15 @@ pub struct Daemon {
     /// rather than queue behind itself. That is the whole bound on how much
     /// work this can be doing at once: one sweep, and one child inside it.
     liveness_sweep: Mutex<()>,
-    /// Leases for the live-terminal carrier: the global attachment cap and the
-    /// one-terminal-per-session rule. Shared across every connection.
-    pub terminal_leases: crate::terminal::TerminalLeases,
     /// The phone's session starts, by request id.
     pub(crate) starts: crate::start_session::Starts,
     /// Which agents could start, as last checked.
     pub(crate) agents: crate::start_session::KnownAgents,
 }
 
-/// **What the Claude-only gate found**, for the callers that must tell two refusals
-/// apart — see [`Daemon::refuse_unless_claude`].
+/// **What the Claude-only gate found** — see [`Daemon::refuse_unless_claude`].
 ///
-/// A bare `Option<String>` could not: it had exactly one shape for "no", so an
+/// Two refusals, not one. A bare `Option<String>` had exactly one shape for "no", so an
 /// unknown session had to be either refused with the wrong sentence or admitted, and
 /// it was admitted. That made a gate whose whole contract is to fail closed fail open
 /// on the one input it cannot vouch for.
@@ -298,8 +294,7 @@ pub enum ClaudeOnly {
     /// particular thing is not something the daemon can do for this agent.
     WrongAgent(String),
     /// **The reference names no run this daemon can vouch for**, or the row could not
-    /// be read. Not evidence that the run is Claude's, and callers that have a code
-    /// for "no such run" should send that one rather than a refusal about authority.
+    /// be read. Not evidence that the run is Claude's.
     Unknown(String),
 }
 
@@ -1617,7 +1612,6 @@ impl Daemon {
             test_tailnet: std::sync::Mutex::new(None),
             actuation_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
-            terminal_leases: crate::terminal::TerminalLeases::new(),
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
         })
@@ -5306,28 +5300,13 @@ impl Daemon {
     /// of these is something a person deliberately asked for and is owed an
     /// explanation rather than a silence — and they are kept apart because "this run
     /// is not Claude's" and "this Mac has no such run" are different things to be
-    /// told, and a caller with two close codes should be able to send the right one.
+    /// told.
     ///
-    /// # Why a shared gate and not a check per call site
+    /// # What is behind it
     ///
-    /// The two operations behind it are Claude-shaped in different ways, and neither
-    /// was refused explicitly before.
-    ///
-    ///   * **The command catalog** is the slash commands a run's claude reported. A
-    ///     Codex run has no claude to report them, and the truth to tell is that,
-    ///     rather than a missing field or an empty menu.
-    ///   * **The terminal attachment** hands a real tmux client to the session's pane
-    ///     and types into it. That is an actuation, and it is the one actuation that
-    ///     does not go through the broker at all — so nothing downstream of it is
-    ///     scoped to an agent, and no gate anywhere else can stand in for this one. A
-    ///     Codex pane belongs to the codex TUI, whose keystrokes and prompts this
-    ///     build has measured nothing about.
-    ///
-    /// **`capture` is deliberately NOT behind it**, and the difference is that it
-    /// actuates nothing: it reads the pane's own screen and returns the text. Reading
-    /// what a Codex session has printed is a fair thing for a phone to do and is not
-    /// a keystroke, so refusing it would remove something useful in the name of a rule
-    /// about writes.
+    /// **The command catalog**, the slash commands a run's claude reported. A Codex run
+    /// has no claude to report them, and the truth to tell is that, rather than a
+    /// missing field or an empty menu.
     ///
     /// **An unreadable row refuses**, for [`Daemon::answer`]'s reason: unreadable is
     /// not evidence of Claude.
@@ -5353,10 +5332,8 @@ impl Daemon {
             // an unknown session is the caller's sentence to write rather than this
             // gate's — which is true, and is why the two refusals are told apart
             // instead of being merged. What was not true is that admitting it was
-            // free: this gate's whole contract is to fail closed, and at the terminal
-            // attach it is the last check before the lease, with no later existence
-            // test behind it. A row this daemon could not find is not evidence that
-            // the run is Claude's.
+            // free: this gate's whole contract is to fail closed, and a row this
+            // daemon could not find is not evidence that the run is Claude's.
             Ok(None) => {
                 ClaudeOnly::Unknown(format!("{session_ref} is not a run the computer hosts"))
             }
@@ -8711,7 +8688,6 @@ impl Daemon {
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
-                tmux_session: row.tmux_session,
                 // Resolved here rather than on the phone, because a push has
                 // to be named by something the phone cannot compute — it may
                 // not be running — and two rules for one name produce two

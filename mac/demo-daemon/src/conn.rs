@@ -490,24 +490,6 @@ where
             )
             .await?
         }
-        // A live terminal is shell-equivalent authority. There is no shell here
-        // and the capability says so; the refusal is enforced again anyway,
-        // because a client that ignored the capability must still not get one.
-        ClientMessage::TerminalAttach { attachment_id, .. }
-        | ClientMessage::TerminalInput { attachment_id, .. }
-        | ClientMessage::TerminalResize { attachment_id, .. }
-        | ClientMessage::TerminalCredit { attachment_id, .. }
-        | ClientMessage::TerminalDetach { attachment_id } => {
-            send(
-                sink,
-                &ServerMessage::TerminalClosed {
-                    attachment_id,
-                    code: protocol::ws::terminal_close::NOT_AUTHORISED.into(),
-                    reason: "this demonstration daemon serves no terminal".into(),
-                },
-            )
-            .await?
-        }
     }
     Ok(())
 }
@@ -544,7 +526,9 @@ fn capabilities() -> Capabilities {
         // holding it, and resolving it takes it out of that set.
         prompt_identity: true,
         command_catalog: false,
-        terminal_pty: false,
+        // Plain `ws` behind a TLS edge it cannot see: it cannot vouch for the
+        // transport.
+        private_transport: false,
         // No Codex link and no turn to stop: an action this server cannot perform
         // is not offered.
         codex_interrupt: false,
@@ -984,7 +968,7 @@ mod tests {
         // — load-bearing — no TLS: the phone re-dials `wss://` the moment it sees
         // `tls` true on a plaintext link, and would flap for ever.
         for withheld in [
-            "terminal_pty",
+            "private_transport",
             "codex_interrupt",
             "push",
             "push_relay",
@@ -1222,24 +1206,6 @@ mod tests {
         // to drop a working connection.
         say(&mut ws, json!({"type": "ping"})).await;
         assert_eq!(hear(&mut ws).await["type"], "pong");
-    }
-
-    #[tokio::test]
-    async fn a_terminal_attach_is_refused_even_though_the_capability_already_said_no() {
-        let (_fleet, addr) = start().await;
-        let mut ws = paired(addr).await;
-        say(
-            &mut ws,
-            json!({
-                "type": "terminal_attach", "attachment_id": "att-1",
-                "session_uid": "cc-1", "cols": 80, "rows": 24, "output_credit": 65536,
-            }),
-        )
-        .await;
-        let closed = hear(&mut ws).await;
-        assert_eq!(closed["type"], "terminal_closed");
-        assert_eq!(closed["attachment_id"], "att-1");
-        assert_eq!(closed["code"], protocol::ws::terminal_close::NOT_AUTHORISED);
     }
 
     #[tokio::test]

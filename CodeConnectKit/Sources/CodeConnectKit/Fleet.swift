@@ -464,15 +464,8 @@ public enum FleetStatusRule {
         case .degraded:
             return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
-            // A run with no tmux session is one ccd hosts: it has no supervisor and no
-            // pane to answer from, and its link is ccd's connection to its host.
-            if summary.tmuxSession.isEmpty {
-                return .observe(
-                    reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
-                )
-            }
             return .observe(
-                reason: "No supervisor is attached to this session. It can only be answered at \(HostDevice.current.computer("the computer"))."
+                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
             )
         case .stale:
             return .observe(

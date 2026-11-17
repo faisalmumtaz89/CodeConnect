@@ -406,7 +406,7 @@ final class TimelineTurnTests: XCTestCase {
             from: Data(
                 """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
-                 "tmux_session":"cc-1","cwd":"/tmp/x","lifecycle":"live",
+                 "cwd":"/tmp/x","lifecycle":"live",
                  "link":"attached","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
                  "updated_at":"2026-08-02T10:00:00Z","blocked_on":[]}
                 """.utf8))

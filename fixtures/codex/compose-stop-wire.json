@@ -16,7 +16,6 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -71,7 +70,6 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -113,7 +111,6 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -226,7 +223,6 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -256,7 +252,6 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -293,7 +288,6 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     }
@@ -313,6 +307,7 @@
     "hold_secs": 0,
     "hook_only_approvals": true,
     "machine_stats": true,
+    "private_transport": false,
     "prompt_identity": true,
     "push": false,
     "push_relay": false,
@@ -324,7 +319,6 @@
     "start_session": true,
     "start_worktree": true,
     "stop_run": true,
-    "terminal_pty": false,
     "test_push": false,
     "tls": false,
     "tls_active": false
@@ -374,7 +368,6 @@
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "tmux_session": "",
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_ended_by_end_run": {
@@ -390,7 +383,6 @@
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "tmux_session": "",
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_relaunchable": {
@@ -407,7 +399,6 @@
     "relaunchable": true,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "tmux_session": "",
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_stopping": {
@@ -423,7 +414,6 @@
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "tmux_session": "",
     "updated_at": "2026-11-15T00:00:00Z"
   }
 }

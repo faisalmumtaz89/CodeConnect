@@ -13,19 +13,15 @@ This app keys **everything** by `SessionSummary.sessionKey` / `Event.sessionKey`
 which is the uid where the daemon mints one and the tmux name where it does not:
 the event stores, the subscriptions, the on-disk cache, the diff cache, the
 review marks, the fleet rows, the navigation routes, and the run an answer is
-scoped to. The name is display only — plus the one place it is the *right*
-answer, `tmux attach -t =cc-1`, which is taken from the fleet rather than from
-the route because tmux has never heard of a uid.
+scoped to. The name is display only.
 
 Two consequences worth stating:
 
 * **Two runs of one name are two sessions.** They get two rows, two timelines
   and two rails. The uid keys them; it never names them. A row is called by the
   **project** the daemon resolved (`RunLabel`), and where two runs share one
-  project each row adds the time it started — but only when that is both true
-  and useful: never for an adopted run, whose timestamp is a first sighting
-  rather than a start, and never when two runs started in the same minute,
-  because a discriminator that ties is worse than none.
+  project each row adds the time it started — but never when two runs started
+  in the same minute, because a discriminator that ties is worse than none.
 * **An answer names its run** (`answer.session_id`). The daemon refuses an
   unscoped answer when one `request_id` is open in two runs rather than guessing;
   sending the uid means that path is never reached. In-flight answer state is
@@ -42,16 +38,8 @@ in it says which parts belong to the run now offering that uid. The sessions tha
 lost history say so (`GapNotice.cacheDiscarded`); a cold re-sync costs one
 bounded backfill.
 
-One third-party dependency, pinned, only for the live terminal:
-
-| Package | Pin | Why |
-|---|---|---|
-| [SwiftTerm](https://github.com/faisalmumtaz89/SwiftTerm) | revision `5429006` | terminal emulator (`TerminalView`); a fork of upstream `1.15.0` carrying a one-line DECRQSS crash fix no upstream release has |
-
-The terminal needs no network library of its own: it rides the paired
-`URLSessionWebSocketTask` the rest of the app already holds. Everything else
-resolved is transitive and Apple-owned; `Package.resolved` is committed and is
-the real pin.
+No third-party package: the one package the app depends on is
+`../CodeConnectKit`, which depends on none.
 
 The icons are [Phosphor](https://phosphoricons.com)'s (MIT), copied rather than
 depended on: only the SVGs the app draws, from `@phosphor-icons/core` 2.1.1, in
@@ -89,10 +77,10 @@ pairing and opens no socket, and nothing in it reports a link
 
 | Path | What it is |
 |---|---|
-| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, the session-start model, `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket, Keychain pairing, this device's identity, the relay credential and its enrollment, the unified-diff parser, and the models: every paired computer (`Machines`, one `AppModel` each), event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, preferences, the on-disk event cache, the start-up purge of credentials earlier releases stored, and the `PushRegistrar` seam with `PushWire`. |
+| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, the session-start model, `DaemonConnection` (one supervised `URLSessionWebSocketTask`), Keychain pairing, this device's identity, the relay credential and its enrollment, the unified-diff parser, and the models: every paired computer (`Machines`, one `AppModel` each), event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, preferences, the on-disk event cache, the start-up purge of credentials earlier releases stored, and the `PushRegistrar` seam with `PushWire`. |
 | `CodeConnect/Net/` | `PushRegistration`, which asks iOS for notifications and an APNs token, and the hand-off to Tailscale. |
 | `CodeConnect/Model/` | `Dictation`, speech to text for the compose bar. |
-| `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline, and the terminal from the bar's menu), decision card, diff, pairing and settings. |
+| `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
 | `CodeConnectUITests/` | End-to-end. `ApprovalFlowUITests` and `LiveDaemonUITests` need a **real** daemon; `DeckUITests` replays contract-shaped frames. |
 | `CodeConnectRenderHarness/` | The render catalog. Its own target, in its own scheme, **excluded from the product scheme's TestAction** — nothing here changes the product's test counts. See *The render harness*. |
@@ -191,7 +179,6 @@ release build:
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
 | `-cc.debug.diff truncated` | a capture the daemon cut short, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Cut short by your computer` marker. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
-| `-cc.debug.terminalState attaching\|ended\|endedLive` | the terminal states a healthy Mac never shows, which otherwise need a session killed mid-flight or the link dropped |
 | `-cc.debug.sendText <mode>` | resolves typed sends locally, the way `-CC_FIXTURE` resolves decisions, so a send's outcomes can be photographed: `sent` and `duplicate` (`Fixtures.sendTextResult`) |
 
 `-CC_FIXTURE` also resolves answers locally, because the Deck's advance
@@ -337,14 +324,6 @@ is enforced.
   "from a paired device", and only the Sent banner of the Mac's own approval
   (`AnswerOutcome.sentToClaudeLine(on:sentHere:)`) names the Mac; never "this app".
   `local` is "at the computer".
-* **A disconnected terminal says so.** The last bytes stay on screen under an
-  explicit not-live banner, because a frozen terminal is indistinguishable from
-  a live one and clearing it would lie about what you just read.
-* **A terminal rebuilt from a capped buffer says so.** Coming back to a session
-  replays the last 224 KiB the carrier held, which for a chatty agent begins
-  mid-session; the pane that was handed those remains draws a `CCGapMarker`
-  above itself until the Mac repaints it whole. Out of band on purpose — a
-  notice written *into* the emulator is erased by the next `ESC[2J` it replays.
 * **A diff carries its capture time and its truncation.** An empty diff renders
   the daemon's `note`, which is the only thing that tells a clean tree from a
   directory that was never a git repository.
@@ -478,7 +457,7 @@ is enforced.
   (`Machines`). Each paired machine has an `AppModel` of its own — its link, its
   cache folder, its catch-up, its sessions — so nothing one Mac says reaches
   another's state, and the screens under a session (approve, answer, stop,
-  compose, diff, terminal) are handed the model of the machine the session is
+  compose, diff) are handed the model of the machine the session is
   on. The fleet, the count under its title, the Deck and its bar merge every
   machine's sessions and cards; each row carries its machine
   (`FleetRow.machineID`, `machineName`), whose link is its model's own
@@ -506,21 +485,6 @@ is enforced.
   `deviceOwnerAuthentication` — the flag that invalidates when the enrolled set
   changes. A phone with no passcode cannot approve a HIGH card at all; it says
   so and sends you to the Mac.
-* **The app names a session, never a pane.** `TerminalCarrier` sends the
-  `session_uid` and nothing else; the daemon resolves it to one live pane and
-  addresses every write there, so the phone has no way to reach a pane it was
-  not shown. Keystrokes are delivered as data, never as tmux commands.
-* **The terminal is drawn at the pane's size, and reports the phone's.** While
-  the Mac also shows a session the pane keeps the Mac's size, so the bytes are
-  drawn for it; the daemon states that size ahead of every paint
-  (`CSI 8 ; rows ; cols t`), and `TerminalPaneView` takes it at once, before the
-  paint is parsed. `TerminalPaneScroller` lays the pane out at that grid, opens
-  at the prompt, slides both ways and, for a pane wider than the tab, pinches
-  out to the whole width (one no wider keeps the pinch for the font), and tells
-  the daemon what fits the phone, never the pane's size — the size the window
-  takes once the Mac viewer leaves. Before any size arrives (an older daemon)
-  the pane fills the tab as it always has. SwiftTerm's mouse-tracking pan is
-  never installed: with mouse reporting declined it would only swallow drags.
 
 ## Transport
 
@@ -621,7 +585,7 @@ id open.
 
 **A hosted Claude run can be stopped too, by its own rule.** `CodexProse.stopUnavailable`
 switches on the agent: a Codex run keeps the gate above, while a hosted Claude run — `claude_interrupt`
-advertised, an empty `tmux_session`, `lifecycle == live`, and a running turn — is offered Stop with
+advertised, `lifecycle == live`, and a running turn — is offered Stop with
 **no `codex_link` check**, because a hosted run has no Codex link. The stop outcome shows in the same
 slot and names Claude, and a committed send after a Stop retires that note so it cannot shadow the send's
 own outcome. When a Stop cancels a send, the daemon's `send_not_sent {reason: "stopped"}` marks the
@@ -863,8 +827,6 @@ CC.color   bg surface surfaceRaised surfaceOverlay
 
 CC.text    primary secondary tertiary disabled onAccent
 
-CC.ansi    table[16] background foreground     // the 16-colour terminal palette
-
 CC.space   xxs 4 · xs 8 · sm 12 · md 16 · lg 20 · xl 24 · xxl 32 · xxxl 48
 CC.radius  sm 6 · md 8 · lg 12 · xl 16 · pill
 CC.stroke  hairline 1 · emphasis 1.5 · focus 2 · ring 3
@@ -965,7 +927,6 @@ haptic is not motion, and removing it removes information.
 | `CCSheetChrome` | `CCSheetChrome("Decision", subtitle:, onClose:) { content }` (+ `trailing:` slot); pairs with `CCActionBar`. The **subtitle** resolves backtick markup, so a sheet's anchor sets its path in mono; the **title** is verbatim and bounded to two lines, because it carries a project name — arbitrary text from a filesystem, which a markup renderer would eat |
 | `CCActionPair` | `CCActionPair { deny } allow: { allow }` — **40 : 60, 12pt gap**, and no ratio parameter. A `Layout`, not a measurement: exact on the first frame, no `@State`, no `PreferenceKey`. Stacks at accessibility sizes |
 | `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with a `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
-| `CCSegmented` | `CCSegmented(selection:options:accessibilityLabel:)` with `CCSegmentedOption(value, title:, icon:)` |
 | `CCGapMarker` | `CCGapMarker(label:actionLabel:action:)` — inline, at its position in time |
 | `CCBanner` / `CCBannerSlot` | `CCBannerSlot([CCBannerItem(.rejected, title:…), …])` renders **exactly one**, by the ladder `rejected > offline > stale > cached > gap > truncated` |
 | `CCHunkHeader` | `CCHunkHeader(header:fontSize:actions: CCHunkActions(comment:copyHunk:copyPath:))` — the kit draws the glyph, owns the menu and **is** the 44pt target. Pass actions as values, not a built control; the `menu:` closure form is legacy and cannot carry the gesture |
@@ -998,10 +959,7 @@ real layout, never a `contentShape` reaching outside a frame.** An expanded
 content shape is *reported* to the accessibility tree without being hit-tested:
 it measures as a pass and fails under a thumb.
 
-So `CCSegmented` draws its 36pt track inside a button that is genuinely 44pt
-tall (4pt of transparent overhang, 3pt of track padding, a 30pt thumb — every
-point inside the `Button`'s own frame); it shipped with the border drawn around
-the hit target and measured **49.67pt**. And a `CCBadge` that carries an `action` is
+A `CCBadge` that carries an `action` is
 not a badge: file chips and toggles are `CC.size.chip`
 32, not the label's 20, so a row of things to press stops reading as a strip of
 captions.
@@ -1220,16 +1178,6 @@ same reason `textTertiary` was corrected: `textDisabled` is reserved for
 genuinely inactive text, and a code comment — at 2.69:1 — is something you have
 to read.
 
-**ANSI** — ten of the sixteen are palette tokens re-used by name, so the
-terminal's green is a `CCDiffRow`'s green. On `bg`, in index order: `—` / 6.43 /
-10.52 / 10.36 / 5.71 / 5.28 / 9.74 / 8.13 · `—` / 9.92 / 14.75 / 13.84 / 10.00 /
-8.73 / 14.91 / 17.94. The two exemptions are **black** (#131313, 1.13) and
-**bright black** (#525252, 2.69): ANSI black is a background colour and is
-invisible on a black terminal by construction — lifting it would break
-`\e[30;47m` — and bright black is the conventional dim slot, where printing a
-program's "dim" brightly would misreport what the program said. Neither is a
-colour this app chooses for its own text.
-
 **Borders are not AA-rated and do not need to be.** `border` #262626 measures
 1.39:1 on `bg` and `borderStrong` #383838 measures 1.79:1. They are *separation*,
 never the sole identifier of a control: every CC control is identified by its
@@ -1301,22 +1249,22 @@ VoiceOver cannot express a hold.
 
 ## Reviewing the system
 
-`CCGallery` (DEBUG only) renders every component in every state across eight
+`CCGallery` (DEBUG only) renders every component in every state across seven
 pages. Open `CodeConnect/Views/DesignSystem/CCGallery.swift` and run any
 `#Preview` — `Gallery · AX5 (worst case)` is the one that matters. Pressed
 states are live, not mocked.
 
 **Every component under `Views/DesignSystem/` has a page**, and the gallery's own
-header says so, which makes it a claim that can fail. The `terminal` and `diff`
-pages exist for the components whose only other render is a screen needing a
-live terminal or a real diff — `CCKeyCap`, `CCKeyCapDivider`, `CCSkeleton`,
-`CCSkeletonRow`, `CCWaitingNotice`, `CCProgressRing`, `CCScannerFrame`,
-`CCDisclosure` and the diff strip — because "a control is 44pt" written about a
-component nobody can photograph is a claim nobody has checked.
-`render-screens.sh` photographs all eight at `L` and AX5.
+header says so, which makes it a claim that can fail. The `diff` page exists
+for the components whose only other render is a screen needing a real diff —
+the diff strip — and `CCSkeleton`, `CCSkeletonRow`, `CCWaitingNotice`,
+`CCProgressRing`, `CCScannerFrame` and `CCDisclosure` have their pages too,
+because "a control is 44pt" written about a component nobody can photograph is a
+claim nobody has checked. `render-screens.sh` photographs all seven at `L` and
+AX5.
 
 To drive it on a simulator, launch with `SIMCTL_CHILD_CC_GALLERY_PAGE=buttons`
-(or `rows`, `indicators`, `controls`, `feedback`, `terminal`, `diff`) — the app
+(or `rows`, `indicators`, `controls`, `feedback`, `diff`) — the app
 boots into the gallery whenever `CC_GALLERY_PAGE` is set (DEBUG only,
 `CodeConnectApp.swift`), rather than needing the app root edited by hand before
 every render. A page is long enough that "scroll to the component"

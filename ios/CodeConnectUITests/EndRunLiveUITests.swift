@@ -5,7 +5,7 @@ import XCTest
 /// run CodeConnect started; it asks once; the row reads Stopping… and the run then sits with the ended ones.
 ///
 ///   TEST_RUNNER_CC_HOST=127.0.0.1:<port> TEST_RUNNER_CC_TOKEN=<device token> \
-///   TEST_RUNNER_CC_END_RUN=<session uid of a live run ccd started> TEST_RUNNER_CC_TMUX_RUN=<uid of a run in tmux> \
+///   TEST_RUNNER_CC_END_RUN=<session uid of a live run ccd started> \
 ///   xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
 ///     -destination 'platform=iOS Simulator,id=<sim>' -only-testing:CodeConnectUITests/EndRunLiveUITests
 ///
@@ -82,15 +82,5 @@ final class EndRunLiveUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
         return condition()
-    }
-
-    /// The control: a run in tmux, which ccd did not start and will not end, offers no End run.
-    func testARunInTmuxOffersNoEndRun() throws {
-        let uid = env["CC_TMUX_RUN"] ?? ""
-        try XCTSkipIf(uid.isEmpty, "CC_TMUX_RUN not provided")
-        let app = try launchApp()
-        openRun(app, uid: uid)
-        XCTAssertTrue(app.buttons["Changes"].waitForExistence(timeout: 10), "the menu is open")
-        XCTAssertFalse(app.buttons["End run"].exists, "no End run on a run CodeConnect did not start")
     }
 }

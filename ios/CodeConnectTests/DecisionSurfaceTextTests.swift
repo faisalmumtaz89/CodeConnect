@@ -147,7 +147,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
                 SessionSummary.self,
                 from: Data(
                     """
-                    {"session_uid":"\(uid)","session_id":"cc-1","tmux_session":"cc-1",
+                    {"session_uid":"\(uid)","session_id":"cc-1",
                      "cwd":"/work/\u{202E}ppa","project_label":"\(project)","lifecycle":"live",
                      "link":"attached","last_seq":1,"created_at":"\(created)",
                      "updated_at":"2026-10-22T00:00:00Z","blocked_on":[]}
@@ -331,7 +331,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
         _ uid: String, agent: String? = nil, blocked: [String], lastSeq: Int
     ) -> JSONValue {
         var fields: [String: JSONValue] = [
-            "session_uid": .string(uid), "session_id": .string("cc-1"), "tmux_session": .string("cc-1"),
+            "session_uid": .string(uid), "session_id": .string("cc-1"),
             "cwd": .string("/work/\u{202E}ppa"), "project_label": .string("app\u{202E}"),
             "lifecycle": .string("live"), "link": .string("attached"), "last_seq": .int(Int64(lastSeq)),
             "created_at": .string("2026-10-22T00:00:00Z"), "updated_at": .string("2026-10-22T00:00:00Z"),
@@ -550,7 +550,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
         let chat = try await screen(
             "claude-chat", model,
             NavigationStack {
-                SessionDetailView(route: SessionRoute(key: uid), surfaceForTesting: .constant(.timeline))
+                SessionDetailView(route: SessionRoute(key: uid))
             }, height: 1400, opening: ["Bash tool call"])
         assertScreenIsSafe(chat.spoken, "the chat", expected: ["Bash tool call, git push origin \u{FFFD}niam"])
         XCTAssertTrue(chat.drawn.contains("command"), "the held call's row is open: \(chat.drawn)")

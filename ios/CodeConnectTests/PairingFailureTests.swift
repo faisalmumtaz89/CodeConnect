@@ -55,11 +55,11 @@ final class PairingFailureTests: XCTestCase {
     }
 
     /// The connection's encryption is claimed only as far as the daemon vouched
-    /// for it: to a paired phone, the terminal is offered exactly on a private
-    /// connection. Every answer is in plain words.
+    /// for it: the daemon says whether a paired phone's connection is private.
+    /// Every answer is in plain words.
     func testTheTransportClaimsOnlyWhatTheDaemonVouchedFor() {
-        let offered = Capabilities(extra: ["terminal_pty": .bool(true)])
-        let withheld = Capabilities(extra: ["terminal_pty": .bool(false)])
+        let offered = Capabilities(extra: ["private_transport": .bool(true)])
+        let withheld = Capabilities(extra: ["private_transport": .bool(false)])
         let silent = Capabilities(extra: [:])
         let tailnet = PairingView.transport(encrypted: false, paired: true, capabilities: offered)
         XCTAssertEqual(tailnet.value, "Encrypted by Tailscale")

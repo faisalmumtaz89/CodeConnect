@@ -475,7 +475,7 @@ enum RenderCatalog {
     /// Every state this harness knows how to reach.
     ///
     /// Ordered the way a reader meets them: the fleet, the decision, the
-    /// session, the diff, the terminal, the trust screen, then the kit's own
+    /// session, the diff, the trust screen, then the kit's own
     /// gallery — which is the only reachable render several components have.
     static let all: [RenderScenario] = product + codex + questions + gallery
 
@@ -1682,10 +1682,8 @@ enum RenderCatalog {
 
     /// The kit's own review surface, one render per page.
     ///
-    /// **This is the only reachable render several components have.**
-    /// `CCKeyCap`'s other one is a screen that needs a live terminal, so
-    /// without these pages "a control is 44pt" is written about it and never
-    /// checked. A claim nobody can photograph is a claim nobody has tested.
+    /// **This is the only reachable render several components have**, and a
+    /// claim nobody can photograph is a claim nobody has tested.
     /// Each page, and one section heading that only that page draws.
     ///
     /// Waiting on the picker badge would prove only that the *picker* rendered —
@@ -1699,7 +1697,6 @@ enum RenderCatalog {
         ("indicators", "CCBadge"),
         ("controls", "CCField"),
         ("feedback", "CCBanner"),
-        ("terminal", "CCKeyCap"),
         ("diff", "CCDiffFileChip"),
     ]
 

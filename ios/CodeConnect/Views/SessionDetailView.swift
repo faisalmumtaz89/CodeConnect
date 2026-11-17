@@ -928,14 +928,6 @@ private struct HistoryHead: View {
 struct SessionDetailView: View {
     let route: SessionRoute
 
-    /// Timeline is what the daemon *knows*; Terminal is the Mac's own TTY. They
-    /// are different kinds of truth and the app never blends them.
-    enum Surface: String, CaseIterable, Identifiable {
-        case timeline, terminal
-        var id: String { rawValue }
-        var label: String { self == .timeline ? "Timeline" : "Terminal" }
-    }
-
     @Environment(AppModel.self) private var model
     @Environment(Machines.self) private var machines
     /// Read for one decision only: the Stop control's label. "Stop this turn"
@@ -976,29 +968,6 @@ struct SessionDetailView: View {
     /// every launch, not only a slow one. Spent when the sheet opens, or when
     /// the screen goes; never on a miss.
     @State private var wantedRequestID: String?
-    @State private var ownSurface: Surface = .timeline
-    /// Whether the Terminal surface has ever been selected on this screen. The
-    /// emulator is kept alive once built, and this is what keeps it in the view
-    /// tree while the timeline is the one on show.
-    @State private var terminalHasBeenOpened = false
-    #if DEBUG
-        /// Test seam: switch between the timeline and the terminal from outside.
-        ///
-        /// The terminal's emulator has to survive a trip to the timeline and
-        /// back, and that is a claim about one `UIView` instance rather than
-        /// about anything a value can report. Proving it needs the switch
-        /// thrown against a hosted screen, and the switch is `@State`.
-        var surfaceForTesting: Binding<Surface>?
-    #endif
-
-    /// The surface on show: this screen's own, or a test's.
-    private var surfaceBinding: Binding<Surface> {
-        #if DEBUG
-            if let surfaceForTesting { return surfaceForTesting }
-        #endif
-        return $ownSurface
-    }
-    private var surface: Surface { surfaceBinding.wrappedValue }
     @State private var showDiff = false
     @State private var showLinkDetail = false
     @State private var confirmingEndRun = false
@@ -1012,7 +981,7 @@ struct SessionDetailView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     /// The run this screen is about. Everything on it — the timeline, the
-    /// compose bar, the diff, the terminal — is scoped to this one key, so a
+    /// compose bar, the diff — is scoped to this one key, so a
     /// `cc-1` that exits while the screen is open cannot hand the screen to its
     /// successor.
     private var key: String { route.key }
@@ -1025,62 +994,24 @@ struct SessionDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             // **The header is the bar.** The project and its path are the bar's
-            // title, and the terminal and the rest are one tap away at its end, so
+            // title, and the rest is one tap away at its end, so
             // the conversation starts where the bar stops. What the header carried
             // only sometimes — a Codex turn's Stop, the permission note, an ended
             // run's resume command — still shows, under the bar, while it applies.
             sessionNotices
 
-            // **Two slots, not two branches.** A `switch` here puts the two
-            // surfaces in one structural position, so switching between them
-            // dismantles whichever was showing — and the terminal's emulator
-            // is not a view that can be rebuilt from its inputs. It *is* the
-            // scrollback: `cargo build` scrolls megabytes through it, the
-            // carrier keeps only the last 224 KiB, and a glance at the
-            // timeline would throw the rest away while the session is still
-            // running. Separate `if`s keep the terminal in a slot of its own,
-            // so it is hidden rather than destroyed.
-            ZStack {
-                if surface == .timeline {
-                    if shown != nil {
-                        SessionTimeline(
-                            key: key, tailWatch: tailWatch,
-                            openApproval: $openApproval, showLinkDetail: $showLinkDetail,
-                            composerFocused: $composerFocused
-                        )
-                        .onAppear { openWantedApproval() }
-                    } else {
-                        notInTheList
-                    }
-                }
-                // Built the first time it is asked for and kept after that.
-                // Mounting it with the screen would cost every reader an
-                // emulator they may never open; keeping it once opened costs
-                // one, and buys back the pane they were reading.
-                if surface == .terminal || terminalHasBeenOpened {
-                    // Attached **by uid**: the daemon resolves the uid to the
-                    // one live session that carries it, so a reused tmux name
-                    // can never hand this tab a different agent's keyboard.
-                    // The name is carried alongside only as something to show.
-                    TerminalTabView(
-                        sessionUID: key,
-                        tmuxName: model.tmuxName(for: key),
-                        runLabel: label.spoken,
-                        onScreen: surface == .terminal
-                    )
-                    .opacity(surface == .terminal ? 1 : 0)
-                    // A hidden pane takes no taps and is not read out. The
-                    // keyboard is `onScreen`'s to give back — see
-                    // `TerminalPaneView.acceptsInput`.
-                    .allowsHitTesting(surface == .terminal)
-                    .accessibilityHidden(surface != .terminal)
-                }
+            if shown != nil {
+                SessionTimeline(
+                    key: key, tailWatch: tailWatch,
+                    openApproval: $openApproval, showLinkDetail: $showLinkDetail,
+                    composerFocused: $composerFocused
+                )
+                .onAppear { openWantedApproval() }
+            } else {
+                notInTheList
             }
         }
         .background(CC.color.bg)
-        .onChange(of: surface, initial: true) { _, new in
-            if new == .terminal { terminalHasBeenOpened = true }
-        }
         .ccNavigationChrome()
         // Empty: the title is the bar's principal item, the project over its
         // path, which a title string cannot draw.
@@ -1092,51 +1023,44 @@ struct SessionDetailView: View {
                 .ccPlainToolbarItem()
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            // The compose bar types into Claude's prompt. In the terminal you
-            // are already typing at the TTY, so a second text field there would
-            // be two ways to say the same thing with different consequences.
-            if surface == .timeline {
-                VStack(spacing: 0) {
-                    if let palette = paletteContent {
-                        CommandPalette(content: palette, onAction: route)
-                    }
-                    SessionComposeBar(
-                        key: key,
-                        text: $composeText,
-                        result: composeResult,
-                        sending: sending,
-                        runLabel: label.spoken,
-                        summary: summary,
-                        onWhy: { showLinkDetail = true },
-                        onSend: send,
-                        focused: $composerFocused)
+            VStack(spacing: 0) {
+                if let palette = paletteContent {
+                    CommandPalette(content: palette, onAction: route)
                 }
-                .onChange(of: composeText) { old, new in
-                    // If the draft has moved off the words it held — the same
-                    // normalisation the send's mutation key uses, so a whitespace-only
-                    // edit is not a move — the send kept under those words is no longer
-                    // this draft's retry: drop its identity, so the same words typed
-                    // later are a new send.
-                    model.abandonHeldSend(whenDraftChangesFrom: old, to: new, in: key)
-                    unansweredSend = nil
-                    // Editing is the user's next act; a standing failure
-                    // note has been read. A landed outcome's note retires itself.
-                    if composeResult?.clearsOnEdit == true { composeResult = nil }
-                }
-                .onChange(of: model.composerRestore[key]) { _, restore in
-                    // A send a live Stop cancelled hands its text back here — but only into an EMPTY
-                    // composer, so a draft the person is typing now is never overwritten. Consumed
-                    // either way, so the words are offered once; the dropped identity (C2) makes the
-                    // resend fresh. The row keeps reading "Not sent: stopped" regardless.
-                    guard let restore else { return }
-                    if composeText.isEmpty { composeText = restore }
-                    model.consumeComposerRestore(for: key)
-                }
+                SessionComposeBar(
+                    key: key,
+                    text: $composeText,
+                    result: composeResult,
+                    sending: sending,
+                    runLabel: label.spoken,
+                    summary: summary,
+                    onWhy: { showLinkDetail = true },
+                    onSend: send,
+                    focused: $composerFocused)
+            }
+            .onChange(of: composeText) { old, new in
+                // If the draft has moved off the words it held — the same
+                // normalisation the send's mutation key uses, so a whitespace-only
+                // edit is not a move — the send kept under those words is no longer
+                // this draft's retry: drop its identity, so the same words typed
+                // later are a new send.
+                model.abandonHeldSend(whenDraftChangesFrom: old, to: new, in: key)
+                unansweredSend = nil
+                // Editing is the user's next act; a standing failure
+                // note has been read. A landed outcome's note retires itself.
+                if composeResult?.clearsOnEdit == true { composeResult = nil }
+            }
+            .onChange(of: model.composerRestore[key]) { _, restore in
+                // A send a live Stop cancelled hands its text back here — but only into an EMPTY
+                // composer, so a draft the person is typing now is never overwritten. Consumed
+                // either way, so the words are offered once; the dropped identity (C2) makes the
+                // resend fresh. The row keeps reading "Not sent: stopped" regardless.
+                guard let restore else { return }
+                if composeText.isEmpty { composeText = restore }
+                model.consumeComposerRestore(for: key)
             }
         }
-        // A new handshake is the link back: the unanswered send is asked again. Here,
-        // not on the timeline's composer, so a handshake while the terminal is showing
-        // still counts.
+        // A new handshake is the link back: the unanswered send is asked again.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .sheet(isPresented: $showHostedSettingsSheet) {
             HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
@@ -2129,9 +2053,6 @@ private struct SessionBanner: View {
 /// stale must disable `Send` and say why, on its own, with nobody touching the
 /// screen.** So this view genuinely ticks. What changed is that it ticks alone —
 /// the timeline above it used to be rebuilt to keep this sentence true.
-///
-/// The text and the send result stay bound to `SessionDetailView`, so a half
-/// typed message still survives a trip to the Terminal surface and back.
 private struct SessionComposeBar: View {
     let key: String
     @Binding var text: String

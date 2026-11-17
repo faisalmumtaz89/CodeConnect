@@ -6,14 +6,11 @@ import XCTest
 /// What a run is called, and when the app admits it cannot tell two apart.
 final class RunLabelTests: XCTestCase {
 
-    /// `tmux` empty means adopted: a run CodeConnect never launched and whose
-    /// start it did not witness.
     private func summary(
-        uid: String, project: String, created: String = "2026-08-07T09:05:00.000Z",
-        tmux: String = "cc-1"
+        uid: String, project: String, created: String = "2026-08-07T09:05:00.000Z"
     ) throws -> SessionSummary {
         let json = """
-            {"session_uid":"\(uid)","session_id":"cc-1","tmux_session":"\(tmux)",\
+            {"session_uid":"\(uid)","session_id":"cc-1",\
             "cwd":"/srv/dev/code/checkout-7","lifecycle":"live","link":"attached","last_seq":7,\
             "created_at":"\(created)","updated_at":"2026-08-07T10:00:00.000Z",\
             "project_label":"\(project)"}
@@ -45,55 +42,32 @@ final class RunLabelTests: XCTestCase {
         XCTAssertFalse(label.inline.contains("cc-1"), "and not the tmux counter")
     }
 
-    /// Two agents on one checkout is ordinary. A start time separates them.
-    func testTwoRunsInOneProjectAreSeparatedByWhenTheyStarted() throws {
+    /// **Runs in one project are told apart by when they started**, on runs CodeConnect started (the
+    /// daemon's summary names no tmux session), in all three shapes. One run needs no qualifier. Two that
+    /// started in different minutes are each qualified with the time it started — the rendered times
+    /// themselves, so a qualifier built from anything else, a uid tail or an index, fails here. Two that
+    /// started in the same minute get neither: a qualifier that repeats looks like it tells them apart and
+    /// does not, and two rows that read alike are the honest picture of two runs started together.
+    func testRunsInOneProjectAreToldApartByWhenTheyStarted() throws {
         let early = try summary(
-            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR", project: "Aion",
-            created: "2026-08-07T09:05:00.000Z")
+            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR", project: "Aion", created: "2026-08-07T09:05:00.000Z")
         let later = try summary(
-            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQS", project: "Aion",
-            created: "2026-08-07T11:47:00.000Z")
-        let all = labels([early, later])
-        let one = try XCTUnwrap(all[early.sessionKey])
-        let two = try XCTUnwrap(all[later.sessionKey])
-
-        // The rendered times themselves, so a qualifier built from anything
-        // else — a uid tail, an index — fails here rather than passing on its
-        // prefix.
-        let expected = { (iso: String) -> String in
-            "started " + ISO8601.parse(iso)!.formatted(.dateTime.hour().minute())
+            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQS", project: "Aion", created: "2026-08-07T11:47:00.000Z")
+        let sameMinute = try summary(
+            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQT", project: "Aion", created: "2026-08-07T09:05:59.000Z")
+        let started = { (run: SessionSummary) -> String in
+            "started " + ISO8601.parse(run.createdAt)!.formatted(.dateTime.hour().minute())
         }
-        XCTAssertEqual(one, RunLabel(project: "Aion", qualifier: expected("2026-08-07T09:05:00.000Z")))
-        XCTAssertEqual(
-            two, RunLabel(project: "Aion", qualifier: expected("2026-08-07T11:47:00.000Z")))
-        XCTAssertNotEqual(one, two, "and both are qualified, not just the first")
-    }
 
-    /// A qualifier that repeats is worse than none: it looks like it tells them
-    /// apart and does not.
-    func testTwoRunsStartedInTheSameMinuteGetNoQualifierAtAll() throws {
-        let first = try summary(
-            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR", project: "Aion",
-            created: "2026-08-07T09:05:01.000Z")
-        let second = try summary(
-            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQS", project: "Aion",
-            created: "2026-08-07T09:05:59.000Z")
-        let all = labels([first, second])
-        XCTAssertNil(try XCTUnwrap(all[first.sessionKey]).qualifier)
-        XCTAssertNil(try XCTUnwrap(all[second.sessionKey]).qualifier)
-    }
+        XCTAssertEqual(labels([early])[early.sessionKey], RunLabel(project: "Aion", qualifier: nil), "one run")
 
-    /// **An adopted run has no start this app witnessed.** Its timestamp is when
-    /// the daemon first saw a hook from a conversation that may have been going
-    /// for an hour, so "started" would be a fact invented to fill a gap.
-    func testAnAdoptedRunIsNeverGivenAStartTimeItCannotVouchFor() throws {
-        let hosted = try summary(uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR", project: "Aion")
-        let adopted = try summary(
-            uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQS", project: "Aion",
-            created: "2026-08-07T11:47:00.000Z", tmux: "")
-        let all = labels([hosted, adopted])
-        XCTAssertNil(try XCTUnwrap(all[hosted.sessionKey]).qualifier)
-        XCTAssertNil(try XCTUnwrap(all[adopted.sessionKey]).qualifier)
+        let two = labels([early, later])
+        XCTAssertEqual(two[early.sessionKey], RunLabel(project: "Aion", qualifier: started(early)), "\(two)")
+        XCTAssertEqual(two[later.sessionKey], RunLabel(project: "Aion", qualifier: started(later)), "\(two)")
+
+        let tied = labels([early, sameMinute])
+        XCTAssertNil(try XCTUnwrap(tied[early.sessionKey]).qualifier, "\(tied)")
+        XCTAssertNil(try XCTUnwrap(tied[sameMinute.sessionKey]).qualifier, "\(tied)")
     }
 
     func testATimestampThatDoesNotParseWithholdsTheQualifierRatherThanGuessing() throws {

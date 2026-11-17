@@ -47,7 +47,7 @@ final class CatchUpScreenTests: XCTestCase {
         frame(
             """
             {"type":"sessions","sessions":[{"session_uid":"\(a)","session_id":"cc-1",\
-            "tmux_session":"cc-1","cwd":"/tmp/a","lifecycle":"live","link":"attached",\
+            "cwd":"/tmp/a","lifecycle":"live","link":"attached",\
             "last_seq":\(lastSeq),"created_at":"2026-10-16T10:00:00Z",\
             "updated_at":"2026-10-16T10:00:00Z","blocked_on":[]}]}
             """)
@@ -106,7 +106,7 @@ final class CatchUpScreenTests: XCTestCase {
         let scene = try XCTUnwrap(
             UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         return Host(
-            SessionDetailView(route: SessionRoute(key: a), surfaceForTesting: .constant(.timeline))
+            SessionDetailView(route: SessionRoute(key: a))
                 .environment(model)
                 .environment(Machines(holding: model)),
             scene: scene, size: CGSize(width: 402, height: 874))

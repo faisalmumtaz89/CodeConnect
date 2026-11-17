@@ -13,7 +13,7 @@ final class ProjectLabelWireTests: XCTestCase {
 
     private let base = """
         "session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",\
-        "tmux_session":"cc-1","cwd":"/srv/dev/code/Aion",\
+        "cwd":"/srv/dev/code/Aion",\
         "lifecycle":"live","link":"attached","last_seq":7,\
         "created_at":"2026-08-07T10:00:00.000Z","updated_at":"2026-08-07T10:00:00.000Z"
         """

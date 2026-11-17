@@ -40,7 +40,7 @@ struct HostedSettingsSheet: View {
                         case .hostedReadOnly(let modelFact):
                             readOnly(modelFact)
                         case .deferToOtherPath:
-                            // A tmux or Codex run, which these menus do not speak for: it says so.
+                            // An agent these menus do not speak for: it says so.
                             // Handled, not defaulted, so the picker is never drawn for such a run.
                             unavailable
                         }

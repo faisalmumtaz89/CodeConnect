@@ -33,7 +33,7 @@ final class FleetCardOrderTests: XCTestCase {
         ended: Bool = false
     ) -> String {
         """
-        {"session_uid":"\(uid)","session_id":"cc-1","tmux_session":"cc-1",
+        {"session_uid":"\(uid)","session_id":"cc-1",
          "cwd":"/tmp/\(project)","project_label":"\(project)","lifecycle":"\(ended ? "exited" : "live")",
          "link":"attached","last_seq":0,"created_at":"2026-11-08T\(created):00Z",
          "updated_at":"2026-11-08T\(updated):00Z",

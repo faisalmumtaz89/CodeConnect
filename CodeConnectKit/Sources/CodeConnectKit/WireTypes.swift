@@ -16,46 +16,6 @@ public enum Wire {
     /// **bytes, not characters**. Mirrored here so the composer can refuse
     /// before sending rather than learning it from a round trip.
     public static let maxComposeBytes = 8192
-
-    /// The live terminal's flow control, mirroring `protocol/src/ws.rs`. Bytes
-    /// ride as base64 inside the JSON frames and each direction is governed by a
-    /// credit window: a grant of `n` lets the peer send `n` more decoded bytes,
-    /// and credit is returned only once those bytes have been consumed — for
-    /// this side, once they have been fed to the terminal view. Exceeding a
-    /// window is a protocol error the daemon closes the terminal for, so these
-    /// numbers must match the Mac's exactly.
-    ///
-    /// **The two ceilings are now advertised, and these are the fallback.**
-    /// `terminal_attached` carries `max_chunk_bytes` and
-    /// `max_outstanding_credit`, and a carrier enforces what the daemon it is
-    /// talking to actually said. Hand-mirrored numbers were a version-skew trap:
-    /// they are enforced as protocol errors, so raising either at the Mac would
-    /// have killed the terminal of every phone still compiled against the old
-    /// pair. They stay here for three jobs that outlive the advertisement: the
-    /// window before it arrives (a `terminal_attach` names its own output
-    /// credit, and it is sent before any ack), the local queue bound, and the
-    /// parity test that reads the Mac's source. They are *not* here for an
-    /// older daemon: the Mac makes both fields required, and a daemon too old
-    /// to carry them is one that never sends `terminal_attached` at all,
-    /// because it does not advertise the capability the phone attaches on.
-    public enum Terminal {
-        /// The largest decoded chunk one `terminal_input` may carry.
-        public static let maxChunkBytes = 16 * 1024
-        /// What this phone grants the daemon at attach, and the ceiling it will
-        /// let outstanding credit reach in either direction.
-        public static let initialOutputCredit: UInt32 = 64 * 1024
-        /// What the daemon grants *this phone* at attach. Not this side's to
-        /// choose — it arrives in `terminal_attached` — but pinned here so a
-        /// test can drive a carrier with the window a real daemon opens rather
-        /// than one that happens to be to hand.
-        static let initialInputCredit: UInt32 = 32 * 1024
-        public static let maxOutstandingCredit: UInt32 = 256 * 1024
-        /// Geometry the daemon accepts; anything outside is refused.
-        public static let minCols = 2
-        public static let maxCols = 512
-        public static let minRows = 2
-        public static let maxRows = 256
-    }
 }
 
 // MARK: - Scalars
@@ -602,9 +562,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// `sessionID` when a tmux name has been reused, and only this tells them
     /// apart — see the "Session identity" section of `mac/README.md`.
     public let sessionUID: String
-    /// The tmux name. Display and `tmux attach` only.
+    /// The run's name. A run CodeConnect started is named by its uid.
     public let sessionID: String
-    public let tmuxSession: String
     public let cwd: String
     public let lifecycle: Lifecycle
     public let link: Link
@@ -682,7 +641,6 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
         case sessionID = "session_id"
-        case tmuxSession = "tmux_session"
         case cwd
         case lifecycle
         case link
@@ -710,7 +668,6 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessionUID = try c.decodeIfPresent(String.self, forKey: .sessionUID) ?? ""
         sessionID = try c.decode(String.self, forKey: .sessionID)
-        tmuxSession = try c.decode(String.self, forKey: .tmuxSession)
         cwd = try c.decode(String.self, forKey: .cwd)
         lifecycle = try c.decode(Lifecycle.self, forKey: .lifecycle)
         link = try c.decode(Link.self, forKey: .link)
@@ -756,13 +713,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// An adopted run: Claude Code reported it through its hooks, but nothing on
     /// the computer started or hosts it. ccd's own test is the session id's
     /// `claude:` prefix, which the hook mints for a session CodeConnect did not
-    /// launch; such a run has no tmux session either.
+    /// launch.
     var isAdopted: Bool { sessionID.hasPrefix("claude:") }
-
-    /// Started by CodeConnect itself, from an app: ccd's agent host runs it, and
-    /// ccd names it by its uid with no tmux session. A run in tmux, or an adopted
-    /// one, is neither.
-    public var startedByCodeConnect: Bool { tmuxSession.isEmpty && !isAdopted }
 
     /// Whether the phone may offer to remove this run: ccd's own rule.
     ///
@@ -980,17 +932,12 @@ public struct Capabilities: Codable, Sendable, Hashable {
     public var reportsMachineStats: Bool { advertises(["machine_stats"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     public var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
-    /// A live terminal can be opened over *this* connection. Connection-scoped,
-    /// not a build fact: a terminal is shell-equivalent authority, so the daemon
-    /// answers false for the static bootstrap token. False means the Terminal
-    /// tab must say what to fix rather than offer a session it cannot open.
-    public var servesTerminal: Bool { advertises(["terminal_pty"]) }
-    /// The daemon said no for *this* connection, rather than not saying at all
-    /// as a daemon from before the terminal does. To a paired phone that no
-    /// means the connection is not private — neither TLS, nor the daemon's
-    /// tailnet address, nor loopback — since pairing is the only other thing
-    /// the daemon gates the terminal on.
-    public var withholdsTerminal: Bool { advertised["terminal_pty"]?.boolValue == false }
+    /// This connection is private, as the daemon judges it: TLS, its tailnet
+    /// address or loopback (`private_transport`).
+    public var isPrivateTransport: Bool { advertises(["private_transport"]) }
+    /// The daemon said this connection is not private, rather than not saying at
+    /// all as an older daemon does.
+    public var saysNotPrivate: Bool { advertised["private_transport"]?.boolValue == false }
     /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
     /// false, so an older Mac simply does not offer the swipe rather than offering
     /// one that silently does nothing.
@@ -2091,22 +2038,6 @@ public enum ClientMessage: Sendable {
     /// being omitted entirely, so an old daemon that never learned the key is
     /// unaffected.
     case registerPush(token: String, environment: String, relayCredential: String?)
-    /// Open a live terminal on a hosted session. Minor 13.
-    ///
-    /// By uid, like every other session-scoped message: a tmux name is reused,
-    /// a uid is not. `outputCredit` is how many decoded bytes the daemon may
-    /// send before this phone replenishes.
-    case terminalAttach(
-        attachmentID: String, sessionUID: String, cols: Int, rows: Int, outputCredit: UInt32)
-    /// Keystrokes for the pane, base64 of the raw bytes. Spends input credit.
-    case terminalInput(attachmentID: String, base64: String)
-    /// This phone's viewport changed. Applied to the daemon's own disposable
-    /// client only, so a human at the Mac is never resized by it.
-    case terminalResize(attachmentID: String, cols: Int, rows: Int)
-    /// `bytes` of output have been consumed; grant that much more.
-    case terminalCredit(attachmentID: String, bytes: UInt32)
-    /// Close the terminal. The session and the agent are untouched.
-    case terminalDetach(attachmentID: String)
     /// **Stop a Codex session's running turn.** Minor 15 to decode, minor 17 to
     /// honour. All four fields are required — none is defaulted at the Mac.
     ///
@@ -2196,12 +2127,6 @@ extension ClientMessage: Encodable {
         case text
         case require
         case submit
-        case attachmentID = "attachment_id"
-        case cols
-        case rows
-        case outputCredit = "output_credit"
-        case bytes
-        case data
         case turnID = "turn_id"
         case trust
     }
@@ -2286,30 +2211,6 @@ extension ClientMessage: Encodable {
             // credential" means on the wire, and a present-but-null would read
             // as "relay, credential lost".
             try c.encodeIfPresent(relayCredential, forKey: .relayCredential)
-        case .terminalAttach(
-            let attachmentID, let sessionUID, let cols, let rows, let outputCredit):
-            try c.encode("terminal_attach", forKey: .type)
-            try c.encode(attachmentID, forKey: .attachmentID)
-            try c.encode(sessionUID, forKey: .sessionUID)
-            try c.encode(cols, forKey: .cols)
-            try c.encode(rows, forKey: .rows)
-            try c.encode(outputCredit, forKey: .outputCredit)
-        case .terminalInput(let attachmentID, let base64):
-            try c.encode("terminal_input", forKey: .type)
-            try c.encode(attachmentID, forKey: .attachmentID)
-            try c.encode(base64, forKey: .data)
-        case .terminalResize(let attachmentID, let cols, let rows):
-            try c.encode("terminal_resize", forKey: .type)
-            try c.encode(attachmentID, forKey: .attachmentID)
-            try c.encode(cols, forKey: .cols)
-            try c.encode(rows, forKey: .rows)
-        case .terminalCredit(let attachmentID, let bytes):
-            try c.encode("terminal_credit", forKey: .type)
-            try c.encode(attachmentID, forKey: .attachmentID)
-            try c.encode(bytes, forKey: .bytes)
-        case .terminalDetach(let attachmentID):
-            try c.encode("terminal_detach", forKey: .type)
-            try c.encode(attachmentID, forKey: .attachmentID)
         case .interrupt(let session, let requestID, let turnID, let payloadHash):
             try c.encode("interrupt", forKey: .type)
             // All four required at the Mac, so all four are plain `encode` —
@@ -2630,31 +2531,6 @@ public enum ServerMessage: Sendable {
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case testPushResult(requestID: String, result: TestPushResult)
     case diff(SessionDiff)
-    /// The terminal is live. `inputCredit` is how many decoded bytes this phone
-    /// may send before the first `terminal_credit`. Minor 13.
-    ///
-    /// `maxChunkBytes` and `maxOutstandingCredit` are **the daemon's own flow
-    /// control ceilings**. They are carried rather than assumed for one reason:
-    /// exceeding either is a protocol error the daemon closes the terminal for,
-    /// so a Mac that raised one would otherwise be killing terminals on every
-    /// phone compiled against the old number.
-    ///
-    /// Optional here, required at the Mac. That is not a compatibility window —
-    /// a daemon too old to carry them never sends this message at all — it is
-    /// this side declining to lose a whole ack over a field: `nil` falls back to
-    /// the mirrored `Wire.Terminal` constants, which is what the phone enforced
-    /// before the ceilings were advertised and what it still sends its own
-    /// attach against.
-    case terminalAttached(
-        attachmentID: String, inputCredit: UInt32, maxChunkBytes: UInt32?,
-        maxOutstandingCredit: UInt32?)
-    /// Pane bytes, base64. Spends the output credit this phone granted.
-    case terminalOutput(attachmentID: String, base64: String)
-    /// The daemon has taken `bytes` of input and grants that much more.
-    case terminalCredit(attachmentID: String, bytes: UInt32)
-    /// The terminal ended. `code` is one of the `terminal_close` strings and
-    /// `reason` is human text; terminal for this attachment id.
-    case terminalClosed(attachmentID: String, code: String, reason: String)
     /// The answer to one `interrupt`. `sessionID` and `requestID` are echoed
     /// back as the phone sent them, so correlation is exact-string on the id
     /// this end minted.
@@ -2713,13 +2589,6 @@ extension ServerMessage: Decodable {
         case result
         case code
         case message
-        case attachmentID = "attachment_id"
-        case inputCredit = "input_credit"
-        case maxChunkBytes = "max_chunk_bytes"
-        case maxOutstandingCredit = "max_outstanding_credit"
-        case bytes
-        case data
-        case reason
         case beforeSeq = "before_seq"
         case firstSeq = "first_seq"
         case error
@@ -2786,30 +2655,6 @@ extension ServerMessage: Decodable {
             self = .error(
                 code: try c.decode(String.self, forKey: .code),
                 message: try c.decode(String.self, forKey: .message))
-        case "terminal_attached":
-            self = .terminalAttached(
-                attachmentID: try c.decode(String.self, forKey: .attachmentID),
-                inputCredit: try c.decodeIfPresent(UInt32.self, forKey: .inputCredit) ?? 0,
-                // Absent stays absent rather than defaulting here: the fallback
-                // belongs where the ceiling is enforced, and a decoder that
-                // silently substituted a constant would make "the daemon said
-                // 16 KiB" and "the daemon said nothing" the same fact.
-                maxChunkBytes: try c.decodeIfPresent(UInt32.self, forKey: .maxChunkBytes),
-                maxOutstandingCredit: try c.decodeIfPresent(
-                    UInt32.self, forKey: .maxOutstandingCredit))
-        case "terminal_output":
-            self = .terminalOutput(
-                attachmentID: try c.decode(String.self, forKey: .attachmentID),
-                base64: try c.decode(String.self, forKey: .data))
-        case "terminal_credit":
-            self = .terminalCredit(
-                attachmentID: try c.decode(String.self, forKey: .attachmentID),
-                bytes: try c.decodeIfPresent(UInt32.self, forKey: .bytes) ?? 0)
-        case "terminal_closed":
-            self = .terminalClosed(
-                attachmentID: try c.decode(String.self, forKey: .attachmentID),
-                code: try c.decodeIfPresent(String.self, forKey: .code) ?? "",
-                reason: try c.decodeIfPresent(String.self, forKey: .reason) ?? "")
         case "interrupt_result":
             self = .interruptResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

@@ -55,7 +55,7 @@ final class CodexSendPathTests: XCTestCase {
     private func model(
         link: String, agent: String = "codex", uid: String = "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         interrupt: Bool = true, compose: Bool = true, claudeInterrupt: Bool = false,
-        tmux: String = "cc-1", minor: UInt32 = 19
+        minor: UInt32 = 19
     ) -> (AppModel, Wire) {
         // Its own defaults suite: the spent-material ledger is durable by
         // design, so a shared one would let the first test's uncertainty refuse
@@ -74,7 +74,7 @@ final class CodexSendPathTests: XCTestCase {
                 ]),
             minor: minor)
         model.connection.injectForTesting(
-            .sessions([Self.summary(uid: uid, agent: agent, link: link, tmux: tmux)]))
+            .sessions([Self.summary(uid: uid, agent: agent, link: link)]))
         // A running turn on the envelope, so Stop has something to name.
         model.connection.injectForTesting(
             .event(Self.turnEvent(uid: uid.isEmpty ? "cc-1" : uid)))
@@ -100,14 +100,14 @@ final class CodexSendPathTests: XCTestCase {
     }
 
     private static func summary(
-        uid: String, agent: String, link: String, runLink: String = "attached", tmux: String = "cc-1"
+        uid: String, agent: String, link: String, runLink: String = "attached"
     ) -> SessionSummary {
         let uidClause = uid.isEmpty ? "" : #""session_uid":"\#(uid)","#
         return try! JSONDecoder().decode(
             SessionSummary.self,
             from: Data(
                 """
-                {\(uidClause)"session_id":"cc-1","tmux_session":"\(tmux)",
+                {\(uidClause)"session_id":"cc-1",
                  "cwd":"/work","project_label":"work","lifecycle":"live","link":"\(runLink)",
                  "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
                  "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],
@@ -669,7 +669,7 @@ final class CodexSendPathTests: XCTestCase {
     /// Must-fail before the move: `outcomeNote` is nil for a Claude run.
     func testAHostedClaudeStopOutcomeShowsInTheSession() async {
         let (model, wire) = model(
-            link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+            link: "subscribed", agent: "claude", claudeInterrupt: true)
         wire.interruptResult = .aborted(turnID: "turn-9")
         _ = await model.stopCodexTurn(sessionKey: key())
         let note = model.outcomeNote(for: key(), lastSend: nil)
@@ -684,7 +684,7 @@ final class CodexSendPathTests: XCTestCase {
     /// Must-fail without the reset: `outcomeNote` keeps returning the stop note over the send.
     func testAHostedClaudeSendRetiresTheStaleStopNote() async {
         let (model, wire) = model(
-            link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+            link: "subscribed", agent: "claude", claudeInterrupt: true)
         wire.interruptResult = .aborted(turnID: "turn-9")
         _ = await model.stopCodexTurn(sessionKey: key())
         XCTAssertEqual(
@@ -819,7 +819,7 @@ final class CodexSendPathTests: XCTestCase {
     /// says the daemon dropped it — the identity is cleared by its request id, so the text handed
     /// back to the composer goes as a NEW send and not the "already applied" the retry would get.
     func testASendAStopCancelledDropsItsRetryIdentity() async throws {
-        let (model, wire) = model(link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+        let (model, wire) = model(link: "subscribed", agent: "claude", claudeInterrupt: true)
         model.connection.sendStub = { message in
             MainActor.assumeIsolated { wire.frames.append(message) }
             throw ConnectionError.sentButUnanswered
@@ -843,7 +843,7 @@ final class CodexSendPathTests: XCTestCase {
     /// **B5 regression:** without a Stop, an unanswered send KEEPS its identity — only a
     /// `send_not_sent` notice drops one. Dropping it otherwise would re-type the same words.
     func testAnUnconfirmedSendKeepsItsIdentityWithoutAStop() async throws {
-        let (model, wire) = model(link: "subscribed", agent: "claude", claudeInterrupt: true, tmux: "")
+        let (model, wire) = model(link: "subscribed", agent: "claude", claudeInterrupt: true)
         model.connection.sendStub = { message in
             MainActor.assumeIsolated { wire.frames.append(message) }
             throw ConnectionError.sentButUnanswered

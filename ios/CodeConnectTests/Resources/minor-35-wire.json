@@ -14,6 +14,7 @@
     "hold_secs": 0,
     "hook_only_approvals": true,
     "machine_stats": true,
+    "private_transport": true,
     "prompt_identity": true,
     "push": false,
     "push_relay": false,
@@ -25,7 +26,6 @@
     "start_session": true,
     "start_worktree": true,
     "stop_run": true,
-    "terminal_pty": true,
     "test_push": false,
     "tls": false,
     "tls_active": false
@@ -44,7 +44,6 @@
         "project_label": "app",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "",
         "updated_at": "2026-11-14T08:00:00.000Z"
       }
     ],

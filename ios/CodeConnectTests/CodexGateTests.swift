@@ -692,7 +692,7 @@ final class CodexGateTests: XCTestCase {
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"\(uid)","session_id":"\(uid)","tmux_session":"\(uid)",
+                {"session_uid":"\(uid)","session_id":"\(uid)",
                  "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
                  "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
                  "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[]\(pendingJSON),

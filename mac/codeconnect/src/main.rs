@@ -142,8 +142,8 @@ codeconnect — host coding agents your iPhone can see and answer
 
 /// A command this CLI no longer has, still named on a phone screen.
 ///
-/// CodeConnect's terminal rides the paired connection, so nothing here manages
-/// SSH keys. An app from before that change asks its owner to authorise a key
+/// CodeConnect does not use SSH, so nothing here manages SSH keys. An app from
+/// before SSH was retired asks its owner to authorise a key
 /// with `codeconnect pair --ssh`, and to withdraw one with
 /// `codeconnect ssh-revoke`. Both are answered rather than refused: the person
 /// typing them is doing exactly what their screen told them to.
@@ -240,12 +240,11 @@ fn retirement_notice(retired: RetiredCommand, style: update_check::Style) -> Str
     // survives silently whenever the key sits outside the single hardcoded
     // `$HOME/.ssh/authorized_keys` or on any line outside the marker-and-key
     // pair, which is what "best-effort" and the check below are carrying.
-    let explanation = "CodeConnect does not use SSH. The Terminal tab rides the same paired\n\
-                       connection as the rest of the app, so CodeConnect never installs an SSH\n\
-                       key — and it does take one back. At startup the daemon removes the\n\
-                       entries an earlier release wrote into ~/.ssh/authorized_keys, and it\n\
-                       sweeps that file again on every revocation. It is best-effort either\n\
-                       way, and warns in its log when it cannot.";
+    let explanation = "CodeConnect does not use SSH, so it never installs an SSH key — and it\n\
+                       does take one back. At startup the daemon removes the entries an\n\
+                       earlier release wrote into ~/.ssh/authorized_keys, and it sweeps that\n\
+                       file again on every revocation. It is best-effort either way, and\n\
+                       warns in its log when it cannot.";
     let out_of_date = "The phone that asked for this is running an older version of the app.";
 
     // Where the two part company: one reader wanted to grant access, the other
@@ -260,7 +259,7 @@ fn retirement_notice(retired: RetiredCommand, style: update_check::Style) -> Str
     let remedy = match retired {
         RetiredCommand::SshPairing => format!(
             "{out_of_date}\n\
-             Update the app: its Terminal tab then connects over the paired link\n\
+             Update the app: it then connects over the paired link\n\
              with nothing to authorise.\n\n\
              Pairing a phone is unchanged:\n\n\
              {}",
@@ -268,7 +267,7 @@ fn retirement_notice(retired: RetiredCommand, style: update_check::Style) -> Str
         ),
         RetiredCommand::SshRevocation => format!(
             "{out_of_date}\n\
-             Update the app: its Terminal tab then rides the paired link, and\n\
+             Update the app: it then connects over the paired link, and\n\
              nothing in CodeConnect has a use for the key it holds. The check\n\
              below shows what is still in that file.\n\n\
              To stop a phone reaching CodeConnect, revoke its device token:\n\n\
@@ -493,12 +492,11 @@ mod tests {
         );
     }
 
-    /// Every fact the reader needs, in both answers: that SSH is gone and the
-    /// terminal rides the paired connection instead, what the daemon does to
-    /// `authorized_keys` — at startup, and again on every revocation — and
-    /// where it says so when it cannot, the one-line check that settles what is
-    /// actually left there, that the app is what is out of date — and the
-    /// command that now serves the intent they arrived with.
+    /// Every fact the reader needs, in both answers: that SSH is gone, what the
+    /// daemon does to `authorized_keys` — at startup, and again on every
+    /// revocation — and where it says so when it cannot, the one-line check that
+    /// settles what is actually left there, that the app is what is out of date —
+    /// and the command that now serves the intent they arrived with.
     #[test]
     fn the_retirement_notice_names_the_facts_that_matter() {
         use update_check::Style;
@@ -507,7 +505,6 @@ mod tests {
 
         for notice in [&pairing, &revocation] {
             assert!(notice.contains("does not use SSH"), "{notice}");
-            assert!(notice.contains("rides the same paired"), "{notice}");
             assert!(
                 notice.contains("At startup the daemon removes"),
                 "the sweep is what the daemon does, and it must be stated: {notice}"
@@ -890,15 +887,14 @@ mod tests {
             ),
             concat!(
                 "codeconnect pair --ssh is retired\n",
-                "CodeConnect does not use SSH. The Terminal tab rides the same paired\n",
-                "connection as the rest of the app, so CodeConnect never installs an SSH\n",
-                "key — and it does take one back. At startup the daemon removes the\n",
-                "entries an earlier release wrote into ~/.ssh/authorized_keys, and it\n",
-                "sweeps that file again on every revocation. It is best-effort either\n",
-                "way, and warns in its log when it cannot.\n",
+                "CodeConnect does not use SSH, so it never installs an SSH key — and it\n",
+                "does take one back. At startup the daemon removes the entries an\n",
+                "earlier release wrote into ~/.ssh/authorized_keys, and it sweeps that\n",
+                "file again on every revocation. It is best-effort either way, and\n",
+                "warns in its log when it cannot.\n",
                 "\n",
                 "The phone that asked for this is running an older version of the app.\n",
-                "Update the app: its Terminal tab then connects over the paired link\n",
+                "Update the app: it then connects over the paired link\n",
                 "with nothing to authorise.\n",
                 "\n",
                 "Pairing a phone is unchanged:\n",
@@ -935,15 +931,14 @@ mod tests {
             ),
             concat!(
                 "codeconnect ssh-revoke is retired\n",
-                "CodeConnect does not use SSH. The Terminal tab rides the same paired\n",
-                "connection as the rest of the app, so CodeConnect never installs an SSH\n",
-                "key — and it does take one back. At startup the daemon removes the\n",
-                "entries an earlier release wrote into ~/.ssh/authorized_keys, and it\n",
-                "sweeps that file again on every revocation. It is best-effort either\n",
-                "way, and warns in its log when it cannot.\n",
+                "CodeConnect does not use SSH, so it never installs an SSH key — and it\n",
+                "does take one back. At startup the daemon removes the entries an\n",
+                "earlier release wrote into ~/.ssh/authorized_keys, and it sweeps that\n",
+                "file again on every revocation. It is best-effort either way, and\n",
+                "warns in its log when it cannot.\n",
                 "\n",
                 "The phone that asked for this is running an older version of the app.\n",
-                "Update the app: its Terminal tab then rides the paired link, and\n",
+                "Update the app: it then connects over the paired link, and\n",
                 "nothing in CodeConnect has a use for the key it holds. The check\n",
                 "below shows what is still in that file.\n",
                 "\n",

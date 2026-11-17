@@ -29,7 +29,7 @@ final class FleetStatusTests: XCTestCase {
             from: Data(
                 """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
-                 "tmux_session":"cc-1","cwd":"/tmp/x","lifecycle":"\(lifecycle)",
+                 "cwd":"/tmp/x","lifecycle":"\(lifecycle)",
                  "link":"\(link)","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
                  "updated_at":"2026-08-02T10:00:00Z","blocked_on":[\(ids)]}
                 """.utf8))

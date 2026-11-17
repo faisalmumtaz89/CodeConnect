@@ -113,11 +113,6 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(model, "sonnet (claude-sonnet-5-5)")
     }
 
-    /// A terminal (tmux) Claude run keeps its own picker: this entry draws nothing.
-    func testATmuxClaudeRunDefersToTheOtherPath() throws {
-        XCTAssertEqual(RunSettings.of(summary: try summary("session_tmux_live")), .deferToOtherPath)
-    }
-
     /// Each answer class words itself as the control should show it: the applied cases name the setting
     /// and the value's label, now or from the next message; the refusals and the indeterminate carry
     /// the agent's own sentence verbatim.

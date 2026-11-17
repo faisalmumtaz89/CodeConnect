@@ -24,7 +24,7 @@ final class DeckCatchUpTests: XCTestCase {
         frame(
             """
             {"type":"sessions","sessions":[{"session_uid":"\(a)","session_id":"cc-1",\
-            "tmux_session":"cc-1","cwd":"/tmp/a","lifecycle":"live","link":"attached",\
+            "cwd":"/tmp/a","lifecycle":"live","link":"attached",\
             "last_seq":\(lastSeq),"created_at":"2026-10-16T10:00:00Z",\
             "updated_at":"2026-10-16T10:00:00Z","blocked_on":[]}]}
             """)

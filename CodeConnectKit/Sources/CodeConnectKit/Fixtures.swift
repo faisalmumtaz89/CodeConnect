@@ -369,7 +369,7 @@ enum Fixtures {
         "delete_session":true,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,\
-        "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
+        "prompt_identity":true,"command_catalog":true,"private_transport":true,\
         "hook_only_approvals":true,"start_session":true,"start_worktree":true,"browse_folders":true},\
         "machine_name":"Jordan’s Mac Studio","machine_os":"macos",\
         "device_name":"iPhone"}
@@ -377,10 +377,11 @@ enum Fixtures {
 
     /// The sample fleet's ack: exactly what the sample serves and nothing
     /// more — the demo daemon's own rule, "an action this server cannot
-    /// perform is not offered". `capture`, `delete_session`,
-    /// `command_catalog` and `terminal_pty` are false because each one's
-    /// request rides the connection, and the sample has none: advertising
-    /// them dresses a dead end as a control. `send_text` stays true — typing
+    /// perform is not offered". `delete_session` and `command_catalog` are
+    /// false because each one's request rides the connection, and the sample
+    /// has none: advertising them dresses a dead end as a control.
+    /// `private_transport` is false because there is no connection to vouch
+    /// for. `send_text` stays true — typing
     /// is answered in sample vocabulary, not hidden — and `diff` is true
     /// because the sample preloads its own.
     private static let sampleHelloAckJSON = """
@@ -391,7 +392,7 @@ enum Fixtures {
         "delete_session":false,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,\
-        "prompt_identity":true,"command_catalog":false,"terminal_pty":false,\
+        "prompt_identity":true,"command_catalog":false,"private_transport":false,\
         "hook_only_approvals":true},\
         "device_name":"iPhone"}
         """
@@ -419,7 +420,7 @@ enum Fixtures {
             with: "\"machine_name\":\"build-server-eu-west-1\",\"machine_os\":\"linux\"")
         let session = { (id: String, name: String, seq: Int) in
             """
-            {"session_id":"\(id)","tmux_session":"\(id)","cwd":"/home/jordan/\(name)",\
+            {"session_id":"\(id)","cwd":"/home/jordan/\(name)",\
             "project_label":"\(name)","lifecycle":"live","link":"attached",\
             "last_seq":\(seq),"created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
             """
@@ -465,7 +466,7 @@ enum Fixtures {
         let agent = start.agent == .codex ? "\"agent\":\"codex\"," : ""
         let cwd = start.folder ?? Self.newWorktreeFolder(start)
         let summary = """
-            {"session_uid":"\(uid)","session_id":"\(id)","tmux_session":"\(id)",\(agent)\
+            {"session_uid":"\(uid)","session_id":"\(id)",\(agent)\
             "cwd":\(quoted(cwd)),"project_label":\(quoted(start.project.name)),\
             "lifecycle":"live","link":"attached","last_seq":\(start.prompt == nil ? 1 : 2),\
             "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
@@ -546,7 +547,7 @@ enum Fixtures {
                 (variant == .stacked || variant == .wideTool || variant == .mcpApproval) && index == 4
             let agent = codex ? "\"agent\":\"codex\"," : ""
             return """
-                {"session_id":"\(id)","tmux_session":"\(id)",\(agent)\
+                {"session_id":"\(id)",\(agent)\
                 "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"live","link":"attached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
@@ -560,7 +561,7 @@ enum Fixtures {
             let index = variant.sessionCount + offset + 1
             return """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
-                "session_id":"fx-\(index)","tmux_session":"fx-\(index)",\
+                "session_id":"fx-\(index)",\
                 "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"exited","link":"detached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
@@ -571,15 +572,14 @@ enum Fixtures {
         return "{\"type\":\"sessions\",\"sessions\":[\(all)]}"
     }
 
-    /// The one run the `hostedSettings` fixture carries: live, started by this app (empty
-    /// `tmux_session`), with minor-39's menus in their worst shapes — the longest model detail, all
-    /// five efforts, the three permission modes — and the facts that select "sonnet", "high" and
-    /// "plan". Decoded like every other frame, so the sheet draws it through `runSettings` as it would
-    /// a daemon's own summary.
+    /// The one run the `hostedSettings` fixture carries: live, started by this app, with minor-39's
+    /// menus in their worst shapes — the longest model detail, all five efforts, the three permission
+    /// modes — and the facts that select "sonnet", "high" and "plan". Decoded like every other frame,
+    /// so the sheet draws it through `runSettings` as it would a daemon's own summary.
     private static func hostedSettingsSessionsJSON(stamp: String) -> String {
         """
         {"type":"sessions","sessions":[\
-        {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"fx-1","tmux_session":"",\
+        {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"fx-1",\
         "agent":"claude","cwd":"/Users/dev/app","project_label":"app",\
         "lifecycle":"live","link":"attached","last_seq":5,\
         "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[],\
@@ -1171,7 +1171,7 @@ enum CodexFixtures {
             "delete_session":true,"test_push":false,"push":false,"tls":false,\
             "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
             "send_text_idempotent":true,\
-            "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
+            "prompt_identity":true,"command_catalog":true,"private_transport":true,\
             "codex_interrupt":\(caps.interrupt),"codex_compose":\(caps.compose),\
             "supported_agents":["claude","codex"]},\
             "device_name":"iPhone"}
@@ -1202,18 +1202,17 @@ enum CodexFixtures {
         // The captured stream keeps the identity and the working directory the
         // daemon recorded; every hand-made state keeps `cx-1`.
         let key = fleetKey(for: state)
-        let tmux = capturedStream().compactMap(\.event).first?.sessionID ?? key
+        let sessionID = capturedStream().compactMap(\.event).first?.sessionID ?? key
         let cwd = state == .phoneTurnStream ? "/work" : "/work/p-abort-pending"
         let label = state == .phoneTurnStream ? "work" : "p-abort-pending"
         return """
             {"type":"sessions","sessions":[\
-            {"session_uid":"\(key)","session_id":"\(tmux)",\
-            "tmux_session":"\(tmux)","cwd":"\(cwd)",\
+            {"session_uid":"\(key)","session_id":"\(sessionID)","cwd":"\(cwd)",\
             "project_label":"\(label)","lifecycle":"live","link":"attached",\
             "last_seq":\(lastSeq),"created_at":"\(stamp)","updated_at":"\(stamp)",\
             "blocked_on":[\(blocked)],"agent":"codex",\
             "codex_thread_id":"\(threadID)"\(linkClause)},\
-            {"session_uid":"fx-9","session_id":"fx-9","tmux_session":"fx-9",\
+            {"session_uid":"fx-9","session_id":"fx-9",\
             "cwd":"/Users/dev/proj","project_label":"proj","lifecycle":"live",\
             "link":"attached","last_seq":0,"created_at":"\(stamp)",\
             "updated_at":"\(stamp)","blocked_on":[]}]}

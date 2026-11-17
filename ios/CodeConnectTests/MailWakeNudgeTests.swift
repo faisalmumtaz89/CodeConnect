@@ -42,7 +42,7 @@ final class MailWakeNudgeTests: XCTestCase {
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"\(last.sessionKey)","session_id":"\(last.sessionID)","tmux_session":"",
+                {"session_uid":"\(last.sessionKey)","session_id":"\(last.sessionID)",
                  "agent":"codex","cwd":"/work/proj","lifecycle":"live","link":"attached","last_seq":\(last.seq),
                  "created_at":"2026-11-13T00:00:00Z","updated_at":"2026-11-13T00:00:00Z","blocked_on":[]}
                 """.utf8))

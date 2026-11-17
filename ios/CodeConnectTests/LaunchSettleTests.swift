@@ -33,7 +33,7 @@ final class LaunchSettleTests: XCTestCase {
         let rows = entries.map { entry in
             """
             {"session_uid":"\(entry.uid)","session_id":"cc-\(entry.uid.suffix(2))",\
-            "tmux_session":"cc-\(entry.uid.suffix(2))","cwd":"/tmp/x","lifecycle":"live",\
+            "cwd":"/tmp/x","lifecycle":"live",\
             "link":"attached","last_seq":\(entry.lastSeq),\
             "created_at":"2026-10-14T10:00:00Z","updated_at":"2026-10-14T10:00:00Z",\
             "blocked_on":[]}

@@ -14,6 +14,7 @@
     "hold_secs": 0,
     "hook_only_approvals": true,
     "machine_stats": true,
+    "private_transport": false,
     "prompt_identity": true,
     "push": false,
     "push_relay": false,
@@ -25,7 +26,6 @@
     "start_session": true,
     "start_worktree": true,
     "stop_run": true,
-    "terminal_pty": false,
     "test_push": false,
     "tls": false,
     "tls_active": false
@@ -106,7 +106,6 @@
     "relaunchable": true,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "tmux_session": "",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_live": {
@@ -169,7 +168,6 @@
     "project_label": "cc-rig",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-    "tmux_session": "",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_live_events": [
@@ -224,7 +222,6 @@
     "project_label": "tmp",
     "session_id": "cc-1",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNTMX",
-    "tmux_session": "cc-1",
     "updated_at": "2026-11-15T09:00:00.000Z"
   }
 }

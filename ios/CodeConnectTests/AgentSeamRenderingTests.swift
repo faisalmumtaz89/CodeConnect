@@ -499,7 +499,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
                     SessionSummary.self,
                     from: Data(
                         """
-                        {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1",
+                        {"session_uid":"u-1","session_id":"cc-1",
                          "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
                          "last_seq":1,"created_at":"2026-08-18T09:00:00.000Z",
                          "updated_at":"2026-08-18T09:00:00.000Z","blocked_on":[],"agent":"claude"}

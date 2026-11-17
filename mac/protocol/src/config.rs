@@ -167,7 +167,7 @@ pub struct Config {
     /// Say that plaintext is acceptable on the address `ws_bind` names.
     ///
     /// The daemon's credential is a bearer token, and a connection carries the
-    /// event log, the approval path and the terminal — so plaintext is admitted
+    /// event log and the approval path — so plaintext is admitted
     /// only where the bytes are private already: loopback, or this node's own
     /// tailnet address, where WireGuard encrypts the path before it touches a
     /// network. An explicit `ws_bind` onto a LAN is neither, and with no
@@ -320,8 +320,7 @@ pub struct Config {
     /// soft `RLIMIT_NOFILE` to [`crate::fdlimit::TARGET`] as it starts, where
     /// launchd hands it 256. The daemon needs a few dozen for itself (five
     /// SQLite connections plus their WAL and SHM handles, the listeners, the log
-    /// files, the pipes of up to eight terminal
-    /// attachments), and the rest is the local IPC socket's. `64` here, on each
+    /// files), and the rest is the local IPC socket's. `64` here, on each
     /// of the tailnet and loopback listeners, keeps the network side a small
     /// share, where a larger WebSocket cap would let a remote peer squeeze out
     /// the local side.
@@ -658,10 +657,9 @@ mod tests {
     /// tailnet address and loopback.
     const WS_LISTENERS: usize = 2;
     /// Descriptors the daemon needs for itself: five SQLite connections plus
-    /// their WAL and SHM handles, the listeners, the log files, and two pipes
-    /// for each of up to eight terminal attachments. Rounded up generously —
-    /// being wrong in this direction costs a refused connection, and being wrong
-    /// in the other costs the local socket.
+    /// their WAL and SHM handles, the listeners and the log files. Rounded up
+    /// generously — being wrong in this direction costs a refused connection, and
+    /// being wrong in the other costs the local socket.
     const DAEMON_OVERHEAD: usize = 64;
 
     #[test]

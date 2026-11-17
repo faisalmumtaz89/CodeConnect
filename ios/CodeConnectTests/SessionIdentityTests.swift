@@ -163,7 +163,7 @@ final class SessionIdentityTests: XCTestCase {
         model.connection.injectForTesting(
             try decode(
                 """
-                {"type":"sessions","sessions":[{"session_id":"cc-1","tmux_session":"cc-1",
+                {"type":"sessions","sessions":[{"session_id":"cc-1",
                  "cwd":"/tmp/one","lifecycle":"live","link":"attached","last_seq":2,
                  "created_at":"2026-07-31T09:00:00.000Z","updated_at":"2026-07-31T09:00:00.000Z"}]}
                 """))
@@ -198,7 +198,7 @@ final class SessionIdentityTests: XCTestCase {
             try decode(
                 """
                 {"type":"sessions","sessions":[{"session_uid":"\(liveUID)","session_id":"cc-1",
-                 "tmux_session":"cc-1","cwd":"/tmp/live","lifecycle":"live","link":"attached",
+                 "cwd":"/tmp/live","lifecycle":"live","link":"attached",
                  "last_seq":1,"created_at":"2026-07-31T09:05:00.000Z",
                  "updated_at":"2026-07-31T09:05:00.000Z"}]}
                 """))
@@ -247,7 +247,7 @@ final class SessionIdentityTests: XCTestCase {
         let alone = try decodeSessions(
             """
             {"type":"sessions","sessions":[{"session_uid":"\(liveUID)","session_id":"cc-1",
-             "tmux_session":"cc-1","cwd":"/tmp/live","project_label":"live","lifecycle":"live",
+             "cwd":"/tmp/live","project_label":"live","lifecycle":"live",
              "link":"attached","last_seq":1,"created_at":"t","updated_at":"t"}]}
             """)
         XCTAssertEqual(
@@ -515,10 +515,10 @@ final class SessionIdentityTests: XCTestCase {
     private func twoRunsSharingTheName(liveSeq: UInt64, deadSeq: UInt64) -> String {
         """
         {"type":"sessions","sessions":[
-          {"session_uid":"\(deadUID)","session_id":"cc-1","tmux_session":"cc-1",
+          {"session_uid":"\(deadUID)","session_id":"cc-1",
            "cwd":"/tmp/first","lifecycle":"exited","link":"detached","last_seq":\(deadSeq),
            "created_at":"2026-07-31T09:00:00.000Z","updated_at":"2026-07-31T09:01:00.000Z"},
-          {"session_uid":"\(liveUID)","session_id":"cc-1","tmux_session":"cc-1",
+          {"session_uid":"\(liveUID)","session_id":"cc-1",
            "cwd":"/tmp/second","lifecycle":"live","link":"attached","last_seq":\(liveSeq),
            "created_at":"2026-07-31T09:05:00.000Z","updated_at":"2026-07-31T09:06:00.000Z"}]}
         """

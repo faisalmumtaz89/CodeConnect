@@ -32,12 +32,11 @@ h2 = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
 rustls-native-certs = { workspace = true }
-# The terminal wire carries raw pane bytes as base64 inside the existing JSON
-# frames. See `terminal.rs` for the carrier itself.
-base64 = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# TEST-ONLY. The tests write PEM certificates, whose bodies are base64.
+base64 = { workspace = true }
 # `test-util` for the paused clock a test runs on when its timing must not depend on how
 # busy the machine is.
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

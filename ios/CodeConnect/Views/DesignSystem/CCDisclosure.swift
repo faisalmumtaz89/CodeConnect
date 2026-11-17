@@ -108,8 +108,8 @@ struct CCDisclosure<Content: View>: View {
                 // text edge every other heading holds. It is literally the
                 // `micro` token — the word that names a group — and it sat on
                 // the container's own edge while the verbatim block underneath
-                // it now lands on the content column: measured on the gallery's
-                // `terminal` page, label 16.00 against block text 52.00, a third
+                // it now lands on the content column: measured in the gallery,
+                // label 16.00 against block text 52.00, a third
                 // edge inside one component. The *content* still gets inset 0
                 // and the full measure; it is only the heading that moves.
                 .padding(.leading, CCColumn.step(from: columnInset, scaledDot: scaledDot))

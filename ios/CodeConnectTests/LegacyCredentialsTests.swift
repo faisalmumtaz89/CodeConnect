@@ -28,12 +28,12 @@ final class LegacyCredentialsTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         defaults.set("retired", forKey: "codeconnect.ssh.host")
-        defaults.set(12, forKey: "codeconnect.terminal.fontSize")
+        defaults.set(12, forKey: "codeconnect.diff.fontSize")
 
         LegacyCredentials.purge(defaults: defaults)
 
         XCTAssertNil(defaults.object(forKey: "codeconnect.ssh.host"))
-        XCTAssertEqual(defaults.integer(forKey: "codeconnect.terminal.fontSize"), 12)
+        XCTAssertEqual(defaults.integer(forKey: "codeconnect.diff.fontSize"), 12)
     }
 
     /// The other half of the purge: the two Keychain accounts an earlier

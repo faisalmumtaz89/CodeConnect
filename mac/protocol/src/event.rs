@@ -471,9 +471,8 @@ pub struct SessionSummary {
     /// tells them apart.
     #[serde(default)]
     pub session_uid: String,
-    /// The tmux session name. Display and `codeconnect attach` only.
+    /// The run's name. A run CodeConnect started is named by its uid.
     pub session_id: String,
-    pub tmux_session: String,
     pub cwd: String,
     pub lifecycle: Lifecycle,
     pub link: Link,
@@ -759,7 +758,6 @@ mod tests {
         let older = serde_json::json!({
             "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
             "session_id": "cc-1",
-            "tmux_session": "cc-1",
             "cwd": "/Users/dev/Aion",
             "lifecycle": "live",
             "link": "detached",
@@ -769,7 +767,7 @@ mod tests {
         });
         let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
         assert_eq!(decoded.project_label, "");
-        assert_eq!(decoded.session_id, "cc-1", "the handle survives for attach");
+        assert_eq!(decoded.session_id, "cc-1", "the run's name survives");
     }
 
     #[test]
@@ -780,7 +778,6 @@ mod tests {
         let summary = |uid: &str, lifecycle| SessionSummary {
             session_uid: uid.into(),
             session_id: "cc-1".into(),
-            tmux_session: "cc-1".into(),
             cwd: "/tmp".into(),
             project_label: "tmp".into(),
             lifecycle,
@@ -847,7 +844,6 @@ mod tests {
         let older = serde_json::json!({
             "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
             "session_id": "cc-1",
-            "tmux_session": "cc-1",
             "cwd": "/Users/dev/Aion",
             "lifecycle": "live",
             "link": "detached",
@@ -877,7 +873,6 @@ mod tests {
         let older = serde_json::json!({
             "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
             "session_id": "cc-1",
-            "tmux_session": "cc-1",
             "cwd": "/Users/dev/Aion",
             "lifecycle": "live",
             "link": "detached",
@@ -940,7 +935,6 @@ mod tests {
         let older = serde_json::json!({
             "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
             "session_id": "cc-1",
-            "tmux_session": "cc-1",
             "cwd": "/Users/dev/Aion",
             "lifecycle": "live",
             "link": "detached",

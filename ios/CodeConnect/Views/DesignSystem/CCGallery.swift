@@ -30,8 +30,6 @@ import SwiftUI
             case indicators
             case controls
             case feedback
-            /// The terminal's own furniture, plus the three shapes a wait takes.
-            case terminal
             /// The diff grid's primitives, drawn as a grid.
             case diff
 
@@ -39,8 +37,6 @@ import SwiftUI
         }
 
         @State private var page: Page
-        @State private var segment: Surface = .timeline
-        @State private var threeWay: Density = .comfortable
         @State private var fieldText = ""
         @State private var monoField = "100.64.12.34:8765"
         @State private var errorField = "not-a-token"
@@ -48,9 +44,6 @@ import SwiftUI
         @State private var unlabelled = ""
         @State private var loadingButton = false
         @State private var lastAction = "-"
-
-        enum Surface: String, Hashable { case timeline, terminal }
-        enum Density: String, Hashable { case compact, comfortable, loose }
 
         init(page: Page = .foundations) {
             // Lets the screenshot harness open straight onto a page:
@@ -120,19 +113,16 @@ import SwiftUI
             case .controls:
                 fieldSection
                 voiceButtonSection
-                segmentedSection
+                disclosureSection
                 monoSection
                 hunkHeaderSection
             case .feedback:
                 bannerSection
                 screenMarkSection
                 waitSection
-                gapSection
-            case .terminal:
-                keyCapSection
-                disclosureSection
                 progressSection
                 scannerSection
+                gapSection
             case .diff:
                 diffChipSection
                 diffGridSection
@@ -177,8 +167,7 @@ import SwiftUI
                 CCProse(
                     "Every component under `Views/DesignSystem/` has a page here, dark only. "
                         + "A component with no reachable render cannot be measured, so nothing "
-                        + "claimed about it can be checked, which is how `CCKeyCap` spent a "
-                        + "long time being called a 44pt control.",
+                        + "claimed about it can be checked.",
                     style: CC.type.callout, color: CC.text.secondary
                 )
                 .fixedSize(horizontal: false, vertical: true)
@@ -196,7 +185,6 @@ import SwiftUI
         private var foundationsSection: some View {
             section("Foundations") { surfaceLadder }
             section("Syntax") { syntaxSpecimen }
-            section("ANSI") { ansiSpecimen }
             section("Type") { typeSpecimen }
         }
 
@@ -250,70 +238,6 @@ import SwiftUI
                 .ccType(CC.type.monoSmall)
                 .lineLimit(1)
         }
-
-        /// The terminal's 16-colour table. Ten of the sixteen are palette tokens
-        /// under another name; what has to hold is that no bright is darker than
-        /// its normal and that nothing here belongs to a different family.
-        private var ansiSpecimen: some View {
-            VStack(alignment: .leading, spacing: CC.space.xs) {
-                Text("ANSI - 16 COLOURS, NORMAL OVER BRIGHT")
-                    .ccType(CC.type.micro)
-                    .foregroundStyle(CC.text.tertiary)
-
-                ForEach(0..<2, id: \.self) { half in
-                    HStack(spacing: CC.space.xxs) {
-                        ForEach(0..<8, id: \.self) { index in
-                            VStack(spacing: 2) {
-                                RoundedRectangle(cornerRadius: CC.radius.sm, style: .continuous)
-                                    .fill(CC.ansi.table[half * 8 + index].color)
-                                    .frame(height: 28)
-                                    .overlay {
-                                        RoundedRectangle(
-                                            cornerRadius: CC.radius.sm, style: .continuous
-                                        )
-                                        .strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
-                                    }
-                                Text("\(half * 8 + index)")
-                                    .ccType(CC.type.monoSmall)
-                                    .foregroundStyle(CC.text.tertiary)
-                            }
-                        }
-                    }
-                }
-
-                Text(
-                    "0 black · 1 red · 2 green · 3 yellow · 4 blue · 5 magenta · 6 cyan · 7 white, then the brights. Black and bright black are the two below AA and the two that must be, ANSI black is a background, bright black is the dim slot."
-                )
-                .ccType(CC.type.footnote)
-                .foregroundStyle(CC.text.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                // Foreground on background, as the terminal actually draws it.
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(Self.ansiNames.enumerated()), id: \.offset) { index, name in
-                        HStack(spacing: CC.space.xs) {
-                            Text("\(name) text")
-                                .ccType(CC.type.monoSmall)
-                                .foregroundStyle(CC.ansi.table[index].color)
-                            Text("bright")
-                                .ccType(CC.type.monoSmall)
-                                .foregroundStyle(CC.ansi.table[index + 8].color)
-                        }
-                    }
-                }
-                .padding(CC.space.xs)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(CC.ansi.background)
-                .overlay {
-                    RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous)
-                        .strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
-                }
-            }
-        }
-
-        private static let ansiNames = [
-            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-        ]
 
         private var surfaceLadder: some View {
             VStack(alignment: .leading, spacing: CC.space.xs) {
@@ -1111,30 +1035,6 @@ import SwiftUI
                 .foregroundStyle(CC.text.tertiary)
         }
 
-        // MARK: Segmented
-
-        private var segmentedSection: some View {
-            section("CCSegmented") {
-                VStack(alignment: .leading, spacing: CC.space.sm) {
-                    CCSegmented(
-                        selection: $segment,
-                        options: [
-                            CCSegmentedOption(.timeline, title: "Timeline", icon: "list-bullets"),
-                            CCSegmentedOption(.terminal, title: "Terminal", icon: "terminal-window"),
-                        ],
-                        accessibilityLabel: "Session surface")
-                    CCSegmented(
-                        selection: $threeWay,
-                        options: [
-                            CCSegmentedOption(.compact, title: "Compact"),
-                            CCSegmentedOption(.comfortable, title: "Comfortable"),
-                            CCSegmentedOption(.loose, title: "Loose"),
-                        ],
-                        accessibilityLabel: "Density")
-                }
-            }
-        }
-
         // MARK: Mono
 
         private var monoSection: some View {
@@ -1421,7 +1321,7 @@ import SwiftUI
                         "In `ios/CodeConnect/Net/Sender.swift` lines 12–28",
                         style: CC.type.footnote, color: CC.text.secondary)
                     CCProse(
-                        "The terminal will stop working until this iPhone is paired again at the Mac with `codeconnect pair`.",
+                        "Approvals stop reaching this iPhone until it is paired again at the Mac with `codeconnect pair`.",
                         style: CC.type.body, color: CC.text.primary)
                     CCProse(
                         "Send to CodeConnect · `cc-tests`", style: CC.type.headline,
@@ -1552,54 +1452,6 @@ import SwiftUI
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-        }
-
-        // MARK: Terminal furniture
-
-        /// **The component this page exists for.**
-        ///
-        /// `CCKeyCap`'s only other render is a screen that needs a live
-        /// terminal, so without this page "a control is 44pt" is a claim that
-        /// can be asserted and never *checked* — exactly what the honest-target
-        /// rule exists to stop anybody making. Latched is here too, because the
-        /// modifier you cannot tell is on is the one that types the wrong
-        /// character.
-        private var keyCapSection: some View {
-            section("CCKeyCap") {
-                VStack(alignment: .leading, spacing: CC.space.sm) {
-                    note(
-                        "40pt of cap inside 44pt of finger, the 4pt is real layout, not a `contentShape` reaching outside the button. Press one: the cap contracts 6% and lifts a step"
-                    )
-                    keyRow
-                    note(
-                        "latched `ctrl` is the Vercel signature, `#EDEDED` fill, `#000` label, the same treatment a primary button and a selected chip take, because there is only one in the product"
-                    )
-                    HStack(spacing: CC.space.xs) {
-                        CCKeyCap("ctrl", spokenLabel: "Control, on", isLatched: true) {
-                            lastAction = "ctrl (latched)"
-                        }
-                        CCKeyCap("ctrl", spokenLabel: "Control, off") { lastAction = "ctrl" }
-                    }
-                }
-            }
-        }
-
-        /// The accessory row exactly as `TerminalTabView` builds it, so what is
-        /// reviewed here is what ships.
-        private var keyRow: some View {
-            HStack(spacing: CC.space.xs) {
-                CCKeyCap("esc", spokenLabel: "Escape") { lastAction = "esc" }
-                CCKeyCap("tab", spokenLabel: "Tab") { lastAction = "tab" }
-                CCKeyCap("^C", spokenLabel: "Control C, interrupt") { lastAction = "^C" }
-                CCKeyCapDivider()
-                CCKeyCap(symbol: "arrow-up", spokenLabel: "Up arrow") { lastAction = "up" }
-                CCKeyCap(symbol: "arrow-down", spokenLabel: "Down arrow") { lastAction = "down" }
-            }
-            .padding(.horizontal, CC.space.sm)
-            .padding(.vertical, CC.space.xs)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(CC.color.surfaceRaised)
-            .overlay(alignment: .top) { CCHairline() }
         }
 
         private var disclosureSection: some View {
@@ -1782,8 +1634,8 @@ import SwiftUI
                 newPath: "ios/CodeConnect/Net/Sender.swift",
                 status: .modified, hunks: [], notes: []),
             .init(
-                id: "ios/CodeConnect/Views/DesignSystem/CCKeyCap.swift", oldPath: nil,
-                newPath: "ios/CodeConnect/Views/DesignSystem/CCKeyCap.swift",
+                id: "ios/CodeConnect/Views/DesignSystem/CCStepRow.swift", oldPath: nil,
+                newPath: "ios/CodeConnect/Views/DesignSystem/CCStepRow.swift",
                 status: .added, hunks: [], notes: []),
             .init(
                 id: "mac/daemon/src/legacy.rs",
@@ -1973,8 +1825,6 @@ import SwiftUI
     #Preview("Controls") { CCGallery(page: .controls) }
     #Preview("Controls · AX5") { CCGallery(page: .controls).dynamicTypeSize(.accessibility5) }
     #Preview("Feedback") { CCGallery(page: .feedback) }
-    #Preview("Terminal") { CCGallery(page: .terminal) }
-    #Preview("Terminal · AX5") { CCGallery(page: .terminal).dynamicTypeSize(.accessibility5) }
     #Preview("Diff") { CCGallery(page: .diff) }
     #Preview("Diff · AX5") { CCGallery(page: .diff).dynamicTypeSize(.accessibility5) }
 

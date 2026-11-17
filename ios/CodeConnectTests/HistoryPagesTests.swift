@@ -1397,7 +1397,7 @@ final class HistoryPagesTests: XCTestCase {
         let scene = try XCTUnwrap(
             UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let host = Host(
-            SessionDetailView(route: SessionRoute(key: uid), surfaceForTesting: .constant(.timeline))
+            SessionDetailView(route: SessionRoute(key: uid))
                 .environment(model)
                 .environment(Machines(holding: model)),
             scene: scene, size: CGSize(width: 402, height: 874))

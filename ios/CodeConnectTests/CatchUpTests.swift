@@ -89,7 +89,7 @@ final class CatchUpTests: XCTestCase {
         let body = rows.map { row in
             let pending = row.pending.map { #"{"request_id":"\#($0.id)","seq":\#($0.seq)}"# }
             return """
-                {"session_uid":"\(row.uid)","session_id":"\(row.name)","tmux_session":"\(row.name)",\
+                {"session_uid":"\(row.uid)","session_id":"\(row.name)",\
                 "cwd":"/tmp/\(row.uid.suffix(2))","lifecycle":"\(row.lifecycle)","link":"attached",\
                 "last_seq":\(row.lastSeq),"created_at":"\(row.created)",\
                 "updated_at":"2026-10-16T10:00:00Z","blocked_on":[\(row.pending.map { "\"\($0.id)\"" }.joined(separator: ","))],\
@@ -403,7 +403,7 @@ final class CatchUpTests: XCTestCase {
             [SessionSummary].self,
             from: Data(
                 """
-                [{"session_uid":"\(a)","session_id":"cc-1","tmux_session":"cc-1","cwd":"/tmp/a",\
+                [{"session_uid":"\(a)","session_id":"cc-1","cwd":"/tmp/a",\
                 "lifecycle":"live","link":"attached","last_seq":3,"created_at":"2026-10-16T10:00:00Z",\
                 "updated_at":"2026-10-16T10:00:00Z","blocked_on":[]}]
                 """.utf8))
@@ -616,7 +616,7 @@ final class CatchUpTests: XCTestCase {
             [SessionSummary].self,
             from: Data(
                 """
-                [{"session_uid":"\(a)","session_id":"cc-1","tmux_session":"cc-1","cwd":"/tmp/a",\
+                [{"session_uid":"\(a)","session_id":"cc-1","cwd":"/tmp/a",\
                 "lifecycle":"live","link":"attached","last_seq":3,"created_at":"2026-10-16T10:00:00Z",\
                 "updated_at":"2026-10-16T10:00:00Z","blocked_on":[]}]
                 """.utf8))

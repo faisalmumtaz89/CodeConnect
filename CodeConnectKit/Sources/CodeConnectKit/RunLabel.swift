@@ -96,11 +96,7 @@ extension RunLabel {
     private static func distinctStarts(in group: [SessionSummary]) -> [String: String]? {
         var rendered: [String: String] = [:]
         for summary in group {
-            // Hosted only: `tmuxSession` empty means adopted, and the timestamp
-            // is a first sighting rather than a start.
-            guard !summary.tmuxSession.isEmpty,
-                let started = ISO8601.parse(summary.createdAt)
-            else { return nil }
+            guard let started = ISO8601.parse(summary.createdAt) else { return nil }
             rendered[summary.sessionKey] = started.formatted(.dateTime.hour().minute())
         }
         guard Set(rendered.values).count == group.count else { return nil }

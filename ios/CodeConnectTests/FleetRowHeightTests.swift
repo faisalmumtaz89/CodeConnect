@@ -29,7 +29,7 @@ final class FleetRowHeightTests: XCTestCase {
             SessionSummary.self,
             from: Data(
                 """
-                {"session_uid":"01K8N0AAAAAAAAAAAAAAAAAAAA","session_id":"cc-1","tmux_session":"cc-1",
+                {"session_uid":"01K8N0AAAAAAAAAAAAAAAAAAAA","session_id":"cc-1",
                  "cwd":"/tmp/alpha","project_label":"alpha","agent":"\(agent)",
                  "lifecycle":"\(ended ? "exited" : "live")","link":"attached","last_seq":0,
                  "created_at":"2026-11-08T09:00:00Z","updated_at":"2026-11-08T10:00:00Z",
