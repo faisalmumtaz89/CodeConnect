@@ -321,9 +321,9 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
 }
 
 /// The run `uid`'s models with the one its thread started on (its start's `answer` names it)
-/// put first when its start's check did not list it: a model the person's Codex config names,
-/// or a signed-in account's default, which Codex takes from its catalog online and the list
-/// the check kept may not carry. So the run's menu marks the model it is on, and offers it
+/// put first when its start's check did not list it: a model the person's Codex config names
+/// that Codex does not list, or an account default Codex's online catalog gained after the
+/// check kept its signed-in answer. So the run's menu marks the model it is on, and offers it
 /// again once another is picked. Codex names only its id: its row's label is the id and it
 /// lists no efforts, so while the run is on it no effort is offered (a written miss).
 async fn keep_started_model(daemon: &Daemon, uid: &str, answer: &Value) {
