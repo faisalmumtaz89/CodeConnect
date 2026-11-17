@@ -2938,7 +2938,8 @@ impl Daemon {
 
     /// **A turn is running, which is the run demonstrably moving.**
     ///
-    /// The movement is read off the wire: a Codex run's as below, and a Claude run
+    /// The movement is read off the wire: a Codex run's `turn/started`, an engine run's in
+    /// its link ([`crate::codex_host`]) and a tmux-linked run's as below, and a Claude run
     /// CodeConnect started by the `system/init` that begins each of its turns
     /// ([`crate::claude_host`]'s `apply_sdk`).
     ///
@@ -3522,10 +3523,11 @@ impl Daemon {
     /// push design exists to avoid.
     ///
     /// Nothing distinguishes the two *facts*, so nothing tries to. The two **call
-    /// sites** are distinct instead, and only the live one calls this:
-    /// `codex_link`'s `record_minted` — reached only from `observe_notification`,
-    /// and so only from a frame read off the wire — while the recovery paths hand
-    /// their events to [`Daemon::ingest`] and stop
+    /// sites** are distinct instead, and only the live one calls this: an engine run's
+    /// link ([`crate::codex_host`]) as it files a frame read off the wire, its resume's
+    /// filings never, and `codex_link`'s `record_minted` — reached only from
+    /// `observe_notification`, and so only from a frame read off the wire — while the
+    /// recovery paths hand their events to [`Daemon::ingest`] and stop
     /// there. Adding a provenance field to the event would have been the wrong fix
     /// twice over: it would break the identity that makes recovery dedup-safe, and
     /// under first-wins the marker of whichever copy arrived first would become
