@@ -102,7 +102,7 @@ public enum ClaudeCommandPolicy {
     /// feature exists to prevent. Safety is the measured lists below. Taking
     /// the argument away is stronger than a test forbidding its use: the mistake cannot be
     /// written here again.
-    public static func action(for text: String) -> CommandAction {
+    public static func action(for text: String, runSettings: RunSettings = .deferToOtherPath) -> CommandAction {
         guard let command = firstToken(text) else { return .passThrough }
         let args = arguments(of: text, command: command)
         if command == "model" {
@@ -127,6 +127,12 @@ public enum ClaudeCommandPolicy {
             }
             return .nativeClear
         }
+        // Decision 227: the refusals below guard a terminal composer, which these commands take over.
+        // They apply only where `runSettings` defers — a terminal-attached Claude run, a non-Claude run,
+        // or an unknown one (fail-safe). A run CodeConnect started sends every command; claude's answer,
+        // or its own "isn't available in this environment" line, is the row. (C5 rewrites `runSettings`
+        // so no Claude run defers; C6 then removes the dialog list and this branch with it.)
+        guard case .deferToOtherPath = runSettings else { return .passThrough }
         if unrecoverableCommands.contains(command) {
             return .blocked(
                 command: command,

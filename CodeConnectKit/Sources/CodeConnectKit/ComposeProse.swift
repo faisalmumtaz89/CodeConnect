@@ -113,7 +113,7 @@ extension AppModel {
     /// and everything else — prose, custom skills — is typed as written.
     public func submission(of draft: String, to key: String) -> Submission {
         if shownSummary(for: key)?.isCodex == true { return .codex }
-        let action = ClaudeCommandPolicy.action(for: draft)
+        let action = ClaudeCommandPolicy.action(for: draft, runSettings: runSettings(for: key))
         if case .passThrough = action { return .claude }
         return .command(action)
     }

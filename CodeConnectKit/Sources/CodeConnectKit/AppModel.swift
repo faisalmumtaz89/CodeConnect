@@ -3697,7 +3697,7 @@ public final class AppModel {
         // a denial reason, a diff comment. A deny reason that happens to
         // start with `/config` would otherwise recreate the measured Mac
         // dialog lockout through the side door.
-        switch ClaudeCommandPolicy.action(for: text) {
+        switch ClaudeCommandPolicy.action(for: text, runSettings: runSettings(for: key)) {
         case .nativeModel:
             return .refused("/model has its own control in the app — use the Model sheet.")
         case .nativeDiff:
