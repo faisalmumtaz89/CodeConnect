@@ -30,8 +30,7 @@ final class CodexGateTests: XCTestCase {
         connection.simulateConnectedForTesting()
         connection.simulateCapabilitiesForTesting(
             Capabilities(
-                canApproveReliably: true, failMode: "fail_open", answerPath: .codexResponse,
-                sendText: true,
+                canApproveReliably: true, failMode: "fail_open", sendText: true,
                 extra: [
                     "codex_interrupt": .bool(interrupt),
                     "codex_compose": .bool(compose),
@@ -282,14 +281,10 @@ final class CodexGateTests: XCTestCase {
         model.connection.injectForTesting(
             .sessions([
                 Self.summary(uid: "u-sub", agent: "codex", link: "subscribed"),
-                Self.summary(uid: "u-bound", agent: "codex", link: "bound"),
-                Self.summary(uid: "u-off", agent: "codex", link: "offline"),
                 Self.summary(uid: "u-none", agent: "codex", link: "none"),
             ]))
         XCTAssertNil(model.composeUnavailable(for: "u-sub"))
-        for key in ["u-bound", "u-off", "u-none"] {
-            XCTAssertNotNil(model.composeUnavailable(for: key), key)
-        }
+        XCTAssertNotNil(model.composeUnavailable(for: "u-none"))
     }
 
     // MARK: 1.5 — idempotence at the client
@@ -488,7 +483,7 @@ final class CodexGateTests: XCTestCase {
     /// that "nothing was sent" stands in Stop's place while the turn runs on,
     /// through the same send path and the same accessor the row reads.
     func testAStopRefusedOnThePhoneAnswersTheRunningTurn() async throws {
-        let refusal = try XCTUnwrap(CodexLinkState.offline.blockedReason(for: .stop))
+        let refusal = try XCTUnwrap(CodexLinkState.none.blockedReason(for: .stop))
         let model = AppModel(
             cache: EventCache(),
             codexSpentLedger: CodexSpentLedger(

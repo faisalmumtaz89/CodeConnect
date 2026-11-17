@@ -334,6 +334,18 @@ final class CodexTurnTimelineTests: XCTestCase {
                 "user_message", "agent_message", "reasoning", "tool_call", "tool_result",
                 "approval_request", "approval_resolved", "turn_complete",
             ])
+
+        // The card answered at the keyboard names an answerer an earlier daemon called `local`, which today's
+        // does not send: it decodes as an answerer this build does not name, and its banner says only that.
+        let atKeyboard = try XCTUnwrap(
+            events.compactMap(\.codexResolution).first {
+                if case .answered(.unknown(_), _, _) = $0 { return true }
+                return false
+            })
+        XCTAssertEqual(atKeyboard, .answered(by: .unknown("local"), decision: nil, answeredOn: nil))
+        let banner = CodexProse.resolution(atKeyboard)
+        XCTAssertEqual(banner.title, "Answered")
+        XCTAssertTrue(banner.message.contains("does not recognise"), banner.message)
     }
 
     /// **(b) Every kind in the daemon's capture reaches the screen** — the
@@ -385,7 +397,7 @@ final class CodexTurnTimelineTests: XCTestCase {
                 return nil
             },
             [false, false],
-            "both captured cards are resolved — one by the phone, one at the Mac")
+            "both captured cards are resolved — one by the phone, one by an answerer this build does not name")
         XCTAssertEqual(noticeTitles(items), ["Turn complete", "Turn complete"])
 
         // Nothing in the capture reaches the screen as nothing: 2 messages +
@@ -412,118 +424,7 @@ final class CodexTurnTimelineTests: XCTestCase {
         XCTAssertEqual(tool.durationMS, 12)
     }
 
-    // MARK: What the Mac reads back for a turn it attached to while it ran
-
-    /// **`fixtures/codex/phone-recovered-turn-0.164.0.json`**, emitted by ccd from one
-    /// real codex 0.164.0 session, in four runs; the second turn ran a command, then
-    /// replied. `attachedAfterThePrompt`: the daemon attached before the command started,
-    /// so the call (5) and its result (6) were filed live and the prompt was read back
-    /// after the turn's end (10). `attachedMidTurn`: the prompt (8) and the command (9)
-    /// were read back after the reply (5) and the end (7). `reconnectedMidTurn`: the
-    /// prompt was filed live (5) and only the command was read back (9), after the
-    /// reply (6). `reconnectedDuringTheCommand` is described on its own test.
-    private func recoveredTurn(_ run: String) throws -> [Event] {
-        let url = try XCTUnwrap(
-            Bundle(for: type(of: self))
-                .url(forResource: "phone-recovered-turn-0.164.0", withExtension: "json"),
-            "phone-recovered-turn-0.164.0.json is not in the test bundle (checked in at "
-                + "ios/CodeConnectTests/Resources/, copied from fixtures/codex/)")
-        let root = try XCTUnwrap(
-            try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue)
-        return try XCTUnwrap(root[run]?["frames"]?.arrayValue, "no run named \(run)").map {
-            try XCTUnwrap($0["event"]?.decoded(Event.self), "every event frame must decode")
-        }
-    }
-
-    /// **What the Mac reads back is drawn inside its turn**: the prompt and the command
-    /// above the reply, and the turn's end last. Drawn in arrival order the prompt sat
-    /// under "Turn complete", where it read as a new message, and the fleet took it for
-    /// work in progress.
-    func testWhatTheMacReadsBackIsDrawnInsideItsTurn() async throws {
-        let events = try recoveredTurn("attachedMidTurn")
-        XCTAssertEqual(
-            events.filter { $0.codexBelongsBefore != nil }.map(\.seq), [8, 9],
-            "the premise: the prompt and the command were read back after the turn's end")
-
-        XCTAssertEqual(
-            TimelineBuilder.build(events).map(\.seq), [2, 3, 4, 8, 9, 5, 7],
-            "the first turn as filed; then the second turn's prompt, its command, its reply "
-                + "and its end")
-
-        let state = await WireRecording.state(events)
-        XCTAssertEqual(
-            try WireRecording.status(state), .doneUnreviewed,
-            "a finished turn, not work in progress")
-    }
-
-    /// **A prompt read back goes above the command it started**, though the command's
-    /// row was filed live: the row is its call, and the result folds into it.
-    func testAPromptReadBackGoesAboveTheCommandFiledLive() async throws {
-        let events = try recoveredTurn("attachedAfterThePrompt")
-        XCTAssertEqual(
-            events.filter { $0.codexBelongsBefore != nil }.map(\.seq), [10],
-            "the premise: only the prompt was read back")
-
-        XCTAssertEqual(
-            TimelineBuilder.build(events).map(\.seq), [2, 3, 4, 10, 5, 7, 9],
-            "the second turn's prompt, its command, its reply and its end")
-
-        let state = await WireRecording.state(events)
-        XCTAssertEqual(try WireRecording.status(state), .doneUnreviewed)
-    }
-
-    /// **The same when the command's result was read back too**: its call was filed live
-    /// (5) and the link was gone before the result, so the prompt (9) and the result (10)
-    /// were read back after the turn's end (8). The result folds into the call.
-    func testAPromptReadBackGoesAboveACommandWhoseCallWasFiledLive() async throws {
-        let events = try recoveredTurn("reconnectedDuringTheCommand")
-        XCTAssertEqual(
-            events.filter { $0.codexBelongsBefore != nil }.map(\.seq), [9, 10],
-            "the premise: the prompt and the command's result were read back")
-
-        XCTAssertEqual(
-            TimelineBuilder.build(events).map(\.seq), [2, 3, 4, 9, 5, 6, 8],
-            "the second turn's prompt, its command, its reply and its end")
-
-        let state = await WireRecording.state(events)
-        XCTAssertEqual(try WireRecording.status(state), .doneUnreviewed)
-    }
-
-    /// **A reconnect mid-turn reads back only what happened while it was away**, and
-    /// that goes where it happened: the command between the prompt filed live and the
-    /// reply.
-    func testWhatAReconnectReadsBackGoesWhereItHappened() async throws {
-        let events = try recoveredTurn("reconnectedMidTurn")
-        XCTAssertEqual(
-            events.filter { $0.codexBelongsBefore != nil }.map(\.seq), [9],
-            "the premise: only the command was read back")
-
-        XCTAssertEqual(
-            TimelineBuilder.build(events).map(\.seq), [2, 3, 4, 5, 9, 6, 8],
-            "the second turn's prompt, its command, its reply and its end")
-
-        let state = await WireRecording.state(events)
-        XCTAssertEqual(try WireRecording.status(state), .doneUnreviewed)
-    }
-
-    /// **A command read back shows what it was given, not how it ended.** `attachedMidTurn` read the command back (9)
-    /// only as its terminal event, whose payload holds the outcome (status, exit code, output) and where it was read
-    /// back (`belongs_before`) beside the command line. The row's input is exactly the tool and the command line; the
-    /// outcome is the row's status and output.
-    func testACommandReadBackShowsWhatItWasGivenNotHowItEnded() throws {
-        let events = try recoveredTurn("attachedMidTurn")
-        let result = try XCTUnwrap(events.first { $0.kind == .toolResult })
-        XCTAssertEqual(
-            events.filter { $0.kind == .toolCall || $0.kind == .toolResult }.map(\.seq), [result.seq],
-            "the premise: the command came back as its result alone")
-        XCTAssertNotNil(result.payload["belongs_before"], "the premise: it carries where it was read back")
-
-        let tool = try XCTUnwrap(tools(TimelineBuilder.build(events)).first)
-        let given: JSONValue = .object([
-            "tool": try XCTUnwrap(result.payload["tool"]), "command": try XCTUnwrap(result.payload["command"]),
-        ])
-        XCTAssertEqual(tool.input, given, "the row's input shows more than what the command was given")
-    }
+    // MARK: A result drawn without its call
 
     /// **A file change read back keeps its changes**, which are what its call carried and the only place its diff is
     /// drawn. The daemon's own capture's file change result (17), its call dropped as if it were on an older page.
@@ -561,30 +462,5 @@ final class CodexTurnTimelineTests: XCTestCase {
 
         let tool = try XCTUnwrap(tools(TimelineBuilder.build(post)).first)
         XCTAssertEqual(tool.input, arguments, "the hook's arguments were dropped from its row")
-    }
-
-    /// An item whose fact is not loaded — an older page, as in a long turn the phone
-    /// holds only the end of — belongs above everything drawn, so it waits for that page
-    /// rather than sitting under the turn's end.
-    func testAReadBackItemWhoseFactIsNotLoadedWaitsForItsPage() async throws {
-        let events = try recoveredTurn("attachedMidTurn").filter { $0.seq >= 6 }
-        XCTAssertEqual(TimelineBuilder.build(events).map(\.seq), [7])
-
-        let state = await WireRecording.state(events)
-        XCTAssertEqual(try WireRecording.status(state), .doneUnreviewed)
-    }
-
-    /// Only a Codex fact is placed: the key on any other source is not the daemon's
-    /// placement, and the event keeps its seq order.
-    func testOnlyACodexFactIsPlaced() throws {
-        let events = try recoveredTurn("attachedMidTurn").map { event -> Event in
-            guard event.seq == 8 else { return event }
-            var object = try XCTUnwrap(
-                try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(event))
-                    .objectValue)
-            object["source"] = .string("daemon")
-            return try XCTUnwrap(JSONValue.object(object).decoded(Event.self))
-        }
-        XCTAssertEqual(TimelineBuilder.build(events).map(\.seq), [2, 3, 4, 9, 5, 7, 8])
     }
 }

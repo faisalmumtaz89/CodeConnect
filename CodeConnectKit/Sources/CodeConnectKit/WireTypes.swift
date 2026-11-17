@@ -129,23 +129,26 @@ public enum Lifecycle: String, Codable, Sendable, Hashable {
 /// this app has lost sight of the session, not that the agent stopped working.
 /// The two must never be conflated on any surface.
 public enum Link: String, Codable, Sendable, Hashable {
-    case attached, degraded, detached, stale
+    case attached, detached
 
-    /// An unrecognised link word from a newer daemon degrades rather than
-    /// pretending to be attached — claiming liveness we cannot justify is the
-    /// one thing this enum exists to prevent.
+    /// An unrecognised link word reads as detached rather than pretending to be
+    /// attached — claiming liveness we cannot justify is the one thing this enum
+    /// exists to prevent.
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = Link(rawValue: raw) ?? .degraded
+        self = Link(rawValue: raw) ?? .detached
     }
 }
 
 public enum ResolvedBy: String, Codable, Sendable, Hashable {
-    case phone, local, timeout, superseded
+    case phone, timeout, superseded
+    /// A resolver this build does not name, from a newer daemon or an earlier
+    /// one's record. Said so, never read as one of the others.
+    case unknown
 
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = ResolvedBy(rawValue: raw) ?? .superseded
+        self = ResolvedBy(rawValue: raw) ?? .unknown
     }
 }
 
@@ -218,16 +221,11 @@ extension AgentKind: Codable {
 
 /// **Whether this Mac can actuate on this Codex session right now** — the one
 /// fact `codex_thread_id` could never carry, because a thread id reads the same
-/// whether the control link is subscribed, merely bound, or reconnecting.
+/// whether or not the run is being watched.
 ///
-/// **Cross-checked against the Rust that landed it**:
-/// `event.rs`'s `CodexLink` is
-/// `subscribed | bound | bound_not_started | offline | none`, spelled by hand in
-/// its own pinning test rather than trusted to `rename_all`, and
-/// `#[derive(Default)] None` — so an older daemon's summary, which carries no
-/// such field, decodes as `none`. The daemon's `Unbound` deliberately folds into
-/// `offline`: what separates them is *why* there is no addressee, and the answer
-/// a client has for both is the same one.
+/// **Cross-checked against the Rust**: `event.rs`'s `CodexLink` is
+/// `subscribed | bound_not_started | none`, and `#[derive(Default)] None` — so a
+/// summary that carries no such field decodes as `none`.
 ///
 /// **The whole rule, in one line: `subscribed` actuates both verbs;
 /// `bound_not_started` actuates compose only; everything else neither.** The Mac
@@ -236,7 +234,7 @@ extension AgentKind: Codable {
 /// and Compose **with the reason**, and the daemon's own refusal sentence is what
 /// the operator reads if they ask anyway.
 ///
-/// **`bound_not_started` is protocol minor 20**; the other four words are minor
+/// **`bound_not_started` is protocol minor 20**; `subscribed` and `none` are minor
 /// 19, which build 72 shipped on 2026-09-08. So this decoder reads a strictly
 /// newer daemon than that build does, and a daemon that predates the word simply
 /// never sends it. The `unknown` arm below is what makes the reverse direction —
@@ -248,8 +246,6 @@ extension AgentKind: Codable {
 public enum CodexLinkState: Sendable, Hashable {
     /// Watching this session's thread. The only state that can actuate.
     case subscribed
-    /// Connected to the session, not yet watching its thread.
-    case bound
     /// **Bound to a thread the Mac has PROVED has never run a turn** (protocol
     /// minor 20), and therefore the one un-subscribed state a first message may
     /// be sent into.
@@ -260,15 +256,12 @@ public enum CodexLinkState: Sendable, Hashable {
     /// first turn cannot collide with one.
     ///
     /// It exists because of a dead end: on a fresh Codex session the thread has
-    /// no rollout until its first turn, so the link is stuck at `bound` — and a
-    /// composer gated on `subscribed` could never send the message that would
-    /// unstick it.
+    /// no rollout until its first turn, and a composer gated on `subscribed`
+    /// could never send the message that would start one.
     ///
     /// **Compose, and only compose.** There is no turn to stop, so Stop is not
     /// offered here — see `blockedReason(for:)`.
     case boundNotStarted
-    /// The control link is down and reconnecting.
-    case offline
     /// There is no Codex control link for this session — including every
     /// Claude session and every daemon predating the field.
     case none
@@ -278,9 +271,7 @@ public enum CodexLinkState: Sendable, Hashable {
     var rawValue: String {
         switch self {
         case .subscribed: return "subscribed"
-        case .bound: return "bound"
         case .boundNotStarted: return "bound_not_started"
-        case .offline: return "offline"
         case .none: return "none"
         case .unknown(let raw): return raw
         }
@@ -324,8 +315,6 @@ public enum CodexLinkState: Sendable, Hashable {
             case .compose: return nil
             case .stop: return "This Codex session has not started a turn yet."
             }
-        case .bound: return "\(HostDevice.current.computer("The computer")) has reached the Codex session but is not yet watching it."
-        case .offline: return "\(HostDevice.current.computer("The computer")) has lost its link to the Codex session and is reconnecting."
         case .none: return "There is no live link to this Codex session."
         case .unknown: return "\(HostDevice.current.computer("The computer")) reports a link state this app does not recognise."
         }
@@ -334,9 +323,7 @@ public enum CodexLinkState: Sendable, Hashable {
     init(wire raw: String) {
         switch raw {
         case "subscribed": self = .subscribed
-        case "bound": self = .bound
         case "bound_not_started": self = .boundNotStarted
-        case "offline": self = .offline
         case "none": self = .none
         case let other: self = .unknown(other)
         }
@@ -355,44 +342,37 @@ extension CodexLinkState: Codable {
 }
 
 /// How an answer was actually applied — an *actuation claim*, so an unknown
-/// wire value must never collapse into one this build would read as "we typed
-/// it". `.sendKeys` used to be the fallback, which meant a newer daemon's path
-/// this build had never heard of was silently reported as keystrokes it never
-/// sent. Modelled on `AnswerDecision`: a tagged single-value string, with the
-/// unknown retained in its own case rather than folded into a known one.
+/// wire value must never collapse into a known one. Modelled on
+/// `AnswerDecision`: a tagged single-value string, with the unknown retained in
+/// its own case rather than folded into a known one.
 public enum AnswerPath: Sendable, Hashable {
     /// Returned to Claude through a channel that confirms it: the hook Claude holds for the call, or, for a run
     /// started in an agent host, the host's return to the SDK's `canUseTool` request. The value names the
     /// confirmation, not the carrier.
     case hookReturn
-    case sendKeys
     /// The Codex path (minor 16): the answer was written back as the response to
     /// the app-server's own approval request. A **real** actuation, and it has
     /// to be named — without the case every successful Codex answer decoded to
     /// `.unknown`, whose whole contract is that it never claims one, so a
     /// confirmed answer rendered as unvouchable.
     case codexResponse
-    /// A path a newer daemon knows about and this build does not. Never claims
-    /// an actuation: a reader asking "did we type this?" must treat it as *not*
-    /// `send_keys`, because this build cannot vouch for how the answer landed.
+    /// A path this build does not name — a newer daemon's, or an earlier one's
+    /// `send_keys`. Never claims an actuation: this build cannot vouch for how
+    /// the answer landed.
     case unknown(String)
 
     var rawValue: String {
         switch self {
         case .hookReturn: return "hook_return"
-        case .sendKeys: return "send_keys"
         case .codexResponse: return "codex_response"
         case .unknown(let raw): return raw
         }
     }
 
-    /// Build from a wire string outside a decoder — used by `Capabilities`,
-    /// which reads `answer_path` out of its verbatim map. An unrecognised value
-    /// is retained, never coerced to `.sendKeys`.
+    /// An unrecognised value is retained, never coerced into a known one.
     init(wire raw: String) {
         switch raw {
         case "hook_return": self = .hookReturn
-        case "send_keys": self = .sendKeys
         case "codex_response": self = .codexResponse
         case let other: self = .unknown(other)
         }
@@ -425,10 +405,6 @@ public enum EventKind: Sendable, Hashable {
     case userMessage, agentMessage, reasoning
     case usage, error
     case resync, linkState
-    /// A minor-21 daemon's change to whether the phone may answer an
-    /// `AskUserQuestion` card: `{request_id, question_hold}`. The latest one for
-    /// a request wins over the card's own value.
-    case questionHold
     case other(String)
 
     var rawValue: String {
@@ -448,7 +424,6 @@ public enum EventKind: Sendable, Hashable {
         case .error: return "error"
         case .resync: return "resync"
         case .linkState: return "link_state"
-        case .questionHold: return "question_hold"
         case .other(let raw): return raw
         }
     }
@@ -470,7 +445,6 @@ public enum EventKind: Sendable, Hashable {
         case "error": self = .error
         case "resync": self = .resync
         case "link_state": self = .linkState
-        case "question_hold": self = .questionHold
         default: self = .other(rawValue)
         }
     }
@@ -849,7 +823,6 @@ public struct MenuMode: Codable, Sendable, Hashable {
 public struct Capabilities: Codable, Sendable, Hashable {
     public let canApproveReliably: Bool
     let failMode: String
-    let answerPath: AnswerPath
     let holdSecs: UInt64
     public let sendText: Bool
     let push: Bool
@@ -866,7 +839,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
     public init(
         canApproveReliably: Bool = false,
         failMode: String = "unknown",
-        answerPath: AnswerPath = .sendKeys,
         holdSecs: UInt64 = 0,
         sendText: Bool = false,
         push: Bool = false,
@@ -876,7 +848,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
     ) {
         self.canApproveReliably = canApproveReliably
         self.failMode = failMode
-        self.answerPath = answerPath
         self.holdSecs = holdSecs
         self.sendText = sendText
         self.push = push
@@ -885,7 +856,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
         var map = extra
         map["can_approve_reliably"] = .bool(canApproveReliably)
         map["fail_mode"] = .string(failMode)
-        map["answer_path"] = .string(answerPath.rawValue)
         map["hold_secs"] = .int(Int64(holdSecs))
         map["send_text"] = .bool(sendText)
         map["push"] = .bool(push)
@@ -899,8 +869,6 @@ public struct Capabilities: Codable, Sendable, Hashable {
         advertised = raw
         canApproveReliably = raw["can_approve_reliably"]?.boolValue ?? false
         failMode = raw["fail_mode"]?.stringValue ?? "unknown"
-        answerPath =
-            raw["answer_path"]?.stringValue.map(AnswerPath.init(wire:)) ?? .sendKeys
         holdSecs = (raw["hold_secs"]?.intValue).map { UInt64(max(0, $0)) } ?? 0
         sendText = raw["send_text"]?.boolValue ?? false
         push = raw["push"]?.boolValue ?? false
@@ -1161,18 +1129,12 @@ public enum QuestionHold: Sendable, Hashable {
     /// conversation the Mac shows the same question, and the first complete
     /// answer wins.
     case held
-    /// The question is on the Mac and only the Mac can answer it.
-    case atMac
-    /// The phone's hold ended; the question may still be open at the Mac.
-    case ended
     /// A word this build does not know. Never answerable.
     case unrecognised(String)
 
     init(wire: String) {
         switch wire {
         case "held": self = .held
-        case "at_mac": self = .atMac
-        case "ended": self = .ended
         default: self = .unrecognised(wire)
         }
     }
@@ -1180,8 +1142,6 @@ public enum QuestionHold: Sendable, Hashable {
     var wire: String {
         switch self {
         case .held: return "held"
-        case .atMac: return "at_mac"
-        case .ended: return "ended"
         case .unrecognised(let raw): return raw
         }
     }
@@ -1275,26 +1235,6 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         inferred ? "Closed" : decision.label
     }
 
-    /// A phone's answer to a Claude approval, as a minor-22 daemon records it:
-    /// handed to the call's own hook, which is all that is known. Claude takes
-    /// the first answer and may not use this one, so it is shown as sent, never
-    /// as confirmed and never as an answer that went missing.
-    public var wasSentToClaude: Bool { indeterminate && detail?.hasPrefix(Self.sentToClaude) == true }
-
-    /// The daemon's own words for that record (`SENT_TO_CLAUDE` in ccd), which
-    /// it follows with a note when the record could not be written. The same
-    /// whichever device sent the answer: `answeredOn` says which. A marker, not
-    /// words to show: a card shows `sentToClaudeLine(on:)`.
-    public static let sentToClaude = "Sent to Claude from a phone"
-
-    /// The line a card shows for an answer handed to Claude's hook, naming the
-    /// device that sent it by its kind. `sentHere` is for the reply to this
-    /// device's own answer: a record that names no device is then this one's.
-    public func sentToClaudeLine(on host: HostDevice = .current, sentHere: Bool = false) -> String {
-        let device = answeredOn ?? (sentHere ? AnsweredOn(host) : nil)
-        return Self.answeringDevice(device, on: host).map { "Sent to Claude from \($0)" } ?? Self.sentToClaude
-    }
-
     /// The device a paired answer came from, by its kind, or nil where the
     /// iPhone's words stay as they were: where an iPhone answered, or the record
     /// does not say (an older daemon, an answer a restart settled). A Mac reading
@@ -1315,12 +1255,11 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
 
     /// Where the answer came from, as far as the record proves it: `phone`
     /// names a paired device by its kind (`answeredOn`), and where the record
-    /// does not say, "a phone" on the iPhone and "a paired device" on a Mac;
-    /// `local` is the computer.
+    /// does not say, "a phone" on the iPhone and "a paired device" on a Mac.
     public func provenance(on host: HostDevice = .current) -> String {
         switch resolvedBy {
         case .phone: return Self.answeringDevice(answeredOn, on: host).map { "from \($0)" } ?? "from a phone"
-        case .local: return "at \(host.computer("the computer"))"
+        case .unknown: return "by an answerer this app does not recognise"
         case .timeout where detail == Self.sessionEnded: return "when the session ended"
         case .timeout: return "by timeout - nobody answered"
         case .superseded: return "superseded"
@@ -1383,14 +1322,13 @@ extension AnswerResult: Codable {
 /// Who a Codex prompt was resolved by. Decode-only, and an unrecognised actor
 /// is retained rather than coerced: nothing here may guess who acted.
 public enum ResolutionActor: Decodable, Sendable, Hashable {
-    case phone, local
+    case phone
     /// An actor a newer daemon names and this build does not.
     case unknown(String)
 
     public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
         case "phone": self = .phone
-        case "local": self = .local
         case let other: self = .unknown(other)
         }
     }
@@ -1784,41 +1722,6 @@ extension SendTextResult: Codable {
     }
 }
 
-/// What must be on screen before keys are injected. The daemon substitutes
-/// operator-configured needles for the named modes.
-public enum PromptPresence: Sendable, Hashable {
-    case inputBox
-    case permissionPrompt
-    case anyOf(needles: [String])
-}
-
-extension PromptPresence: Codable {
-    private enum CodingKeys: String, CodingKey { case mode, needles }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(String.self, forKey: .mode) {
-        case "input_box": self = .inputBox
-        case "permission_prompt": self = .permissionPrompt
-        case "any_of": self = .anyOf(needles: try c.decode([String].self, forKey: .needles))
-        case let other:
-            throw DecodingError.dataCorruptedError(
-                forKey: .mode, in: c, debugDescription: "unknown presence \(other)")
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .inputBox: try c.encode("input_box", forKey: .mode)
-        case .permissionPrompt: try c.encode("permission_prompt", forKey: .mode)
-        case .anyOf(let needles):
-            try c.encode("any_of", forKey: .mode)
-            try c.encode(needles, forKey: .needles)
-        }
-    }
-}
-
 // MARK: - Approval card
 
 /// Payload of an `approval_request` event, under the `card` key.
@@ -1837,10 +1740,8 @@ public struct ApprovalCard: Codable, Sendable, Hashable {
     /// feature level 1; absent on older daemons. Interpreting it is
     /// `RiskAssessment`'s job, not this type's.
     public let risk: WireRisk?
-    /// Whether the phone can answer it as the card was raised: on an
-    /// `AskUserQuestion` card from a minor-21 daemon, and on every Claude card
-    /// from minor 22. A later `question_hold` event overrides it — see
-    /// `ApprovalItem.questionHold`.
+    /// Whether the phone can answer it: on an `AskUserQuestion` card from a
+    /// minor-21 daemon, and on every Claude card from minor 22.
     public var questionHold: QuestionHold? = nil
     /// Whether the computer offers "Allow for this session" on this card: a
     /// hosted Claude card whose permission suggestions include a session rule
@@ -2033,8 +1934,7 @@ public enum ClientMessage: Sendable {
     case answer(
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?)
     case sendText(
-        session: String, text: String, require: PromptPresence?, submit: Bool,
-        requestID: String?, payloadHash: String?)
+        session: String, text: String, submit: Bool, requestID: String?, payloadHash: String?)
     case getDiff(session: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
@@ -2135,7 +2035,6 @@ extension ClientMessage: Encodable {
         case parent
         case name
         case text
-        case require
         case submit
         case turnID = "turn_id"
         case trust
@@ -2201,12 +2100,10 @@ extension ClientMessage: Encodable {
             // to: `ws.rs` reads `Option<String>`, and a null would decode as
             // "no scope" anyway while making the frame wrong to read.
             try c.encodeIfPresent(session, forKey: .sessionID)
-        case .sendText(
-            let session, let text, let require, let submit, let requestID, let payloadHash):
+        case .sendText(let session, let text, let submit, let requestID, let payloadHash):
             try c.encode("send_text", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(text, forKey: .text)
-            try c.encodeIfPresent(require, forKey: .require)
             try c.encode(submit, forKey: .submit)
             // Omitted, never null: the daemon reads `Option<String>` and a
             // null would say "present but empty".

@@ -24,7 +24,7 @@ final class CodexProseTests: XCTestCase {
     private var allEndings: [CodexResolution] {
         [
             .answered(by: .phone, decision: .optionId("accept"), answeredOn: nil),
-            .answered(by: .local, decision: nil, answeredOn: nil),
+            .answered(by: .unknown("local"), decision: nil, answeredOn: nil),
             .cleared(cause: .turnAborted),
             .cleared(cause: .turnCompleted),
             .cleared(cause: .superseded),
@@ -64,21 +64,6 @@ final class CodexProseTests: XCTestCase {
             item.message.contains("still working"),
             "the reader has to be told the session is not finished: \(item.message)")
         XCTAssertFalse(item.message.contains("finished before"), item.message)
-    }
-
-    /// **The honesty this whole envelope exists for.** A keyboard answer carries
-    /// no decision, because upstream carries no provenance for one — so nothing
-    /// may name a choice, and the copy has to say it does not know rather than
-    /// leaving a blank the reader fills in themselves.
-    func testAnsweredByLocalWithNoDecisionNeverNamesAChoice() {
-        let banner = CodexProse.resolution(.answered(by: .local, decision: nil, answeredOn: nil))
-        for word in ["accept", "cancel", "Allowed", "Denied", "approved"] {
-            XCTAssertFalse(
-                banner.message.lowercased().contains(word.lowercased()),
-                "\(word) must not appear: \(banner.message)")
-        }
-        let chosen = CodexProse.whatWasChosen(.answered(by: .local, decision: nil, answeredOn: nil))
-        XCTAssertTrue(chosen.hasPrefix("Not known"), chosen)
     }
 
     /// When the wire *did* say, the option id is shown verbatim — it is the
@@ -193,7 +178,7 @@ final class CodexProseTests: XCTestCase {
                 card: claude, agent: .claude, hold: .held, hookOnlyApprovals: true),
             .allowDeny(allowForSession: false))
         for (hold, hookOnly) in [
-            (QuestionHold.held, false), (.atMac, true), (.ended, true), (nil, true),
+            (QuestionHold.held, false), (.unrecognised("at_mac"), true), (nil, true),
         ] {
             XCTAssertEqual(
                 DecisionCard.answerSurface(
@@ -349,7 +334,7 @@ final class CodexProseTests: XCTestCase {
             "Nothing is running to stop.")
 
         for link in [
-            CodexLinkState.bound, .boundNotStarted, .offline, .none, .unknown("teleported"),
+            CodexLinkState.boundNotStarted, .none, .unknown("teleported"),
         ] {
             XCTAssertNotNil(
                 CodexProse.stopUnavailable(
@@ -423,15 +408,12 @@ final class CodexProseTests: XCTestCase {
                 agent: .codex, daemonUnderstandsCompose: false, link: .subscribed))
         XCTAssertNotNil(
             CodexProse.composeUnavailable(
-                agent: .codex, daemonUnderstandsCompose: true, link: .offline))
+                agent: .codex, daemonUnderstandsCompose: true, link: .none))
         // **The state that composes without being subscribed.** The Mac has proved
         // this thread has never run a turn, so the first message can be sent.
         XCTAssertNil(
             CodexProse.composeUnavailable(
                 agent: .codex, daemonUnderstandsCompose: true, link: .boundNotStarted))
-        XCTAssertNotNil(
-            CodexProse.composeUnavailable(
-                agent: .codex, daemonUnderstandsCompose: true, link: .bound))
     }
 
     /// **Two states actuate, and each actuates exactly what it can.** An
@@ -459,7 +441,7 @@ final class CodexProseTests: XCTestCase {
         XCTAssertFalse(CodexLinkState.boundNotStarted.canActuate(.stop))
         XCTAssertNotNil(CodexLinkState.boundNotStarted.blockedReason(for: .stop))
 
-        for state in [CodexLinkState.bound, .offline, .none, .unknown("future")] {
+        for state in [CodexLinkState.none, .unknown("future")] {
             for ask in [CodexLinkState.Ask.compose, .stop] {
                 XCTAssertFalse(state.canActuate(ask), "\(state)/\(ask)")
                 XCTAssertNotNil(state.blockedReason(for: ask), "\(state)/\(ask) must say why")

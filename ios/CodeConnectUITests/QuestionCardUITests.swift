@@ -195,17 +195,17 @@ final class QuestionCardUITests: XCTestCase {
 
     /// A question only the Mac can answer is still shown whole, its previews
     /// included, so the reader knows what is being asked there.
-    func testAQuestionAtTheMacShowsItsPreviews() {
+    func testAQuestionOnlyTheMacCanAnswerShowsItsPreviews() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_QUESTION", "at-mac",
+            "-CC_QUESTION", "old-mac",
             "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
         app.launch()
         // Only the Mac can answer it, so its row offers View, not Answer.
         XCTAssertTrue(
-            app.staticTexts["Asking at the computer"].waitForExistence(timeout: 30),
+            app.staticTexts["Answer at the computer"].waitForExistence(timeout: 30),
             "the row says where the question is")
         XCTAssertFalse(app.buttons["Answer"].exists)
         app.buttons["View"].firstMatch.tap()

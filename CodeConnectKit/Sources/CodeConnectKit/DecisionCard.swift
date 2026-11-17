@@ -340,17 +340,9 @@ extension DecisionCard {
                 tone: .success, icon: "check-circle-fill")
         // The one honesty this case exists to protect: the daemon accepted the
         // answer but could not confirm it reached the agent, so it never reads
-        // as confirmed or applied ("Unconfirmed", or "Sent" for an answer handed
-        // to Claude's hook). Its provenance never uses the actuation phrase,
-        // which would claim the exact actuation the daemon could not confirm.
-        case .indeterminate(let outcome) where outcome.wasSentToClaude:
-            return Banner(
-                title: "Sent",
-                // This device's own answer: a replayed one stays a duplicate (`AnswerAttempt.classify(duplicate:)`).
-                message: "\(outcome.decisionLabel) · \(outcome.sentToClaudeLine(on: host, sentHere: true))",
-                provenance: "Claude takes the first answer, \(host.computer("the computer"))’s or this one, "
-                    + "so whether it used this one is not known.",
-                tone: .warning, icon: "question-fill")
+        // as confirmed or applied ("Unconfirmed"). Its provenance never uses the
+        // actuation phrase, which would claim the exact actuation the daemon
+        // could not confirm.
         case .indeterminate(let outcome):
             return Banner(
                 title: "Unconfirmed",
@@ -363,10 +355,6 @@ extension DecisionCard {
         case .duplicate(let outcome, let stale):
             let original =
                 "Original outcome: \(outcome.decisionLabel) \(outcome.provenance(on: host)), \(outcome.resolvedAt)."
-                + (outcome.inferred
-                    ? " \(host.computer("Your computer")) inferred that from the prompt disappearing "
-                        + "rather than observing the answer."
-                    : "")
             return Banner(
                 title: "Duplicate", message: "Already answered",
                 provenance: stale ? original + " The card you answered was also out of date." : original,
@@ -405,7 +393,6 @@ extension DecisionCard {
     /// keystrokes or a hook return nobody can vouch for.
     static func actuationPhrase(for path: AnswerPath, on host: HostDevice = .current) -> String {
         switch path {
-        case .sendKeys: return "typed into the session on \(host.computer("your computer"))"
         case .hookReturn: return "handed straight to Claude"
         // A real actuation, and it reads like one. Codex asked, over its own
         // control link, and this is the answer written back to that request —
@@ -423,18 +410,11 @@ extension DecisionCard {
         for outcome: AnswerOutcome, now: Date, on host: HostDevice = .current
     ) -> Banner {
         let age = Format.ago(since: outcome.resolvedDate, now: now)
-        let title: String
-        let message: String
-        if outcome.wasSentToClaude {
-            title = "Sent"
-            message = "\(outcome.decisionLabel) · \(outcome.sentToClaudeLine(on: host)) · \(age)"
-        } else {
-            title = outcome.indeterminate ? "Unconfirmed" : "Already resolved"
-            let ending = "\(outcome.decisionLabel) \(outcome.provenance(on: host)) · \(age)"
-            message =
-                outcome.indeterminate
-                ? "\(ending), but \(host.computer("your computer")) couldn’t confirm it reached the agent" : ending
-        }
+        let title = outcome.indeterminate ? "Unconfirmed" : "Already resolved"
+        let ending = "\(outcome.decisionLabel) \(outcome.provenance(on: host)) · \(age)"
+        let message =
+            outcome.indeterminate
+            ? "\(ending), but \(host.computer("your computer")) couldn’t confirm it reached the agent" : ending
         return Banner(
             title: title, message: message, provenance: nil, tone: outcome.indeterminate ? .warning : .info,
             icon: outcome.indeterminate ? "question" : "seal-check")
@@ -530,7 +510,7 @@ extension DecisionCard {
     /// `hookOnlyApprovals` is nil while nothing is known of the computer — its link is down and took its capabilities
     /// with it. Unknown is not old: the card then says what is known, which is the link.
     public static func claudeUnanswerableReason(
-        isQuestion: Bool, hookOnlyApprovals: Bool?, linkReason: String?, hold: QuestionHold?,
+        isQuestion: Bool, hookOnlyApprovals: Bool?, linkReason: String?,
         computer: String? = nil, on host: HostDevice = .current
     ) -> String {
         if isQuestion { return "This card cannot be answered from here." }
@@ -538,9 +518,6 @@ extension DecisionCard {
         guard hookOnlyApprovals else {
             return "\(host.computer("This computer", named: computer))'s CodeConnect is too old to answer Claude's "
                 + "approvals from the \(host.noun). Update it, or answer at \(host.computer("the computer", named: computer))."
-        }
-        if hold == .atMac {
-            return "Claude is asking this at \(host.computer("the computer", named: computer)), so answer it there."
         }
         return cannotAnswerHere(computer: computer, on: host)
     }

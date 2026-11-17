@@ -30,8 +30,8 @@ public struct ApprovalItem: Sendable, Hashable, Identifiable {
     ///
     /// Kept beside `outcome` rather than mapped onto it, because the two say
     /// different things and mapping would have to invent the difference: a
-    /// `cleared(turn_aborted)` is not "denied", an `answered(by: .local)` names
-    /// no decision at all, and `AnswerOutcome` has no way to express either
+    /// `cleared(turn_aborted)` is not "denied", an answer may name no decision
+    /// at all, and `AnswerOutcome` has no way to express either
     /// without claiming something. Both make the card non-actionable; only this
     /// one is allowed to describe a Codex ending.
     public var codexResolution: CodexResolution?
@@ -40,9 +40,8 @@ public struct ApprovalItem: Sendable, Hashable, Identifiable {
     public var paneSnapshot: String?
     /// The daemon's own classification, or nil on a daemon too old to send one.
     public var risk: WireRisk?
-    /// Whether the phone can answer this `AskUserQuestion` card now: the latest
-    /// of the card's own `question_hold` and the `question_hold` events after
-    /// it. Nil on every other card and from a daemon below minor 21.
+    /// Whether the phone can answer this card now: the card's own
+    /// `question_hold`. Nil from a daemon below minor 21.
     public var questionHold: QuestionHold? = nil
 
     /// Whether this card is still waiting on a human. **Either** ending
@@ -203,49 +202,6 @@ public enum TimelineBuilder {
         return 0
     }
 
-    /// **The events in the order they happened.** The log is append-only, so a Codex
-    /// item the Mac read back from the thread's history is filed after facts that came
-    /// later in its turn, and names the one it belongs before (`codexBelongsBefore`).
-    /// It is placed immediately before that fact — and so moves with it when that fact
-    /// was read back too. One whose fact is not among `events` belongs to an older page
-    /// not loaded yet, and is left out until that page is. Everything else keeps its
-    /// seq order.
-    static func inHistoryOrder(_ events: [Event]) -> [Event] {
-        var seqByID: [String: UInt64] = [:]
-        for event in events where event.source == .codex {
-            if let id = event.sourceEventID { seqByID[id] = event.seq }
-        }
-        var readBack: [String: [Event]] = [:]
-        var filedInPlace: [Event] = []
-        var placed = false
-        for event in events {
-            guard let anchor = event.codexBelongsBefore else {
-                filedInPlace.append(event)
-                continue
-            }
-            placed = true
-            switch seqByID[anchor] {
-            // An earlier seq, so each move goes back in the log and none can loop.
-            case let at? where at < event.seq: readBack[anchor, default: []].append(event)
-            case nil: break
-            case _?: filedInPlace.append(event)
-            }
-        }
-        guard placed else { return events }
-        var ordered: [Event] = []
-        ordered.reserveCapacity(events.count)
-        func place(_ event: Event) {
-            if event.source == .codex, let id = event.sourceEventID,
-                let before = readBack.removeValue(forKey: id)
-            {
-                before.forEach(place)
-            }
-            ordered.append(event)
-        }
-        filedInPlace.forEach(place)
-        return ordered
-    }
-
     /// **The rows the session screen draws: every item, less a "Turn complete"
     /// that something on screen already ends.**
     ///
@@ -276,12 +232,10 @@ public enum TimelineBuilder {
 
     static func build(_ events: [Event]) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
-        let events = inHistoryOrder(events)
 
         var resultsByToolUse: [String: ToolOutcome] = [:]
         var outcomesByRequest: [String: AnswerOutcome] = [:]
         var codexResolutionsByRequest: [String: CodexResolution] = [:]
-        var holdsByRequest: [String: (seq: UInt64, hold: QuestionHold)] = [:]
         var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
         // Where Claude's transcript puts each call. The hook files a call when
@@ -333,10 +287,6 @@ public enum TimelineBuilder {
                 if let promptID = event.approvalCard?.promptID { approvalPromptIDs.insert(promptID) }
                 if let card = event.approvalCard, card.toolName == QuestionCard.toolName {
                     questionToolUseIDs.insert(card.requestID)
-                }
-            case .questionHold:
-                if let change = event.questionHoldChange {
-                    holdsByRequest[change.requestID] = (event.seq, change.hold)
                 }
             case .notification:
                 if let pane = event.paneSnapshot,
@@ -613,9 +563,7 @@ public enum TimelineBuilder {
                                 codexResolution: codexResolutionsByRequest[card.requestID],
                                 paneSnapshot: card.promptID.flatMap { panesByPrompt[$0] },
                                 risk: card.risk ?? event.declaredRisk,
-                                questionHold: holdsByRequest[card.requestID]
-                                    .flatMap { $0.seq > event.seq ? $0.hold : nil }
-                                    ?? card.questionHold))))
+                                questionHold: card.questionHold))))
 
             case .approvalResolved:
                 break  // shown on the card it resolves
@@ -695,7 +643,7 @@ public enum TimelineBuilder {
                                     ?? event.payload.prettyJSONString,
                                 severity: .failure))))
 
-            case .resync, .usage, .reasoning, .questionHold, .other:
+            case .resync, .usage, .reasoning, .other:
                 // resync is a banner, not a row; usage/reasoning are noise; a
                 // question hold is shown on the card it is about
                 break

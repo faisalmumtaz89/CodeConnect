@@ -100,10 +100,10 @@ final class CodexResolutionTests: XCTestCase {
         let timeline = TimelineBuilder.build([
             try codexCard(),
             try codexResolution(
-                body: #""status":"answered","by":"local""#),
+                body: #""status":"answered","by":"phone""#),
         ])
         let card = try XCTUnwrap(approval(in: timeline))
-        XCTAssertEqual(card.codexResolution, .answered(by: .local, decision: nil, answeredOn: nil))
+        XCTAssertEqual(card.codexResolution, .answered(by: .phone, decision: nil, answeredOn: nil))
         XCTAssertFalse(card.isPending, "an answered card is not still waiting on a human")
         XCTAssertFalse(
             DecisionCard.actionBarAvailable(
@@ -196,13 +196,13 @@ final class CodexResolutionTests: XCTestCase {
             {"seq":2,"session_uid":"u-1","session_id":"cc-1","ts":"2026-09-04T21:32:09.000Z",
              "kind":"approval_resolved","source":"hook","payload":{
                "request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},
-               "resolved_by":"phone","applied_via":"send_keys",
+               "resolved_by":"phone","applied_via":"hook_return",
                "resolved_at":"2026-09-04T21:32:09.000Z","inferred":false}}
             """)
         let timeline = TimelineBuilder.build([request, resolved])
         let card = try XCTUnwrap(approval(in: timeline))
         XCTAssertEqual(card.outcome?.decision, .allow)
-        XCTAssertEqual(card.outcome?.appliedVia, .sendKeys)
+        XCTAssertEqual(card.outcome?.appliedVia, .hookReturn)
         XCTAssertNil(card.codexResolution, "a Claude resolution is not a Codex one")
         XCTAssertFalse(card.isPending)
     }
@@ -287,9 +287,6 @@ final class CodexResolutionTests: XCTestCase {
         let card = try XCTUnwrap(request.approvalCard)
         XCTAssertTrue(
             card.verification.hashMatchesDisplayText, "the real card's hash gate holds")
-        XCTAssertEqual(
-            CodexCard.options(in: card.toolInput).map(\.id),
-            ["accept", "acceptWithExecpolicyAmendment", "cancel"])
 
         // ---- the resolution correlates on `request_id` ---------------------
         let resolved = try XCTUnwrap(root["approval_resolved"]?.decoded(Event.self))

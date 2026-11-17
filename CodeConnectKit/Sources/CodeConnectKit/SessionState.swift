@@ -643,12 +643,11 @@ public final class SessionState {
         return event.approvalOutcome?.requestID ?? event.codexResolvedRequestID
     }
 
-    /// A pinned question's hold is the newest one held for it, or else the one
-    /// the Mac listed — never the card's own, which is as old as the card.
+    /// A pinned question's hold is the one the Mac listed — never the card's
+    /// own, which is as old as the card.
     private func withPinnedHold(_ item: TimelineItem) -> TimelineItem {
         guard case .approval(var approval) = item.content,
-            let hold = pins[approval.card.requestID]?.hold,
-            !events.contains(where: { $0.questionHoldChange?.requestID == approval.card.requestID })
+            let hold = pins[approval.card.requestID]?.hold
         else { return item }
         approval.questionHold = hold
         return TimelineItem(id: item.id, seq: item.seq, date: item.date, content: .approval(approval))

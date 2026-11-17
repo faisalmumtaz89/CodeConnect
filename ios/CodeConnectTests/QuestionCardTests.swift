@@ -65,39 +65,20 @@ final class QuestionCardTests: XCTestCase {
                 QuestionAnswer(selected: [1], notes: "wider screens only"),
             ]))
 
-        let ended = try event("hold_ended")
-        XCTAssertEqual(ended.kind, .questionHold)
-        XCTAssertEqual(ended.questionHoldChange?.requestID, card.requestID)
-        XCTAssertEqual(ended.questionHoldChange?.hold, .ended)
-
-        XCTAssertEqual(try event("at_mac_request").approvalCard?.questionHold, .atMac)
-
+        // An earlier daemon's shapes this build no longer names still decode, and say only what is true: the
+        // hold change is an event kind this build does not name, the hold `at_mac` is unrecognised (never
+        // answerable), and the Mac's own answer names an answerer this app does not recognise.
+        XCTAssertEqual(try event("hold_ended").kind, .other("question_hold"))
+        XCTAssertEqual(try event("at_mac_request").approvalCard?.questionHold, .unrecognised("at_mac"))
         let mac = try XCTUnwrap(try event("answered_at_mac").approvalOutcome)
-        XCTAssertEqual(mac.resolvedBy, .local)
+        XCTAssertEqual(mac.resolvedBy, .unknown)
+        XCTAssertEqual(mac.provenance(), "by an answerer this app does not recognise")
         XCTAssertEqual(mac.decision, .answers([]))
     }
 
-    /// The card's own `question_hold`, then the event that changes it — and a
-    /// card raised after that event keeps its own.
-    func testTheLatestHoldGovernsTheCard() throws {
+    /// An answered question is no longer waiting on anyone.
+    func testAnAnsweredQuestionIsNoLongerPending() throws {
         let held = try event("held_request")
-        let ended = try event("hold_ended")
-        func hold(_ events: [Event]) -> [QuestionHold?] {
-            TimelineBuilder.build(events).compactMap {
-                if case .approval(let item) = $0.content { return item.questionHold }
-                return nil
-            }
-        }
-        XCTAssertEqual(hold([held]), [.held])
-        XCTAssertEqual(hold([held, ended]), [.ended], "a later question_hold overrides the card")
-
-        var raised = try XCTUnwrap(try wire()["at_mac_request"]?.objectValue)
-        raised["seq"] = .int(5)
-        let reraised = try XCTUnwrap(JSONValue.object(raised).decoded(Event.self))
-        XCTAssertEqual(
-            hold([held, ended, reraised]), [.ended, .atMac],
-            "a card raised after the event keeps its own hold")
-
         let answered = try event("answered_from_phone")
         let item = try XCTUnwrap(
             TimelineBuilder.build([held, answered]).compactMap { row -> ApprovalItem? in
@@ -118,8 +99,6 @@ final class QuestionCardTests: XCTestCase {
                 answersQuestions: capable, linkReason: nil)
         }
         XCTAssertEqual(status(hold: .held), .answerable)
-        XCTAssertEqual(status(hold: .atMac), .askingAtMac)
-        XCTAssertEqual(status(hold: .ended), .answerAtMac)
         XCTAssertEqual(status(hold: nil), .answerAtMac, "no stated hold is never answerable")
         XCTAssertEqual(status(hold: .unrecognised("later")), .answerAtMac)
         XCTAssertEqual(status(hold: .held, capable: false), .macTooOld)
@@ -140,14 +119,16 @@ final class QuestionCardTests: XCTestCase {
             status(hold: .held, attempt: .applied(phone)), .answeredOnPhone(sent, from: phone.answeredOn),
             "this phone's own confirmed answer")
         let mac = try XCTUnwrap(try event("answered_at_mac").approvalOutcome)
-        XCTAssertEqual(status(hold: .held, outcome: mac), .answeredAtMac)
+        XCTAssertEqual(
+            status(hold: .held, outcome: mac), .closed,
+            "an answerer this build does not name is closed, never answered at the Mac")
         XCTAssertEqual(
             status(hold: .held, attempt: .answeredAtKeyboard("x")), .answeredAtMac)
         XCTAssertEqual(
             status(hold: .held, attempt: .rejected("refused")), .answerable,
             "a refusal leaves the question answerable")
         XCTAssertFalse(
-            [QuestionCardStatus.askingAtMac, .answerAtMac, .macTooOld, .answeredAtMac, .unavailable]
+            [QuestionCardStatus.answerAtMac, .macTooOld, .answeredAtMac, .unavailable]
                 .contains { $0.isAnswerable })
     }
 
@@ -166,7 +147,7 @@ final class QuestionCardTests: XCTestCase {
                 AnswerOutcome.self,
                 from: JSONEncoder().encode(JSONValue.object(mac.merging(changes) { $1 })))
             return QuestionCardStatus.resolve(
-                outcome: outcome, attempt: attempt, isBacked: true, hold: .ended,
+                outcome: outcome, attempt: attempt, isBacked: true, hold: nil,
                 answersQuestions: true, linkReason: nil)
         }
         let deny: JSONValue = .object(["type": .string("deny")])
@@ -187,7 +168,8 @@ final class QuestionCardTests: XCTestCase {
         XCTAssertEqual(
             try ending(["resolved_by": .string("phone"), "decision": deny]), .declined,
             "an older Mac's record of the Escape it typed for a Deny")
-        XCTAssertEqual(try ending([:]), .answeredAtMac)
+        XCTAssertEqual(
+            try ending([:]), .closed, "an answerer this build does not name is closed, never answered at the Mac")
         XCTAssertEqual(
             try ending(
                 ["decision": decline, "inferred": .bool(true)],
@@ -373,8 +355,7 @@ final class QuestionCardTests: XCTestCase {
     /// the event after the card is the daemon's.
     func testTheStagedQuestionIsTheDaemonsWithLongerWords() throws {
         let expected: [(QuestionFixtures.State, QuestionHold?, EventKind?)] = [
-            (.held, .held, nil), (.atMac, .atMac, nil), (.oldMac, nil, nil),
-            (.ended, .held, .questionHold), (.answered, .held, .approvalResolved),
+            (.held, .held, nil), (.oldMac, nil, nil), (.answered, .held, .approvalResolved),
         ]
         for (state, hold, later) in expected {
             let events: [Event] = QuestionFixtures.frames(state: state).compactMap {
@@ -421,11 +402,10 @@ final class QuestionCardTests: XCTestCase {
     /// banner says, and an answer from the phone is what was chosen.
     func testTheTimelineStatesWhatTheCardStates() throws {
         XCTAssertNil(try recorded(["held_request"]).1, "answerable: the row offers Answer instead")
-        XCTAssertEqual(try recorded(["at_mac_request"]).1, "Asking at the computer")
-        XCTAssertEqual(try recorded(["held_request", "hold_ended"]).1, "Answer at the computer")
         XCTAssertEqual(try recorded(["held_request"], capable: false).1, "Answer at the computer")
         XCTAssertEqual(
-            try recorded(["at_mac_request", "answered_at_mac"]).1, "Answered at the computer")
+            try recorded(["at_mac_request", "answered_at_mac"]).1, "Closed",
+            "an earlier daemon's answer at the Mac names no answerer this build knows")
         XCTAssertEqual(
             try recorded(["held_request", "answered_from_phone"]).1,
             "Answered: Dedupe with hardlinks (Recommended) · Unit tests, Soak test · "

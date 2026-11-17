@@ -29,14 +29,14 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// iPhone says "your computer"; a Mac, where that would be the Mac itself,
     /// says "the agent's computer".
     func testTheResultBannersNameTheComputerInEachDevicesWords() {
-        let typed = outcome(appliedVia: .sendKeys)
-        let unconfirmed = outcome(appliedVia: .sendKeys, indeterminate: true)
+        let confirmed = outcome(appliedVia: .hookReturn)
+        let unconfirmed = outcome(appliedVia: .hookReturn, indeterminate: true)
         let now = unconfirmed.resolvedDate
         let words: [(HostDevice, [String])] = [
             (
                 .iPhone,
                 [
-                    "Allowed, confirmed by your computer", "typed into the session on your computer",
+                    "Allowed, confirmed by your computer", "handed straight to Claude",
                     "Allowed, but your computer couldn’t confirm it landed",
                     "Your computer accepted this but never confirmed it reached the agent.",
                     "Answered at the computer", "Your computer refused this answer",
@@ -48,7 +48,7 @@ final class AgentSeamRenderingTests: XCTestCase {
             (
                 .mac,
                 [
-                    "Allowed, confirmed by the agent's computer", "typed into the session on the agent's computer",
+                    "Allowed, confirmed by the agent's computer", "handed straight to Claude",
                     "Allowed, but the agent's computer couldn’t confirm it landed",
                     "The agent's computer accepted this but never confirmed it reached the agent.",
                     "Answered at the agent's computer", "The agent's computer refused this answer",
@@ -61,8 +61,8 @@ final class AgentSeamRenderingTests: XCTestCase {
         ]
         for (host, expected) in words {
             let said = [
-                DecisionCard.resultBanner(for: .applied(typed), on: host).message,
-                DecisionCard.resultBanner(for: .applied(typed), on: host).provenance,
+                DecisionCard.resultBanner(for: .applied(confirmed), on: host).message,
+                DecisionCard.resultBanner(for: .applied(confirmed), on: host).provenance,
                 DecisionCard.resultBanner(for: .indeterminate(unconfirmed), on: host).message,
                 DecisionCard.resultBanner(for: .indeterminate(unconfirmed), on: host).provenance,
                 DecisionCard.resultBanner(for: .answeredAtKeyboard("x"), on: host).message,
@@ -82,11 +82,10 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// The trap this guards against: an `AnswerPath.unknown` used to render as
     /// "handed straight to Claude" — a positive claim about how the answer landed that
     /// this build cannot vouch for. It must now read as unrecognised, never as a
-    /// hook return or a keystroke.
+    /// hook return.
     func testUnknownAppliedViaMakesNoPositiveActuationClaim() {
         let phrase = DecisionCard.actuationPhrase(for: .unknown("future_path"))
         XCTAssertNotEqual(phrase, "handed straight to Claude", "unknown must not claim a hook return")
-        XCTAssertNotEqual(phrase, "typed into the session on your computer", "unknown must not claim keystrokes")
         XCTAssertTrue(
             phrase.contains("recognise"),
             "an unknown path is described as unrecognised, got: \(phrase)")
@@ -95,12 +94,10 @@ final class AgentSeamRenderingTests: XCTestCase {
         let provenance = DecisionCard.resultBanner(for: .applied(outcome(appliedVia: .unknown("future_path")))).provenance
         XCTAssertNotNil(provenance)
         XCTAssertFalse(provenance!.contains("handed straight to Claude"), provenance!)
-        XCTAssertFalse(provenance!.contains("typed into the session on your computer"), provenance!)
     }
 
-    /// The three known paths keep their exact copy.
+    /// The two known paths keep their exact copy.
     func testKnownAppliedViaKeepTheirExactCopy() {
-        XCTAssertEqual(DecisionCard.actuationPhrase(for: .sendKeys), "typed into the session on your computer")
         XCTAssertEqual(DecisionCard.actuationPhrase(for: .hookReturn), "handed straight to Claude")
         XCTAssertEqual(DecisionCard.actuationPhrase(for: .codexResponse), "sent straight to Codex")
     }
@@ -111,10 +108,10 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// never become `.applied` (the case rendered as "confirmed"). This is the
     /// exact function `AppModel.sendAnswer` now routes its applied result through.
     func testIndeterminateOutcomeClassifiesAsIndeterminateNotApplied() {
-        guard case .indeterminate = AnswerAttempt.classify(applied: outcome(appliedVia: .sendKeys, indeterminate: true))
+        guard case .indeterminate = AnswerAttempt.classify(applied: outcome(appliedVia: .hookReturn, indeterminate: true))
         else { return XCTFail("an indeterminate outcome must classify as .indeterminate") }
 
-        guard case .applied = AnswerAttempt.classify(applied: outcome(appliedVia: .sendKeys, indeterminate: false))
+        guard case .applied = AnswerAttempt.classify(applied: outcome(appliedVia: .hookReturn, indeterminate: false))
         else { return XCTFail("a confirmed outcome must classify as .applied") }
     }
 
@@ -122,14 +119,14 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// sentence never says "confirmed by your computer" — while `.applied` still
     /// does, so the contrast is real and not a copy accident.
     func testIndeterminateRendersAsUnconfirmedNotConfirmed() {
-        let indeterminate = AnswerAttempt.indeterminate(outcome(appliedVia: .sendKeys, indeterminate: true))
+        let indeterminate = AnswerAttempt.indeterminate(outcome(appliedVia: .hookReturn, indeterminate: true))
         XCTAssertEqual(DecisionCard.resultBanner(for: indeterminate).title, "Unconfirmed")
         let indeterminateHeadline = DecisionCard.resultBanner(for: indeterminate).message
         XCTAssertFalse(
             indeterminateHeadline.contains("confirmed by your computer"),
             "the daemon did not confirm this landed: \(indeterminateHeadline)")
 
-        let applied = AnswerAttempt.applied(outcome(appliedVia: .sendKeys))
+        let applied = AnswerAttempt.applied(outcome(appliedVia: .hookReturn))
         XCTAssertEqual(DecisionCard.resultBanner(for: applied).title, "Confirmed")
         XCTAssertTrue(
             DecisionCard.resultBanner(for: applied).message.contains("confirmed by your computer"),
@@ -137,12 +134,11 @@ final class AgentSeamRenderingTests: XCTestCase {
     }
 
     /// An `.indeterminate` provenance must never reuse the actuation phrase —
-    /// even when the outcome's `appliedVia` is `.sendKeys`, it cannot say "typed
-    /// into the session on your computer", because that is the very landing the daemon could not confirm.
+    /// even when the outcome's `appliedVia` is `.hookReturn`, it cannot say "handed
+    /// straight to Claude", because that is the very landing the daemon could not confirm.
     func testIndeterminateProvenanceMakesNoPositiveActuationClaim() throws {
-        let attempt = AnswerAttempt.indeterminate(outcome(appliedVia: .sendKeys, indeterminate: true))
+        let attempt = AnswerAttempt.indeterminate(outcome(appliedVia: .hookReturn, indeterminate: true))
         let provenance = try XCTUnwrap(DecisionCard.resultBanner(for: attempt).provenance)
-        XCTAssertFalse(provenance.contains("typed into the session on your computer"), provenance)
         XCTAssertFalse(provenance.contains("handed straight to Claude"), provenance)
         XCTAssertTrue(provenance.contains("never confirmed"), provenance)
     }
@@ -185,7 +181,7 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// answered", so the fix narrows only the indeterminate case.
     func testAConfirmedDuplicateStillReadsAsAlreadyAnswered() {
         let attempt = AnswerAttempt.classify(
-            duplicate: outcome(appliedVia: .sendKeys, indeterminate: false), staleHash: false)
+            duplicate: outcome(appliedVia: .hookReturn, indeterminate: false), staleHash: false)
         guard case .duplicate = attempt else { return XCTFail("expected .duplicate, got \(attempt)") }
         XCTAssertEqual(DecisionCard.resultBanner(for: attempt).message, "Already answered")
     }
@@ -196,7 +192,7 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// replays — must render the card's already-resolved banner as "Unconfirmed"
     /// with no confirming seal, never "Already resolved" with a checkmark.
     func testAlreadyResolvedBannerHonoursIndeterminate() {
-        let unconfirmed = outcome(appliedVia: .sendKeys, indeterminate: true)
+        let unconfirmed = outcome(appliedVia: .hookReturn, indeterminate: true)
         XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: unconfirmed, now: Date()).title, "Unconfirmed")
         XCTAssertNotEqual(
             DecisionCard.alreadyResolvedBanner(for: unconfirmed, now: Date()).icon, "seal-check",
@@ -205,7 +201,7 @@ final class AgentSeamRenderingTests: XCTestCase {
             DecisionCard.alreadyResolvedBanner(for: unconfirmed, now: Date()).message
                 .contains("reached the agent"))
 
-        let confirmed = outcome(appliedVia: .sendKeys, indeterminate: false)
+        let confirmed = outcome(appliedVia: .hookReturn, indeterminate: false)
         XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: confirmed, now: Date()).title, "Already resolved")
         XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: confirmed, now: Date()).icon, "seal-check")
     }
@@ -216,7 +212,7 @@ final class AgentSeamRenderingTests: XCTestCase {
     /// indeterminate *deny* must not read as `denied`; a confirmed deny still does.
     func testIndeterminateAnswerDoesNotDriveADefinitiveToolStatus() {
         let toolID = "toolu_9"
-        let indeterminateDeny = outcome(appliedVia: .sendKeys, indeterminate: true, decision: .deny)
+        let indeterminateDeny = outcome(appliedVia: .hookReturn, indeterminate: true, decision: .deny)
         XCTAssertNotEqual(
             TimelineBuilder.statusFromApproval(toolUseID: toolID, approvals: [toolID: indeterminateDeny]),
             .denied,
@@ -225,7 +221,7 @@ final class AgentSeamRenderingTests: XCTestCase {
             TimelineBuilder.statusFromApproval(toolUseID: toolID, approvals: [toolID: indeterminateDeny]),
             "an indeterminate answer justifies no definitive status; the timing verdict stands")
 
-        let confirmedDeny = outcome(appliedVia: .sendKeys, indeterminate: false, decision: .deny)
+        let confirmedDeny = outcome(appliedVia: .hookReturn, indeterminate: false, decision: .deny)
         XCTAssertEqual(
             TimelineBuilder.statusFromApproval(toolUseID: toolID, approvals: [toolID: confirmedDeny]),
             .denied,
@@ -295,7 +291,7 @@ final class CompositeIdOpacityTests: XCTestCase {
         .applied(
             outcome: AnswerOutcome(
                 requestID: requestID, sessionID: "u-1", decision: .allow, resolvedBy: .phone,
-                appliedVia: .sendKeys, resolvedAt: "2026-08-18T09:00:00.000Z", detail: nil,
+                appliedVia: .hookReturn, resolvedAt: "2026-08-18T09:00:00.000Z", detail: nil,
                 inferred: false))
     }
 
@@ -397,7 +393,7 @@ final class PersistedApprovalRowTests: XCTestCase {
             {"seq":2,"session_uid":"u-1","session_id":"cc-1","ts":"2026-08-18T09:00:01.000Z",
              "kind":"approval_resolved","source":"daemon","payload":{
                "request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},
-               "resolved_by":"local","applied_via":"send_keys",
+               "resolved_by":"phone","applied_via":"send_keys",
                "resolved_at":"2026-08-18T09:00:01.000Z","indeterminate":\(indeterminate)}}
             """)
         let items = TimelineBuilder.build([request, resolved])
@@ -437,8 +433,7 @@ final class PersistedApprovalRowTests: XCTestCase {
         XCTAssertFalse(outcome.indeterminate)
 
         XCTAssertEqual(ApprovalRow.headerTitle(for: approval), "RESOLVED")
-        // resolved_by "local" in the fixture → "at the Mac".
-        XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Allowed at the computer")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Allowed from a phone")
         XCTAssertTrue(
             ApprovalRow.resolvedAccessibilityLabel(for: outcome, call: approval.card.toolName)
                 .hasPrefix("Resolved approval"))
@@ -749,7 +744,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         let applied = AnswerAttempt.applied(
             AnswerOutcome(
                 requestID: "toolu_1", sessionID: "cc-1", decision: .allow, resolvedBy: .phone,
-                appliedVia: .sendKeys, resolvedAt: "2026-08-18T09:00:01.000Z", detail: nil,
+                appliedVia: .hookReturn, resolvedAt: "2026-08-18T09:00:01.000Z", detail: nil,
                 inferred: false))
         guard case .attempt = liveBanner(model, attempt: applied) else {
             return XCTFail("a terminal receipt stands even without live backing")

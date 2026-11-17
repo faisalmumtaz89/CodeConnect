@@ -313,17 +313,15 @@ is enforced.
   `answer_result` comes back.
 * **The card proves its own text.** `ApprovalCard.verification` re-hashes
   `display_text` against `payload_hash`.
-* **An inferred outcome is never stated as fact.** `ResolvedBy::Local` carries
-  `inferred: true` — the daemon saw the prompt leave, it did not see the answer —
-  so the UI says "Closed at the computer", never "Allowed" or "answered"
-  (`AnswerOutcome.decisionLabel`). Where an answer came from is said as far as the
+* **An inferred outcome is never stated as fact.** A record an earlier daemon kept
+  with `inferred: true` — it saw the prompt leave, it did not see the answer —
+  says "Closed", never "Allowed" or "answered" (`AnswerOutcome.decisionLabel`). Where an answer came from is said as far as the
   record proves it (`AnswerOutcome.provenance(on:)`): `phone` names the kind of
   paired device the record says sent it (`answeredOn`), "from a Mac" or, read on a
   Mac, "from an iPhone", and "from a phone" where an iPhone or an unknown device
   answered and the phone reads it; read on a Mac, a record that names no device is
-  "from a paired device", and only the Sent banner of the Mac's own approval
-  (`AnswerOutcome.sentToClaudeLine(on:sentHere:)`) names the Mac; never "this app".
-  `local` is "at the computer".
+  "from a paired device"; never "this app". A resolver this build does not name is
+  "by an answerer this app does not recognise", never one of the others.
 * **A diff carries its capture time and its truncation.** An empty diff renders
   the daemon's `note`, which is the only thing that tells a clean tree from a
   directory that was never a git repository.
@@ -564,8 +562,8 @@ control. Both verbs require the daemon to have advertised the capability
 
 `bound_not_started` is compose-only on purpose: the daemon has proved that thread has
 never run a turn, so a first turn cannot collide with one, and there is correspondingly
-no turn to stop. The five words the app knows are `subscribed`, `bound`,
-`bound_not_started`, `offline` and `none`; a word it does not know is **kept verbatim
+no turn to stop. The three words the app knows are `subscribed`,
+`bound_not_started` and `none`; a word it does not know is **kept verbatim
 and actuates nothing**, because the only safe reading of a value this build cannot
 interpret is "not offered". An absent field decodes as `none`. The capability is
 checked again in front of `send` rather than only on the button, so a control that
@@ -687,15 +685,10 @@ the one command on the card, so a person reads what they grant before granting i
 Its answer is `option_id: "acceptForSession"`, which gives Claude that rule for this
 session only.
 
-In a run started in a terminal, a sent answer is recorded as sent to Claude, not
-confirmed (`indeterminate`, detail "Sent to Claude from a phone";
-`AnswerOutcome.wasSentToClaude`), because Claude takes the first answer and may not
-use the phone's. The banner, the resolved card and the timeline say "Sent", never
-"Confirmed" or "Unconfirmed". The detail is a marker, the same whichever device
-answered; the words shown name that device from `answeredOn`
-(`AnswerOutcome.sentToClaudeLine(on:)`). In a run started in an app the agent host
-says when the answer reached Claude, so the answer is recorded as applied: not
-`indeterminate`, and with no such detail.
+The agent host says when an answer reached Claude, so the answer is recorded as
+applied. A record an earlier daemon kept for a run started in a terminal
+(`indeterminate`, detail "Sent to Claude from a phone") reads as an answer that was
+never confirmed.
 
 `CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
 an earlier ccd's test emitted (frozen, never regenerated).
@@ -735,29 +728,26 @@ The answer is option **indices**, never labels: `{"type":"answers","answers":
 from the question it stored and returns it through the run's agent host; nothing
 is typed.
 
-Whether the phone may answer is the card's `question_hold` — `held`, `at_mac` or
-`ended` — and a later `question_hold` event for the same request overrides it
-(`ApprovalItem.questionHold`). Only `held` is answerable. Every other state shows
-the questions read-only and says why (`QuestionCardStatus`): *Asking at the Mac*,
-*Answer at the Mac* (the phone's hold ended, or the hold is missing or unknown),
+Whether the phone may answer is the card's `question_hold` (`ApprovalItem.questionHold`).
+Only `held` is answerable. Every other state shows the questions read-only and says
+why (`QuestionCardStatus`): *Answer at the Mac* (the hold is missing or unknown),
 *too old* (no `question_card`), *Answered* with what was sent from a paired device
 (Claude ran with exactly those answers; the kind of device that sent them is named
 when the record says, which one is not recorded, and the same answers chosen at the
 Mac would read the same), *Answered at the Mac*,
 *Declined* (a decline from a phone recorded as taken: an older Mac records it so,
 and so does a current Mac for a session started from an app, whose agent host
-confirms it), *Unconfirmed* (a current Mac's decline of a terminal session's
-question among them), and
+confirms it), *Unconfirmed*, and
 *Closed* when the question left the Mac (Escape, the session or turn ending)
 without anyone being seen to answer it. Neither age nor a newer prompt closes a
-question card: one still open at the Mac stays *Asking at the Mac*. A refusal saying the question was "answered at the Mac"
+question card. A refusal saying the question was "answered at the Mac"
 is the Mac winning the race, and reads as *Answered at the Mac*.
 
 On the timeline a question is a `QuestionRow` (`Views/TimelineRows.swift`), not an
 approval row: "Question" (or "4 questions") and the first question's words in prose,
 two lines at most, and the same status as the card (`QuestionCardStatus.recorded`):
-**Answer** while the phone can answer it, otherwise the status's own words — *Asking at
-the Mac*, *Answer at the Mac*, *Closed*, an answer from the phone as what was chosen —
+**Answer** while the phone can answer it, otherwise the status's own words — *Answer at
+the Mac*, *Closed*, an answer from the phone as what was chosen —
 with **View**, and once it has ended how long ago. It carries no risk tag unless the class
 is HIGH, where Submit takes Face ID.
 

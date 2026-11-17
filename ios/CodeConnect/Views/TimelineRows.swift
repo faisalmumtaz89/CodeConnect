@@ -733,7 +733,7 @@ struct ApprovalRow: View {
     ///
     /// A separate footer rather than a mapping onto `AnswerOutcome`, for the
     /// same reason `ApprovalItem` keeps the two apart: a `cleared(turn_aborted)`
-    /// is not "Denied", an `answered(by: .local)` names no decision at all, and
+    /// is not "Denied", an answer may name no decision at all, and
     /// `AnswerOutcome` cannot express either without claiming something.
     ///
     /// No timestamp. The Codex wire carries a `resolved_at` on **no arm at all**
@@ -760,12 +760,11 @@ struct ApprovalRow: View {
     ///
     /// **A Codex ending counts.** Read against `approval.outcome` alone this row
     /// said `NEEDS YOU` — with a live `Review` button and a ticking wait clock —
-    /// on a card that had already been answered at the Mac. Caught by looking at
-    /// `codex-resolved-at-mac--L.png`; the builder's own tests were green,
+    /// on a card that had already been answered. Caught by looking at a render
+    /// of a resolved Codex card; the builder's own tests were green,
     /// because the defect was in a second reader that had not been told.
     static func headerTitle(for approval: ApprovalItem) -> String {
         if let outcome = approval.outcome {
-            if outcome.wasSentToClaude { return "SENT" }
             return outcome.indeterminate ? "UNCONFIRMED" : "RESOLVED"
         }
         if let resolution = approval.codexResolution { return Self.codexHeader(for: resolution) }
@@ -787,7 +786,6 @@ struct ApprovalRow: View {
     static func resolutionText(for outcome: AnswerOutcome) -> String {
         // The daemon accepted the answer but never confirmed it reached the
         // agent, so the footer must not state a decision or an actor as fact.
-        if outcome.wasSentToClaude { return outcome.sentToClaudeLine() }
         if outcome.indeterminate { return "Answer not confirmed" }
         // An inferred decision is the daemon noticing the prompt is gone, not
         // watching an answer happen. Rendering it as "Allowed" would put a fact
@@ -799,9 +797,7 @@ struct ApprovalRow: View {
     /// outcome is announced as such — never "Resolved approval", which would
     /// speak a confirmation VoiceOver users cannot see is false.
     static func resolvedAccessibilityLabel(for outcome: AnswerOutcome, call: String) -> String {
-        let lead =
-            outcome.wasSentToClaude
-            ? "Approval" : outcome.indeterminate ? "Unconfirmed approval" : "Resolved approval"
+        let lead = outcome.indeterminate ? "Unconfirmed approval" : "Resolved approval"
         return "\(lead). \(resolutionText(for: outcome)). \(call)."
     }
 

@@ -5,8 +5,9 @@ import XCTest
 
 /// What an approval's ending says about who answered and where — only as far
 /// as the record proves it. `resolved_by: phone` names a paired phone, not
-/// this one; `local` is the Mac; an inferred ending is the prompt leaving the
-/// Mac, with no answer seen.
+/// this one; an answerer this build does not name, such as an earlier daemon's
+/// `local`, is said to be one; an inferred ending is the prompt leaving, with no
+/// answer seen.
 @MainActor
 final class ProvenanceWordingTests: XCTestCase {
 
@@ -25,19 +26,16 @@ final class ProvenanceWordingTests: XCTestCase {
         XCTAssertEqual(ApprovalRow.resolutionText(for: try outcome("phone")), "Allowed from a phone")
     }
 
-    func testAnAnswerAtTheMacSaysTheMac() throws {
-        XCTAssertEqual(ApprovalRow.resolutionText(for: try outcome("local")), "Allowed at the computer")
-    }
-
     /// The daemon saw the prompt leave, not an answer: closed, never answered.
     func testAnInferredEndingClaimsNoAnswer() throws {
         let inferred = try outcome("local", inferred: true)
-        XCTAssertEqual(ApprovalRow.resolutionText(for: inferred), "Closed at the computer")
+        XCTAssertEqual(
+            ApprovalRow.resolutionText(for: inferred), "Closed by an answerer this app does not recognise")
         XCTAssertEqual(inferred.decisionLabel, "Closed")
         XCTAssertEqual(
             DecisionCard.alreadyResolvedBanner(
                 for: inferred, now: inferred.resolvedDate.addingTimeInterval(65)).message,
-            "Closed at the computer · 1m ago", "the place said once")
+            "Closed by an answerer this app does not recognise · 1m ago", "the answerer said once")
     }
 
     /// Codex's `resolved_by: phone` names a paired phone too.

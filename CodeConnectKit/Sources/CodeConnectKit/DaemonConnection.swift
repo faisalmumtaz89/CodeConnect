@@ -1013,7 +1013,7 @@ public final class DaemonConnection {
                 return .applied(
                     outcome: AnswerOutcome(
                         requestID: requestID, sessionID: session ?? "fixture", decision: decision,
-                        resolvedBy: .phone, appliedVia: .sendKeys,
+                        resolvedBy: .phone, appliedVia: .hookReturn,
                         resolvedAt: Date().formatted(
                             Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
                         detail: "fixture", inferred: false))
@@ -1032,7 +1032,7 @@ public final class DaemonConnection {
     /// correlating on the string this app chose is exact whether it is a uid or
     /// a name.
     public func sendText(
-        session: String, text: String, require: PromptPresence?, submit: Bool,
+        session: String, text: String, submit: Bool,
         requestID: String? = nil, payloadHash: String? = nil
     ) async throws -> SendTextResult {
         #if DEBUG
@@ -1043,7 +1043,7 @@ public final class DaemonConnection {
             key: session,
             store: \.sendTextWaiters,
             send: .sendText(
-                session: session, text: text, require: require, submit: submit,
+                session: session, text: text, submit: submit,
                 requestID: requestID, payloadHash: payloadHash))
     }
 

@@ -948,7 +948,6 @@ enum CodexFixtures {
         // Resolutions (R-series)
         case resolvedAccepted = "resolved-accepted"
         case resolvedDeclined = "resolved-declined"
-        case resolvedAtMac = "resolved-at-mac"
         case clearedTurnAborted = "cleared-turn-aborted"
         case clearedTurnCompleted = "cleared-turn-completed"
         case retiredItemCompleted = "retired-item-completed"
@@ -1034,7 +1033,7 @@ enum CodexFixtures {
         var link: String? {
             guard protocolMinor >= 19 else { return nil }
             switch self {
-            case .stopLinkDown: return "offline"
+            case .stopLinkDown: return "none"
             default: return "subscribed"
             }
         }
@@ -1075,7 +1074,7 @@ enum CodexFixtures {
                 return true
             // An answer, a timeout or an unconfirmed write says nothing about
             // whether the turn went on; it did.
-            case .resolvedAccepted, .resolvedDeclined, .resolvedAtMac, .timeoutUnknown,
+            case .resolvedAccepted, .resolvedDeclined, .timeoutUnknown,
                 .writeUnknown:
                 return true
             // **Codex was idle**, which is the whole point of `started`: the
@@ -1335,7 +1334,7 @@ enum CodexFixtures {
 
     private static func cardJSON(_ state: State) -> String? {
         switch state {
-        case .cardCommandWorst, .resolvedAccepted, .resolvedDeclined, .resolvedAtMac,
+        case .cardCommandWorst, .resolvedAccepted, .resolvedDeclined,
             .clearedTurnAborted, .clearedTurnCompleted, .timeoutUnknown, .writeUnknown,
             .stopOffered, .stopAborted, .stopLinkDown, .stopRefusedLate, .stopIndeterminate:
             return card(
@@ -1490,10 +1489,6 @@ enum CodexFixtures {
             return #""status":"answered","by":"phone","decision":{"type":"option_id","option_id":"accept"}"#
         case .resolvedDeclined:
             return #""status":"answered","by":"phone","decision":{"type":"option_id","option_id":"cancel"}"#
-        // The common case for a keyboard answer: `decision` ABSENT, because the
-        // Codex wire carries no provenance for one.
-        case .resolvedAtMac:
-            return #""status":"answered","by":"local""#
         case .clearedTurnAborted:
             return #""status":"cleared","cause":"turn_aborted""#
         case .clearedTurnCompleted:

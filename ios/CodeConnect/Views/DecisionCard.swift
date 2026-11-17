@@ -1342,7 +1342,7 @@ struct DecisionCardView: View {
             return DecisionCard.claudeUnanswerableReason(
                 isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
-                linkReason: model.actionsBlockedReason, hold: hold)
+                linkReason: model.actionsBlockedReason)
         }
     }
 

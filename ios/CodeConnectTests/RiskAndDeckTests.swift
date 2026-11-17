@@ -288,11 +288,7 @@ final class RiskAndDeckTests: XCTestCase {
                 DecisionCard.codexUnanswerableReason(
                     isKnown: true, isVerified: true, linkReason: nil, computer: computer, on: host),
                 DecisionCard.claudeUnanswerableReason(
-                    isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: nil, computer: computer,
-                    on: host),
-                DecisionCard.claudeUnanswerableReason(
-                    isQuestion: false, hookOnlyApprovals: true, linkReason: nil, hold: .atMac, computer: computer,
-                    on: host),
+                    isQuestion: false, hookOnlyApprovals: false, linkReason: nil, computer: computer, on: host),
                 DecisionCard.unsupportedAgentReason("aider", computer: computer, on: host),
                 DecisionCard.stillWaiting(after: 120, computer: computer, on: host),
                 DecisionCard.stillWaiting(after: 120, spoken: true, computer: computer, on: host),
@@ -305,7 +301,6 @@ final class RiskAndDeckTests: XCTestCase {
             "This card arrived without the options Codex answers by, so it can only be answered at the computer.",
             "This computer's CodeConnect is too old to answer Claude's approvals from the phone. "
                 + "Update it, or answer at the computer.",
-            "Claude is asking this at the computer, so answer it there.",
             "This app does not know how to answer a aider session. Answer it at the computer.",
             "Still waiting on the computer - \(age).",
             "Still waiting on the computer, \(spoken).",
@@ -320,7 +315,6 @@ final class RiskAndDeckTests: XCTestCase {
                     + "agent's computer.",
                 "The agent's computer's CodeConnect is too old to answer Claude's approvals from the Mac. "
                     + "Update it, or answer at the agent's computer.",
-                "Claude is asking this at the agent's computer, so answer it there.",
                 "This app does not know how to answer a aider session. Answer it at the agent's computer.",
                 "Still waiting on the agent's computer - \(age).",
                 "Still waiting on the agent's computer, \(spoken).",
@@ -333,7 +327,6 @@ final class RiskAndDeckTests: XCTestCase {
                     + "Jordan’s Mac Studio.",
                 "Jordan’s Mac Studio's CodeConnect is too old to answer Claude's approvals from the Mac. "
                     + "Update it, or answer at Jordan’s Mac Studio.",
-                "Claude is asking this at Jordan’s Mac Studio, so answer it there.",
                 "This app does not know how to answer a aider session. Answer it at Jordan’s Mac Studio.",
                 "Still waiting on Jordan’s Mac Studio - \(age).",
                 "Still waiting on Jordan’s Mac Studio, \(spoken).",

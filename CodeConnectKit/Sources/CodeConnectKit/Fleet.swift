@@ -460,15 +460,10 @@ public enum FleetStatusRule {
         switch summary.link {
         case .attached:
             return .control
-        case .degraded:
-            return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
             return .observe(
                 reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
             )
-        case .stale:
-            return .observe(
-                reason: "\(HostDevice.current.computer("The computer")) hasn't heard from this session recently.")
         }
     }
 }

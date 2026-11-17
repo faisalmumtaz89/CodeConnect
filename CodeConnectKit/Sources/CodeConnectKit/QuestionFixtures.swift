@@ -21,10 +21,6 @@
         enum State: String, CaseIterable {
             /// Held: the phone can answer.
             case held
-            /// The question is on the Mac and only the Mac can answer it.
-            case atMac = "at-mac"
-            /// Held when raised, then a `question_hold: ended` event.
-            case ended
             /// Answered from this phone and confirmed by the Mac.
             case answered
             /// A minor-20 Mac: no `question_card`, so read-only.
@@ -56,9 +52,6 @@
             case .held: return held.map { [$0] } ?? []
             case .oldMac:
                 return wire["held_request"].map { [lengthened($0, hold: nil, now: now)] } ?? []
-            case .atMac:
-                return wire["at_mac_request"].map { [lengthened($0, hold: "at_mac", now: now)] } ?? []
-            case .ended: names = ["hold_ended"]
             case .answered: names = ["answered_from_phone"]
             }
             return ([held] + names.map { wire[$0].map { retimed($0, now: now) } }).compactMap { $0 }

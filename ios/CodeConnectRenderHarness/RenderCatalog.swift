@@ -1220,17 +1220,6 @@ enum RenderCatalog {
                     "the ending's own sentence, on the card")
             }),
         codexScenario(
-            "resolved-at-mac",
-            purpose:
-                "answered at the keyboard, with NO decision — the wire carries no provenance for one",
-            route: "session",
-            reach: { app, driver in
-                try openResolvedCard(app, driver)
-                try driver.require(
-                    driver.element(containing: "Answered at the computer", in: app),
-                    "the ending's own sentence, on the card")
-            }),
-        codexScenario(
             "cleared-turn-aborted", purpose: "the turn was stopped and the question went with it",
             route: "session",
             reach: { app, driver in
@@ -1311,20 +1300,20 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "Stopped", in: app), "the stopped banner")
             }),
-        // **The gate, photographed.** `codex_link` is `offline`, so the send
+        // **The gate, photographed.** `codex_link` is `none`, so the send
         // path refuses before anything leaves: what is on screen is the app's
         // own sentence over "Nothing was sent", and the Mac has said nothing
         // because it was never asked.
         codexScenario(
             "stop-link-down",
-            purpose: "the phone's own refusal: an offline link, so no frame ever left",
+            purpose: "the phone's own refusal: no link, so no frame ever left",
             reach: { app, driver in
                 try driver.fleet(app)
                 try driver.require(
                     driver.element(containing: "Nothing was sent", in: app),
                     "the app's own words, not the daemon's")
                 try driver.require(
-                    driver.element(containing: "lost its link", in: app),
+                    driver.element(containing: "no live link", in: app),
                     "why the phone would not send")
             }),
         // **The refusal after the fact**, which is a different screen and a
@@ -1641,23 +1630,6 @@ enum RenderCatalog {
                 try driver.require(app.buttons["question-submit"].firstMatch, "Submit")
                 try driver.require(
                     driver.element(containing: "Review your answers", in: app), "the review list")
-            }),
-        questionScenario(
-            "at-mac", state: "at-mac",
-            purpose: "read-only: Claude is asking at the Mac, the questions shown whole",
-            opensWith: "View",
-            reach: { app, driver in
-                try driver.require(
-                    driver.element(containing: "Asking at the computer", in: app), "the card's status")
-            }),
-        questionScenario(
-            "ended", state: "ended",
-            purpose: "read-only: the phone's hold ended — answer at the Mac",
-            opensWith: "View",
-            reach: { app, driver in
-                try driver.require(
-                    driver.element(containing: "no longer be answered from the phone", in: app),
-                    "the card's status")
             }),
         questionScenario(
             "old-mac", state: "old-mac",
