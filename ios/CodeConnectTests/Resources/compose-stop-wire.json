@@ -46,7 +46,13 @@
         "lifecycle": "live",
         "link": "attached",
         "menus": {
-          "models": [],
+          "models": [
+            {
+              "efforts": [],
+              "label": "gpt-test",
+              "value": "gpt-test"
+            }
+          ],
           "modes": [
             {
               "label": "Default",
@@ -87,7 +93,13 @@
         "lifecycle": "live",
         "link": "detached",
         "menus": {
-          "models": [],
+          "models": [
+            {
+              "efforts": [],
+              "label": "gpt-test",
+              "value": "gpt-test"
+            }
+          ],
           "modes": [
             {
               "label": "Default",
@@ -189,7 +201,13 @@
         "lifecycle": "live",
         "link": "attached",
         "menus": {
-          "models": [],
+          "models": [
+            {
+              "efforts": [],
+              "label": "gpt-test",
+              "value": "gpt-test"
+            }
+          ],
           "modes": [
             {
               "label": "Default",
@@ -335,7 +353,13 @@
     "lifecycle": "live",
     "link": "attached",
     "menus": {
-      "models": [],
+      "models": [
+        {
+          "efforts": [],
+          "label": "gpt-test",
+          "value": "gpt-test"
+        }
+      ],
       "modes": [
         {
           "label": "Default",

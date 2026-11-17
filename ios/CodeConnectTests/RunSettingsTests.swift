@@ -85,6 +85,21 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(s.selectedModel?.value, "gpt-6-astra")
     }
 
+    /// **A Codex run started on a model its start's check did not list has that model as its checked row.** The
+    /// daemon offers the model the run started on first (its id its label, no efforts: Codex names none for it) and
+    /// names it `selected_model`, so the button shows a chosen row the person can return to. With no efforts, no
+    /// effort menu is drawn while it is chosen: the written miss. From the daemon's `codex-settings-wire.json`.
+    func testACodexRunOnAnUnlistedModelHasItAsTheCheckedRow() throws {
+        guard case .hostedLive(let s) = RunSettings.of(
+            summary: try summary("session_codex_unlisted_default", in: "codex-settings-wire"))
+        else { return XCTFail("a live engine Codex run with menus is hostedLive") }
+        XCTAssertEqual(s.models.count, 10)
+        XCTAssertEqual(s.models.first?.value, "stub-model")
+        XCTAssertEqual(s.selectedModel?.value, "stub-model", "the model the run started on is the checked row")
+        XCTAssertEqual(s.modelDisplay, "stub-model")
+        XCTAssertEqual(s.efforts, [], "Codex names no efforts for it, so no effort menu")
+    }
+
     /// **The fix's reason, against the daemon's own init-shape summary.** After claude's next init the
     /// model fact is its full id ("claude-sonnet-5-5"), which is not a menu value; the selection follows
     /// the daemon's `selected_model` ("sonnet"), so the right row — and its efforts — still draw.

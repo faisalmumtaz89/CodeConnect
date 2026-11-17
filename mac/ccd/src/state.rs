@@ -3425,7 +3425,8 @@ impl Daemon {
         }
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
         // answer, with the one its model fact names marked (its newest receipt read for that
-        // here); a Codex run's from its start's check, its model fact marked as it is.
+        // here); a Codex run's from its start's check and the model it started on, its model
+        // fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
         let mut codex_menus: Vec<String> = Vec::new();

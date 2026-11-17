@@ -94,7 +94,8 @@ pub(crate) struct Run<'a> {
     /// the model its settings name.
     pub model: Option<&'a str>,
     /// The models the start's check listed, each as Codex's `model/list` gives it (hidden
-    /// ones left out): kept with the run, the models of its settings menu ([`menus`]).
+    /// ones left out): kept with the run, the models of its settings menu ([`menus`]), the
+    /// model its thread starts on put first if they do not list it ([`keep_started_model`]).
     pub models: &'a [Value],
     /// The codex the start's check found.
     pub codex: &'a Path,
@@ -300,6 +301,7 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
         }
         Ok((thread, answer)) if advanced => {
             daemon.mail_run_live(&uid).await;
+            keep_started_model(&daemon, &uid, &answer).await;
             let mut adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
             file(&daemon, &uid, adapter.settings_answered(&thread, &answer)).await;
             link(
@@ -315,6 +317,37 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
             .await;
         }
         Ok(_) => {}
+    }
+}
+
+/// The run `uid`'s models with the one its thread started on (its start's `answer` names it)
+/// put first when its start's check did not list it: a model the person's Codex config names,
+/// or a signed-in account's default, which Codex takes from its catalog online and the list
+/// the check kept may not carry. So the run's menu marks the model it is on, and offers it
+/// again once another is picked. Codex names only its id: its row's label is the id and it
+/// lists no efforts, so while the run is on it no effort is offered (a written miss).
+async fn keep_started_model(daemon: &Daemon, uid: &str, answer: &Value) {
+    let Some(started) = answer["model"].as_str().filter(|model| !model.is_empty()) else {
+        return;
+    };
+    let mut models = match daemon.db.hosted_models(uid.to_string()).await {
+        Ok(Some(models)) => models,
+        Ok(None) => return,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its models: {err:#}");
+            return;
+        }
+    };
+    if models.iter().any(|model| model["model"] == started) {
+        return;
+    }
+    models.insert(0, json!({ "model": started }));
+    if let Err(err) = daemon
+        .db
+        .keep_hosted_models(uid.to_string(), json!({ "models": models }))
+        .await
+    {
+        crate::log_error!("{uid}: could not keep the model it started on: {err:#}");
     }
 }
 
@@ -2274,7 +2307,8 @@ const MODES: [(&str, &str, bool); 4] = [
 ];
 
 /// An engine Codex run's menus, from the models its start's check listed, each as Codex's
-/// `model/list` gives it: each model's `model`, name, description and efforts, and [`MODES`].
+/// `model/list` gives it, and the one it started on ([`keep_started_model`]): each model's
+/// `model`, name (else its `model`), description and efforts, and [`MODES`].
 pub(crate) fn menus(models: &[Value]) -> RunMenus {
     let text = |model: &Value, key: &str| {
         model
@@ -8071,13 +8105,18 @@ mod tests {
 
     /// A run started on a stand-in with the models its start's check listed (`models`), its
     /// `thread/start` answered as Codex 0.167 answers one, naming the thread `thr-x6`'s settings
-    /// ([`START_SETTINGS`]), and its first turn answered: its uid and the stand-in's end of its
-    /// link.
-    async fn engine_run_offering(rig: &Rig, models: &[serde_json::Value]) -> (String, Socket) {
+    /// ([`START_SETTINGS`]) with `model` as its model, and its first turn answered: its uid and
+    /// the stand-in's end of its link.
+    async fn engine_run_offering(
+        rig: &Rig,
+        models: &[serde_json::Value],
+        model: &str,
+    ) -> (String, Socket) {
         let codex = stand_in(rig, "exec sleep 30");
         let mut script = whole_start();
         script.truncate(3);
         let mut started = START_SETTINGS.clone();
+        started["model"] = model.into();
         started["thread"] = json!({"id": "thr-x6"});
         script[2].1 = json!({ "result": started });
         let run = Run {
@@ -8096,12 +8135,12 @@ mod tests {
         (uid, ws)
     }
 
-    /// The settings a `thread/start` answer names (X6 P12a, codex 0.167): its model, an effort
-    /// left to the model's own (`null`), the preset Default ccd starts a thread with, and no
-    /// collaboration mode.
+    /// The settings a `thread/start` answer names (X6 P12a, codex 0.167) but its model: an
+    /// effort left to the model's own (`null`), the preset Default ccd starts a thread with, and
+    /// no collaboration mode.
     static START_SETTINGS: std::sync::LazyLock<serde_json::Value> =
         std::sync::LazyLock::new(|| {
-            json!({"model": "gpt-6.1-sol", "modelProvider": "openai", "reasoningEffort": null,
+            json!({"modelProvider": "openai", "reasoningEffort": null,
                "approvalPolicy": "on-request", "approvalsReviewer": "user",
                "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": false}})
         });
@@ -8129,7 +8168,7 @@ mod tests {
     #[tokio::test]
     async fn a_codex_runs_settings_are_its_start_and_resume_answers() {
         let rig = rig();
-        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
         let started = settings_as_sent(&rig.daemon, &uid, "auto").await;
         assert_eq!(
             (&started["model"]["value"], started.get("effort")),
@@ -8175,7 +8214,7 @@ mod tests {
     async fn a_relaunched_codex_run_resumes_at_default() {
         let _env = crate::ProcessEnvRead::take();
         let rig = rig();
-        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
         tell(
             &mut ws,
             &settings_report(
@@ -8198,6 +8237,70 @@ mod tests {
             (&json!("on-request"), &json!("workspace-write"))
         );
         drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A Codex run offers the model it started on, and can go back to it.** A start's answer
+    /// naming a model its start's check did not list (P12a's `stub-model`, which the person's
+    /// config names; or, signed in, Codex's default from its catalog online) puts it first among
+    /// the run's models, marked chosen, its id its label and no efforts, since Codex names none
+    /// for it. Once another model is picked it is still offered, and picking it again goes to
+    /// Codex.
+    #[tokio::test]
+    async fn a_codex_run_offers_the_model_it_started_on_and_can_go_back_to_it() {
+        use crate::claude_host::Setting;
+        let rig = rig();
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "stub-model").await;
+        let started = settings_as_sent(&rig.daemon, &uid, "auto").await;
+        assert_eq!(
+            started["menus"]["models"].as_array().map(Vec::len),
+            Some(recorded_models().len() + 1)
+        );
+        assert_eq!(
+            started["menus"]["models"][0],
+            json!({"value": "stub-model", "label": "stub-model", "efforts": []})
+        );
+        assert_eq!(started["menus"]["selected_model"], "stub-model");
+
+        let pick = |model: &str| Setting::Model {
+            model: Some(model.into()),
+            effort: None,
+        };
+        let (picked, _) = changed(&rig, &mut ws, &uid, pick("gpt-6-astra")).await;
+        assert!(
+            matches!(picked, SettingResult::Applied { .. }),
+            "{picked:?}"
+        );
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6-astra",
+                "high",
+                "on-request",
+                "workspaceWrite",
+                "default",
+            ),
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while summary_of(&rig.daemon, &uid)
+            .await
+            .model
+            .is_none_or(|fact| fact.value != "gpt-6-astra")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the run's model never read gpt-6-astra"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        let moved = summary_as_sent(&rig.daemon, &uid).await;
+        assert_eq!(moved["menus"]["models"][0]["value"], "stub-model");
+        assert_eq!(moved["menus"]["selected_model"], "gpt-6-astra");
+
+        let (back, asked) = changed(&rig, &mut ws, &uid, pick("stub-model")).await;
+        assert!(matches!(back, SettingResult::Applied { .. }), "{back:?}");
+        assert_eq!(asked, json!({"threadId": "thr-x6", "model": "stub-model"}));
         end_run(&rig, &uid).await;
     }
 
@@ -8245,7 +8348,8 @@ mod tests {
     /// (its models from the start's check, the four modes with Full Access marked `confirm`)
     /// and facts from its start's answer; a model and an effort applied while no turn runs; Plan
     /// applied while one does, from its next turn; Full Access refused without the person's
-    /// confirmation, nothing sent, then applied with it; and the run once Codex reports it.
+    /// confirmation, nothing sent, then applied with it; the run once Codex reports it; and a
+    /// run started on a model its start's check did not list.
     #[tokio::test]
     async fn the_codex_settings_wire_fixture_is_what_this_build_emits() {
         const FIXTURE: &str = include_str!("../../../fixtures/codex/codex-settings-wire.json");
@@ -8285,7 +8389,7 @@ mod tests {
         use crate::claude_host::Setting;
         let rig = rig();
         let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
         let live = settings_as_sent(&rig.daemon, &uid, "auto").await;
 
         let (model, asked_model) = changed(
@@ -8407,6 +8511,14 @@ mod tests {
         let full = settings_as_sent(&rig.daemon, &uid, "full-access").await;
         end_run(&rig, &uid).await;
 
+        // A run whose start's answer names a model its start's check did not list.
+        let other = self::rig();
+        let (unlisted, unlisted_ws) =
+            engine_run_offering(&other, &recorded_models(), "stub-model").await;
+        let unlisted_default = settings_as_sent(&other.daemon, &unlisted, "auto").await;
+        end_run(&other, &unlisted).await;
+        drop(unlisted_ws);
+
         let answer = |request_id: &str, result: SettingResult| {
             serde_json::to_value(protocol::ws::ServerMessage::SettingResult {
                 session_id: fixed.into(),
@@ -8446,6 +8558,7 @@ mod tests {
             "set_mode_confirmed_request": set_mode("mode-3", "full-access", true),
             "applied_confirmed": answer("mode-3", confirmed),
             "session_codex_full_access": full,
+            "session_codex_unlisted_default": unlisted_default,
         })
     }
 
