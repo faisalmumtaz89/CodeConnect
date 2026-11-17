@@ -556,14 +556,14 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<Fact>,
     /// The effort this run last took, and the event that recorded it (minor 39): an app's
-    /// change ([`notice::MODEL_SET`]) or claude's own receipt for a typed `/effort`. Omitted
-    /// when neither has happened.
+    /// change ([`notice::MODEL_SET`]) or claude's own receipt for a typed `/effort`, or the
+    /// settings a Codex run's Codex names (minor 43). Omitted when none has happened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Fact>,
     /// What an app may set this run to (minor 39): a live Claude run CodeConnect started,
-    /// once its start is answered. Omitted for any other run, before then, once it has
-    /// ended, and from an older daemon; a client offers the model, effort and mode controls
-    /// only where it is.
+    /// once its start is answered, or a live Codex one (minor 43). Omitted for any other run,
+    /// before then, once it has ended, and from an older daemon; a client offers the model,
+    /// effort and mode controls only where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<RunMenus>,
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
@@ -633,10 +633,13 @@ pub struct ModelFact {
 pub struct RunMenus {
     pub models: Vec<MenuModel>,
     /// The permission modes an app may set, the agent's own default first: the mode that asks
-    /// before acting, which a run starts in when no setting names another (Claude's `default`).
+    /// before acting, which a run starts in when no setting names another (Claude's `default`,
+    /// Codex's `auto`, minor 43). The order is CodeConnect's, not the agent's own.
     pub modes: Vec<MenuMode>,
     /// The value in `models` the run's model fact names, for an app to show as chosen (display
-    /// only: the run's model is claude's). Read off claude's own start answer: the fact itself,
+    /// only: the run's model is its agent's). A Codex run's is the fact itself, Codex naming
+    /// its model by the value its list gives (minor 43). A Claude run's is read off claude's
+    /// own start answer: the fact itself,
     /// the alias of claude's receipt of a change (`sonnet (claude-sonnet-5-5)`), or the one model
     /// claude resolves to the fact's id. When two do (`default` and `opus` both resolve to
     /// `claude-opus-5-5`), the alias of the run's newest receipt if it is one of them, else
@@ -673,7 +676,8 @@ pub struct MenuMode {
 pub enum ModelSource {
     /// The `model` of a `session_start`.
     SessionStart,
-    /// Claude Code's own `/model` receipt, `Set model to …` or `Kept model as …`.
+    /// The agent's own word on its model: Claude Code's `/model` receipt, `Set model to …` or
+    /// `Kept model as …`, or the settings a Codex run's Codex names (minor 43).
     Command,
 }
 

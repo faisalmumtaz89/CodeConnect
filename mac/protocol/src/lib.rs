@@ -814,7 +814,17 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     turn runs is still answered `next_turn`. `/model` or `/effort` sent alone, or as its
 ///     screen's confirmation, is refused with "/model's screen isn't available in this
 ///     session; nothing was changed." (or `/effort`'s).
-pub const PROTOCOL_MINOR: u32 = 42;
+///   * `43` — **A Codex run's settings from the apps.**
+///
+///     No message changes shape. A live Codex run CodeConnect started now carries
+///     [`event::SessionSummary`]'s `menus` (its models from Codex's own list, and the modes
+///     `auto` "Default", `read-only` "Read Only", `plan` "Plan" and `full-access` "Full
+///     Access", marked `confirm`), and its `model`, `effort` and `permission_mode` facts,
+///     read off the settings Codex names in its answers to the run's start and resumes and
+///     in its report of each change. [`ws::ClientMessage::SetModel`] and
+///     [`ws::ClientMessage::SetMode`] serve it as they serve a Claude run, answered with
+///     [`ws::ServerMessage::SettingResult`]. A daemon below 43 sends a Codex run no `menus`.
+pub const PROTOCOL_MINOR: u32 = 43;
 
 #[cfg(test)]
 mod ledger_tests {

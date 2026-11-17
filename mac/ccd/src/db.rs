@@ -426,6 +426,15 @@ impl Db {
             .await
     }
 
+    pub async fn keep_hosted_models(
+        &self,
+        session_uid: String,
+        models: serde_json::Value,
+    ) -> Result<()> {
+        self.run(move |store| store.keep_hosted_models(&session_uid, &models))
+            .await
+    }
+
     pub async fn newest_model_receipt(&self, session_uid: String) -> Result<Option<String>> {
         self.run(move |store| store.newest_model_receipt(&session_uid))
             .await

@@ -7566,21 +7566,33 @@ impl Daemon {
                 requests.insert((uid, request_id), filed);
             }
         }
-        // A live Claude run CodeConnect started offers its settings from its start's answer,
-        // with the one its model fact names marked (its newest receipt read for that here).
+        // A live run CodeConnect started offers its settings: a Claude run's from its start's
+        // answer, with the one its model fact names marked (its newest receipt read for that
+        // here); a Codex run's from its start's check, its model fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
+        let mut codex_menus: Vec<String> = Vec::new();
         for row in &rows {
-            if row.agent != protocol::agent::AgentKind::Claude || row.lifecycle != Lifecycle::Live {
+            if row.lifecycle != Lifecycle::Live {
                 continue;
             }
-            if let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? {
-                menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
-                let receipt = self
-                    .db
-                    .newest_model_receipt(row.session_uid.clone())
-                    .await?;
-                choosing.push((row.session_uid.clone(), models, receipt));
+            let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? else {
+                continue;
+            };
+            match row.agent {
+                protocol::agent::AgentKind::Claude => {
+                    menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
+                    let receipt = self
+                        .db
+                        .newest_model_receipt(row.session_uid.clone())
+                        .await?;
+                    choosing.push((row.session_uid.clone(), models, receipt));
+                }
+                protocol::agent::AgentKind::Codex => {
+                    menus.insert(row.session_uid.clone(), crate::codex_host::menus(&models));
+                    codex_menus.push(row.session_uid.clone());
+                }
+                protocol::agent::AgentKind::Unsupported(_) => {}
             }
         }
         // An ended run the person's next message relaunches, of either agent.
@@ -7601,6 +7613,19 @@ impl Daemon {
             if let (Some(fact), Some(menu)) = (fact, menus.get_mut(uid)) {
                 menu.selected_model =
                     crate::claude_host::selected_model(models, &fact.value, receipt.as_deref());
+            }
+        }
+        for uid in &codex_menus {
+            let fact = inner
+                .session_facts
+                .get(uid)
+                .and_then(|facts| facts.model.as_ref());
+            if let (Some(fact), Some(menu)) = (fact, menus.get_mut(uid)) {
+                menu.selected_model = menu
+                    .models
+                    .iter()
+                    .any(|model| model.value == fact.value)
+                    .then(|| fact.value.clone());
             }
         }
         Ok(Self::assemble_sessions(
@@ -7698,7 +7723,8 @@ impl Daemon {
 
     /// [`ClientMessage::SetModel`](protocol::ws::ClientMessage::SetModel) and
     /// [`ClientMessage::SetMode`](protocol::ws::ClientMessage::SetMode): change a Claude run
-    /// CodeConnect started ([`crate::claude_host::set_setting`]).
+    /// CodeConnect started ([`crate::claude_host::set_setting`]), or a Codex one through its
+    /// link ([`crate::codex_host::set_setting`], minor 43).
     pub async fn set_setting(
         &self,
         session_ref: &str,
@@ -7718,6 +7744,13 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
+        if row.agent == protocol::agent::AgentKind::Codex {
+            let commands = match self.inner.lock().await.host_links.get(&row.session_uid) {
+                Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
+                _ => None,
+            };
+            return crate::codex_host::set_setting(self, &row.session_uid, setting, commands).await;
+        }
         crate::claude_host::set_setting(self, &row.session_uid, setting).await
     }
 
