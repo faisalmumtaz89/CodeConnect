@@ -18,9 +18,7 @@ public enum CommandAction: Equatable {
     case nativeCompact(prefillInstructions: String)
     /// Bare `/clear` — the destructive confirmation, no intermediate sheet.
     case nativeClear
-    /// A built-in this app will not inject, with the honest sentence why.
-    /// Blocking beats "send and warn": a warning followed by a measured
-    /// lockout is not a safeguard.
+    /// A command this app will not send as typed, with the sentence why.
     case blocked(command: String, reason: String)
     /// Ordinary prose — or a custom skill, which expands into a normal
     /// prompt turn and needs nothing from us.
@@ -28,41 +26,9 @@ public enum CommandAction: Equatable {
 }
 
 /// The app's slash-command policy: native adapters for what this app answers
-/// itself, a measured guard for the built-ins that take the Mac's composer
-/// away, and untouched passage for everything else.
-///
-/// Every list here is *measured* — each command injected exactly as the
-/// daemon injects it, with the composer-presence needle sampled on a timing
-/// ladder afterwards. None of it is a guess about what a command is, and none
-/// of it is the binary's own inventory: see `action(for:)`.
+/// itself, and untouched passage for everything else — Claude Code answers
+/// every other command on a run CodeConnect started.
 public enum ClaudeCommandPolicy {
-
-    /// Commands **measured** to take the Mac's composer away — every one of
-    /// these was injected exactly as the daemon injects, sampling the
-    /// composer-presence needle on a 50/100/200/400/800/1200ms ladder, and
-    /// every one showed the composer gone at every sample. While it is gone
-    /// the daemon refuses every send, so the phone is locked out of its own
-    /// session.
-    ///
-    /// They are refused client-side and never typed at all. Two of them are
-    /// the reason the list must exist regardless:
-    /// `config` and `keybindings` survive Escape — `keybindings` spawns
-    /// **vim** on a config file, where Escape is a mode key — so no
-    /// automatic recovery can rescue them.
-    ///
-    /// Measured-inline and therefore NOT here, though a hand-written list
-    /// once claimed they were dialogs: `context` (a large render that can
-    /// hide the footer transiently and returns by itself), `agents`,
-    /// `focus`.
-    static let dialogCommands: Set<String> = [
-        "model", "status", "usage", "cost", "help", "export", "diff",
-        "permissions", "memory", "config", "hooks", "ide", "keybindings",
-        "mcp",
-    ]
-
-    /// Measured to open a view that **one Escape does not close**, so they are
-    /// refused with their own sentence rather than the generic one.
-    static let unrecoverableCommands: Set<String> = ["config", "keybindings"]
 
     /// Commands this app answers itself rather than typing: the run's settings
     /// sheet for `/model` and `/effort`, a sheet for `/compact`, a confirmation
@@ -71,11 +37,6 @@ public enum ClaudeCommandPolicy {
         "model", "diff", "effort", "compact", "clear",
     ]
 
-    /// Refused because CodeConnect cannot observe the result: the Mac's
-    /// title changes and nothing reports it back, so the app would be
-    /// claiming a change it cannot see.
-    static let unobservableCommands: Set<String> = ["rename"]
-
     /// `"/model sonnet"` → `"sonnet"` — everything after the command word.
     private static func arguments(of text: String, command: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -83,17 +44,9 @@ public enum ClaudeCommandPolicy {
             .trimmingCharacters(in: .whitespaces)
     }
 
-    /// Classification, in the order the measurements justify.
-    ///
-    /// **The discovered catalog is deliberately not a parameter.** It was,
-    /// and it was wrong: the probe lists 43 commands and omits real built-ins
-    /// including `/status`, `/cost`, `/help` and `/export` — all four
-    /// measured to take the composer away — so "absent from the catalog" was
-    /// read as "harmless custom skill" and typed, which is the lockout this
-    /// feature exists to prevent. Safety is the measured lists below. Taking
-    /// the argument away is stronger than a test forbidding its use: the mistake cannot be
-    /// written here again.
-    public static func action(for text: String, runSettings: RunSettings = .deferToOtherPath) -> CommandAction {
+    /// Classification: the five commands this app answers itself, and everything
+    /// else typed as written.
+    public static func action(for text: String) -> CommandAction {
         guard let command = firstToken(text) else { return .passThrough }
         let args = arguments(of: text, command: command)
         if command == "model" { return .nativeModel }
@@ -116,34 +69,8 @@ public enum ClaudeCommandPolicy {
             }
             return .nativeClear
         }
-        // Decision 227: the refusals below guard a terminal composer, which these commands take over.
-        // They apply only where `runSettings` defers — a terminal-attached Claude run, a non-Claude run,
-        // or an unknown one (fail-safe). A run CodeConnect started sends every command; claude's answer,
-        // or its own "isn't available in this environment" line, is the row. (C5 rewrites `runSettings`
-        // so no Claude run defers; C6 then removes the dialog list and this branch with it.)
-        guard case .deferToOtherPath = runSettings else { return .passThrough }
-        if unrecoverableCommands.contains(command) {
-            return .blocked(
-                command: command,
-                reason:
-                    "/\(command) opens a view on \(HostDevice.current.computer("the computer")) that Esc does not close, so "
-                    + "CodeConnect cannot recover the composer for you.")
-        }
-        if dialogCommands.contains(command) {
-            return .blocked(
-                command: command,
-                reason:
-                    "/\(command) opens a view on \(HostDevice.current.computer("the computer")) and would take over this "
-                    + "composer.")
-        }
-        if unobservableCommands.contains(command) {
-            return .blocked(
-                command: command,
-                reason:
-                    "/\(command) changes something CodeConnect cannot yet observe.")
-        }
-        // Everything else — a measured-inline built-in, a custom skill, a
-        // project command, a typo — is typed.
+        // Everything else — a built-in, a custom skill, a project command, a
+        // typo — is typed, and Claude Code's answer is the row.
         return .passThrough
     }
 

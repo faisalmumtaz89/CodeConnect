@@ -72,7 +72,8 @@ final class FleetRowChangeUITests: XCTestCase {
             NSPredicate(format: "label CONTAINS %@", "Try again in a moment")
         ).firstMatch
         XCTAssertTrue(outcome.waitForExistence(timeout: 30), "the launch's refusal is in Stop's place")
-        XCTAssertTrue(outcome.label.contains("lost its control link"), "and speaks the daemon's sentence: \(outcome.label)")
+        XCTAssertTrue(
+            outcome.label.contains("no connection to this run"), "and speaks the daemon's sentence: \(outcome.label)")
 
         outcome.tap()
         XCTAssertTrue(again.waitForExistence(timeout: 10), "Stop is offered beside the sentence")

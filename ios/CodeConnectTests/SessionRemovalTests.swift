@@ -379,6 +379,40 @@ final class SessionRemovalTests: XCTestCase {
             "a cold open must not restore a session the Mac no longer has")
     }
 
+    /// **A run the daemon no longer has leaves this device at the next connect.** The first start of a daemon
+    /// without the tmux path deletes every run it did not host, with its history (owner decision 230). This app
+    /// still holds such a run in `fleet.json` and its events file: a cold open restores it, and the first live
+    /// list that does not name it takes both.
+    func testARunTheDaemonDeletedLeavesTheCacheAtTheNextConnect() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = EventCache(root: root)
+        let kept = summary(lifecycle: "live", uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
+        let deleted = summary(lifecycle: "exited", uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQS")
+        await cache.saveFleet([kept, deleted])
+        let event = try JSONDecoder().decode(
+            Event.self,
+            from: Data(
+                """
+                {"session_uid":"\(deleted.sessionUID)","seq":1,"session_id":"cc-1",
+                 "ts":"2026-08-02T10:00:00.000Z","kind":"agent_message",
+                 "payload":{"text":"hi"},"source":"transcript"}
+                """.utf8))
+        await cache.saveEvents([event], key: deleted.sessionKey)
+
+        let model = AppModel(pairing: PairingStore(ephemeral: true), cache: cache)
+        await model.loadCachedFleetForTesting()
+        XCTAssertNotNil(model.statesForTesting[deleted.sessionKey], "the cold open restored it")
+
+        model.connection.injectForTesting(.sessions([kept]))
+        await model.cacheSettledForTesting()
+
+        let events = await cache.loadEvents(key: deleted.sessionKey)
+        XCTAssertNil(events, "its history is gone from this device")
+        let fleet = await cache.loadFleet()?.sessions.map(\.sessionUID)
+        XCTAssertEqual(fleet, [kept.sessionUID], "and a cold open no longer restores it")
+    }
+
     /// The review-mark map is capped at 200 and pruned oldest-first by ULID, so a
     /// mark held for a deleted run is not merely untidy: it is a slot taken from a
     /// run that still exists, and the evicted one's finished work reads as new.

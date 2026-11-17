@@ -1465,7 +1465,7 @@ private struct DiffCommentSheet: View {
     }
 
     private func resultMessage(_ attempt: ComposeAttempt) -> String {
-        // A Codex run composes the comment as a message; a Claude run's computer types it into the TTY.
+        // A Codex run composes the comment as a message; a Claude run takes it as typed text.
         let isCodex = model.shownSummary(for: key)?.isCodex == true
         switch attempt {
         case .sent(let matched):

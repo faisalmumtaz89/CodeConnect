@@ -68,12 +68,11 @@ public final class CodexControls {
 
     /// Until when Stop is greyed after a link-state refusal.
     ///
-    /// **Bounded, never permanent.** Four of the daemon's eleven refusal
-    /// sentences end in *"try again shortly"* or *"try again in a few seconds"*,
-    /// so a control that stayed dead would be contradicting the sentence printed
-    /// directly above it. Ten seconds is long enough that a reader does not
-    /// hammer a link that is reconnecting, and short enough that the daemon's
-    /// own advice stays true.
+    /// **Bounded, never permanent.** A greying refusal says the same ask may
+    /// work shortly, so a control that stayed dead would be contradicting the
+    /// sentence printed directly above it. Ten seconds is long enough that a
+    /// reader does not hammer the computer, and short enough that the
+    /// sentence stays true.
     private(set) var stopGreyedUntil: Date?
 
     static let refusalCooldown: TimeInterval = 10
@@ -339,7 +338,7 @@ public final class CodexControls {
         // **The grey survives**, unlike in `beginCompose`. That one clears it
         // because a compose which actually left proves the link came back; this
         // one is a compose that never left, which proves nothing — and the
-        // daemon's "try again shortly" is still the last word on the link.
+        // daemon's greying refusal is still the last word on the link.
     }
 
     /// Whether the bounded grey is still in force.
@@ -373,8 +372,8 @@ public final class CodexControls {
     /// fixture out of the repo and compares this app's bundled copy to it byte
     /// for byte. It used to compare the app's copy to the test bundle's copy —
     /// two derivatives of one `cp` — and both sat two rows behind the daemon,
-    /// so `compose_start_in_flight` left this composer live against a link that
-    /// was mid-first-turn with every test green.
+    /// so a missing link-state row left this composer live against a link the
+    /// daemon was refusing, with every test green.
     ///
     /// An unmatched sentence does **not** grey: a control the reader could act
     /// on now, held dead for ten seconds, is the worse of the two errors.

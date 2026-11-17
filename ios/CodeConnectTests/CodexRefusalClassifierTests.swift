@@ -115,11 +115,9 @@ final class CodexRefusalClassifierTests: XCTestCase {
     /// This is the seam that was missing. The classifier reads a bundled
     /// resource because it has to work on a phone with no repo, and the old
     /// drift check compared the app's copy to the *test bundle's* copy — two
-    /// derivatives of the same stale `cp`, so it could not fail. Both sat at 68
-    /// rows against a 70-row source for as long as nobody looked, and the two
-    /// rows missing were `compose_start_in_flight` and `compose_no_turn_to_steer`
-    /// — link-state refusals the daemon really sends, which the phone therefore
-    /// did not grey.
+    /// derivatives of the same stale `cp`, so it could not fail. Both sat two
+    /// rows behind the source for as long as nobody looked, and the two rows
+    /// missing were link-state refusals, which the phone therefore did not grey.
     ///
     /// So the comparison is against `fixtures/codex/refusal-sentences.json`
     /// itself. Skipped, not failed, when the repo is unreachable (a device run,
@@ -147,36 +145,6 @@ final class CodexRefusalClassifierTests: XCTestCase {
             """)
     }
 
-    /// **The two rows the stale copy was missing, named.**
-    ///
-    /// `compose_start_in_flight` and `compose_no_turn_to_steer` are returned by
-    /// `compose_route` in `mac/ccd/src/codex_link.rs` — plain arms, no `cfg`,
-    /// on the ordinary first-turn path. Both are `link_state`: the turn is
-    /// coming, and the same message a moment later will be written. With the
-    /// stale 68-row bundle the classifier had never heard of either, the
-    /// unmatched arm declined to grey, and the composer stayed live against a
-    /// link mid-first-turn.
-    ///
-    /// Named explicitly rather than left to the loop above, because these two
-    /// are the regression: if a future regeneration drops them the loop still
-    /// passes over 68 other rows and this does not.
-    func testTheFirstTurnLinkStateRefusalsGrey() throws {
-        let wire = try Self.repoFixture()
-        for id in ["compose_start_in_flight", "compose_no_turn_to_steer"] {
-            let row = try XCTUnwrap(
-                wire.sentences.first { $0.id == id },
-                "\(id) is not in refusal-sentences.json — the daemon still sends it")
-            XCTAssertEqual(row.category, "link_state", "\(id) must be a link-state refusal")
-            let rendered = Self.fill(row.text, tokens: wire.tokens)
-            XCTAssertTrue(
-                CodexControls.isLinkStateRefusal(rendered),
-                """
-                \(id) did not grey the composer: \(rendered) — the app's \
-                bundled refusal-sentences.json does not contain this row.
-                """)
-        }
-    }
-
     /// A sentence from no row does **not** grey. Failing open here would hold a
     /// control dead for ten seconds on a refusal the reader could act on now.
     func testAnUnrecognisedRefusalDoesNotGrey() {
@@ -186,8 +154,8 @@ final class CodexRefusalClassifierTests: XCTestCase {
         // claim it: the template's first literal segment anchors the start.
         XCTAssertFalse(
             CodexControls.isLinkStateRefusal(
-                "the operator said: there is no live link to this Codex session, so nothing "
-                    + "was sent; stop the turn at the computer — but that was yesterday"))
+                "the operator said: CodeConnect has no connection to this run right now, so nothing "
+                    + "was sent. — but that was yesterday"))
     }
 
     /// **A template that ends in literal text must end the sentence.**

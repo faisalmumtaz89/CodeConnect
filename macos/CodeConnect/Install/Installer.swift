@@ -4,8 +4,8 @@ import os
 /// The app installs CodeConnect itself: the binaries it carries (`Contents/Helpers`) go into the
 /// CodeConnect folder's `bin`, and the existing `codeconnect daemon install` starts the daemon and keeps it
 /// running at login. One updater, the app's: when the app's binaries differ from those installed, they
-/// are copied again and the daemon reinstalled; sessions survive it (they live in tmux). Their notices go
-/// beside them, as every release archive carries them (`Contents/Resources`).
+/// are copied again and the daemon reinstalled; sessions survive it (each run's agent host outlives the
+/// daemon). Their notices go beside them, as every release archive carries them (`Contents/Resources`).
 struct Installer {
     static let binaries = ["ccd", "codeconnect", "cc-tmux", "cc-agent-host"]
     static let notices = ["LICENSE", "THIRD_PARTY_NOTICES", "AGENT_HOST_NOTICES"]

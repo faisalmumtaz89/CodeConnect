@@ -78,13 +78,11 @@ final class FleetRowHeightTests: XCTestCase {
 
     /// The daemon's own sentences, from its catalogue
     /// (`fixtures/codex/refusal-sentences.json`): its link-state refusal, which
-    /// greys Stop for ten seconds, and its longest stop sentence.
-    private let linkRefusal =
-        "the computer has lost its control link to the Codex session and is reconnecting, so nothing was sent; "
-        + "try again shortly, or stop the turn at the computer"
+    /// greys Stop for ten seconds, and its longest Codex stop sentence.
+    private let linkRefusal = "CodeConnect has no connection to this run right now, so nothing was sent."
     private let longestStopSentence =
-        "the link's connection to Codex ended while this request to stop the turn was in flight, and the computer "
-        + "could not record that either, so it cannot say what became of it. Check the computer."
+        "the link's connection to Codex ended while this request to stop the turn was in flight, so whether that "
+        + "turn was stopped is not known; it will not be sent again. Check the computer."
     /// What the fleet draws for a greyed Stop (`FleetView.stopBlockedReason`).
     private let coolingDown = "Try again in a moment."
 

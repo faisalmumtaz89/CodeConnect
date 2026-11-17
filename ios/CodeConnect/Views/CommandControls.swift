@@ -8,8 +8,8 @@ import SwiftUI
 //  a command natively — the run's settings sheet for `/model` and `/effort`, a
 //  sheet for `/compact`, a confirmation for `/clear`, and the app's own diff
 //  for `/diff`. The send-time policy underneath: typed native commands open
-//  their controls, typed dialog built-ins get the composer's refusal note, and
-//  anything unknown passes through as the custom skill or plain text it is.
+//  their controls, and anything else passes through as the command, custom
+//  skill or plain text it is.
 // =============================================================================
 
 /// One palette row: the command, what tapping it opens, and the action the

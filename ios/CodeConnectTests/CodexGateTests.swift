@@ -377,16 +377,13 @@ final class CodexGateTests: XCTestCase {
     // MARK: The bounded grey
 
     /// A link-state refusal greys Stop for a **bounded** window, then gives it
-    /// back — four of the daemon's own sentences end in "try again shortly", so
-    /// a permanent grey would contradict the sentence printed above it.
+    /// back: the same ask may work shortly, so a permanent grey would contradict
+    /// the sentence printed above it.
     func testStopGreysAndRecovers() {
         let controls = CodexControls()
         let now = Date()
         controls.settleStop(
-            .rejected(
-                reason:
-                    "the computer has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the computer"),
+            .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent."),
             material: "m", turnID: "t-1", now: now)
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(1)))
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(9)))
@@ -412,10 +409,7 @@ final class CodexGateTests: XCTestCase {
         XCTAssertFalse(controls.isStopGreyed(now: clock()))
         XCTAssertEqual(reads, 0, "nothing greyed, so nothing to time")
         controls.settleStop(
-            .rejected(
-                reason:
-                    "the computer has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the computer"),
+            .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent."),
             material: "m", turnID: "t-1", now: now)
         XCTAssertTrue(controls.isStopGreyed(now: clock()))
         XCTAssertEqual(reads, 1, "a standing grey is timed")
@@ -428,10 +422,7 @@ final class CodexGateTests: XCTestCase {
         XCTAssertEqual(reads, 0, "a grey whose time is up is no longer timed")
 
         controls.settleStop(
-            .rejected(
-                reason:
-                    "the computer has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the computer"),
+            .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent."),
             material: "m", turnID: "t-1", now: now)
         controls.beginCompose()
         XCTAssertFalse(controls.isStopGreyed(now: clock()))

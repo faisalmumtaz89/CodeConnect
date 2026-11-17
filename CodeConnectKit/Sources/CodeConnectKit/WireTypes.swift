@@ -494,8 +494,8 @@ public struct Event: Codable, Sendable, Hashable, Identifiable {
     /// The run's identity — a ULID minted at spawn and never reused. Empty from
     /// a daemon older than protocol minor 2, which had no such concept.
     let sessionUID: String
-    /// The tmux name (`cc-1`). Display and `tmux attach` only: it is handed to
-    /// the *next* session when this one exits, so it is not an identity.
+    /// The run's name: its uid for a run CodeConnect started, a reused name
+    /// (`cc-1`) on an older daemon. Display only: it is not an identity.
     public let sessionID: String
     let ts: String
     public let kind: EventKind
@@ -1189,9 +1189,8 @@ extension QuestionHold: Codable {
 
 public struct AnswerOutcome: Codable, Sendable, Hashable {
     public let requestID: String
-    /// The tmux *name* of the run that was answered — `ccd/src/state.rs` fills
-    /// this from `session.name`, not from the uid. Display only; never key
-    /// anything by it.
+    /// The *name* of the run that was answered (`session.name` in ccd), not its
+    /// uid. Display only; never key anything by it.
     let sessionID: String
     public let decision: AnswerDecision
     public let resolvedBy: ResolvedBy
@@ -1998,7 +1997,7 @@ public enum HelloCredential: Sendable, Hashable {
 /// like `cc-1` (legacy, and resolved by the daemon to the newest run under that
 /// name). The app sends the uid whenever the daemon mints them, because a name
 /// can resolve to a *different run* than the one the screen is showing — and for
-/// `sendText` that would type into the wrong agent's TTY.
+/// `sendText` that would send to the wrong agent.
 public enum ClientMessage: Sendable {
     case hello(credential: HelloCredential, clientID: String?, clientName: String?)
     case sessions

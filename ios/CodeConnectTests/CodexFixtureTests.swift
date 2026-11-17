@@ -516,7 +516,7 @@ final class CodexFixtureTests: XCTestCase {
 /// That is not a hypothetical. It is how `refusal-sentences.json` sat two rows
 /// behind the daemon in both iOS copies while `CodexRefusalClassifierTests`
 /// compared one copy to the other and stayed green — leaving the composer live
-/// against a link `compose_start_in_flight` was refusing. And it is why
+/// against a link the daemon was refusing. And it is why
 /// `compose-0.153.4.jsonl` was found carrying a *different capture's* item id
 /// from the source's, which nobody had noticed either.
 ///

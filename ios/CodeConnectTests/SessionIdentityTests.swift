@@ -221,7 +221,7 @@ final class SessionIdentityTests: XCTestCase {
 
         XCTAssertEqual(
             model.resolveSessionKey(reference: "cc-1"), liveUID,
-            "a bare name means the run with a supervisor attached (mac/README.md)")
+            "a bare name means the run whose link is attached")
         XCTAssertEqual(
             model.resolveSessionKey(reference: deadUID), deadUID, "a uid is exact")
         XCTAssertNil(model.resolveSessionKey(reference: "cc-9"))
