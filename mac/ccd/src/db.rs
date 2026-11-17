@@ -110,6 +110,8 @@ db_ops! {
     fn max_seq(session_uid: String) -> u64;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
+    /// The settings Codex last named for a Codex run's thread, as filed.
+    fn newest_codex_settings(session_uid: String) -> Option<serde_json::Value>;
     fn get_session(session_uid: String) -> Option<SessionRow>;
     /// The durable Codex generation high-water for one uid, or
     /// `None` when nothing provable has been adopted under it.
@@ -423,6 +425,15 @@ impl Db {
         session_uid: String,
     ) -> Result<Option<Vec<serde_json::Value>>> {
         self.run(move |store| store.hosted_models(&session_uid))
+            .await
+    }
+
+    pub async fn keep_hosted_models(
+        &self,
+        session_uid: String,
+        models: serde_json::Value,
+    ) -> Result<()> {
+        self.run(move |store| store.keep_hosted_models(&session_uid, &models))
             .await
     }
 

@@ -1,0 +1,408 @@
+{
+  "applied_confirmed": {
+    "request_id": "mode-3",
+    "result": {
+      "applies": "now",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "applied_effort": {
+    "request_id": "effort-1",
+    "result": {
+      "applies": "now",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "applied_model": {
+    "request_id": "model-1",
+    "result": {
+      "applies": "now",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "applied_plan_during_a_turn": {
+    "request_id": "mode-1",
+    "result": {
+      "applies": "next_turn",
+      "status": "applied"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "refused_unconfirmed": {
+    "request_id": "mode-2",
+    "result": {
+      "reason": "Turning on Full Access needs your confirmation in the app; nothing was changed.",
+      "status": "refused"
+    },
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "setting_result"
+  },
+  "session_codex_full_access": {
+    "agent": "codex",
+    "blocked_on": [],
+    "codex_link": "subscribed",
+    "codex_thread_id": "thr-x6",
+    "created_at": "2026-11-15T00:00:00Z",
+    "cwd": "/Users/person/project",
+    "effort": {
+      "seq": 6,
+      "value": "high"
+    },
+    "last_seq": 0,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Latest workhorse model for coding and everyday work.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6.1-Sol",
+          "value": "gpt-6.1-sol"
+        },
+        {
+          "detail": "Frontier intelligence for the most demanding work.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6-Astra",
+          "value": "gpt-6-astra"
+        },
+        {
+          "detail": "Previous generation workhorse model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6-Sol",
+          "value": "gpt-6-sol"
+        },
+        {
+          "detail": "Fast and affordable model for easier tasks.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "GPT-6-Luna",
+          "value": "gpt-6-luna"
+        },
+        {
+          "detail": "Older generation workhorse model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-5.6-Sol",
+          "value": "gpt-5.6-sol"
+        },
+        {
+          "detail": "GPT-6.1 Terra Codex model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6.1 Terra",
+          "value": "gpt-6.1-terra"
+        },
+        {
+          "detail": "Older balanced model for straightforward work.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-5.6-Terra",
+          "value": "gpt-5.6-terra"
+        },
+        {
+          "detail": "Older fast and efficient model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "GPT-5.6-Luna",
+          "value": "gpt-5.6-luna"
+        },
+        {
+          "detail": "Legacy coding model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "label": "GPT-5.5",
+          "value": "gpt-5.5"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Default",
+          "value": "auto"
+        },
+        {
+          "label": "Read Only",
+          "value": "read-only"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Full Access",
+          "value": "full-access"
+        }
+      ],
+      "selected_model": "gpt-6-astra"
+    },
+    "model": {
+      "at": "2026-11-15T00:00:00Z",
+      "seq": 6,
+      "source": "command",
+      "value": "gpt-6-astra"
+    },
+    "permission_mode": {
+      "seq": 6,
+      "value": "full-access"
+    },
+    "project_label": "project",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T00:00:00Z"
+  },
+  "session_codex_live": {
+    "agent": "codex",
+    "blocked_on": [],
+    "codex_link": "subscribed",
+    "codex_thread_id": "thr-x6",
+    "created_at": "2026-11-15T00:00:00Z",
+    "cwd": "/Users/person/project",
+    "last_seq": 0,
+    "lifecycle": "live",
+    "link": "attached",
+    "menus": {
+      "models": [
+        {
+          "detail": "Latest workhorse model for coding and everyday work.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6.1-Sol",
+          "value": "gpt-6.1-sol"
+        },
+        {
+          "detail": "Frontier intelligence for the most demanding work.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6-Astra",
+          "value": "gpt-6-astra"
+        },
+        {
+          "detail": "Previous generation workhorse model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6-Sol",
+          "value": "gpt-6-sol"
+        },
+        {
+          "detail": "Fast and affordable model for easier tasks.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "GPT-6-Luna",
+          "value": "gpt-6-luna"
+        },
+        {
+          "detail": "Older generation workhorse model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-5.6-Sol",
+          "value": "gpt-5.6-sol"
+        },
+        {
+          "detail": "GPT-6.1 Terra Codex model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-6.1 Terra",
+          "value": "gpt-6.1-terra"
+        },
+        {
+          "detail": "Older balanced model for straightforward work.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "label": "GPT-5.6-Terra",
+          "value": "gpt-5.6-terra"
+        },
+        {
+          "detail": "Older fast and efficient model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "label": "GPT-5.6-Luna",
+          "value": "gpt-5.6-luna"
+        },
+        {
+          "detail": "Legacy coding model.",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "label": "GPT-5.5",
+          "value": "gpt-5.5"
+        }
+      ],
+      "modes": [
+        {
+          "label": "Default",
+          "value": "auto"
+        },
+        {
+          "label": "Read Only",
+          "value": "read-only"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Full Access",
+          "value": "full-access"
+        }
+      ],
+      "selected_model": "gpt-6.1-sol"
+    },
+    "model": {
+      "at": "2026-11-15T00:00:00Z",
+      "seq": 1,
+      "source": "command",
+      "value": "gpt-6.1-sol"
+    },
+    "permission_mode": {
+      "seq": 1,
+      "value": "auto"
+    },
+    "project_label": "project",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "tmux_session": "",
+    "updated_at": "2026-11-15T00:00:00Z"
+  },
+  "set_effort_request": {
+    "effort": "high",
+    "request_id": "effort-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_model"
+  },
+  "set_mode_bare_request": {
+    "mode": "full-access",
+    "request_id": "mode-2",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_mode"
+  },
+  "set_mode_confirmed_request": {
+    "confirmed": true,
+    "mode": "full-access",
+    "request_id": "mode-3",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_mode"
+  },
+  "set_mode_plan_request": {
+    "mode": "plan",
+    "request_id": "mode-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_mode"
+  },
+  "set_model_request": {
+    "model": "gpt-6-astra",
+    "request_id": "model-1",
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "type": "set_model"
+  }
+}

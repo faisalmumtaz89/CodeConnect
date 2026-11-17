@@ -16,6 +16,32 @@ use crate::event::{Event, EventKind, Fact, ModelFact, ModelSource, Source};
 /// under, read from a log that build wrote.
 pub const TRANSCRIPT_PERMISSION_MODE: &str = "transcript_permission-mode";
 
+/// The kind ccd files a Codex run's settings under, as Codex names them in its report of a
+/// change or its answer to the run's start or a resume: its `model`, `effort`,
+/// `approval_policy`, `sandbox` and `collaboration_mode`.
+pub const CODEX_SETTINGS: &str = "codex_settings";
+
+/// The menu mode a Codex run's settings are (minor 43), by Codex's approval policy, sandbox
+/// and collaboration mode: `full-access` whenever it asks nothing with full access (never,
+/// full access), in Plan too, since Plan keeps the approval and sandbox it was entered with
+/// and a run that asks nothing must read so; else `plan` whenever its collaboration mode is
+/// Plan; else `auto` (on request, workspace write) or `read-only` (on request, read only).
+/// Any other combination is none of the menu's modes and decides no fact.
+pub fn codex_mode(approval: &str, sandbox: &str, collaboration: &str) -> Option<&'static str> {
+    match (approval, sandbox, collaboration) {
+        ("never", "dangerFullAccess", "default" | "plan") => Some("full-access"),
+        (_, _, "plan") => Some("plan"),
+        ("on-request", "workspaceWrite", "default") => Some("auto"),
+        ("on-request", "readOnly", "default") => Some("read-only"),
+        _ => None,
+    }
+}
+
+/// Whether `event` is a Codex run's settings ([`CODEX_SETTINGS`]).
+fn codex_settings(event: &Event) -> bool {
+    matches!(&event.kind, EventKind::Other(kind) if kind == CODEX_SETTINGS)
+}
+
 /// A run's facts, each as of the newest event that decided it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFacts {
@@ -69,8 +95,8 @@ impl SessionFacts {
 /// What one event says the run's effort is, if anything: the `effort` of a `model_set`
 /// notice, which ccd files when claude has taken an app's effort change (minor 39), or
 /// claude's own receipt for a typed `/effort` on a user line (`Set effort level to low (this
-/// session only): …`), read as [`model_fact`] reads `Set model to`. A receipt in another
-/// wording is not read.
+/// session only): …`), read as [`model_fact`] reads `Set model to`, or a Codex run's settings
+/// report's `effort` ([`CODEX_SETTINGS`]). A receipt in another wording is not read.
 pub fn effort_fact(event: &Event) -> Option<Fact> {
     let value = match event.kind {
         EventKind::Notification => {
@@ -88,6 +114,7 @@ pub fn effort_fact(event: &Event) -> Option<Fact> {
                 .next()?
                 .to_string()
         }
+        _ if codex_settings(event) => event.payload.get("effort")?.as_str()?.to_string(),
         _ => return None,
     };
     Some(Fact {
@@ -97,9 +124,11 @@ pub fn effort_fact(event: &Event) -> Option<Fact> {
 }
 
 /// What one event says the run's model is, if anything: a `session_start`
-/// carrying a non-empty `model`, or Claude Code's `/model` receipt on a
-/// transcript user line. Both verbs of the receipt are facts about the model in
-/// force; which one it was is not this fact's business.
+/// carrying a non-empty `model`, Claude Code's `/model` receipt on a
+/// transcript user line, or a Codex run's settings' `model`
+/// ([`CODEX_SETTINGS`]), an agent's own receipt as Claude's is. Both verbs of the
+/// receipt are facts about the model in force; which one it was is not this fact's
+/// business.
 pub fn model_fact(event: &Event) -> Option<ModelFact> {
     let (value, source) = match event.kind {
         EventKind::SessionStart => {
@@ -113,6 +142,13 @@ pub fn model_fact(event: &Event) -> Option<ModelFact> {
             let content = event.payload.get("message")?.get("content")?.as_str()?;
             (model_receipt(content)?.1, ModelSource::Command)
         }
+        _ if codex_settings(event) => {
+            let model = event.payload.get("model")?.as_str()?;
+            if model.is_empty() {
+                return None;
+            }
+            (model.to_string(), ModelSource::Command)
+        }
         _ => return None,
     };
     Some(ModelFact {
@@ -125,11 +161,24 @@ pub fn model_fact(event: &Event) -> Option<ModelFact> {
 
 /// What one event says the main agent's permission mode is, if anything: the
 /// `permission_mode` of a hook's input that names no `agent_id`, Claude's own
-/// permission-mode transcript line, or the `permissionMode` of an SDK run's init.
+/// permission-mode transcript line, the `permissionMode` of an SDK run's init, or the menu
+/// mode a Codex run's settings are ([`codex_mode`]).
 ///
 /// A background agent's hook carries its `agent_id`, and its mode (measured:
 /// `bubble`) is that agent's, never the run's.
 pub fn permission_mode_fact(event: &Event) -> Option<Fact> {
+    if codex_settings(event) {
+        let text = |key: &str| event.payload.get(key).and_then(serde_json::Value::as_str);
+        return Some(Fact {
+            value: codex_mode(
+                text("approval_policy")?,
+                text("sandbox")?,
+                text("collaboration_mode")?,
+            )?
+            .to_string(),
+            seq: event.seq,
+        });
+    }
     let mode = match &event.kind {
         EventKind::Other(kind) if kind == TRANSCRIPT_PERMISSION_MODE => {
             event.payload.get("permissionMode")?
@@ -620,5 +669,62 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// **A Codex run's settings decide its model, its effort and its mode** (minor
+    /// 43): the model and the effort as Codex names them, the model as the agent's own
+    /// receipt; the mode as the menu's, a run asking nothing reading `full-access` in Plan
+    /// too; and a combination no menu mode is, or a report with no effort, decides nothing of
+    /// that.
+    #[test]
+    fn a_codex_settings_report_decides_its_model_effort_and_mode() {
+        let report = |seq, approval: &str, sandbox: &str, mode: &str, effort: serde_json::Value| {
+            event(
+                seq,
+                EventKind::Other(CODEX_SETTINGS.into()),
+                Source::Codex,
+                json!({"model": "gpt-6-astra", "effort": effort, "approval_policy": approval,
+                       "sandbox": sandbox, "collaboration_mode": mode}),
+            )
+        };
+        for (approval, sandbox, mode, read) in [
+            ("on-request", "workspaceWrite", "default", Some("auto")),
+            ("on-request", "readOnly", "default", Some("read-only")),
+            ("on-request", "workspaceWrite", "plan", Some("plan")),
+            ("on-request", "readOnly", "plan", Some("plan")),
+            ("never", "dangerFullAccess", "default", Some("full-access")),
+            ("never", "dangerFullAccess", "plan", Some("full-access")),
+            ("never", "workspaceWrite", "default", None),
+            ("on-request", "dangerFullAccess", "default", None),
+        ] {
+            let decided = permission_mode_fact(&report(4, approval, sandbox, mode, json!("high")));
+            assert_eq!(
+                decided.map(|fact| fact.value),
+                read.map(str::to_string),
+                "{approval} {sandbox} {mode}"
+            );
+        }
+        let reported = report(4, "on-request", "workspaceWrite", "default", json!("high"));
+        let model = model_fact(&reported).expect("its model");
+        assert_eq!(
+            (model.value.as_str(), model.source),
+            ("gpt-6-astra", ModelSource::Command)
+        );
+        assert_eq!(
+            effort_fact(&reported).map(|fact| fact.value),
+            Some("high".into())
+        );
+        let no_effort = report(
+            5,
+            "on-request",
+            "workspaceWrite",
+            "default",
+            serde_json::Value::Null,
+        );
+        assert_eq!(
+            effort_fact(&no_effort),
+            None,
+            "a report with no effort decides none"
+        );
     }
 }

@@ -31,8 +31,9 @@
 //! The start's connection is then kept as the run's link ([`link`], P3 R1): every
 //! notification it brings is mapped by the Codex adapter and filed, for both apps. When a
 //! ccd restarts, each `live` run whose app-server is alive is connected again
-//! ([`reconnect`]): its thread resumed with the preset and its thread config, the turns it
-//! ran meanwhile filed from the answer, and its link kept from there. An app's Stop, its
+//! ([`reconnect`]): its thread resumed with the approval and sandbox Codex last named for it
+//! and its thread config, the turns it ran meanwhile filed from the answer, and its link kept
+//! from there. An app's Stop, its
 //! later messages and End run reach the run through its link too ([`LinkCommand`]). A message
 //! is a `turn/start` under its own uuid, which Codex runs as a new turn or adds to the running
 //! one; it is settled by what Codex then records of it ([`compose`], [`heard`]).
@@ -40,7 +41,7 @@
 //! A run whose app-server ended without ccd stopping it ("Stopped: its process ended": a crash,
 //! or a Mac restart) is relaunched by the person's next message, never at ccd start
 //! ([`relaunch`], P3 R4): its app-server is launched again into the run's folder, its thread
-//! resumed as a reconnect resumes it, and the message sent on the new link.
+//! resumed at Default's approval and sandbox, and the message sent on the new link.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -50,13 +51,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::agent::AgentKind;
-use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
+use protocol::event::{
+    EventKind, Lifecycle, MenuMode, MenuModel, PendingEvent, RunMenus, SessionKey, Source,
+};
 use protocol::host::Trust;
 use protocol::proc_identity::{
     group_has_members, group_warrant, liveness, read_birth_identity, BootIdentity, GroupWarrant,
     Liveness, ProcessIdentity,
 };
-use protocol::ws::{StartFailure, StartSessionResult};
+use protocol::ws::{Applies, SettingResult, StartFailure, StartSessionResult};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
@@ -90,6 +93,9 @@ pub(crate) struct Run<'a> {
     /// The app's model. Codex's own `default` is sent as none, so the thread starts with
     /// the model its settings name.
     pub model: Option<&'a str>,
+    /// The models the start's check listed, each as Codex's `model/list` gives it (hidden
+    /// ones left out): kept with the run, the models of its settings menu ([`menus`]).
+    pub models: &'a [Value],
     /// The codex the start's check found.
     pub codex: &'a Path,
     /// The `codeconnect` binary, which runs the run's mail server.
@@ -168,6 +174,16 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
         Ok(None) => {}
         Err(err) => return failed(format!("could not record the run: {err:#}")),
+    }
+    // Kept where a Claude run keeps its start's answer, so its menu is read the same way; a
+    // run whose check listed none offers its modes alone, and one that could not keep them
+    // offers no settings.
+    if let Err(err) = daemon
+        .db
+        .keep_hosted_models(uid.clone(), serde_json::json!({ "models": run.models }))
+        .await
+    {
+        crate::log_error!("{uid}: could not keep its models for its settings: {err:#}");
     }
     let deadline = Instant::now() + timeout;
     let mut launched = None;
@@ -285,9 +301,10 @@ async fn first_send(daemon: Arc<Daemon>, client: Client, send: FirstSend) {
             drop(client);
             stop(&uid, send.leader, send.boot).await;
         }
-        Ok(thread) if advanced => {
+        Ok((thread, answer)) if advanced => {
             daemon.mail_run_live(&uid).await;
-            let adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
+            let mut adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
+            file(&daemon, &uid, adapter.settings_answered(&thread, &answer)).await;
             link(
                 daemon,
                 uid,
@@ -588,6 +605,11 @@ pub(crate) enum LinkCommand {
     Compose(ComposeAsk),
     /// End run's graceful step ([`stop_gracefully`]).
     Stop,
+    /// An app's settings change, its outcome told on `reply` ([`change_settings`]).
+    Settings {
+        setting: crate::claude_host::Setting,
+        reply: tokio::sync::oneshot::Sender<SettingResult>,
+    },
 }
 
 /// A phone's message `text` under its request id and the hash [`Daemon::compose`] binds it
@@ -750,9 +772,15 @@ async fn link(
                 else {
                     continue;
                 };
+                // As Codex last named the run's settings, not as the reconnect resumed it: a
+                // change made while the turn ran stays made.
+                let mut resume = due.resume;
+                if let Some(kept) = adapter.settings() {
+                    keep_settings(&mut resume, kept);
+                }
                 match tokio::time::timeout(
                     crate::start_session::START_TIMEOUT,
-                    client.call("thread/resume", due.resume),
+                    client.call("thread/resume", resume),
                 )
                 .await
                 {
@@ -798,6 +826,13 @@ async fn link(
                 LinkCommand::Stop => {
                     record_tools(host.as_ref(), &mut tools);
                     stop_gracefully(&daemon, &uid, &client, &mut running).await;
+                }
+                LinkCommand::Settings { setting, reply } => {
+                    let told = change_settings(
+                        &client, &thread, adapter.settings(), running.is_some(), &setting,
+                    )
+                    .await;
+                    let _ = reply.send(told);
                 }
             },
         }
@@ -1815,15 +1850,18 @@ async fn resumed(
     )
     .await;
     adapter.apply_resume_seed(&seed);
+    file(daemon, uid, adapter.settings_answered(thread, answer)).await;
     seed.running_turn_ids().to_vec()
 }
 
 /// A restarted ccd's link to the `live` run `run`, whose recorded app-server is alive (P3
-/// R2): its socket, `initialize`, a fresh skills scan, then `thread/resume` with the preset
-/// and the run's thread config, the answer filed, and the run's [`link`] from there. Codex
-/// restores the thread's model itself; the resume carries the preset and the thread config,
-/// as the start did. A turn the answer reports running is owed its follow-up. Anything that
-/// fails, within START_TIMEOUT, leaves the run `live` and unlinked, and is logged.
+/// R2): its socket, `initialize`, a fresh skills scan, then `thread/resume` with the approval
+/// policy and sandbox Codex last named for it and the run's thread config, the answer filed,
+/// and the run's [`link`] from there. Codex restores the thread's model itself; the resume
+/// carries the approval and sandbox because Codex takes a resume's as the thread's own (X6
+/// P12c), and the same app-server keeps what the run was set to (ruling b). A turn the answer
+/// reports running is owed its follow-up. Anything that fails, within START_TIMEOUT, leaves
+/// the run `live` and unlinked, and is logged.
 pub(crate) async fn reconnect(
     daemon: Arc<Daemon>,
     root: PathBuf,
@@ -1863,19 +1901,30 @@ async fn resume(
         .initialize()
         .await
         .map_err(|err| format!("Codex's app-server did not initialize: {err}"))?;
-    let (adapter, owed, cards) = resume_thread(daemon, &client, run, codeconnect).await?;
+    let kept = match daemon.db.newest_codex_settings(uid.clone()).await {
+        Ok(kept) => kept,
+        Err(err) => {
+            crate::log_error!(
+                "{uid}: could not read its settings, so it resumes at Default: {err:#}"
+            );
+            None
+        }
+    };
+    let (adapter, owed, cards) = resume_thread(daemon, &client, run, codeconnect, kept).await?;
     Ok((client, adapter, owed, cards))
 }
 
 /// The run's thread resumed on `client`, connected and initialized: a fresh skills scan, then
-/// `thread/resume` with the preset and the run's thread config, its answer filed. The adapter
-/// told what was filed, the turn the answer reports running owed its follow-up, and the run's
-/// standing cards.
+/// `thread/resume` with the run's thread config and the approval policy and sandbox `kept`
+/// names (its newest `codex_settings` fact, [`keep_settings`]), the preset Default's without
+/// one, its answer filed. The adapter told what was filed, the turn the answer reports running
+/// owed its follow-up, and the run's standing cards.
 async fn resume_thread(
     daemon: &Arc<Daemon>,
     client: &Client,
     run: &LiveCodexRun,
     codeconnect: &Path,
+    kept: Option<Value>,
 ) -> Result<(CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
     let uid = &run.host.session_uid;
     let folders = folders(&run.cwd, daemon.config.git_bin.as_deref()).await?;
@@ -1887,6 +1936,9 @@ async fn resume_thread(
         .await
         .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
     let mut params = thread_params(&run.cwd, None);
+    if let Some(kept) = &kept {
+        keep_settings(&mut params, kept);
+    }
     params["threadId"] = json!(run.thread);
     params["config"] = thread_config(
         uid,
@@ -1926,7 +1978,8 @@ async fn resume_thread(
 /// `as.sock` are removed; the codex a start would find, with the environment a
 /// start reads, is launched into the run's folder with the run's kept folder answer, appending
 /// to its `host.log` ([`bring_up`]); and the thread is resumed on that connection as a
-/// reconnect resumes it ([`resume_thread`]). The run is then `live`, before its link is in
+/// reconnect resumes it ([`resume_thread`]), at Default's approval and sandbox: a new
+/// app-server keeps nothing the run was set to (ruling b). The run is then `live`, before its link is in
 /// place, its start is filed under this launch so the apps' timeline reopens, and its [`link`]
 /// takes `ask` as its first command.
 ///
@@ -2067,6 +2120,8 @@ async fn launch_again(
         cwd: &run.cwd,
         prompt: &ask.text,
         model: None,
+        // The run keeps the models its start kept.
+        models: &[],
         codex: &codex.path,
         codeconnect: &codeconnect,
         git_bin,
@@ -2075,7 +2130,7 @@ async fn launch_again(
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
-    let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect).await?;
+    let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect, None).await?;
     Ok((client, adapter, owed, cards))
 }
 
@@ -2143,8 +2198,13 @@ async fn standing_cards(
 }
 
 /// `skills/list`, `thread/start`, the thread recorded, then `turn/start` with the first
-/// message: each call's error, or a run ended meanwhile, stops it. The run's thread.
-async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Result<String, String> {
+/// message: each call's error, or a run ended meanwhile, stops it. The run's thread, and
+/// `thread/start`'s answer, which names the settings it runs with.
+async fn send_first(
+    daemon: &Daemon,
+    client: &Client,
+    send: &FirstSend,
+) -> Result<(String, Value), String> {
     let skills = client
         .call(
             "skills/list",
@@ -2187,7 +2247,261 @@ async fn send_first(daemon: &Daemon, client: &Client, send: &FirstSend) -> Resul
         )
         .await
         .map_err(|err| format!("Codex did not take the first message: {err}"))?;
-    Ok(thread.to_string())
+    Ok((thread.to_string(), started))
+}
+
+/// The permission modes an app may set an engine Codex run to (minor 43), the asking default
+/// first: our order, not Codex's own. Each is one of Codex's presets as Codex names it; Full
+/// Access, which asks nothing, is marked `confirm` (decision 214), and Plan is decision 211's.
+const MODES: [(&str, &str, bool); 4] = [
+    ("auto", "Default", false),
+    ("read-only", "Read Only", false),
+    ("plan", "Plan", false),
+    ("full-access", "Full Access", true),
+];
+
+/// An engine Codex run's menus, from the models its start's check listed, each as Codex's
+/// `model/list` gives it: each model's `model`, name, description and efforts, and [`MODES`].
+pub(crate) fn menus(models: &[Value]) -> RunMenus {
+    let text = |model: &Value, key: &str| {
+        model
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    RunMenus {
+        models: models
+            .iter()
+            .filter_map(|model| {
+                let value = text(model, "model")?;
+                Some(MenuModel {
+                    label: text(model, "displayName").unwrap_or_else(|| value.clone()),
+                    detail: text(model, "description"),
+                    efforts: model
+                        .get("supportedReasoningEfforts")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|effort| effort.get("reasoningEffort")?.as_str())
+                        .map(str::to_string)
+                        .collect(),
+                    value,
+                })
+            })
+            .collect(),
+        modes: MODES
+            .iter()
+            .map(|(value, label, confirm)| MenuMode {
+                value: value.to_string(),
+                label: label.to_string(),
+                confirm: *confirm,
+            })
+            .collect(),
+        selected_model: None,
+    }
+}
+
+/// The `thread/settings/update` fields for `setting`, given the thread's settings as Codex
+/// last named them (`current`, its `codex_settings` fact): a model and an effort as they are;
+/// a mode as its preset's approval policy and sandbox, Plan keeping the run's own (decision
+/// 174), with its collaboration mode, which carries the thread's model and effort since Codex
+/// makes the mode's own the thread's (X6 P2). A model or an effort changed in Plan carries
+/// Plan again, with them. `None` when a mode finds no settings to take them from.
+fn update_params(setting: &crate::claude_host::Setting, current: Option<&Value>) -> Option<Value> {
+    use crate::claude_host::Setting;
+    let collaboration = |mode: &str, model: &Value, effort: &Value| {
+        json!({"mode": mode, "settings": {
+            "model": model, "reasoning_effort": effort, "developer_instructions": null}})
+    };
+    match setting {
+        Setting::Model { model, effort } => {
+            let mut params = json!({});
+            if let Some(model) = model {
+                params["model"] = model.as_str().into();
+            }
+            if let Some(effort) = effort {
+                params["effort"] = effort.as_str().into();
+            }
+            if current.is_some_and(|current| current["collaboration_mode"] == "plan") {
+                let current = current?;
+                let model = model
+                    .as_deref()
+                    .map_or(current["model"].clone(), Value::from);
+                let effort = effort
+                    .as_deref()
+                    .map_or(current["effort"].clone(), Value::from);
+                params["collaborationMode"] = collaboration("plan", &model, &effort);
+            }
+            Some(params)
+        }
+        Setting::Mode { mode, .. } => {
+            let current = current?;
+            let into = if mode == "plan" { "plan" } else { "default" };
+            let mut params = json!({
+                "collaborationMode": collaboration(into, &current["model"], &current["effort"]),
+            });
+            let preset = match mode.as_str() {
+                "auto" => Some(("on-request", "workspaceWrite")),
+                "read-only" => Some(("on-request", "readOnly")),
+                "full-access" => Some(("never", "dangerFullAccess")),
+                _ => None,
+            };
+            if let Some((approval, sandbox)) = preset {
+                params["approvalPolicy"] = approval.into();
+                params["sandboxPolicy"] = json!({ "type": sandbox });
+            }
+            Some(params)
+        }
+    }
+}
+
+/// How long the link waits for Codex to answer a settings change.
+const SETTING_WAIT: Duration = Duration::from_secs(10);
+
+/// An app's settings change, sent to Codex by the run's link as one `thread/settings/update`
+/// on its `thread` ([`update_params`]): `applied`, from the next turn while one runs (Codex
+/// takes a change from its next request, X6 P4) and at once otherwise; `refused` with Codex's
+/// own words when it answers with an error; `indeterminate` when it does not answer within
+/// [`SETTING_WAIT`]. What the run's settings are after it is Codex's own report
+/// (`thread/settings/updated`), filed as its facts.
+async fn change_settings(
+    client: &Client,
+    thread: &str,
+    current: Option<&Value>,
+    running: bool,
+    setting: &crate::claude_host::Setting,
+) -> SettingResult {
+    let Some(mut params) = update_params(setting, current) else {
+        return SettingResult::Refused {
+            reason: "Codex hasn't said what this session's settings are yet, so nothing was \
+                     changed."
+                .into(),
+        };
+    };
+    params["threadId"] = thread.into();
+    match tokio::time::timeout(SETTING_WAIT, client.call("thread/settings/update", params)).await {
+        Ok(Ok(_)) => SettingResult::Applied {
+            applies: if running {
+                Applies::NextTurn
+            } else {
+                Applies::Now
+            },
+        },
+        Ok(Err(CallError::Rpc { message, .. })) => SettingResult::Refused {
+            reason: format!("Codex didn't take the change ({message}); nothing was changed."),
+        },
+        Ok(Err(CallError::Closed)) | Err(_) => SettingResult::Indeterminate {
+            reason: "Codex didn't answer, so the change may or may not have been made.".into(),
+        },
+    }
+}
+
+/// An app's settings change for the engine Codex run `uid`, whose link takes asks on
+/// `commands` when it is attached. Refused before anything is sent when the run is not live,
+/// its link is not attached, the model or the effort is not on its menu, the mode is not one
+/// of [`MODES`], or Full Access comes without the person's confirmation in the app; otherwise
+/// the link sends it ([`change_settings`]).
+pub(crate) async fn set_setting(
+    daemon: &Daemon,
+    uid: &str,
+    setting: crate::claude_host::Setting,
+    commands: Option<tokio::sync::mpsc::UnboundedSender<LinkCommand>>,
+) -> SettingResult {
+    use crate::claude_host::Setting;
+    let refused = |reason: &str| SettingResult::Refused {
+        reason: reason.to_string(),
+    };
+    match &setting {
+        Setting::Model {
+            model: None,
+            effort: None,
+        } => return refused("Choose a model or an effort; nothing was changed."),
+        Setting::Model { .. } => {}
+        Setting::Mode { mode, confirmed } => {
+            match MODES.iter().find(|(value, _, _)| value == mode) {
+                None => {
+                    return refused(
+                        "That permission mode isn't offered in this session; nothing was changed.",
+                    )
+                }
+                Some((_, label, true)) if !confirmed => {
+                    return refused(&format!(
+                        "Turning on {label} needs your confirmation in the app; nothing was \
+                         changed."
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    match daemon.db.hosted_link(uid.to_string()).await {
+        Ok(Some(linked)) if linked.lifecycle == Lifecycle::Live => {}
+        Ok(Some(_)) => return refused("This session isn't running, so nothing was changed."),
+        Ok(None) => return refused(crate::claude_host::NOT_FROM_THE_APP),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its host: {err:#}");
+            return refused("This computer could not read the session.");
+        }
+    }
+    if let Setting::Model { model, effort } = &setting {
+        let menus = match daemon.db.hosted_models(uid.to_string()).await {
+            Ok(models) => menus(&models.unwrap_or_default()),
+            Err(err) => {
+                crate::log_error!("{uid}: could not read its models: {err:#}");
+                return refused("This computer could not read the session.");
+            }
+        };
+        if model
+            .as_ref()
+            .is_some_and(|model| !menus.models.iter().any(|offered| &offered.value == model))
+        {
+            return refused("Codex doesn't offer that model in this session; nothing was changed.");
+        }
+        if effort.as_ref().is_some_and(|effort| {
+            !menus
+                .models
+                .iter()
+                .any(|offered| offered.efforts.contains(effort))
+        }) {
+            return refused(
+                "Codex doesn't offer that effort in this session; nothing was changed.",
+            );
+        }
+    }
+    let lost =
+        || refused("The computer lost its connection to this session, so nothing was changed.");
+    let Some(commands) = commands else {
+        return lost();
+    };
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    if commands
+        .send(LinkCommand::Settings { setting, reply })
+        .is_err()
+    {
+        return lost();
+    }
+    answer
+        .await
+        .unwrap_or_else(|_| SettingResult::Indeterminate {
+            reason: "Codex didn't answer, so the change may or may not have been made.".into(),
+        })
+}
+
+/// A `thread/resume`'s approval policy and sandbox (`params`) set to those of the settings
+/// Codex last named (`kept`, a `codex_settings` fact), as `thread/resume` takes them; left as
+/// they are when `kept` names no approval policy or a sandbox other than Codex's three.
+fn keep_settings(params: &mut Value, kept: &Value) {
+    let sandbox = match kept["sandbox"].as_str() {
+        Some("workspaceWrite") => "workspace-write",
+        Some("readOnly") => "read-only",
+        Some("dangerFullAccess") => "danger-full-access",
+        _ => return,
+    };
+    if let Some(approval) = kept["approval_policy"].as_str() {
+        params["approvalPolicy"] = approval.into();
+        params["sandbox"] = sandbox.into();
+    }
 }
 
 /// `thread/start`'s params but its `config`: the run's folder, its model (none for Codex's own
@@ -2526,6 +2840,7 @@ mod tests {
             cwd: &rig.project,
             prompt: "fix the tests",
             model: Some("gpt-test"),
+            models: &[],
             codex,
             codeconnect: Path::new(CODECONNECT),
             git_bin: None,
@@ -3545,11 +3860,17 @@ mod tests {
                 ((first_resume, follow_up), ws)
             }
         );
-        for resume in [&first_resume, &follow_up] {
+        // The reconnect's resume carries the preset Default, the run having named no settings
+        // before the restart; the follow-up, the settings the reconnect's answer then named
+        // (this capture's read-only), as Codex last named them.
+        for (resume, sandbox) in [
+            (&first_resume, "workspace-write"),
+            (&follow_up, "read-only"),
+        ] {
             let params = &resume["params"];
             assert_eq!(params["threadId"], thread.as_str());
             assert_eq!(params["approvalPolicy"], "on-request");
-            assert_eq!(params["sandbox"], "workspace-write");
+            assert_eq!(params["sandbox"], sandbox);
             assert!(params["config"]["projects"].is_object(), "{params}");
             assert!(
                 params["config"]["mcp_servers.codeconnect"].is_object(),
@@ -4072,6 +4393,81 @@ mod tests {
             drop(ws);
             end_run(&rig, &uid).await;
         }
+    }
+
+    /// **A mode set while a reconnected turn runs stays set at its follow-up resume**: the
+    /// follow-up asks for the run's settings as Codex last named them, not as the reconnect
+    /// resumed it, since Codex takes a resume's approval and sandbox as the thread's own (X6
+    /// P12c). A run at Full Access, its ccd restarted mid-turn and resumed with Full Access, is
+    /// set to Default while that turn runs; its follow-up asks for Default.
+    #[tokio::test]
+    async fn a_mode_set_while_a_reconnected_turn_runs_stays_set_at_its_follow_up() {
+        use crate::claude_host::Setting;
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mid_turn = &capture["answerMidTurn"]["result"];
+        let thread = mid_turn["thread"]["id"].as_str().unwrap();
+        let first_turn = capture["answerAfter"]["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap();
+        let on_thread = |mut report: serde_json::Value| {
+            report["params"]["threadId"] = json!(thread);
+            report
+        };
+        let rig = rig();
+        let (uid, mut ws) = engine_run(&rig, "req-follow-kept", thread, first_turn).await;
+        let full = settings_report(
+            "gpt-6.1-sol",
+            "high",
+            "never",
+            "dangerFullAccess",
+            "default",
+        );
+        tell(&mut ws, &on_thread(full)).await;
+        settings_as_sent(&rig.daemon, &uid, "full-access").await;
+        let (restarted, mut ws, resumed) = resumed_with(&rig, ws, mid_turn.clone()).await;
+        assert_eq!(
+            (&resumed["approvalPolicy"], &resumed["sandbox"]),
+            (&json!("never"), &json!("danger-full-access"))
+        );
+        link_attached(&restarted, &uid).await;
+        let default = Setting::Mode {
+            mode: "auto".into(),
+            confirmed: false,
+        };
+        let (told, ()) = tokio::join!(restarted.set_setting(&uid, default), async {
+            let update = asked(&mut ws, "thread/settings/update").await;
+            answer(&mut ws, &update, json!({})).await;
+        });
+        assert!(matches!(told, SettingResult::Applied { .. }), "{told:?}");
+        let auto = settings_report(
+            "gpt-6.1-sol",
+            "high",
+            "on-request",
+            "workspaceWrite",
+            "default",
+        );
+        tell(&mut ws, &on_thread(auto)).await;
+        settings_as_sent(&restarted, &uid, "auto").await;
+        for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+            tell(&mut ws, frame).await;
+        }
+        let follow_up = asked(&mut ws, "thread/resume").await;
+        answer(
+            &mut ws,
+            &follow_up,
+            capture["answerAfter"]["result"].clone(),
+        )
+        .await;
+        assert_eq!(
+            (
+                &follow_up["params"]["approvalPolicy"],
+                &follow_up["params"]["sandbox"]
+            ),
+            (&json!("on-request"), &json!("workspace-write")),
+            "the follow-up undid the mode set while the turn ran"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 
     /// **R6 (X7a): an answer in flight across a restart is sent once more to Codex's
@@ -5856,8 +6252,8 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
-    /// The run `uid`'s summary as the fleet sends it, its identity, folder, times and count of
-    /// events fixed so the fixture is the same on every run.
+    /// The run `uid`'s summary as the fleet sends it, its identity, folder, times (its model's
+    /// receipt among them) and count of events fixed so the fixture is the same on every run.
     async fn summary_as_sent(daemon: &Daemon, uid: &str) -> serde_json::Value {
         let mut sent = serde_json::to_value(summary_of(daemon, uid).await).unwrap();
         let fixed = [
@@ -5873,11 +6269,15 @@ mod tests {
             assert!(sent.get(key).is_some(), "the summary carries no {key}");
             sent[key] = value;
         }
+        if let Some(at) = sent.pointer_mut("/model/at") {
+            *at = json!("2026-11-15T00:00:00Z");
+        }
         sent
     }
 
     /// The run `uid`'s events filed after the seq `after`, each as a phone reads its kind, source event id and turn,
-    /// the run's uid written `{uid}` and an end's launch `{leader}`; and the last seq among them.
+    /// the run's uid written `{uid}`, an end's launch `{leader}` and a settings fact's own id `{report}`; and the last
+    /// seq among them.
     async fn events_after_as_sent(
         daemon: &Daemon,
         uid: &str,
@@ -5894,6 +6294,10 @@ mod tests {
             .map(|event| {
                 let id = event.source_event_id.map(|id| match id.replace(uid, "{uid}") {
                     end if end.starts_with("exit:{uid}:") => "exit:{uid}:{leader}".to_string(),
+                    named if named.contains(":settings:") => {
+                        let (thread, _) = named.split_once(":settings:").unwrap();
+                        format!("{thread}:settings:{{report}}")
+                    }
                     id => id,
                 });
                 json!({
@@ -7225,13 +7629,19 @@ mod tests {
     }
 
     /// The run `uid` on `thread`, whose app-server ended, relaunched by a message whose turn is
-    /// `turn`: the daemon it was relaunched on, and the stand-in's end of the new link.
-    async fn relaunched(rig: &Rig, uid: &str, thread: &str, turn: &str) -> (Arc<Daemon>, Socket) {
+    /// `turn`: the daemon it was relaunched on, the stand-in's end of the new link, and the
+    /// `thread/resume` ccd sent it.
+    async fn relaunched(
+        rig: &Rig,
+        uid: &str,
+        thread: &str,
+        turn: &str,
+    ) -> (Arc<Daemon>, Socket, serde_json::Value) {
         let launch = launches(rig) + 1;
         let daemon = relauncher(rig);
         let mut said = saying(&daemon, uid, "say-relaunched", "are you still there");
         let resume = json!({"thread": {"id": thread, "turns": []}});
-        let (mut ws, _) = tokio::select! {
+        let (mut ws, resumed) = tokio::select! {
             served = relaunch_served(rig, launch, resume) => served,
             refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
         };
@@ -7242,7 +7652,7 @@ mod tests {
             matches!(said, protocol::ws::ComposeResult::Started { .. }),
             "{said:?}"
         );
-        (daemon, ws)
+        (daemon, ws, resumed)
     }
 
     /// A process group whose leader is gone while one member, which notes each SIGTERM in
@@ -7379,7 +7789,7 @@ mod tests {
             .unwrap()
             .host;
         app_server_ended(&rig, &uid, ws).await;
-        let (daemon, ws) = relaunched(&rig, &uid, "thr-r2", "turn-2").await;
+        let (daemon, ws, _) = relaunched(&rig, &uid, "thr-r2", "turn-2").await;
         let stale = daemon
             .end_hosted_run(
                 &uid,
@@ -7432,7 +7842,7 @@ mod tests {
         app_server_ended(&rig, &uid, ws).await;
 
         let again = "turn-after-relaunch";
-        let (daemon, mut ws) = relaunched(&rig, &uid, thread, again).await;
+        let (daemon, mut ws, _) = relaunched(&rig, &uid, thread, again).await;
         let mut started = frames[16].clone();
         let mut asked = frames[17].clone();
         let item = format!("{}-again", asked["params"]["itemId"].as_str().unwrap());
@@ -7524,5 +7934,457 @@ mod tests {
                 }
             );
         }
+    }
+
+    // ------------------------------- X6: a Codex run's settings from an app (minor 43)
+
+    /// **What a settings change sends Codex** ([`update_params`]), against the thread's settings
+    /// as Codex last named them: a model or an effort as it is; a mode as its preset with the
+    /// collaboration mode carrying the thread's model and effort, Plan keeping the run's own
+    /// approval and sandbox; a model changed in Plan carrying Plan again with it; and nothing
+    /// for a mode before any report has named the model.
+    #[test]
+    fn a_settings_change_is_one_update_carrying_the_threads_model_and_effort() {
+        use crate::claude_host::Setting;
+        let report = |mode: &str| {
+            json!({"model": "gpt-6-astra", "effort": "high", "approval_policy": "on-request",
+                   "sandbox": "workspaceWrite", "collaboration_mode": mode})
+        };
+        let collaboration = |mode: &str, model: &str| {
+            json!({"mode": mode, "settings": {
+                "model": model, "reasoning_effort": "high", "developer_instructions": null}})
+        };
+        let mode = |mode: &str| Setting::Mode {
+            mode: mode.into(),
+            confirmed: true,
+        };
+        assert_eq!(
+            update_params(&mode("plan"), Some(&report("default"))),
+            Some(json!({"collaborationMode": collaboration("plan", "gpt-6-astra")}))
+        );
+        for (value, approval, sandbox) in [
+            ("auto", "on-request", "workspaceWrite"),
+            ("read-only", "on-request", "readOnly"),
+            ("full-access", "never", "dangerFullAccess"),
+        ] {
+            assert_eq!(
+                update_params(&mode(value), Some(&report("plan"))),
+                Some(
+                    json!({"collaborationMode": collaboration("default", "gpt-6-astra"),
+                            "approvalPolicy": approval, "sandboxPolicy": {"type": sandbox}})
+                ),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            update_params(&mode("plan"), None),
+            None,
+            "nothing names the model"
+        );
+        let to_sol = Setting::Model {
+            model: Some("gpt-6-sol".into()),
+            effort: None,
+        };
+        assert_eq!(
+            update_params(&to_sol, None),
+            Some(json!({"model": "gpt-6-sol"}))
+        );
+        assert_eq!(
+            update_params(&to_sol, Some(&report("plan"))),
+            Some(json!({"model": "gpt-6-sol",
+                        "collaborationMode": collaboration("plan", "gpt-6-sol")}))
+        );
+    }
+
+    /// Codex's recorded models (codex 0.167.0 signed in with an API key), as a start's check
+    /// keeps them: the entries its `model/list` gives, hidden ones left out.
+    fn recorded_models() -> Vec<serde_json::Value> {
+        include_str!("../../../fixtures/codex/app-server-models-api-key-0.167.0.jsonl")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|line| line["result"]["data"].as_array().cloned())
+            .expect("the recorded model list")
+            .into_iter()
+            .filter(|model| model["hidden"] != true)
+            .collect()
+    }
+
+    /// A run started on a stand-in with the models its start's check listed (`models`), its
+    /// `thread/start` answered as Codex 0.167 answers one, naming the thread `thr-x6`'s settings
+    /// ([`START_SETTINGS`]), and its first turn answered: its uid and the stand-in's end of its
+    /// link.
+    async fn engine_run_offering(rig: &Rig, models: &[serde_json::Value]) -> (String, Socket) {
+        let codex = stand_in(rig, "exec sleep 30");
+        let mut script = whole_start();
+        script.truncate(3);
+        let mut started = START_SETTINGS.clone();
+        started["thread"] = json!({"id": "thr-x6"});
+        script[2].1 = json!({ "result": started });
+        let run = Run {
+            models,
+            ..run(rig, "req-x6", &codex)
+        };
+        let (result, ws) = tokio::join!(start(&rig.daemon, run), async {
+            let (_, mut ws) = play_app_server(rig, script).await;
+            let first_turn = asked(&mut ws, "turn/start").await;
+            answer(&mut ws, &first_turn, json!({"turn": {"id": "turn-1"}})).await;
+            ws
+        });
+        let uid = started_uid(&result);
+        row_once(rig, &uid, Lifecycle::Live).await;
+        link_attached(&rig.daemon, &uid).await;
+        (uid, ws)
+    }
+
+    /// The settings a `thread/start` answer names (X6 P12a, codex 0.167): its model, an effort
+    /// left to the model's own (`null`), the preset Default ccd starts a thread with, and no
+    /// collaboration mode.
+    static START_SETTINGS: std::sync::LazyLock<serde_json::Value> =
+        std::sync::LazyLock::new(|| {
+            json!({"model": "gpt-6.1-sol", "modelProvider": "openai", "reasoningEffort": null,
+               "approvalPolicy": "on-request", "approvalsReviewer": "user",
+               "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": false}})
+        });
+
+    /// Codex's own report of the thread `thr-x6`'s settings, in first-turn.jsonl:2's shape.
+    fn settings_report(
+        model: &str,
+        effort: &str,
+        approval: &str,
+        sandbox: &str,
+        mode: &str,
+    ) -> serde_json::Value {
+        json!({"method": "thread/settings/updated", "params": {"threadId": "thr-x6",
+            "threadSettings": {"model": model, "effort": effort, "approvalPolicy": approval,
+                "sandboxPolicy": {"type": sandbox},
+                "collaborationMode": {"mode": mode, "settings": {"model": model,
+                    "reasoning_effort": effort, "developer_instructions": null}}}}})
+    }
+
+    /// **A Codex run's settings are what its start's and its resume's answers name, and a
+    /// restart keeps them** (X6 P12): Codex reports none at a start, a resume or a plain turn.
+    /// A run set to Full Access, its ccd restarted, is resumed on the same app-server with the
+    /// Full Access it was set to (ruling b), and reads what the resume's answer names, here a
+    /// recorded one naming Default, not what ccd asked or read back.
+    #[tokio::test]
+    async fn a_codex_runs_settings_are_its_start_and_resume_answers() {
+        let rig = rig();
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
+        let started = settings_as_sent(&rig.daemon, &uid, "auto").await;
+        assert_eq!(
+            (&started["model"]["value"], started.get("effort")),
+            (&json!("gpt-6.1-sol"), None),
+            "the start's answer names the model and leaves the effort to it"
+        );
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6.1-sol",
+                "high",
+                "never",
+                "dangerFullAccess",
+                "default",
+            ),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, &uid, "full-access").await;
+        // A resume answer as Codex 0.164 gave one after a finished turn: gpt-6.1-sol, effort
+        // high, on-request, workspace-write, Default; its thread is the run's.
+        let recorded: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/resume-after-approved-tool-turn-0.164.0.json"
+        ))
+        .unwrap();
+        let mut resume = recorded["result"].clone();
+        resume["thread"]["id"] = json!("thr-x6");
+        resume["thread"]["sessionId"] = json!("thr-x6");
+        let (restarted, _ws, params) = resumed_with(&rig, ws, resume).await;
+        assert_eq!(
+            (&params["approvalPolicy"], &params["sandbox"]),
+            (&json!("never"), &json!("danger-full-access")),
+            "the same app-server keeps what the run was set to"
+        );
+        let resumed = settings_as_sent(&restarted, &uid, "auto").await;
+        assert_eq!(resumed["effort"]["value"], "high");
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A relaunched Codex run comes back at Default** (ruling b): its new app-server keeps
+    /// nothing the run was set to, so a run set to Full Access whose app-server ended is resumed
+    /// with the preset Default, as its start was.
+    #[tokio::test]
+    async fn a_relaunched_codex_run_resumes_at_default() {
+        let rig = rig();
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6.1-sol",
+                "high",
+                "never",
+                "dangerFullAccess",
+                "default",
+            ),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, &uid, "full-access").await;
+        app_server_ended(&rig, &uid, ws).await;
+        let (_daemon, ws, resumed) = relaunched(&rig, &uid, "thr-x6", "turn-2").await;
+        assert_eq!(
+            (
+                &resumed["params"]["approvalPolicy"],
+                &resumed["params"]["sandbox"]
+            ),
+            (&json!("on-request"), &json!("workspace-write"))
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// The run `uid`'s summary as the fleet sends it ([`summary_as_sent`]) once its mode fact
+    /// reads `mode`, within 10 s.
+    async fn settings_as_sent(daemon: &Daemon, uid: &str, mode: &str) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let summary = summary_of(daemon, uid).await;
+            let read = summary
+                .permission_mode
+                .as_ref()
+                .is_some_and(|fact| fact.value == mode);
+            if read || Instant::now() >= deadline {
+                assert!(
+                    read,
+                    "the run's mode never read {mode}: {:?}",
+                    summary.permission_mode
+                );
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        summary_as_sent(daemon, uid).await
+    }
+
+    /// `setting` set from an app on the run `uid`, the stand-in answering the one
+    /// `thread/settings/update` it gets: ccd's answer, and what it asked Codex.
+    async fn changed(
+        rig: &Rig,
+        ws: &mut Socket,
+        uid: &str,
+        setting: crate::claude_host::Setting,
+    ) -> (SettingResult, serde_json::Value) {
+        tokio::join!(rig.daemon.set_setting(uid, setting), async {
+            let update = asked(ws, "thread/settings/update").await;
+            answer(ws, &update, json!({})).await;
+            update["params"].clone()
+        })
+    }
+
+    /// **X6: a Codex run's settings, as the apps are sent them (minor 43).**
+    /// `fixtures/codex/codex-settings-wire.json` is the apps' pin, emitted by this build from a run on
+    /// a stand-in app-server that names its settings in Codex's own shapes: the run's menus
+    /// (its models from the start's check, the four modes with Full Access marked `confirm`)
+    /// and facts from its start's answer; a model and an effort applied while no turn runs; Plan
+    /// applied while one does, from its next turn; Full Access refused without the person's
+    /// confirmation, nothing sent, then applied with it; and the run once Codex reports it.
+    #[tokio::test]
+    async fn the_codex_settings_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/codex-settings-wire.json");
+        let committed: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("the fixture must be JSON");
+        assert_eq!(
+            committed["session_codex_full_access"]["permission_mode"]["value"],
+            "full-access"
+        );
+        assert_eq!(
+            derived_codex_settings_wire().await,
+            committed,
+            "the committed Codex settings wire fixture no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_codex_settings_wire_fixture, then copy it over its copy under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/codex-settings-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_codex_settings_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_codex_settings_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/codex-settings-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The frames of a Codex run's settings and each answer ccd gives, and what ccd asks
+    /// Codex for each, asserted here.
+    async fn derived_codex_settings_wire() -> serde_json::Value {
+        use crate::claude_host::Setting;
+        let rig = rig();
+        let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models()).await;
+        let live = settings_as_sent(&rig.daemon, &uid, "auto").await;
+
+        let (model, asked_model) = changed(
+            &rig,
+            &mut ws,
+            &uid,
+            Setting::Model {
+                model: Some("gpt-6-astra".into()),
+                effort: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            asked_model,
+            json!({"threadId": "thr-x6", "model": "gpt-6-astra"})
+        );
+        let (effort, asked_effort) = changed(
+            &rig,
+            &mut ws,
+            &uid,
+            Setting::Model {
+                model: None,
+                effort: Some("high".into()),
+            },
+        )
+        .await;
+        assert_eq!(
+            asked_effort,
+            json!({"threadId": "thr-x6", "effort": "high"})
+        );
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6-astra",
+                "high",
+                "on-request",
+                "workspaceWrite",
+                "default",
+            ),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, &uid, "auto").await;
+
+        // A turn runs: Plan is answered from the next turn.
+        tell(
+            &mut ws,
+            &json!({"method": "turn/started", "params": {"threadId": "thr-x6",
+                "turn": {"id": "turn-2", "status": "inProgress", "items": []}}}),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (plan, asked_plan) = changed(
+            &rig,
+            &mut ws,
+            &uid,
+            Setting::Mode {
+                mode: "plan".into(),
+                confirmed: false,
+            },
+        )
+        .await;
+        assert_eq!(
+            asked_plan,
+            json!({"threadId": "thr-x6", "collaborationMode": {"mode": "plan", "settings": {
+                "model": "gpt-6-astra", "reasoning_effort": "high", "developer_instructions": null}}}),
+            "Plan keeps the run's approval and sandbox"
+        );
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6-astra",
+                "high",
+                "on-request",
+                "workspaceWrite",
+                "plan",
+            ),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, &uid, "plan").await;
+        tell(
+            &mut ws,
+            &json!({"method": "turn/completed", "params": {"threadId": "thr-x6",
+                "turn": {"id": "turn-2", "status": "completed", "items": []}}}),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let full_access = |confirmed| Setting::Mode {
+            mode: "full-access".into(),
+            confirmed,
+        };
+        let bare = rig.daemon.set_setting(&uid, full_access(false)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), next_frame(&mut ws))
+                .await
+                .is_err(),
+            "the unconfirmed Full Access sent Codex nothing"
+        );
+        let (confirmed, asked_full) = changed(&rig, &mut ws, &uid, full_access(true)).await;
+        assert_eq!(
+            asked_full,
+            json!({"threadId": "thr-x6", "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+                "collaborationMode": {"mode": "default", "settings": {
+                    "model": "gpt-6-astra", "reasoning_effort": "high",
+                    "developer_instructions": null}}})
+        );
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6-astra",
+                "high",
+                "never",
+                "dangerFullAccess",
+                "default",
+            ),
+        )
+        .await;
+        let full = settings_as_sent(&rig.daemon, &uid, "full-access").await;
+        end_run(&rig, &uid).await;
+
+        let answer = |request_id: &str, result: SettingResult| {
+            serde_json::to_value(protocol::ws::ServerMessage::SettingResult {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let set_model = |request_id: &str, model: Option<&str>, effort: Option<&str>| {
+            serde_json::to_value(protocol::ws::ClientMessage::SetModel {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                model: model.map(str::to_string),
+                effort: effort.map(str::to_string),
+            })
+            .unwrap()
+        };
+        let set_mode = |request_id: &str, mode: &str, confirmed: bool| {
+            serde_json::to_value(protocol::ws::ClientMessage::SetMode {
+                session_id: fixed.into(),
+                request_id: request_id.into(),
+                mode: mode.into(),
+                confirmed,
+            })
+            .unwrap()
+        };
+        json!({
+            "session_codex_live": live,
+            "set_model_request": set_model("model-1", Some("gpt-6-astra"), None),
+            "applied_model": answer("model-1", model),
+            "set_effort_request": set_model("effort-1", None, Some("high")),
+            "applied_effort": answer("effort-1", effort),
+            "set_mode_plan_request": set_mode("mode-1", "plan", false),
+            "applied_plan_during_a_turn": answer("mode-1", plan),
+            "set_mode_bare_request": set_mode("mode-2", "full-access", false),
+            "refused_unconfirmed": answer("mode-2", bare),
+            "set_mode_confirmed_request": set_mode("mode-3", "full-access", true),
+            "applied_confirmed": answer("mode-3", confirmed),
+            "session_codex_full_access": full,
+        })
     }
 }
