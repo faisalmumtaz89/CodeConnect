@@ -5,19 +5,18 @@ protocol defined in `mac/protocol/src/ws.rs`.
 
 ## Session identity
 
-A run has two names and they do different jobs (see "Session identity" in
-`mac/README.md`). `session_id` is the tmux name — `cc-1` — and it is **reused**.
-`session_uid` is a ULID minted once at spawn and never reused.
+A run's `session_uid` is a ULID minted once when the run starts and never reused,
+and its `session_id` carries the same value (see "Session identity" in
+`mac/README.md`).
 
 This app keys **everything** by `SessionSummary.sessionKey` / `Event.sessionKey`,
-which is the uid where the daemon mints one and the tmux name where it does not:
-the event stores, the subscriptions, the on-disk cache, the diff cache, the
-review marks, the fleet rows, the navigation routes, and the run an answer is
-scoped to. The name is display only.
+which is that uid: the event stores, the subscriptions, the on-disk cache, the
+diff cache, the review marks, the fleet rows, the navigation routes, and the run
+an answer is scoped to. A row is called by its project, never by the uid.
 
 Two consequences worth stating:
 
-* **Two runs of one name are two sessions.** They get two rows, two timelines
+* **Two runs of one project are two sessions.** They get two rows, two timelines
   and two rails. The uid keys them; it never names them. A row is called by the
   **project** the daemon resolved (`RunLabel`), and where two runs share one
   project each row adds the time it started — but never when two runs started
@@ -29,7 +28,7 @@ Two consequences worth stating:
 
 `DaemonProfile.scopesSessionsByUID` is the gate: every connected computer mints
 uids, so its runs are keyed by uid. Only while nothing is known of the computer
-does the app keep the tmux name as a run's identity.
+does the app keep a run's name as its identity.
 
 The local cache records which of the two regimes wrote it. On the first connect
 to a uid-minting daemon the name-keyed files are **dropped**, not remapped: a
@@ -649,8 +648,7 @@ function of the events:
 * a turn's end stays in the timeline for the fleet's status and preview, but draws no
   "Turn complete" row when the screen already shows the turn ended: on Claude's reply,
   on "Interrupted · What should Claude do instead?" (an Esc, a Stop, a refused or denied
-  call), and, in a session started from an app, at a command's own end (`/clear`,
-  `/compact`, `/effort low`), where a terminal run files none. A command an app sends
+  call), and at a command's own end (`/clear`, `/compact`, `/effort low`). A command an app sends
   draws as a command row, and the run reads Running until the command's own turn ends;
   a `/clear` draws only "Conversation cleared.";
 * Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
@@ -666,14 +664,12 @@ The card is answerable only from a daemon that advertises `hook_only_approvals`
 `question_hold` is `held` (`DecisionCard.answerSurface`); the send path refuses
 the same cases (`AppModel.decisionMismatch`). Otherwise the card is read-only and
 says why (`DecisionCard.claudeUnanswerableReason`): the Mac's CodeConnect is too
-old, Claude is asking at the Mac, or the phone can no longer answer it.
+old, the link to it is down, or the phone can no longer answer it.
 
 A held card offers **Allow**, **Deny** and **Deny with a reason**. Deny with a
 reason is one answer, `{"type":"text","text":…}`, which the daemon returns to the
-agent that asked as its denial. In a run started in a terminal, "Always" is chosen
-at the Mac, where Claude's own dialog says exactly what it saves; the phone never
-offers rows read off the Mac's screen. A run started in an app has no dialog at the
-Mac: there the daemon marks a card whose request suggests an allow rule
+agent that asked as its denial. A run has no dialog at the Mac: the daemon marks a
+card whose request suggests an allow rule
 (`allow_for_session`, protocol minor 36), and the phone then offers **Allow for this
 session** beside Allow and Deny, under a one-line caption naming the rule it would
 grant as Claude writes it (e.g. `Bash(touch m1.txt)`) — the rule can be broader than
@@ -682,9 +678,7 @@ Its answer is `option_id: "acceptForSession"`, which gives Claude that rule for 
 session only.
 
 The agent host says when an answer reached Claude, so the answer is recorded as
-applied. A record an earlier daemon kept for a run started in a terminal
-(`indeterminate`, detail "Sent to Claude from a phone") reads as an answer that was
-never confirmed.
+applied.
 
 `CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
 an earlier ccd's test emitted (frozen, never regenerated).
@@ -750,13 +744,13 @@ is HIGH, where Submit takes Face ID.
 |---|---|---|
 | `fixtures/claude/minor-21-wire.json` | test bundle and app bundle (`CodeConnectTests/Resources/`, `CodeConnect/Resources/`, byte-identical copies) | The five minor-21 events an earlier ccd emitted (frozen) — a held card, the phone's answer, a hold ended, a card at the Mac, an answer at the Mac — decoded through the app's types; the phone's encoded answer equals the fixture's `decision` (`QuestionCardTests`). The `-CC_QUESTION` staging replays these events. |
 
-`-CC_QUESTION held|at-mac|ended|answered|old-mac` stages one session holding the
+`-CC_QUESTION held|answered|old-mac` stages one session holding the
 live 2.1.286 four-question card from the daemon's own events, its words lengthened
 to the worst case (`CodeConnectKit/Sources/CodeConnectKit/QuestionFixtures.swift`, DEBUG only); answers resolve
 locally as under `-CC_FIXTURE`, so `QuestionCardUITests` drives the phone's half —
-every step, Review and Submit — not the hook. Nine `question-*` render scenarios
-photograph each step, Review, and the read-only card at the Mac, after its hold
-ended, answered on the phone and on a minor-20 Mac.
+every step, Review and Submit — not the daemon's. Seven `question-*` render scenarios
+photograph each step, Review, and the card answered on the phone and read-only on a
+minor-20 Mac.
 
 ## Not built yet
 

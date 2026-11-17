@@ -44,7 +44,7 @@ Each run's agent host or app server starts in a session of its own, so killing t
 
 ## Approving something, safely
 
-Every answer to a Claude card goes back through the agent host Claude runs under, and nothing is ever typed into a permission prompt. The phone answers Claude approvals only from a daemon that advertises `hook_only_approvals`: an older one types the answer into whatever prompt is on screen.
+Every answer to a Claude card goes back through the agent host Claude runs under, and nothing is ever typed into a permission prompt. Every daemon the apps can connect to advertises `hook_only_approvals`; one of an earlier protocol is refused before any card reaches the phone.
 
 Every answer carries the request ID and the hash of the card text the phone checked before drawing it; a mismatch is refused. The intent to answer is recorded durably before the host is handed anything, and resolved after: an answer whose outcome has not come is never sent again.
 
@@ -57,7 +57,7 @@ Claude Code asks every `AskUserQuestion` as a permission request, but it is a qu
 The agent host holds each question as the SDK's `canUseTool` request, and there is no terminal dialog. Nothing about how a terminal would draw the question's text keeps it from the phone: there is no keyboard answer to match. The answer goes back through the host as the call's input, and a decline is a deny with "Declined from iPhone" or "Declined from Mac", with an interrupt for the main conversation's question and none for a background agent's. The host says when the answer is written into Claude's input, so an answer or a decline is recorded as taken, not unconfirmed. The card stays answerable for as long as Claude waits, across a daemon restart, and closes with nobody having answered when Claude stops waiting.
 
 - **The answer is built by the daemon.** The phone sends, per question, which options were picked (in the order picked), any "Other" text, and notes on a preview. The daemon builds Claude's answer from the question it stored — the same strings, joins and preview notes Claude's own dialog produces from the same choices at the keyboard — and refuses an incomplete answer or one that names an option the question does not have. The phone draws every string of a question with NUL, U+061C and the bidi embeddings, overrides and isolates as �. Past the daemon's payload limit (`max_payload_bytes`, 512 KiB) the phone gets no card to answer. A preview longer than 2,000 UTF-16 units is not annotated: Claude's dialog does not show it, and the answer leaves it out of the preview notes, as the keyboard's does. A single choice with previews has no "Other" at the Mac, so the phone offers none and the daemon refuses one.
-- **Older phones** still see the question as an approval. `allow`, `option` and `text` on it are refused before anything is claimed; `deny` declines it.
+- **A decision meant for an approval is refused.** `allow`, `option` and `text` on a question are refused before anything is claimed; `deny` declines it.
 
 ## Never claiming what it does not know
 
@@ -65,7 +65,7 @@ The interface separates three things that are easy to conflate: what the *proces
 
 An unmeasured value renders as an em dash, never as zero. Zero is a measurement.
 
-The same rule decides what a Codex session may claim. Codex's "this request was resolved" message carries only *which* request was answered — never the decision, and it reads the same however it was settled. So an approval that Codex reports resolved without an answer from an app is rendered as answered and nothing more: nothing on the wire says how it was settled. An answer sent *from* an app keeps its decision, because the daemon composes that record itself as it forwards the answer.
+The same rule decides what a Codex session may claim. Codex's "this request was resolved" message carries only *which* request was answered — never the decision, and it reads the same however it was settled. So an approval that Codex reports resolved without an answer from an app is recorded as cleared, not answered, with the cause the daemon saw (the request resolved, its item or turn ended, the turn stopped): nothing on the wire says how it was settled, so no decision is claimed. An answer sent *from* an app keeps its decision, because the daemon composes that record itself as it forwards the answer.
 
 Where the daemon reports an error it is quoted and attributed; where the app speaks for itself, it says so. The two are distinct types in the code precisely so they cannot be confused at a call site.
 

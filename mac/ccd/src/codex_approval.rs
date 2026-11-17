@@ -1,55 +1,21 @@
 //! **A Codex approval request, read off the wire and turned into a card.**
 //!
-//! Two request families reach a subscribed ccd leg and are worth a human's
-//! attention: `item/commandExecution/requestApproval` and
-//! `item/fileChange/requestApproval`.
+//! Four kinds of request from a run's app-server become a card (`card_family`):
+//! `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, an
+//! `mcpServer/elicitation/request` that asks for an MCP tool call, and an
+//! `item/tool/requestUserInput` question that holds its turn (Plan mode's).
 //!
-//! # The other families, and why none of them is a card
+//! # Every other request is refused
 //!
-//! Codex's app-server schema declares three more server→client requests, and what
-//! each of them can ever be to this daemon was measured rather than reasoned
-//! about — once against the broker, which decides what a ccd leg is handed at
-//! all, and once against a live app-server, which decides whether the frame
-//! exists. The record is `fixtures/codex/nonphone-families-0.153.txt`.
-//!
-//! * `item/permissions/requestApproval` — **delivered, and not a card.** It ends
-//!   in `/requestApproval`, so the broker binds it and relays it; the grant is
-//!   TUI-only, so a ccd answer to it would forward zero bytes. What it asks for
-//!   is a permission *profile* — a filesystem and network shape — and not a
-//!   yes/no about one action, so it carries no `availableDecisions` and there is
-//!   no set of buttons a phone could be honestly offered.
-//! * `item/tool/requestUserInput` and `mcpServer/elicitation/request` — **never
-//!   delivered.** Neither ends in `/requestApproval`, so the broker tombstones
-//!   the id and answers the app-server itself with a method-unavailable error
-//!   rather than handing a client an exchange it may not reply to. A ccd leg
-//!   cannot observe what it is never sent, so nothing here could read them even
-//!   if the wire produced them.
-//!
-//! # The permissions producer exists, and the operator's config decides it
-//!
-//! **It would be false to say nothing produces one.** Codex has a model-callable
-//! permissions tool behind a feature flag, measured `false` by default and `true`
-//! when the operator's `config.toml` turns it on. A CodeConnect session runs under
-//! the operator's own `CODEX_HOME` and sets no feature of its own, so the key is
-//! the operator's, exactly as in native codex. On a live 0.153 session with the
-//! feature off, driven from five positions that could each produce one (a question
-//! put to the user, a network escalation, a filesystem escalation with the command
-//! approved, the same with it declined, and an MCP form with a real MCP server
-//! connected and a tool on it called), **the app-server emitted none of the
-//! three.** The escalation the model reaches for instead is the command family
-//! itself: it re-asks by running the command, and the approval that arrives is a
-//! `commandExecution` one.
-//!
-//! So no card, row, doorbell or answer path exists for any of them, and building
-//! one would be machinery for an input the phone is never handed.
-//!
-//! **The limit on that.** The zero is a fact about what this model did on these
-//! prompts with the feature off, not a wire property: an operator who turns the
-//! permissions tool on gets that family, and nothing structural stops a codex build
-//! emitting the other two. The reason none of them reaches a card is the broker's, not the
-//! app-server's: it hands the phone's leg only a command or file-change approval
-//! on the thread the keyboard is on, and leaves every other server request to the
-//! keyboard, which receives it as native codex would.
+//! Any other server request — `item/permissions/requestApproval`, a plain MCP form, a
+//! question that does not hold its turn — gets no card: `codex_host` answers it at once
+//! with an error, and Codex carries on as it does when nobody answers. A permissions
+//! request asks for a permission *profile*, a filesystem and network shape rather than a
+//! yes or no about one action, so it carries no `availableDecisions` and there is no set
+//! of buttons a phone could honestly be offered. Codex sends one only when the operator's
+//! own `config.toml` turns its permissions tool on; with it off, driven from five positions
+//! on a live 0.153 session, the app-server sent none
+//! (`fixtures/codex/nonphone-families-0.153.txt`).
 //!
 //! # The wire wins over the bundle label
 //!

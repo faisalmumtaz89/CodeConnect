@@ -421,8 +421,8 @@ struct PendingApproval {
     agent: protocol::agent::AgentKind,
     /// Asked by a background agent rather than the main conversation.
     fork: bool,
-    /// Asked by the agent host of a run started from an app: answered through the
-    /// run's host link.
+    /// Answered through the run's host link: true on a hosted run's card; false on a
+    /// Codex card and on a Claude card recovery restored without reading its run's host.
     link: bool,
     /// An `AskUserQuestion` card.
     question: bool,
@@ -1909,18 +1909,16 @@ impl Daemon {
 
     /// Which run an answer is for.
     ///
-    /// A `session_uid` settles it outright. Anything else — a bare name, or
-    /// nothing at all from a protocol-minor-1 client — is matched against the
-    /// live approvals; if none matches (the card was answered and the entry is
-    /// gone) the ledger is consulted, so a retried tap still gets its original
-    /// outcome back.
+    /// A `session_uid` settles it outright. An answer without a `session_id` (the
+    /// field is optional on the wire; see Known limits in `mac/README.md`) is matched
+    /// against the live approvals by request id; if none matches (the card was
+    /// answered and the entry is gone) the ledger is consulted, so a retried tap still
+    /// gets its original outcome back. Every run's name is its uid, so a `session_id`
+    /// that is not a uid matches nothing and is refused as an unknown session.
     ///
     /// Two live approvals sharing a request id is the one case that cannot be
     /// worked out, and it is refused with an instruction rather than resolved by
-    /// coin flip. That refusal covers the name-scoped case as well as the
-    /// unscoped one: "the run called `cc-1`" is not an answer to "which of these
-    /// two cards did the human tap", and typing into the wrong agent's TTY is
-    /// not a mistake that can be taken back.
+    /// coin flip.
     async fn approval_target(
         &self,
         request_id: &str,
@@ -1945,17 +1943,9 @@ impl Daemon {
             };
         }
 
-        // Everything else is a *name*, and a name is not an identity — whether
-        // it arrived in `session_id` or not at all. So both cases get the same
-        // ambiguity check: if this request id is open in more than one run, the
-        // right answer cannot be worked out and must not be guessed at.
-        //
-        // The collision is not hypothetical. When a `PermissionRequest` has no
-        // PreToolUse to correlate against, the request id falls back to
-        // `pr-<prompt_id>-<hash>` and the hash covers only the tool and its
-        // input — so two runs executing the same ordinary command produce the
-        // same request id *and* the same payload hash, which means the staleness
-        // guard downstream would not catch the mix-up either.
+        // No uid: matched by request id alone (a `session_id` that is not a uid
+        // names no run, so it matches nothing). If this request id is open in more
+        // than one run, the right answer cannot be worked out and is not guessed at.
         let matches: Vec<String> = {
             let inner = self.inner.lock().await;
             inner
@@ -4559,7 +4549,6 @@ impl Daemon {
                 updated_at: row.updated_at,
                 blocked_on,
                 // The per-session agent fact the client scopes its offerings to.
-                // Claude for every row today; the seam carries it either way.
                 agent: row.agent,
                 // The thread the run's link started or resumed, as the row holds it.
                 codex_thread_id: row.codex_thread_id,
@@ -5335,9 +5324,11 @@ const DENIAL_WITH_REASON: &str = "The user doesn't want to proceed with this too
                                   was NOT written to the file). To tell you how to proceed, the \
                                   user said:\n";
 
-/// The source a card's `approval_request` event is filed under: a hosted run's and
-/// Codex's by this daemon with the card's row; a card an earlier build filed for a run
-/// it did not host, by its hook.
+/// The source a card's `approval_request` event is filed under: this daemon's, for a
+/// hosted run's card and a Codex card. `Hook` is left only for a Claude card recovery
+/// restored without a host link, because the run's host could not be read then.
+/// Accepted miss: that card's request event was filed by the daemon, so it is not found
+/// under `Hook` and the fleet lists the card in `blocked_on` without a ref.
 fn request_event_source(entry: &PendingApproval) -> Source {
     if entry.link || matches!(entry.agent, protocol::agent::AgentKind::Codex) {
         Source::Daemon
