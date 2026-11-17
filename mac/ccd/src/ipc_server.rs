@@ -769,14 +769,24 @@ mod tests {
     async fn mail_is_read_only_once_its_connection_confirms_it() {
         let (daemon, socket) = served_daemon().await;
         let uid = protocol::uid::new().unwrap();
-        assert!(matches!(
-            exchange(
-                &socket,
-                &register_frame(&uid, "cc-1", protocol::agent::AgentKind::Codex)
-            )
-            .await,
-            DaemonFrame::Ack
-        ));
+        let now = protocol::time::now_rfc3339();
+        let run = crate::store::SessionRow {
+            session_uid: uid.clone(),
+            session_id: "cc-1".into(),
+            tmux_session: "cc-1".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: protocol::event::Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Codex,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        assert_eq!(daemon.store.begin_run(&run, &uid, None).unwrap(), None);
+        daemon.mail_run_live(&uid).await;
         daemon
             .store
             .take_mail(

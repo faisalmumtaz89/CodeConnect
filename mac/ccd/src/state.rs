@@ -11000,7 +11000,8 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner()) = Some(six_nodes());
         let laptop: std::net::IpAddr = "100.64.0.6".parse().unwrap();
         let from = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &from, "cc-1").await;
+        seed_codex_session(&daemon, &from, "cc-1");
+        daemon.mail_run_live(&from).await;
         let ask = || daemon.serve_peer(laptop, PeerRequest::PeerListAgents);
         assert!(matches!(ask().await, PeerReply::PeerAgents { .. }));
 
@@ -12136,31 +12137,26 @@ mod tests {
         assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
     }
 
-    /// A session row for a run hosted by Codex rather than Claude.
+    /// A live Codex run's hosted row, with no host attached and no events.
     fn seed_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
         let now = protocol::time::now_rfc3339();
-        daemon
-            .store
-            .upsert_session_at_generation(
-                &SessionRow {
-                    session_uid: uid.into(),
-                    session_id: name.into(),
-                    tmux_session: name.into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: Lifecycle::Live,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    agent: protocol::agent::AgentKind::Codex,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                },
-                None,
-            )
-            .unwrap()
-            .assert_present();
+        let row = SessionRow {
+            session_uid: uid.into(),
+            session_id: name.into(),
+            tmux_session: name.into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Codex,
+            codex_thread_id: None,
+            codex_socket: None,
+        };
+        let request = format!("seed-{uid}");
+        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
     }
 
     /// The payload of the `session_end` filed for `uid`, or `None` if none was.
@@ -12898,7 +12894,7 @@ mod tests {
                 .await;
             }
             Ring::CodexApproval => {
-                register_codex_session(daemon, TEST_UID, "cc-1").await;
+                seed_codex_session(daemon, TEST_UID, "cc-1");
                 assert!(
                     daemon
                         .raise_codex_approval(
@@ -12914,7 +12910,7 @@ mod tests {
                 );
             }
             Ring::CodexQuestion => {
-                register_codex_session(daemon, TEST_UID, "cc-1").await;
+                seed_codex_session(daemon, TEST_UID, "cc-1");
                 let asked: serde_json::Value = serde_json::from_str(include_str!(
                     "../../../fixtures/codex/plan-question-0.167.0.json"
                 ))
@@ -13072,7 +13068,7 @@ mod tests {
 
     /// File one Codex approval card on [`MIXED_CODEX_UID`].
     async fn raise_mixed_codex_card(daemon: &Arc<Daemon>) {
-        register_codex_session(daemon, MIXED_CODEX_UID, "cc-2").await;
+        seed_codex_session(daemon, MIXED_CODEX_UID, "cc-2");
         assert!(
             daemon
                 .raise_codex_approval(
@@ -13221,10 +13217,10 @@ mod tests {
     ///
     /// Every doorbell shares one collapse slot and a device's queue keeps the one
     /// that arrives last, so arrival order has to be the order the counts were
-    /// taken in. Here a finished turn is counted with one decision open elsewhere
-    /// and its sender then stalls before enqueueing; meanwhile another run raises
-    /// a decision, counted as 2. Released, the stale count of 1 must not end up
-    /// as the phone's newest notification.
+    /// taken in. Here one run's decision is counted alone and its sender then
+    /// stalls before enqueueing; meanwhile another run raises a decision, counted
+    /// as 2. Released, the stale count of 1 must not end up as the phone's newest
+    /// notification.
     ///
     /// **Mutation:** take the ordering lock out of the dispatch and the stalled
     /// `Approval, 1` lands last.
@@ -13253,10 +13249,8 @@ mod tests {
         );
         crate::presence::set_idle(Some(AWAY));
 
-        // Run A's turn ends with one decision waiting elsewhere; its send stalls
-        // after the count.
-        open_a_decision(&daemon).await;
-        raise_ring(&daemon, Ring::CodexCompleted).await;
+        // Run A raises a decision, counted alone; its send stalls after the count.
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
         tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
             .await
             .unwrap()
@@ -19059,7 +19053,7 @@ mod tests {
     async fn send_text_refuses_an_identity_that_does_not_match_its_own_text() {
         let daemon = test_daemon();
         let uid = TEST_UID;
-        let _attached = attach(&daemon, "cc-1", uid).await;
+        seed_session(&daemon, uid, "cc-1", Lifecycle::Live);
         let honest = protocol::hash::send_text_hash(uid, "deploy to prod", true);
 
         // A hash for different text: a captured frame replayed with new content
@@ -19449,11 +19443,15 @@ mod tests {
         let daemon = test_daemon();
         let tailnet = six_nodes();
         let sender = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &sender, "cc-2").await;
-        let first_run = register(&daemon, "cc-1", None).await;
-        let first = first_run.session.uid.clone();
+        seed_codex_session(&daemon, &sender, "cc-2");
+        daemon.mail_run_live(&sender).await;
+        let first = protocol::uid::new().unwrap();
+        seed_session(&daemon, &first, "cc-1", Lifecycle::Live);
+        daemon.store.record_host(&first, &HOST, None).unwrap();
+        daemon.mail_run_live(&first).await;
         let second = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &second, "cc-1").await;
+        seed_codex_session(&daemon, &second, "cc-1");
+        daemon.mail_run_live(&second).await;
 
         let (_, agents) = daemon
             .list_agents_on(Some(&tailnet), &sender, Vec::new())
@@ -19509,10 +19507,20 @@ mod tests {
         assert_eq!(texts(&second), ["for the second"]);
 
         // The first run ends; a new run takes its label.
-        daemon
-            .session_exited("cc-1", Some(&first), Some(0), None, Some(&first_run))
-            .await;
-        let replacement = register(&daemon, "cc-1", None).await.session.uid;
+        assert!(daemon
+            .end_hosted_run(
+                &first,
+                HOST,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                json!({"exit_code": 0})
+            )
+            .await
+            .unwrap());
+        let replacement = protocol::uid::new().unwrap();
+        seed_session(&daemon, &replacement, "cc-1", Lifecycle::Live);
+        daemon.mail_run_live(&replacement).await;
         assert!(refusal(send(&first, "too late").await).contains("not a running session"));
         assert!(
             texts(&replacement).is_empty(),
@@ -19528,8 +19536,10 @@ mod tests {
         let daemon = test_daemon();
         let tailnet = six_nodes();
         let (asker, answerer) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
-        register_codex_session(&daemon, &asker, "cc-2").await;
-        register_codex_session(&daemon, &answerer, "cc-1").await;
+        seed_codex_session(&daemon, &asker, "cc-2");
+        daemon.mail_run_live(&asker).await;
+        seed_codex_session(&daemon, &answerer, "cc-1");
+        daemon.mail_run_live(&answerer).await;
 
         let question = daemon
             .send_agent_message_on(
@@ -19591,7 +19601,8 @@ mod tests {
         let daemon = test_daemon();
         let tailnet = six_nodes();
         let codex = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &codex, "cc-1").await;
+        seed_codex_session(&daemon, &codex, "cc-1");
+        daemon.mail_run_live(&codex).await;
         let desktop: std::net::IpAddr = "100.64.0.2".parse().unwrap();
         let remote = protocol::uid::new().unwrap();
         let (m1, m2, m3) = (
@@ -19771,7 +19782,8 @@ mod tests {
     async fn a_wake_that_cannot_be_issued_leaves_nothing_outstanding() {
         let daemon = test_daemon();
         let codex = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &codex, "cc-1").await;
+        seed_codex_session(&daemon, &codex, "cc-1");
+        daemon.mail_run_live(&codex).await;
         leave_mail(&daemon, &codex, "hi");
         daemon.wake_if_due(&codex).await;
         assert!(
@@ -19831,8 +19843,11 @@ mod tests {
         let daemon = test_daemon();
         let tailnet = six_nodes();
         let sender = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &sender, "cc-2").await;
-        let receiver = register(&daemon, "cc-1", None).await.session.uid;
+        seed_codex_session(&daemon, &sender, "cc-2");
+        daemon.mail_run_live(&sender).await;
+        let receiver = protocol::uid::new().unwrap();
+        seed_session(&daemon, &receiver, "cc-1", Lifecycle::Live);
+        daemon.mail_run_live(&receiver).await;
         let mail = crate::store::SentMail {
             message_id: protocol::uid::new().unwrap(),
             context_id: protocol::uid::new().unwrap(),
@@ -19866,7 +19881,9 @@ mod tests {
     #[tokio::test]
     async fn a_persons_prompt_is_told_of_waiting_mail_in_the_fixed_words() {
         let daemon = test_daemon();
-        let claude = register(&daemon, "cc-1", None).await.session.uid;
+        let claude = protocol::uid::new().unwrap();
+        seed_session(&daemon, &claude, "cc-1", Lifecycle::Live);
+        daemon.mail_run_live(&claude).await;
         assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
         daemon
             .store
@@ -19886,21 +19903,33 @@ mod tests {
         let daemon = test_daemon();
         let tailnet = six_nodes();
         let sender = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &sender, "cc-2").await;
-        let run = register(&daemon, "cc-1", None).await;
+        seed_codex_session(&daemon, &sender, "cc-2");
+        daemon.mail_run_live(&sender).await;
+        let run = protocol::uid::new().unwrap();
+        seed_session(&daemon, &run, "cc-1", Lifecycle::Live);
+        daemon.store.record_host(&run, &HOST, None).unwrap();
+        daemon.mail_run_live(&run).await;
         let status = daemon
             .send_agent_message_on(
                 Some(&tailnet),
                 &sender,
-                &format!("{}@studio", run.session.uid),
+                &format!("{run}@studio"),
                 "hi",
                 None,
             )
             .await;
         assert_eq!(status.state, protocol::ipc::MailState::Waiting);
-        daemon
-            .session_exited("cc-1", Some(&run.session.uid), Some(0), None, Some(&run))
-            .await;
+        assert!(daemon
+            .end_hosted_run(
+                &run,
+                HOST,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                json!({"exit_code": 0})
+            )
+            .await
+            .unwrap());
         let (_, mine) = daemon.offer_agent_messages(&sender).await.unwrap();
         assert_eq!(
             mine.updates
@@ -20244,11 +20273,11 @@ mod tests {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        // The run is registered before the tripwire is armed. A registration
-        // writes `codex_sessions`, which is none of the four, but scoping the
-        // audit to the call under test is what makes an empty answer mean
+        // The run is begun before the tripwire is armed. Beginning it writes
+        // `codex_sessions` and `run_hosts`, which are none of the four, but scoping
+        // the audit to the call under test is what makes an empty answer mean
         // something about the gate rather than about the fixture.
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         arm_ledger_tripwire(&db);
 
         let text = "deploy";
@@ -20406,7 +20435,7 @@ mod tests {
     async fn a_codex_approval_rings_one_doorbell_and_a_redelivery_rings_none() {
         let (daemon, capture) = capture_daemon();
         let uid = TEST_UID;
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         let session = SessionKey::new(uid, "cc-1");
         let card = codex_command_card("rq-ring-once");
         let raise = || {
@@ -21720,13 +21749,12 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
-        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-decline").await;
-        // **Dropped on purpose.** With the receiver gone the ask cannot be parked,
-        // so a build that let this option through fails the send and refuses for
-        // the WRONG reason — a fast, legible failure instead of a test that hangs
-        // waiting for a reply nobody was going to give.
-        drop(asks);
+        seed_codex_session(&daemon, uid, "cc-1");
+        // **No link to ask.** A build that let this option through refuses for the
+        // WRONG reason, at once — a fast, legible failure instead of a test that
+        // hangs waiting for a reply nobody was going to give.
+        assert!(raise_codex_card(&daemon, uid, "rq-decline", "exec-decline").await);
+        let card: ApprovalCard = serde_json::from_str(&open_cards(&daemon, uid)[0].card).unwrap();
 
         let result = daemon
             .answer(
@@ -21776,9 +21804,9 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
-        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-stale").await;
-        drop(asks);
+        seed_codex_session(&daemon, uid, "cc-1");
+        assert!(raise_codex_card(&daemon, uid, "rq-stale", "exec-stale").await);
+        let card: ApprovalCard = serde_json::from_str(&open_cards(&daemon, uid)[0].card).unwrap();
 
         let result = daemon
             .answer(
@@ -22038,7 +22066,7 @@ mod tests {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         arm_ledger_tripwire(&db);
         // A row of the shape a later build writes, read by this one.
         rusqlite::Connection::open(&db)
@@ -22310,7 +22338,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         assert!(raise_codex_card(&daemon, uid, "req-settled", "item-settled").await);
         let held = open_cards(&daemon, uid)
             .into_iter()
@@ -23040,16 +23068,12 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         let uid = TEST_UID;
-        register_codex_session(&daemon, uid, "cc-1").await;
-        let mut asks = install_codex_link_for_tests(
-            &daemon,
-            uid,
-            crate::codex_link::CodexAddressee::Subscribed {
-                thread_id: "th-1".into(),
-            },
-            2,
-        )
-        .await;
+        seed_codex_session(&daemon, uid, "cc-1");
+        let (answers, _) = crate::codex_host::answer_channel();
+        let (commands, mut asks) = tokio::sync::mpsc::unbounded_channel();
+        daemon
+            .host_link_attached(uid, HostLink::Codex(answers, commands))
+            .await;
 
         // `req-1` stopped turn-1, and that is durably recorded.
         let material = crate::store::ClaimedMaterial {
@@ -23257,7 +23281,7 @@ mod tests {
         let uid = TEST_UID;
         {
             let daemon = daemon_on(Arc::clone(&store), Config::default());
-            register_codex_session(&daemon, uid, "cc-1").await;
+            seed_codex_session(&daemon, uid, "cc-1");
         }
         let material = crate::store::ClaimedMaterial {
             thread_id: "th-1".into(),
@@ -23302,15 +23326,6 @@ mod tests {
             Some(crate::store::AnswerStatus::Indeterminate)
         );
 
-        let _asks = install_codex_link_for_tests(
-            &daemon,
-            uid,
-            crate::codex_link::CodexAddressee::Subscribed {
-                thread_id: "th-1".into(),
-            },
-            2,
-        )
-        .await;
         let replayed = daemon
             .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
             .await;
@@ -23341,7 +23356,7 @@ mod tests {
         let uid = TEST_UID;
         {
             let daemon = daemon_on(Arc::clone(&store), Config::default());
-            register_codex_session(&daemon, uid, "cc-1").await;
+            seed_codex_session(&daemon, uid, "cc-1");
         }
         store
             .claim_mutation(
@@ -23394,7 +23409,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         let uid = TEST_UID;
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
 
         let catalog = daemon.command_catalog("cc-1").await;
         let protocol::ws::CommandCatalogResult::Unavailable { reason } = &catalog else {
@@ -23446,28 +23461,7 @@ mod tests {
         // happened to be the one the assertion wanted, so the leg was green while
         // proving nothing — which is the same fail-open the gate itself had.
         let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ2";
-        let now = protocol::time::now_rfc3339();
-        store
-            .upsert_session_at_generation(
-                &SessionRow {
-                    session_uid: claude.into(),
-                    session_id: "cc-claude".into(),
-                    tmux_session: "cc-claude".into(),
-                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                    cwd: "/tmp".into(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Live,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    agent: protocol::agent::AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                },
-                None,
-            )
-            .unwrap()
-            .assert_present();
+        seed_session(&daemon, claude, "cc-claude", Lifecycle::Live);
         assert_eq!(
             daemon.refuse_unless_claude(claude, "the terminal").await,
             crate::state::ClaudeOnly::Admitted,
@@ -23970,10 +23964,10 @@ mod tests {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        // Registered rather than staged — see `register_codex_session`. The card
-        // is still placed by hand below; what the registration buys is that
-        // `answer`'s gate is reading the agent off a row this daemon produced.
-        register_codex_session(&daemon, uid, "cc-1").await;
+        // Begun as the engine begins a run. The card is still placed by hand below;
+        // what beginning the run buys is that `answer`'s gate is reading the agent off
+        // a row this daemon produced.
+        seed_codex_session(&daemon, uid, "cc-1");
         arm_ledger_tripwire(&db);
 
         // The card is placed in memory by hand: `answer` has to hold for a card
@@ -24144,7 +24138,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
 
         let raised = approval_events(&daemon, uid, EventKind::ApprovalRequest);
@@ -24726,7 +24720,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
 
         assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
         // The same item under a second derived id: the derivation broke, and the
@@ -24771,7 +24765,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
 
         assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
         let filed = daemon.store.codex_pending_approvals(uid).unwrap();
@@ -24850,7 +24844,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         store.break_codex_card_writes_for_tests();
 
         assert!(!raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
@@ -24897,7 +24891,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
 
         // The row is unreachable, so the delete half cannot land. Reversible, so
@@ -24989,7 +24983,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
         assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
         assert_eq!(
             daemon
@@ -25066,7 +25060,7 @@ mod tests {
         let (store, _db) = shared_store_on_disk();
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
 
         let approval = worst_case_codex_approval();
         let card = approval.card("codex-worst-case".into(), 1);
@@ -25130,7 +25124,7 @@ mod tests {
                 ..Config::default()
             },
         );
-        register_codex_session(&daemon, uid, "cc-1").await;
+        seed_codex_session(&daemon, uid, "cc-1");
 
         let approval = worst_case_codex_approval();
         let card = approval.card("codex-too-large".into(), 1);
@@ -25337,13 +25331,16 @@ mod tests {
 
         assert!(
             daemon
-                .mark_exited(
-                    &SessionKey::new(TEST_UID, TEST_UID),
-                    Some(0),
-                    Some("test"),
-                    observed_now(&daemon, TEST_UID).await
+                .end_hosted_run(
+                    TEST_UID,
+                    HOST,
+                    None,
+                    Lifecycle::Live,
+                    Lifecycle::Exited,
+                    json!({"exit_code": 0})
                 )
-                .await,
+                .await
+                .unwrap(),
             "the premise: the run ended"
         );
 
@@ -25379,18 +25376,27 @@ mod tests {
     /// A Codex run's open card closes when the run ends, as Claude's do: nobody
     /// is left to answer it.
     ///
-    /// **Mutation:** keep `mark_exited` to Claude's cards and the card stays
+    /// **Mutation:** keep `after_the_end` to Claude's cards and the card stays
     /// open, its run listed as blocked, for as long as the row exists.
     #[tokio::test]
     async fn a_codex_runs_open_card_closes_when_it_ends() {
         let daemon = test_daemon();
         let uid = TEST_UID;
         seed_codex_session(&daemon, uid, "cc-1");
+        daemon.store.record_host(uid, &HOST, None).unwrap();
         assert!(raise_codex_card(&daemon, uid, "req-ended", "item-ended").await);
 
-        daemon
-            .session_exited("cc-1", Some(uid), Some(0), None, None)
-            .await;
+        assert!(daemon
+            .end_hosted_run(
+                uid,
+                HOST,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                json!({"exit_code": 0})
+            )
+            .await
+            .unwrap());
 
         assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
         assert_retired_as_ended(&daemon, uid, "req-ended");
@@ -25563,7 +25569,7 @@ mod tests {
         );
 
         let codex = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
-        register_codex_session(&daemon, codex, "cc-2").await;
+        seed_codex_session(&daemon, codex, "cc-2");
         let session = SessionKey::new(codex, "cc-2");
         tool_call(&daemon, "cc-2", codex, "toolu_codex").await;
         assert!(
@@ -25684,7 +25690,7 @@ mod tests {
     async fn a_quiet_sessions_facts_are_rebuilt_from_the_log_after_a_restart() {
         let store = shared_store();
         let daemon = daemon_on(Arc::clone(&store), Config::default());
-        commit_claude_row(&daemon, TEST_UID, "cc-1");
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
         let key = test_key();
         let filed = |id: &str, kind: EventKind, source: Source, payload: serde_json::Value| {
             PendingEvent::new(&key, kind, payload, source).with_source_event_id(id.to_string())
@@ -25786,7 +25792,7 @@ mod tests {
     async fn a_codex_card_is_pending_before_its_request_event_is_visible() {
         let (store, path) = shared_store_on_disk();
         let daemon = daemon_on(store, Config::default());
-        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
         let id = (TEST_UID.to_string(), "codex-req-1".to_string());
         let mut events = daemon.events_tx.subscribe();
         let writer = rusqlite::Connection::open(&path).unwrap();
@@ -25845,7 +25851,7 @@ mod tests {
     #[tokio::test]
     async fn an_aborted_codex_raise_leaves_no_card_without_its_row_and_event() {
         let daemon = test_daemon();
-        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
         let id = (TEST_UID.to_string(), "codex-req-1".to_string());
         let gate = daemon.publish_gate(TEST_UID).await;
         let held = gate.lock().await;
@@ -25968,7 +25974,7 @@ mod tests {
     async fn a_raise_aborted_inside_a_commit_that_fails_leaves_nothing() {
         let (store, path) = shared_store_on_disk();
         let daemon = daemon_on(store, Config::default());
-        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
         let writer = rusqlite::Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let raising = a_raise_stalled_in_its_commit(&daemon).await;
@@ -25991,7 +25997,7 @@ mod tests {
     async fn a_raise_aborted_inside_a_commit_that_succeeds_leaves_only_the_durable_half() {
         let (store, path) = shared_store_on_disk();
         let daemon = daemon_on(store, Config::default());
-        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
         let mut events = daemon.events_tx.subscribe();
         let writer = rusqlite::Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -26029,7 +26035,7 @@ mod tests {
     async fn a_raise_whose_commit_fails_takes_its_card_back() {
         let (store, path) = shared_store_on_disk();
         let daemon = daemon_on(store, Config::default());
-        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
         let writer = rusqlite::Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let raised = raise_in_a_task(&daemon).await.unwrap();
@@ -26044,7 +26050,7 @@ mod tests {
     async fn a_raise_aborted_while_the_state_lock_is_held_still_leaves_nothing() {
         let (store, path) = shared_store_on_disk();
         let daemon = daemon_on(store, Config::default());
-        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
         let writer = rusqlite::Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let raising = a_raise_stalled_in_its_commit(&daemon).await;
@@ -26072,7 +26078,7 @@ mod tests {
         for path in ["refused commit", "abort", "abort under the state lock"] {
             let (store, db) = shared_store_on_disk();
             let daemon = daemon_on(store, Config::default());
-            register_codex_session(&daemon, TEST_UID, "cc-1").await;
+            seed_codex_session(&daemon, TEST_UID, "cc-1");
             let writer = rusqlite::Connection::open(&db).unwrap();
             writer.execute_batch("BEGIN IMMEDIATE").unwrap();
             let raising = a_raise_stalled_in_its_commit(&daemon).await;

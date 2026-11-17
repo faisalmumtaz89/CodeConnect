@@ -9659,14 +9659,12 @@ mod tests {
         let (store, _path) = temp_store();
         let claude = key("AA", "cc-1");
         let codex = key("CX", "cx-1");
-        store
-            .upsert_session_at_generation(&session_row(&claude), None)
-            .unwrap()
-            .assert_present();
-        store
-            .upsert_session_at_generation(&codex_session_row(&codex), None)
-            .unwrap()
-            .assert_present();
+        begin(&store, &claude);
+        // Begun as a start begins it, its thread recorded while it starts.
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Starting;
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert!(store.record_hosted_thread(&codex.uid, "th_ABC123").unwrap());
 
         assert_eq!(
             table_counts(&store),
@@ -11574,10 +11572,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        store
-            .upsert_session_at_generation(&row, None)
-            .unwrap()
-            .assert_present();
+        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
 
         // Everything a Codex run reaches in the store as things stand: facts,
         // and the generalized mutation ledger built for it.

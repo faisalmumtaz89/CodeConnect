@@ -185,9 +185,9 @@ impl PushGate {
 mod tests {
     use super::*;
 
-    /// The exclusion list a fresh (still-valid) ticket sees.
+    /// The exclusion list a fresh (still-valid) ticket sees: a new card's, named for `seq`.
     fn saw(gate: &PushGate, run: &str, seq: u64) -> Vec<String> {
-        let ticket = gate.admit_turn_end(run);
+        let ticket = gate.admit_decision(run, &format!("card-{seq}")).unwrap();
         gate.exclusions_if_valid(run, ticket, false, seq).unwrap()
     }
 
