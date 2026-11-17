@@ -475,6 +475,10 @@ pub struct CodexAdapter {
     /// `(thread_id, turn_id)` so one thread's usage can never be attributed to,
     /// or removed by, another thread's turn.
     latest_usage: HashMap<(String, String), Value>,
+    /// The thread's settings as Codex last named them, in a report or an answer, as the
+    /// `codex_settings` fact it was filed as: what a mode change carries the model and the
+    /// effort from.
+    settings: Option<Value>,
 }
 
 impl CodexAdapter {
@@ -483,7 +487,40 @@ impl CodexAdapter {
             session,
             open: VecDeque::new(),
             latest_usage: HashMap::new(),
+            settings: None,
         }
+    }
+
+    /// The thread's settings as Codex last named them ([`Self::settings_answered`] or a
+    /// report), `None` before either.
+    pub fn settings(&self) -> Option<&Value> {
+        self.settings.as_ref()
+    }
+
+    /// One `codex_settings` fact from a `thread/start` or `thread/resume` answer for
+    /// `thread`, which names the settings the thread runs with (X6 P12: `model`,
+    /// `reasoningEffort`, `approvalPolicy`, `sandbox`, and a resume's `collaborationMode`).
+    /// Codex sends no report at a start, a resume or a plain turn, so the answer is the run's
+    /// only word on its settings until one changes. A start's answer names no collaboration
+    /// mode, and a thread just started is in Default. An answer that names no approval policy
+    /// is no word on the settings, and gives none.
+    pub fn settings_answered(&mut self, thread: &str, answer: &Value) -> Vec<PendingEvent> {
+        if answer["approvalPolicy"].as_str().is_none() {
+            return Vec::new();
+        }
+        let mode = answer["collaborationMode"]["mode"]
+            .as_str()
+            .unwrap_or("default");
+        self.settings_fact(
+            thread,
+            json!({
+                "model": answer["model"],
+                "effort": answer["reasoningEffort"],
+                "approval_policy": answer["approvalPolicy"],
+                "sandbox": answer["sandbox"]["type"],
+                "collaboration_mode": mode,
+            }),
+        )
     }
 
     /// Normalize one app-server frame. Returns zero or more facts: most frames
@@ -554,6 +591,13 @@ impl CodexAdapter {
             // precisely because there is no event here to hang it on.
             "turn/started" => Vec::new(),
 
+            // thread/settings/updated — Codex's own report of the thread's settings, sent
+            // when a client changes them (params.{threadId, threadSettings}); none comes at a
+            // start, a resume or a plain turn (X6 P12), whose answers name them instead
+            // ([`CodexAdapter::settings_answered`]). The run's model, effort and permission
+            // mode are read off either ([`protocol::facts`]).
+            "thread/settings/updated" => self.on_settings_updated(params),
+
             // Known, deliberately not rendered: observation noise, ownership/
             // config, or streamed output that carries no timeline fact.
             "thread/status/changed"
@@ -561,7 +605,6 @@ impl CodexAdapter {
             | "account/rateLimits/updated"
             | "remoteControl/status/changed"
             | "mcpServer/startupStatus/updated"
-            | "thread/settings/updated"
             | "turn/diff/updated"
             | "app/list/updated"
             | "item/commandExecution/outputDelta"
@@ -943,6 +986,43 @@ impl CodexAdapter {
             return Vec::new();
         };
         self.thread_identity_event(thread).into_iter().collect()
+    }
+
+    /// One `codex_settings` fact from Codex's settings report: the thread's model, effort,
+    /// approval policy, sandbox and collaboration mode, as Codex names them.
+    fn on_settings_updated(&mut self, params: &Value) -> Vec<PendingEvent> {
+        let (Some(tid), Some(settings)) = (
+            params.get("threadId").and_then(Value::as_str),
+            params.get("threadSettings"),
+        ) else {
+            return Vec::new();
+        };
+        self.settings_fact(
+            tid,
+            json!({
+                "model": settings["model"],
+                "effort": settings["effort"],
+                "approval_policy": settings["approvalPolicy"],
+                "sandbox": settings["sandboxPolicy"]["type"],
+                "collaboration_mode": settings["collaborationMode"]["mode"],
+            }),
+        )
+    }
+
+    /// The `codex_settings` fact `settings` names for `thread`, kept as the thread's own. Each
+    /// report or answer is its own fact: the same settings named again later (a change made
+    /// and then undone, a resume) is a newer fact, not a repeat.
+    fn settings_fact(&mut self, thread: &str, settings: Value) -> Vec<PendingEvent> {
+        let Ok(report) = protocol::uid::uuid_v4() else {
+            return Vec::new();
+        };
+        self.settings = Some(settings.clone());
+        vec![self
+            .event(
+                EventKind::Other(protocol::facts::CODEX_SETTINGS.into()),
+                settings,
+            )
+            .with_source_event_id(sid(thread, &format!("settings:{report}")))]
     }
 
     /// The session's identity fact, from a **Thread object**.

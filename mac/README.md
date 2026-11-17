@@ -942,7 +942,24 @@ files when claude takes it, even from an answer that comes late; an effort typed
 `/effort low` shows from claude's own `Set effort level to low …` receipt (a receipt in another
 wording is not read). A retry applies the change again. A change whose answer is lost
 across a ccd restart leaves the effort as it was last set. A Claude run in a terminal, and a
-Codex run, take no settings from an app.
+Codex run in one, take no settings from an app.
+From minor 43 a Codex run CodeConnect started takes the same `set_model` and `set_mode`. Its
+`menus` are the models the start's check of Codex listed (`model/list`, kept with the run) and
+four modes, the asking default first, an order that is CodeConnect's and not Codex's: "Default"
+(`auto`: approval on request, workspace-write sandbox), "Read Only", "Plan" and "Full Access"
+(`full-access`: approval never, no sandbox), marked `confirm` and refused without it as
+Bypass permissions is. Each change goes to Codex as one `thread/settings/update` on the run's
+link, answered `applied` (`now` with no turn running, `next_turn` while one runs, as Codex
+takes a change from its next request), `refused` with Codex's words when it answers with an
+error, or `indeterminate` when it does not answer within 10 s. Plan keeps the run's approval
+and sandbox, and a mode carries the model and the effort Codex last named, since Codex makes
+a mode's own the thread's; a mode change before Codex has named the run's settings is
+refused, nothing sent. The run's model, effort and mode are the settings Codex names: in its
+answer to the run's start and to each resume, and in its report of each change
+(`thread/settings/updated`), since it reports none at a start, a resume or a plain turn. A run
+that asks nothing reads `full-access`, in Plan too, and a combination none of the four is gives
+no mode. A run whose Codex reconnects or relaunches is given Default's approval and sandbox
+again, as its start was, and reads so from the resume's answer.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

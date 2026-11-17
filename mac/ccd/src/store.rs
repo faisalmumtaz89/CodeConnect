@@ -2094,7 +2094,8 @@ impl Store {
     /// Each read is narrowed in SQL to the rows that can decide its fact under
     /// [`protocol::facts`] — a `session_start` or a user line for the model, a
     /// hook, Claude's permission-mode line or an SDK run's init for the mode, a
-    /// notification or a user line for the effort — so a long run costs those rows
+    /// notification or a user line for the effort, and a Codex run's settings
+    /// ([`protocol::facts::CODEX_SETTINGS`]) for each — so a long run costs those rows
     /// down to the deciding one, not its whole log.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
         let conn = self.read();
@@ -2102,22 +2103,24 @@ impl Store {
             model: newest_decided(
                 &conn,
                 session_uid,
-                "kind IN (?2, ?3)",
+                "kind IN (?2, ?3, ?4)",
                 &[
                     EventKind::SessionStart.as_str(),
                     EventKind::UserMessage.as_str(),
+                    protocol::facts::CODEX_SETTINGS,
                 ],
                 protocol::facts::model_fact,
             )?,
             permission_mode: newest_decided(
                 &conn,
                 session_uid,
-                "(kind = ?2 OR source = ?3 OR (kind = ?4 AND source = ?5))",
+                "(kind IN (?2, ?6) OR source = ?3 OR (kind = ?4 AND source = ?5))",
                 &[
                     protocol::facts::TRANSCRIPT_PERMISSION_MODE,
                     Source::Hook.as_str(),
                     EventKind::SessionStart.as_str(),
                     Source::Sdk.as_str(),
+                    protocol::facts::CODEX_SETTINGS,
                 ],
                 protocol::facts::permission_mode_fact,
             )?,
@@ -2125,11 +2128,12 @@ impl Store {
             effort: newest_decided(
                 &conn,
                 session_uid,
-                "kind IN (?2, ?3) AND seq > COALESCE((SELECT MAX(seq) FROM events
-                                                       WHERE session_uid = ?1 AND kind = ?4), 0)",
+                "kind IN (?2, ?3, ?4) AND seq > COALESCE((SELECT MAX(seq) FROM events
+                                                       WHERE session_uid = ?1 AND kind = ?5), 0)",
                 &[
                     EventKind::Notification.as_str(),
                     EventKind::UserMessage.as_str(),
+                    protocol::facts::CODEX_SETTINGS,
                     EventKind::SessionEnd.as_str(),
                 ],
                 protocol::facts::effort_fact,
@@ -3008,8 +3012,20 @@ impl Store {
         .map(|fact| fact.value))
     }
 
-    /// The models of the hosted run `session_uid`'s start's answer, each as claude gives
-    /// it; `None` when the run has no `run_hosts` row or its start is not answered.
+    /// Keep `models` (`{"models": [...]}`) as the Codex run `session_uid`'s models, where a
+    /// Claude run's start's answer keeps its own ([`Store::hosted_models`] reads either).
+    pub fn keep_hosted_models(&self, session_uid: &str, models: &serde_json::Value) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE run_hosts SET initialize = ?2 WHERE session_uid = ?1",
+            params![session_uid, serde_json::to_string(models)?],
+        )?;
+        Ok(())
+    }
+
+    /// The models of the hosted run `session_uid`: a Claude run's start's answer's, each as
+    /// claude gives it, or a Codex run's start check's, each as Codex's `model/list` gives
+    /// it; `None` when the run has no `run_hosts` row or none are kept.
     pub fn hosted_models(&self, session_uid: &str) -> Result<Option<Vec<serde_json::Value>>> {
         let conn = self.read();
         let models = conn
@@ -13189,6 +13205,48 @@ mod tests {
                 .effort
                 .map(|fact| fact.value),
             Some("low".to_string())
+        );
+    }
+
+    /// **A Codex run's settings are read back after a restart as they were folded live**: its
+    /// model, effort and mode from its newest `codex_settings` fact, a start's answer and a
+    /// later report alike.
+    #[test]
+    fn a_codex_runs_settings_are_read_back_as_they_were_folded() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        begin(&store, &session);
+        let settings = |model: &str, effort: &str, approval: &str, sandbox: &str| {
+            let mut report = pending(
+                &session,
+                EventKind::Other(protocol::facts::CODEX_SETTINGS.into()),
+                None,
+            );
+            report.source = Source::Codex;
+            report.payload = serde_json::json!({"model": model, "effort": effort,
+                "approval_policy": approval, "sandbox": sandbox, "collaboration_mode": "default"});
+            report
+        };
+        let mut live = protocol::facts::SessionFacts::default();
+        for report in [
+            settings("gpt-6.1-sol", "low", "on-request", "workspaceWrite"),
+            settings("gpt-6-astra", "high", "never", "dangerFullAccess"),
+        ] {
+            live.observe(&store.append_event(&report).unwrap().unwrap());
+        }
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(read, live);
+        assert_eq!(
+            (
+                read.model.map(|fact| fact.value),
+                read.effort.map(|fact| fact.value),
+                read.permission_mode.map(|fact| fact.value),
+            ),
+            (
+                Some("gpt-6-astra".into()),
+                Some("high".into()),
+                Some("full-access".into())
+            )
         );
     }
 

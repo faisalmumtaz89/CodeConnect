@@ -218,8 +218,9 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
     },
-    /// **Change a Claude run's model, its effort, or both** (minor 39), for the rest of the
-    /// session, answered with [`ServerMessage::SettingResult`]. At least one of the two, each
+    /// **Change a run's model, its effort, or both** (minor 39; a Codex run CodeConnect
+    /// started from minor 43), for the rest of the session, answered with
+    /// [`ServerMessage::SettingResult`]. At least one of the two, each
     /// one the run's [`crate::event::RunMenus`] lists: `model` a model's `value`, `effort` one
     /// of the efforts listed. A client sends it only for a run whose summary carries `menus`.
     /// Nothing is kept per `request_id`: a setting is the same state however often it is
@@ -232,8 +233,9 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
-    /// **Change a Claude run's permission mode** (minor 39) to one of its `menus`' modes, for
-    /// the rest of the session, answered with [`ServerMessage::SettingResult`]. As
+    /// **Change a run's permission mode** (minor 39; a Codex run CodeConnect started from
+    /// minor 43) to one of its `menus`' modes, for the rest of the session, answered with
+    /// [`ServerMessage::SettingResult`]. As
     /// [`ClientMessage::SetModel`], a retry applies it again.
     SetMode {
         session_id: String,
@@ -2360,9 +2362,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 42,
             "a summary saying the next message relaunches the run (`relaunchable`) is minor 42"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 43,
+            "a Codex run's settings from an app (`menus`, `set_model`, `set_mode`) are minor 43"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 42);
+        assert_eq!(crate::PROTOCOL_MINOR, 43);
     }
 
     /// **The tags, pinned on this side too.**

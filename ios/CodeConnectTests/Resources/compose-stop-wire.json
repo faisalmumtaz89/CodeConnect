@@ -46,6 +46,28 @@
         "last_seq": 0,
         "lifecycle": "live",
         "link": "attached",
+        "menus": {
+          "models": [],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ]
+        },
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -66,6 +88,28 @@
         "last_seq": 0,
         "lifecycle": "live",
         "link": "detached",
+        "menus": {
+          "models": [],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ]
+        },
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -124,6 +168,12 @@
           "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
         },
         {
+          "kind": "codex_settings",
+          "link": null,
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:settings:{report}",
+          "turn_id": null
+        },
+        {
           "kind": "link_state",
           "link": "attached",
           "source_event_id": null,
@@ -141,6 +191,38 @@
         "last_seq": 0,
         "lifecycle": "live",
         "link": "attached",
+        "menus": {
+          "models": [],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ]
+        },
+        "model": {
+          "at": "2026-11-15T00:00:00Z",
+          "seq": 11,
+          "source": "command",
+          "value": "gpt-6.1-sol"
+        },
+        "permission_mode": {
+          "seq": 11,
+          "value": "read-only"
+        },
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -161,6 +243,16 @@
         "last_seq": 0,
         "lifecycle": "stopping",
         "link": "attached",
+        "model": {
+          "at": "2026-11-15T00:00:00Z",
+          "seq": 11,
+          "source": "command",
+          "value": "gpt-6.1-sol"
+        },
+        "permission_mode": {
+          "seq": 11,
+          "value": "read-only"
+        },
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -188,6 +280,16 @@
         "last_seq": 0,
         "lifecycle": "exited",
         "link": "detached",
+        "model": {
+          "at": "2026-11-15T00:00:00Z",
+          "seq": 11,
+          "source": "command",
+          "value": "gpt-6.1-sol"
+        },
+        "permission_mode": {
+          "seq": 11,
+          "value": "read-only"
+        },
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -247,6 +349,28 @@
     "last_seq": 0,
     "lifecycle": "live",
     "link": "attached",
+    "menus": {
+      "models": [],
+      "modes": [
+        {
+          "label": "Default",
+          "value": "auto"
+        },
+        {
+          "label": "Read Only",
+          "value": "read-only"
+        },
+        {
+          "label": "Plan",
+          "value": "plan"
+        },
+        {
+          "confirm": true,
+          "label": "Full Access",
+          "value": "full-access"
+        }
+      ]
+    },
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

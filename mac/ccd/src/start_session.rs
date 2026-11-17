@@ -373,6 +373,13 @@ async fn codex_start(
     } else {
         trust
     };
+    // The models this codex's check listed, for the run's settings menu: none when no check
+    // has asked this version yet, and the run then offers its modes alone.
+    let models = daemon
+        .agents
+        .offered(&AgentKind::Codex, &ready.version)
+        .map(|offer| offer.menu)
+        .unwrap_or_default();
     crate::codex_host::start(
         daemon,
         crate::codex_host::Run {
@@ -381,6 +388,7 @@ async fn codex_start(
             cwd: &cwd,
             prompt,
             model,
+            models: &models,
             codex: &ready.path,
             codeconnect: &codeconnect,
             git_bin,
@@ -1321,6 +1329,10 @@ async fn claude_models(
 struct Offer {
     models: Vec<AgentModel>,
     signed_in: Option<bool>,
+    /// Codex's own entries for those models, as `model/list` gives them, their efforts
+    /// among them: what a Codex run started on this answer keeps for its settings menu
+    /// ([`crate::codex_host::Run::models`]). Empty for Claude.
+    menu: Vec<serde_json::Value>,
 }
 
 /// What the codex at `codex`, at `version`, offers a start.
@@ -1491,6 +1503,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                     .filter_map(|entry| model(entry, "value"))
                     .collect(),
                 signed_in: None,
+                menu: Vec::new(),
             })
         }
         _ => {
@@ -1499,11 +1512,14 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                     .find(|line| line["id"] == id)
                     .map(|line| &line["result"])
             };
+            let listed: Vec<&serde_json::Value> = result(2)?["data"]
+                .as_array()?
+                .iter()
+                .filter(|entry| entry["hidden"] != true)
+                .collect();
             Some(Offer {
-                models: result(2)?["data"]
-                    .as_array()?
+                models: listed
                     .iter()
-                    .filter(|entry| entry["hidden"] != true)
                     .filter_map(|entry| model(entry, "model"))
                     .collect(),
                 signed_in: result(3)
@@ -1511,6 +1527,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                     .map(|account| {
                         !account["account"].is_null() || account["requiresOpenaiAuth"] == false
                     }),
+                menu: listed.into_iter().cloned().collect(),
             })
         }
     }
