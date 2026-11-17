@@ -2352,7 +2352,8 @@ impl Store {
 
     /// The models of the hosted run `session_uid`: a Claude run's start's answer's, each as
     /// claude gives it, or a Codex run's start check's, each as Codex's `model/list` gives
-    /// it; `None` when the run has no `run_hosts` row or none are kept.
+    /// it, and the model its thread started on first if the check did not list it; `None`
+    /// when the run has no `run_hosts` row or none are kept.
     pub fn hosted_models(&self, session_uid: &str) -> Result<Option<Vec<serde_json::Value>>> {
         let conn = self.read();
         let models = conn
