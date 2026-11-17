@@ -428,9 +428,7 @@ struct PendingApproval {
     question: bool,
 }
 
-/// The card a decision push is about, by its request id: the request that filed
-/// it knows its own, and a `permission_prompt` is matched to one through its
-/// prompt before it is admitted.
+/// The card a decision push is about, by the request id that filed it.
 #[derive(Debug, Clone)]
 struct CardKey(String);
 
@@ -3121,17 +3119,6 @@ impl Daemon {
             .await
         {
             Ok(Some((stored_hash, outcome))) => {
-                // A superseded card (an older daemon retired it when a newer
-                // prompt arrived) was never *answered*, so replaying it as a
-                // duplicate would tell the phone its tap had been applied. It is
-                // refused, and the refusal says what to do instead.
-                if outcome.resolved_by == ResolvedBy::Superseded {
-                    return AnswerResult::Rejected {
-                        reason: "this card was superseded by a newer prompt in the same run; \
-                                 nothing was typed for it. Answer the current card."
-                            .into(),
-                    };
-                }
                 return AnswerResult::Duplicate {
                     outcome,
                     stale_payload_hash: stored_hash != payload_hash,

@@ -943,15 +943,6 @@ pub const MAX_DIFF_BYTES: usize = 512 * 1024;
 pub struct Capabilities {
     /// True when an answer is guaranteed to reach the agent.
     pub can_approve_reliably: bool,
-    /// `fail_open` | `fail_closed`: how a decision fails with no daemon, as an
-    /// earlier daemon's hook path did (fail-open: the hook emitted nothing). This
-    /// daemon still says `fail_open`.
-    pub fail_mode: String,
-    /// How an answer reaches the agent on this build.
-    pub answer_path: AnswerPath,
-    /// Seconds the daemon will hold a gate hook open, from when holding had a
-    /// fixed bound. 0: a held card is held for as long as Claude waits on it.
-    pub hold_secs: u64,
     pub send_text: bool,
     /// The daemon accepts `delete_session`. Advertised rather than assumed so an
     /// older Mac does not get a swipe that silently does nothing: this app's rule
@@ -1254,7 +1245,6 @@ impl QuestionHold {
 pub enum ResolvedBy {
     Phone,
     Timeout,
-    Superseded,
 }
 
 /// The kind of paired device an answer came from (minor 34), by the
@@ -2561,9 +2551,6 @@ mod tests {
     fn capabilities_fixture() -> Capabilities {
         Capabilities {
             can_approve_reliably: true,
-            fail_mode: "fail_open".into(),
-            answer_path: AnswerPath::HookReturn,
-            hold_secs: 0,
             send_text: true,
             delete_session: true,
             test_push: true,
@@ -3519,20 +3506,31 @@ mod tests {
             .contains("inferred"));
     }
 
-    /// **An answer is resolved by `phone`, `timeout` or `superseded`**, spelled by hand,
-    /// and `local` does not decode.
+    /// **An answer is resolved by `phone` or `timeout`**, spelled by hand, and `local` and
+    /// `superseded` do not decode.
     #[test]
-    fn an_answer_is_resolved_by_phone_timeout_or_superseded() {
+    fn an_answer_is_resolved_by_phone_or_timeout() {
         for (by, word) in [
             (ResolvedBy::Phone, "phone"),
             (ResolvedBy::Timeout, "timeout"),
-            (ResolvedBy::Superseded, "superseded"),
         ] {
             let encoded = serde_json::to_string(&by).unwrap();
             assert_eq!(encoded, format!("\"{word}\""));
             assert_eq!(serde_json::from_str::<ResolvedBy>(&encoded).unwrap(), by);
         }
-        assert!(serde_json::from_str::<ResolvedBy>("\"local\"").is_err());
+        for gone in ["\"local\"", "\"superseded\""] {
+            assert!(serde_json::from_str::<ResolvedBy>(gone).is_err(), "{gone}");
+        }
+    }
+
+    /// **The capabilities carry no `fail_mode`, `answer_path` or `hold_secs`**, constants no
+    /// app reads.
+    #[test]
+    fn the_capabilities_carry_no_fail_mode_answer_path_or_hold_secs() {
+        let sent = serde_json::to_value(capabilities_fixture()).unwrap();
+        for gone in ["fail_mode", "answer_path", "hold_secs"] {
+            assert!(sent.get(gone).is_none(), "{gone}");
+        }
     }
 
     /// **An answer is applied as `hook_return` or `codex_response`**, spelled by hand,

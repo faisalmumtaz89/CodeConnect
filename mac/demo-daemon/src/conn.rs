@@ -20,9 +20,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use protocol::event::{Event, EventKind, Source};
-use protocol::ws::{
-    AnswerPath, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
-};
+use protocol::ws::{Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
@@ -502,9 +500,6 @@ fn capabilities() -> Capabilities {
         // An answer reaches the script the moment it arrives; nothing can drop
         // it in between.
         can_approve_reliably: true,
-        fail_mode: "fail_open".into(),
-        answer_path: AnswerPath::HookReturn,
-        hold_secs: 0,
         send_text: true,
         // No shell, no Claude Code binary, no APNs key, and nothing destructive:
         // an action this server cannot perform is not offered.

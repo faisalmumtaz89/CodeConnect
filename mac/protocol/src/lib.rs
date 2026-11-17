@@ -57,8 +57,10 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `0` — hello/sessions/subscribe/answer/send_text/capture. (`capture`, the
 ///     Mac pane snapshot, is gone in X12: no run is left with a pane to read.)
 ///     **Gone in X12:** a summary's `link` words `degraded` and `stale`; a run's link
-///     is `attached` or `detached`. Also the `answer_path` and `applied_via` word
-///     `send_keys`, since nothing is typed, and an outcome's `inferred`.
+///     is `attached` or `detached`. Also the `applied_via` word `send_keys`, since
+///     nothing is typed; an outcome's `inferred`; the resolver `superseded`, which no
+///     daemon has recorded since minor 22; and the capabilities `fail_mode`,
+///     `answer_path` and `hold_secs`, constants no app reads.
 ///   * `1` — QR pairing + per-device tokens, `wss://`, `get_diff`,
 ///     `EventKind::TurnComplete`, `ResolvedBy::Local`, `risk_class`. **Gone in
 ///     X12:** `ResolvedBy::Local`; nothing records an answer made at the keyboard.
