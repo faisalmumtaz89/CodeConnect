@@ -77,7 +77,7 @@ struct StartForm: View {
         if StartAgent.allCases.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
         guard folder != nil else { return "Choose a folder." }
-        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "Write the first message." }
+        if let reason = StartContext.firstMessageReason(message) { return reason }
         return nil
     }
 
