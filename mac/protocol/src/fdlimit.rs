@@ -8,8 +8,7 @@
 //! parent raised.
 
 /// The soft limit asked for: macOS's `OPEN_MAX`, the most a process may ask for
-/// portably. The pseudo-terminals a session takes (`kern.tty.ptmx_max` is 511)
-/// run out long before it does.
+/// portably.
 pub const TARGET: libc::rlim_t = 10_240;
 
 /// Raise the soft open-file limit to [`TARGET`], or to the hard limit when that

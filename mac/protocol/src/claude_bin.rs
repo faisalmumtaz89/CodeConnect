@@ -25,8 +25,7 @@ pub fn candidates(configured: Option<&str>, home: &Path, path_hits: Vec<PathBuf>
 }
 
 /// The first of `candidates` that is an executable file and not `launcher`, the
-/// `codeconnect` binary itself: a shell alias like `alias claude=codeconnect claude`
-/// would otherwise resolve to it, and a session would spawn itself in a loop.
+/// `codeconnect` binary itself.
 pub fn first_runnable(candidates: Vec<PathBuf>, launcher: Option<&Path>) -> Option<PathBuf> {
     candidates
         .into_iter()

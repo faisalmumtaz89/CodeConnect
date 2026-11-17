@@ -582,11 +582,11 @@ fn next_mark(last: i64, now: i64) -> i64 {
 /// Map one SDK message of a live run and file it with its cursor, then acknowledge it.
 /// `turns.init` is the uuid of the run's latest `system/init`: an init sets it before it is
 /// mapped, so the init's own events carry their turn. The run's turns are marked for the
-/// mail wake rule as a terminal run's transcript marks them: a start at the main thread's
+/// mail wake rule: a start at the main thread's
 /// init, an end at its `result`, which is also the end the rule hears of
 /// ([`crate::mail::turn_ended`]); ccd's clock, each mark after the last. A turn the person
 /// stopped (its `result` aborted) is not ended for the rule: it stays open until their next
-/// turn ends, as Esc leaves a terminal run's, so its mail waits for that prompt. Until the
+/// turn ends, so its mail waits for that prompt. Until the
 /// host's replay ends the marks are set but nothing is decided: the replay's `state`
 /// decides, once the run's replayed turns are all marked. A turn's init is the run moving
 /// again ([`Daemon::note_turn_running`]), and a turn's end read after the replay is an
@@ -2206,7 +2206,7 @@ pub(crate) async fn answer(
 /// **Wake the hosted run `uid` for its mail** with `text`, the fixed nudge: the line goes to
 /// its host through its attached link, and ccd files a `mail_nudge` notice for it, since a
 /// replayed user line files nothing ([`protocol::sdk_map`]). Whether a link took it; a run
-/// with no link attached (a terminal run, or a host not reached) is not woken here.
+/// with no link attached (a host not reached) is not woken here.
 pub(crate) async fn wake(daemon: &Daemon, uid: &str, text: &str) -> bool {
     let uuid = match protocol::uid::uuid_v4() {
         Ok(uuid) => uuid,
@@ -5352,7 +5352,7 @@ mod tests {
 
     /// **B11 T1: mail that reaches a hosted run while its turn runs wakes it once that turn
     /// has ended, never during it.** The turn starts at claude's init and ends at its
-    /// `result`, as a terminal run's transcript marks them.
+    /// `result`.
     #[tokio::test]
     async fn mail_to_a_hosted_run_mid_turn_wakes_it_once_the_turn_ends() {
         let rig = rig();
@@ -5413,8 +5413,7 @@ mod tests {
     }
 
     /// **B11 T3: a person's message to an idle hosted run while unread mail waits is followed
-    /// by the nudge**, which claude reads in that turn, as a terminal run's prompt is told of
-    /// its mail. With no mail waiting, nothing follows. Mail waits unwoken once three woken
+    /// by the nudge**, which claude reads in that turn. With no mail waiting, nothing follows. Mail waits unwoken once three woken
     /// turns have left it unread.
     #[tokio::test]
     async fn a_message_to_an_idle_hosted_run_with_mail_waiting_is_followed_by_the_nudge() {
@@ -5628,7 +5627,7 @@ mod tests {
     }
 
     /// **B11 T9: an app's Stop of a turn while mail waits wakes nothing until the person's
-    /// next turn has ended**, as Esc leaves a terminal run: no wake after the Stop, no nudge
+    /// next turn has ended**: no wake after the Stop, no nudge
     /// with the person's next message, and one wake once that turn ends, the mail unread.
     #[tokio::test]
     async fn a_stop_while_mail_waits_wakes_nothing_until_the_persons_next_turn_ends() {
@@ -5863,7 +5862,7 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **212b G1: a session's start says why, as a terminal run's SessionStart does.** A
+    /// **212b G1: a session's start says why.** A
     /// launch's first init files its `session_start` with `source: "startup"`; a turn's later
     /// init files one with no `source`, since it starts no session.
     #[tokio::test]
@@ -12266,7 +12265,7 @@ mod tests {
     /// first turn, the run's catalog is what claude reported: none
     /// of a claude.ai connector's commands, of its screen-only ones or of
     /// [`REFUSED_SCREENS`], and `usage` among them. Then `/effort low` and `/usage`, each
-    /// sent as a message, file their output as a terminal run does: a `user_message` with
+    /// sent as a message, file their output as a `user_message` with
     /// claude's `<local-command-stdout>` string. `/effort`'s is printed; of `/usage`'s only
     /// its shape (the wrapper and a length), as it holds the signed-in account's own usage.
     /// Then End run, as G2. Ignored and gated as G2 is.

@@ -434,8 +434,8 @@ pub fn build(
 /// The words of one notification, and the only place they are chosen.
 ///
 /// Title is the project and nothing else. `CodeConnect` is the fallback rather
-/// than the run's tmux name, because a name like `cc-1` is a counter the next
-/// run inherits — it tells a reader nothing, and telling them nothing honestly
+/// than the run's name, because that name is its uid — it tells a reader
+/// nothing, and telling them nothing honestly
 /// beats telling them something meaningless.
 ///
 /// Body is a canned sentence picked by [`PushKind`], or the count once more

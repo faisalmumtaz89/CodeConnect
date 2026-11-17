@@ -1159,10 +1159,9 @@ where
             .await?;
         }
         ClientMessage::DeleteSession { session_uid } => {
-            // **By uid, never by name.** `resolve` accepts a tmux name and maps it
-            // to the newest run under it, which is right for subscribing and wrong
-            // for deleting: a name is handed to the next run, so a phone holding a
-            // stale "cc-1" could destroy a session it never saw.
+            // **By uid, never by name.** `resolve` accepts a name and maps it to the
+            // newest run under it, which is right for subscribing and wrong for
+            // deleting.
             let result = match daemon.delete_exited_session(&session_uid).await {
                 Ok(outcome) => outcome,
                 // Answered as a delete result, not as a bare `error` frame. An

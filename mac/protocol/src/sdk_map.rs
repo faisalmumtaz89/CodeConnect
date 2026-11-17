@@ -12,7 +12,7 @@
 //! and is kept like any tool call.
 //!
 //! A command's own output (`/usage`, `/effort low`, `/compact`'s "Compacted") is
-//! filed as a terminal run's transcript holds it: a `user_message` whose content is
+//! filed as a `user_message` whose content is
 //! its `<local-command-stdout>` (or stderr) string. The SDK gives it three ways: a
 //! replayed user line with that content, an assistant line's `local_command_source`
 //! (`/effort`'s), and `system/local_command_output`'s bare `content`.
@@ -490,7 +490,7 @@ mod tests {
         );
     }
 
-    /// **B8 G3: a command's output is the person's row in a terminal run's shape**, from
+    /// **B8 G3: a command's output is the person's row**, from
     /// each of the SDK's three ways of giving it; on the recorded session those are
     /// `/model`'s line 108, `/compact`'s line 118 and `/effort`'s line 131, and no other
     /// line.

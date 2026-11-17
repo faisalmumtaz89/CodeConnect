@@ -203,7 +203,7 @@ impl EventKind {
 pub struct Event {
     /// Daemon-assigned, monotonic and gap-free **per `session_uid`**.
     ///
-    /// Per *uid*, not per name: `cc-1` is reused by the next session, and
+    /// Per *uid*, not per name: a later run can carry the same name, and
     /// numbering a new run from where a dead one stopped spliced two unrelated
     /// timelines into one. See [`crate::uid`].
     pub seq: u64,
@@ -215,8 +215,7 @@ pub struct Event {
     /// value here means the record predates the migration entirely.
     #[serde(default)]
     pub session_uid: String,
-    /// The tmux session name (e.g. `cc-1`) — for display and for `codeconnect attach`.
-    /// **Not** an identity: it is reassigned when a session exits.
+    /// The run's name. A run CodeConnect started is named by its uid.
     pub session_id: String,
     /// RFC3339 UTC, millisecond precision.
     pub ts: String,
@@ -409,9 +408,9 @@ pub enum CodexLink {
     /// which means no turn can be running now, which means a `turn/start` cannot
     /// join or collide with one.
     ///
-    /// **Why the word exists at all.** On a fresh `codeconnect codex` session the
-    /// thread has no rollout until its first turn, so every resume is refused and the
-    /// link stays [`CodexLink::Bound`] for ever. A phone that may only compose when
+    /// **Why the word exists at all.** A fresh Codex thread has no rollout until its
+    /// first turn, so every resume of it is refused and nothing can subscribe to it. A
+    /// phone that may only compose when
     /// `subscribed` therefore cannot start the first turn — and only a first turn
     /// creates the rollout. Measured on codex 0.153.4
     /// (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`): the app-server accepts

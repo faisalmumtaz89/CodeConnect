@@ -562,9 +562,8 @@ impl Fleet {
 
     /// End a run whose log is full and start its successor.
     ///
-    /// A fresh uid and a log from seq 1, which is exactly what a phone sees when
-    /// a real run exits and `codeconnect claude` takes the freed name: two runs,
-    /// told apart by their uids, never one timeline with a seam in it.
+    /// A fresh uid and a log from seq 1 under the same name: two runs, told apart
+    /// by their uids, never one timeline with a seam in it.
     fn retire(&self, inner: &mut Inner, index: usize, now: Instant) {
         let slot = inner.runs[index].slot;
         let run = &mut inner.runs[index];
@@ -1041,7 +1040,7 @@ mod tests {
         assert_eq!(applied.resolved_by, ResolvedBy::Phone);
         assert_eq!(applied.applied_via, AnswerPath::HookReturn);
         assert!(!applied.inferred && !applied.indeterminate);
-        // Named by the run's tmux name, as `ccd` records it.
+        // Named by the run's scripted name.
         assert_eq!(applied.session_id, "cc-1");
 
         // The retry a flaky link produces: same id, same hash.

@@ -78,31 +78,12 @@ codeconnect token                 # the static fallback token
 
 ## Session identity
 
-A session has two names and they do different jobs.
-
-`session_id` is the tmux name — `cc-1` — and it is **reused**: a session that exits frees
-its number for the next.
-
 `session_uid` is a [ULID](https://github.com/ulid/spec) minted once at spawn and
-never reused. It is what the event log and the answers ledger are keyed by.
+never reused. It is what the event log and the answers ledger are keyed by, and a
+run's `session_id` carries the same value.
 
-The tmux name used to do both jobs, and a new `cc-1` inherited the dead one's
-log and continued its `seq`. Two things were wrong with that:
-
-* **History integrity** — one `cc-1` timeline on the phone was two unrelated
-  agent runs spliced together, with no marker between them.
-* **Approval safety** — a `request_id` answered in the first run stayed in the
-  ledger under the same key, so a card from the second run that happened to
-  reuse an id came back as an already-applied duplicate: an answer nobody gave.
-
-Both identities ride every `event` and every entry in `sessions`. Anything that
-names a session — `subscribe`, `answer`, `send_text`, `get_diff` —
-accepts either, so a client that only knows `cc-1` keeps working. A bare name
-resolves to the newest run under the name. `lifecycle` is deliberately not consulted: a session that
-ended while the daemon was down was never *observed* exiting, so it reads `Live`
-forever, and ranking on it would put that ghost above the run that is really
-there. A client on `protocol_minor >= 2` should send the uid and key its own
-store by it.
+Both ride every `event` and every entry in `sessions`. A client on
+`protocol_minor >= 2` should send the uid and key its own store by it.
 
 
 ## Card identity
@@ -151,8 +132,8 @@ codeconnect 0.3.0 (build unknown)        # built outside a git checkout
 `daemon status` shows the running daemon's build the same way.
 
 `codeconnect update` downloads the newest GitHub Release, proves it is signed
-by CodeConnect's Apple team, and replaces the two binaries, their tmux and
-the agent host in a single directory exchange — so an interrupted update leaves
+by CodeConnect's Apple team, and replaces the two binaries and the agent
+host in a single directory exchange — so an interrupted update leaves
 the complete old set or the complete new one, never a mixture. Where
 CodeConnect.app installed the binaries (it leaves
 `~/.codeconnect/bin/.installed-by-app`), the app keeps them current, and
@@ -333,7 +314,7 @@ the package to add. It never falls back to an unsigned install. `--source` is ma
 **The daemon** runs as a systemd user unit, `~/.config/systemd/user/com.codeconnect.ccd.service`,
 under the same commands as the LaunchAgent (`codeconnect daemon install`, `status`, `restart`,
 `uninstall`). It restarts five seconds after a crash and stays stopped after a clean exit;
-`KillMode=process`, because tmux and the helpers ccd starts outlive a daemon restart by design, as
+`KillMode=process`, because the agent hosts and helpers ccd starts outlive a daemon restart by design, as
 they do under launchd. Its output goes to the same `~/.codeconnect/logs/` files. A user unit stops
 at logout unless systemd's *linger* is on for the user, so `install` turns it on with
 `loginctl enable-linger` — where the system refuses that to a normal user, it stops before changing
@@ -817,7 +798,7 @@ message becomes the run's events (`sdk` source, through `protocol::sdk_map`), fi
 the run's cursor in one transaction before it is acknowledged, and each init also names
 the run's Claude session id and the folder claude runs in, a new worktree's included.
 A command's own output (`/usage`'s, `/effort low`'s, `/compact`'s "Compacted") is filed as a
-terminal run's is: a `user_message` whose content is claude's `<local-command-stdout>` string.
+`user_message` whose content is claude's `<local-command-stdout>` string.
 It is stored with the run's history, account figures included when the command prints them, as
 `/usage` does.
 A live run ends when claude does: its `exited` is filed with the run's cursor in one
@@ -869,7 +850,7 @@ doesn't offer /status in this session."); `/usage`, `/cost` and `/clear` are mes
 clear goes on in the same run, as at claude's keyboard: claude starts its new session, the
 run's events carry a "Conversation cleared" notice with the earlier history above it, and a
 later resume continues the cleared conversation. Each init's `session_start` says why a session
-starts, as a terminal run's SessionStart does: `source: "startup"` at a launch's first init,
+starts: `source: "startup"` at a launch's first init,
 `"clear"` at the first after a `/clear`, and none at a turn's later init. The run's command menu
 (`get_command_catalog`, minor 38) is what its claude last reported: the start's initialize
 answer, then each `commands_changed`, without a claude.ai
@@ -1106,7 +1087,7 @@ same environment. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
 with its `PATH` (`launchctl setenv`'s, or launchd's default) and `XPC_SERVICE_NAME=0`,
 `XPC_FLAGS=0x0`; on Linux the systemd user manager's, read whole. Either way the
-daemon's own location (`CODECONNECT_HOME`, `CODECONNECT_TMUX`, `TMUX_TMPDIR`)
+daemon's own location (`CODECONNECT_HOME`, `TMUX_TMPDIR`)
 goes with it and `CODECONNECT_LOG` and `CODECONNECT_SERVICE` do not. A daemon
 started by hand has the session's environment already and uses its own; so
 does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
@@ -1208,8 +1189,7 @@ and Codex's own `default` as none, the same way.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only verb that removes a run's record.** It names the run
-by `session_uid` and never by `session_id` — a tmux name is handed to the next
-run, so it is not an identity a destructive request may be pointed at. The
+by `session_uid` and never by `session_id`. The
 daemon refuses anything whose lifecycle has
 not ended (`exited`, or `failed` for an app start that never started), and
 anything it still holds an open approval for.
@@ -1232,10 +1212,8 @@ to probe credentials.
   the submit flag are in it, so a captured frame cannot be replayed with new
   text under an id the ledger already trusts. A retry with the same pair replays
   (`status: "duplicate"`); a retry with the same id and different material is
-  refused. The body is capped at 8KB. Both new fields are optional so a client
-  on minor 2 keeps working — such a request is applied at most once per attempt
-  but cannot be made idempotent across retries, and the daemon says so in its
-  log rather than pretending otherwise.
+  refused. The body is capped at 8KB. A request missing either new field is
+  refused, and nothing is sent.
   **`require` is ignored.** It named what had to be on the pane before keystrokes
   were typed, and nothing is typed into a pane. The field still decodes so an
   older client's message parses.
@@ -1612,17 +1590,10 @@ shared `/tmp` is not yours to change.
   lower — an administrator's `LimitNOFILE`, a systemd older than 240 (hard
   4,096), a container — the caps are not lowered to match: past the real limit
   `accept` fails for want of a descriptor, and the accept loop backs off.
-  A tmux server keeps the limit it started with, so one started before this
-  release, or by hand outside CodeConnect, holds its old ceiling until it next
-  starts. And whatever the limits, a Mac has `kern.tty.ptmx_max` (511)
-  pseudo-terminals: a typed session takes two and a phone start one.
 * **`answer` without a `session_id` is resolved by request id.** A client on
   protocol minor 1 cannot say which run it means; the daemon matches the live
   approvals, then the ledger's most recent entry. Two runs holding the same
   `request_id` open at once is refused with an instruction rather than guessed.
-* **A `send_text` from a client below minor 3 is not idempotent.** There is
-  nothing to recognise a retry by, so a retried takeover types twice. The daemon
-  logs it rather than pretending otherwise.
 * **A daemon that dies just after launching a Codex run's app-server can orphan it.**
   The app-server's identity is recorded right after the launch, in one database
   write. A daemon that dies in those few milliseconds leaves the run with no recorded

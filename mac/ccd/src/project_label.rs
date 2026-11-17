@@ -1,9 +1,7 @@
 //! What to call a run out loud.
 //!
-//! A session's name is `cc-<n>` — the lowest free integer, reused the moment
-//! its holder exits. It is the right handle for `tmux attach` and the wrong
-//! word for a human: `cc-1 needs you` on a lock screen names nothing the reader
-//! recognises, and two different projects wear the same name a week apart.
+//! A session's name is its uid, a ULID, and the wrong word for a human: on a
+//! lock screen it names nothing the reader recognises.
 //!
 //! The one fact a run carries that a human chose is where it is working. So the
 //! label is the last component of `cwd` and nothing else.
@@ -16,9 +14,8 @@
 //! component needs none of that.
 //!
 //! **There is no fallback.** When `cwd` names nothing, this returns nothing,
-//! and the surface above says so. Falling back to the tmux name would put the
-//! counter back on the screen through the one door left open, which is exactly
-//! how it got there in the first place.
+//! and the surface above says so. Falling back to the session's name would put
+//! its uid on the screen through the one door left open.
 
 /// Longest label any surface will be handed.
 ///
