@@ -20,7 +20,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 - **Diffs you can read on a phone.** Word-level highlighting, and a comment on any hunk goes to the agent.
 - **Talk to the agent.** Type or dictate a message; dictation uses Apple's speech recognition, and nothing is sent until you send it.
 - **A live terminal.** Open the session's terminal on the phone and take over.
-- **Claude Code and Codex.** Both run as they do on their own. Everything above works with Claude Code; on a Codex session the phone answers approvals with Codex's own options, stops a turn, and sends a message ([details](docs/codex.md)).
+- **Claude Code and Codex.** Everything above works with Claude Code; on a Codex session the phone answers approvals with Codex's own options, stops a turn, and sends a message ([details](docs/codex.md)).
 - **Agents message each other.** A Claude Code or Codex session can message any other session on your computers, through a `codeconnect` tool CodeConnect gives it; the message waits until that session reads it, and the agent is woken to read it ([details](docs/codex.md#messages-from-other-agents)).
 - **Honest about what it knows.** A session shows the age of its last event, and a stale connection disables actions and says why.
 
@@ -35,14 +35,14 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 
 1. On your iPhone, install [CodeConnect Remote](https://apps.apple.com/app/codeconnect-remote/id6797021894) from the App Store, and Tailscale, signed in to the same Tailscale account as your computer.
 2. On your computer:
-   - **Mac:** on macOS 26 or later, download `CodeConnect-<version>.dmg` from the [latest release](https://github.com/faisalmumtaz89/CodeConnect/releases/latest) or [codeconnect.sh/mac](https://codeconnect.sh/mac), drag CodeConnect to Applications and open it. It installs CodeConnect, starts its daemon and keeps both up to date. Its window shows the agents on all your computers: open one to read its conversation, answer its approvals and questions, reply to it, see what it has changed and, for Claude Code, use its live terminal. To pair your iPhone, choose File › Add iPhone… and scan the QR code with your iPhone's camera, or type the address and code shown under it into the iPhone app. On an older Mac, run the Linux command instead.
+   - **Mac:** on macOS 26 or later, download `CodeConnect-<version>.dmg` from the [latest release](https://github.com/faisalmumtaz89/CodeConnect/releases/latest) or [codeconnect.sh/mac](https://codeconnect.sh/mac), drag CodeConnect to Applications and open it. It installs CodeConnect, starts its daemon and keeps both up to date. Its window shows the agents on all your computers: open one to read its conversation, answer its approvals and questions, reply to it and see what it has changed. To pair your iPhone, choose File › Add iPhone… and scan the QR code with your iPhone's camera, or type the address and code shown under it into the iPhone app. On an older Mac, run the Linux command instead.
    - **Linux:** as your own user, run
 
      ```sh
      curl -fsSL https://codeconnect.sh | sh
      ```
 
-The installer checks the release's signature before installing anything, installs to `~/.codeconnect/bin` with its own tmux and the agent host that runs Claude for the app, and asks before adding that folder to your `PATH`. Then it asks "Set up CodeConnect now?" and does whatever is still missing, in order:
+The installer checks the release's signature before installing anything, installs to `~/.codeconnect/bin` with the agent host that runs Claude for the app, and asks before adding that folder to your `PATH`. Then it asks "Set up CodeConnect now?" and does whatever is still missing, in order:
 
 1. Connects Tailscale, saying how to install it if it is missing.
 2. Starts the CodeConnect daemon.
@@ -84,7 +84,7 @@ The daemon, `ccd`, logs every session's events. Claude Code reports to it throug
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
 - Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user; any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, asked once (`codeconnect mail-trust`); it is guidance to the agent, and its own permission mode still governs what it may do.
-- A paired phone can type into your sessions. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
+- A paired phone can send your sessions messages, answer their approvals and type into a session's live terminal. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation
 

@@ -9,7 +9,7 @@ An agent's terminal output tells you what it *has done*. It does not reliably te
 That single fact determines the design. Anything that detects approvals by reading terminal text is inferring a signal from its absence, and it breaks the first time the rendering changes. So the system is split in two:
 
 - **The control plane** — where an agent asks a question and *blocks*. For Claude Code, the agent host it runs under, which holds each request as the Agent SDK's `canUseTool` request; for Codex, its own JSON-RPC app server. It is the only place an approval is created or answered.
-- **The observation plane** — where an agent narrates what already happened. The messages its host or app server relays, and pane snapshots. Useful for showing a timeline and a diff. Never used to decide anything: the daemon acts on the control plane alone.
+- **The observation plane** — where an agent narrates what already happened. The messages its host or app server relays. Useful for showing a timeline and a diff. Never used to decide anything: the daemon acts on the control plane alone.
 
 ## The pieces
 
@@ -40,7 +40,7 @@ That single fact determines the design. Anything that detects approvals by readi
 
 **The phone** is a client of the event log, never a source of truth. It renders what the log says, and shows the age of every fact.
 
-Because the daemon is not in any agent's process-parent chain, killing it does not touch a running session. Restarting it re-attaches and backfills.
+Each run's agent host or app server starts in a session of its own, so killing the daemon does not touch a running session. Restarting it re-attaches and backfills.
 
 ## Approving something, safely
 
@@ -65,7 +65,7 @@ The interface separates three things that are easy to conflate: what the *proces
 
 An unmeasured value renders as an em dash, never as zero. Zero is a measurement.
 
-The same rule decides what a Codex session may claim. Codex's "this request was resolved" message carries only *which* request was answered — never the decision, and it reads the same however it was settled. So an approval answered at the Mac's keyboard is rendered as answered and nothing more: the phone is not told which button was pressed, because nothing on the wire says. An answer sent *from* the phone keeps its decision, because the Mac composes that record itself as it forwards the answer.
+The same rule decides what a Codex session may claim. Codex's "this request was resolved" message carries only *which* request was answered — never the decision, and it reads the same however it was settled. So an approval that Codex reports resolved without an answer from an app is rendered as answered and nothing more: nothing on the wire says how it was settled. An answer sent *from* an app keeps its decision, because the daemon composes that record itself as it forwards the answer.
 
 Where the daemon reports an error it is quoted and attributed; where the app speaks for itself, it says so. The two are distinct types in the code precisely so they cannot be confused at a call site.
 
@@ -83,6 +83,6 @@ A Codex session is started from the app: the daemon runs Codex's own app server 
 
 ## Adding another agent
 
-Sessions are acquired through an adapter, and the phone talks to a normalised event model rather than anything Claude-specific. That is what Codex was added through, and what a third agent would use: its own control channel — several CLIs speak the Agent Client Protocol — plus a tail of whatever session file it writes.
+Sessions are acquired through an adapter, and the phone talks to a normalised event model rather than anything Claude-specific. That is what Codex was added through, and what a third agent would use: its own control channel, as Claude Code's agent host and Codex's app server are; several CLIs speak the Agent Client Protocol.
 
 The rule that does not bend: a new adapter may add an *observation* path freely, but never an *approval* path built on parsing terminal output.

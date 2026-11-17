@@ -29,11 +29,11 @@ The Mac app is an Xcode project in `macos/`; open `macos/CodeConnect.xcodeproj`.
 
 These are not style preferences; each one was paid for by a bug.
 
-**Never parse terminal bytes for meaning.** Approvals ride structured channels — hooks, and later ACP or Codex's app-server. Claude Code's transcript contains no approval events at all, and three independent projects abandoned screen-scraping before this one started.
+**Never parse terminal bytes for meaning.** Approvals ride structured channels: Claude Code's agent host and Codex's app server. Claude Code's transcript contains no approval events at all, and three independent projects abandoned screen-scraping before this one started.
 
 **Never let the UI claim something it does not know.** Every rendered fact carries its age. An unmeasured value is an em dash at `textDisabled`, never a `0`. A disabled control draws the reason it is disabled. If the daemon said something, quote it and attribute it; if the app is speaking, say so.
 
-**Fail toward the human.** If the daemon is unreachable, a permission prompt goes back to the local keyboard. A command that cannot be verified is refused, not guessed at.
+**Fail toward the human.** A command that cannot be verified is refused, not guessed at.
 
 **Colour is information.** It appears for risk, status and freshness. If a colour is not telling the reader something actionable, remove it.
 
