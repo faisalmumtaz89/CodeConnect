@@ -2745,7 +2745,7 @@ impl Daemon {
     /// # The grace is also a best-effort CANCELLATION window, and it is not
     /// coordinated with anything
     ///
-    /// A cancel that arrives after `GRACE` has elapsed, with nobody at the Mac,
+    /// A cancel that arrives after [`crate::push_gate::GRACE`] has elapsed, with nobody at the Mac,
     /// does not stop the push: the task has already woken, taken its exclusion
     /// snapshot and sent. Nothing waits for a cancel that might be in flight, and
     /// nothing is going to — the failure direction is one stale doorbell, and the
@@ -2800,15 +2800,15 @@ impl Daemon {
         heed_progress: bool,
         needs_card: Option<CardKey>,
     ) {
-        const GRACE: Duration = Duration::from_millis(400);
         const LOOK: Duration = Duration::from_secs(1);
+        let grace = self.push_gate.grace();
         let gate = Arc::clone(&self.push_gate);
         let sender = Arc::clone(&self.push);
         let inner = Arc::clone(&self.inner);
         let db = self.db.clone();
         let daemon = Arc::clone(self);
         tokio::spawn(async move {
-            tokio::time::sleep(GRACE).await;
+            grace.await;
             let mut looked: Option<tokio::time::Instant> = None;
             loop {
                 // **The phone is for when the owner is away.** Someone who has
@@ -13045,26 +13045,30 @@ mod tests {
     #[tokio::test]
     async fn a_quiet_occasion_rings_only_for_a_decision_the_phone_can_answer() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         raise_ring(&daemon, Ring::CodexCompleted).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert_eq!(rung(&capture), vec![], "with nothing open");
+        hold.end();
+        assert_eq!(rung_after(&capture, 0).await, vec![], "with nothing open");
 
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         daemon.inner.lock().await.pending.insert(
             ("other-run".into(), "r-at-the-computer".into()),
             pending_card("other-run", "Ledger"),
         );
         raise_ring(&daemon, Ring::CodexCompleted).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
         assert_eq!(
-            rung(&capture),
+            rung_after(&capture, 0).await,
             vec![],
             "with only a card the computer alone can answer"
         );
 
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         open_a_decision(&daemon).await;
         raise_ring(&daemon, Ring::CodexCompleted).await;
+        hold.end();
         assert_eq!(
             rung_after(&capture, 1).await,
             vec![crate::apns::PushKind::Approval],
@@ -16854,6 +16858,7 @@ mod tests {
     #[tokio::test]
     async fn a_codex_turn_complete_rings_once_per_turn() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
             &daemon,
@@ -16864,7 +16869,8 @@ mod tests {
         let session = SessionKey::new(&uid, "cc-9");
         let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
         daemon.push_turn_complete(&session, &first).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         {
             let rings = capture.0.lock().unwrap();
             assert_eq!(rings.len(), 1, "one finished turn, one ring: {rings:?}");
@@ -16880,9 +16886,9 @@ mod tests {
         // `two_turns_inside_one_dispatch_grace_ring_once_on_both_paths`.
         let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
         daemon.push_turn_complete(&session, &second).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
         assert_eq!(
-            capture.0.lock().unwrap().len(),
+            rung_after(&capture, 2).await.len(),
             2,
             "a second turn finishing is a second fact, not a repeat of the first"
         );
@@ -16899,6 +16905,7 @@ mod tests {
     #[tokio::test]
     async fn two_turns_inside_one_dispatch_grace_ring_once() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
             &daemon,
@@ -16909,12 +16916,11 @@ mod tests {
         let session = SessionKey::new(&uid, "cc-9");
         let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
         daemon.push_turn_complete(&session, &first).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
         let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
         daemon.push_turn_complete(&session, &second).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
         assert_eq!(
-            capture.0.lock().unwrap().len(),
+            rung_after(&capture, 1).await.len(),
             1,
             "the first turn's doorbell is superseded by the second, which rings"
         );
@@ -16932,6 +16938,7 @@ mod tests {
     #[tokio::test]
     async fn a_turn_starting_inside_the_grace_cancels_the_last_turns_doorbell() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         open_a_decision(&daemon).await;
         let (uid, _presence) = codex_run_with_link(
             &daemon,
@@ -16942,13 +16949,12 @@ mod tests {
         let session = SessionKey::new(&uid, "cc-9");
         let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
         daemon.push_turn_complete(&session, &first).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // The next turn begins. No terminal, no fact, no event — just the run
-        // going back to work.
+        // The next turn begins inside the grace. No terminal, no fact, no event — just
+        // the run going back to work.
         daemon.note_turn_running(&uid);
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
         assert_eq!(
-            capture.0.lock().unwrap().len(),
+            rung_after(&capture, 0).await.len(),
             0,
             "a completion doorbell must not ring about a run that is mid-turn again"
         );
@@ -16957,9 +16963,9 @@ mod tests {
         // and *that* is news.
         let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
         daemon.push_turn_complete(&session, &second).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
         assert_eq!(
-            capture.0.lock().unwrap().len(),
+            rung_after(&capture, 1).await.len(),
             1,
             "the turn that superseded the first one rings when it ends"
         );

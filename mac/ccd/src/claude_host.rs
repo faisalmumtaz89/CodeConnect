@@ -5049,26 +5049,38 @@ mod tests {
 
     // ------------------------------- a hosted turn's end as a doorbell
 
-    /// How many doorbells `capture` holds once a dispatch grace, and some, has passed.
-    async fn rung_after_grace(capture: &crate::apns::CaptureSender) -> usize {
-        tokio::time::sleep(Duration::from_millis(700)).await;
+    /// How many doorbells `capture` holds once the grace `hold` keeps is ended and `n` have
+    /// rung, or 10 s have passed, and 300 ms more for any ring beyond them.
+    async fn rung(
+        capture: &crate::apns::CaptureSender,
+        hold: &crate::push_gate::GraceHold,
+        n: usize,
+    ) -> usize {
+        hold.end();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while capture.0.lock().unwrap().len() < n && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
         capture.0.lock().unwrap().len()
     }
 
     /// A rig whose doorbells land in a capture, and a hosted run on it holding one approval
     /// the phone can answer, its own doorbell already rung: the decision open elsewhere a
     /// turn's end rings about.
-    async fn a_decision_open_elsewhere() -> (Rig, Arc<crate::apns::CaptureSender>, Played) {
+    async fn a_decision_open_elsewhere() -> (
+        Rig,
+        Arc<crate::apns::CaptureSender>,
+        crate::push_gate::GraceHold,
+        Played,
+    ) {
         let capture = Arc::new(crate::apns::CaptureSender::new());
         let rig = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let hold = rig.daemon.push_gate.hold_grace();
         let mut asking = live_run(&rig).await;
         host_asks(&mut asking, 3, "toolu_open", serde_json::json!({})).await;
-        assert_eq!(
-            rung_after_grace(&capture).await,
-            1,
-            "the card's own doorbell"
-        );
-        (rig, capture, asking)
+        assert_eq!(rung(&capture, &hold, 1).await, 1, "the card's own doorbell");
+        (rig, capture, hold, asking)
     }
 
     /// A second run in `rig`, beside the one [`live_run`] started.
@@ -5108,18 +5120,19 @@ mod tests {
     async fn a_hosted_turns_end_rings_only_about_a_decision_open_elsewhere() {
         let capture = Arc::new(crate::apns::CaptureSender::new());
         let quiet = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let hold = quiet.daemon.push_gate.hold_grace();
         let mut played = live_run(&quiet).await;
         turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000501").await;
         turn_ends(&mut played, 4).await;
-        assert_eq!(rung_after_grace(&capture).await, 0, "with nothing open");
+        assert_eq!(rung(&capture, &hold, 0).await, 0, "with nothing open");
         stop(&played.dir);
 
-        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let (rig, capture, hold, asking) = a_decision_open_elsewhere().await;
         let mut played = another_live_run(&rig).await;
         turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000502").await;
         turn_ends(&mut played, 4).await;
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 2).await,
             2,
             "the card's, then the turn's end about it"
         );
@@ -5146,14 +5159,14 @@ mod tests {
     /// **Mutation:** dispatch a turn end's push without heeding progress and both ring.
     #[tokio::test]
     async fn two_hosted_turns_ending_inside_one_grace_ring_once() {
-        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let (rig, capture, hold, asking) = a_decision_open_elsewhere().await;
         let mut played = another_live_run(&rig).await;
         turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000511").await;
         turn_ends(&mut played, 4).await;
         turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000512").await;
         turn_ends(&mut played, 6).await;
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 2).await,
             2,
             "the card's, then one for both turns"
         );
@@ -5168,20 +5181,19 @@ mod tests {
     /// **Mutation:** take `note_turn_running` out of `apply_sdk` and the first end rings.
     #[tokio::test]
     async fn a_hosted_turn_starting_inside_the_grace_silences_the_last_ones_doorbell() {
-        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let (rig, capture, hold, asking) = a_decision_open_elsewhere().await;
         let mut played = another_live_run(&rig).await;
         turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000521").await;
         turn_ends(&mut played, 4).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
         turn_begins(&mut played, 5, "9d1f0000-0000-4000-8000-000000000522").await;
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 1).await,
             1,
             "only the card's: the run went back to work"
         );
         turn_ends(&mut played, 6).await;
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 2).await,
             2,
             "the turn that started ends, and rings"
         );
@@ -5195,7 +5207,7 @@ mod tests {
     /// **Mutation:** count a stopped turn's end as ended and it rings.
     #[tokio::test]
     async fn a_stopped_hosted_turns_end_rings_nothing() {
-        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let (rig, capture, hold, asking) = a_decision_open_elsewhere().await;
         let mut played = another_live_run(&rig).await;
         turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000531").await;
         sdk(
@@ -5208,7 +5220,7 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
-        assert_eq!(rung_after_grace(&capture).await, 1, "only the card's");
+        assert_eq!(rung(&capture, &hold, 1).await, 1, "only the card's");
         stop(&played.dir);
         stop(&asking.dir);
     }
@@ -5219,7 +5231,7 @@ mod tests {
     /// **Mutation:** take the push out of `apply_sdk` and it rings nothing.
     #[tokio::test]
     async fn a_commands_own_end_rings_as_any_turns_end_does() {
-        let (rig, capture, asking) = a_decision_open_elsewhere().await;
+        let (rig, capture, hold, asking) = a_decision_open_elsewhere().await;
         let mut played = another_live_run(&rig).await;
         turn_begins(&mut played, 3, "9d1f0000-0000-4000-8000-000000000541").await;
         command_ends(&mut played, 4, "cost").await;
@@ -5231,7 +5243,7 @@ mod tests {
             "the end names its command"
         );
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 2).await,
             2,
             "the card's, then the command's end about it"
         );
@@ -5248,7 +5260,7 @@ mod tests {
     /// `apply_sdk`'s push) and the replay rings.
     #[tokio::test]
     async fn a_turns_end_replayed_to_a_restarted_ccd_rings_nothing() {
-        let (rig, _, asking) = a_decision_open_elsewhere().await;
+        let (rig, _, _, asking) = a_decision_open_elsewhere().await;
         let Played {
             dir,
             uid,
@@ -5262,6 +5274,7 @@ mod tests {
             Config::default(),
             Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
         );
+        let hold = daemon.push_gate.hold_grace();
         let (_restarted, mut lines, write) = restarted_as(&rig, &dir, daemon).await;
         assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 3 }));
         let mut played = Played {
@@ -5274,7 +5287,7 @@ mod tests {
         };
         turn_begins(&mut played, 4, "9d1f0000-0000-4000-8000-000000000551").await;
         turn_ends(&mut played, 5).await;
-        assert_eq!(rung_after_grace(&capture).await, 0, "the replayed end");
+        assert_eq!(rung(&capture, &hold, 0).await, 0, "the replayed end");
         say(
             &mut played.write,
             serde_json::json!({"type": "state", "seq": 6, "pending": [
@@ -5285,7 +5298,7 @@ mod tests {
         turn_begins(&mut played, 7, "9d1f0000-0000-4000-8000-000000000552").await;
         turn_ends(&mut played, 8).await;
         assert_eq!(
-            rung_after_grace(&capture).await,
+            rung(&capture, &hold, 1).await,
             1,
             "the live end, about the approval still open"
         );
