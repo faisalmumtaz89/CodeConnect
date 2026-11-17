@@ -203,7 +203,10 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     is shell-equivalent authority, the capability is connection-scoped:
 ///     false for the static bootstrap token.
 ///     Additive: an older daemon omits the capability and the phone offers no
-///     Terminal; an older client ignores the messages.
+///     Terminal; an older client ignores the messages. **Gone in X12:** the
+///     terminal and its nine messages; its capability is now
+///     `private_transport`, which says only whether the connection is unreadable
+///     in transit.
 ///
 ///     *Shipped under 13 without adding to the wire.* The composer is now
 ///     recognised by the box Claude draws it in rather than by footer copy that

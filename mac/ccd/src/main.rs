@@ -40,7 +40,6 @@ mod secret;
 mod start_session;
 mod state;
 mod store;
-mod terminal;
 mod tls;
 mod ws_server;
 
@@ -805,10 +804,7 @@ async fn resolve_bind(config: &Config) -> BindPlan {
         PlaintextOptIn::Honoured => crate::log_warn!(
             "ws_allow_plaintext is set, so {} serves plaintext on your instruction. The \
              bearer token and everything a connection carries cross that network in the \
-             clear, and are exactly as private as it is. The Terminal tab is the one thing \
-             not offered on it: a live shell's keystrokes are not something this daemon \
-             sends in the clear. Provide a certificate, or bind loopback or this computer's \
-             tailnet address, and the terminal is available again.",
+             clear, and are exactly as private as it is.",
             plan.bind
         ),
         PlaintextOptIn::Refused => crate::log_warn!("{}", refused_opt_in_message(&plan)),
@@ -1094,8 +1090,8 @@ fn userspace_plan(plan: BindPlan, ip: IpAddr) -> BindPlan {
 /// Softened is [`ws_server::PlaintextTrust::OperatorAllowed`] and **not**
 /// `TrustedPath`: the operator vouched for their LAN, which admits the
 /// connection, and vouching for a network is not the same statement as the
-/// bytes on it being unreadable. Everything gated on the second — the terminal
-/// — asks for `TrustedPath` and does not get it here.
+/// bytes on it being unreadable. The `private_transport` capability reports the
+/// second, and is false here.
 fn plaintext_admission(
     config: &Config,
     ip: IpAddr,
@@ -2416,8 +2412,8 @@ mod tests {
         config.ws_allow_plaintext = true;
         let plan = plan_bind(&config, &[], false);
         // `OperatorAllowed`, never `TrustedPath`: the listener serves, and the
-        // LAN it serves on is not thereby private. The terminal is what rests
-        // on the difference — see `PlaintextTrust`.
+        // LAN it serves on is not thereby private, which is what
+        // `private_transport` reports — see `PlaintextTrust`.
         assert_eq!(plan.trust, PlaintextTrust::OperatorAllowed);
         assert!(!plan.trust.is_private());
         assert_eq!(plan.opt_in, PlaintextOptIn::Honoured);

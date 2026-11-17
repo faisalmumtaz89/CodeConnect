@@ -20,7 +20,6 @@
     "send_text_idempotent": true,
     "session_uid": true,
     "start_session": true,
-    "terminal_pty": true,
     "test_push": false,
     "tls": false,
     "tls_active": false

@@ -81,7 +81,7 @@ rustls-native-certs = "0.8"
 # renderer and leaves the crate with no transitive dependencies at all.
 qrcode = { version = "0.14", default-features = false }
 
-# The terminal wire carries raw bytes as base64 inside the existing JSON frames.
+# The composite wire ids, and the push relay's credentials and attestations.
 base64 = "0.22"
 
 # The push relay, and only the push relay, needs the rest of this file. It is

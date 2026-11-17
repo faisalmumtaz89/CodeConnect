@@ -214,8 +214,7 @@ Three things behave differently on a Mac that has been running for a while.
   Tailscale is not affected, because the tailnet carries the encryption. A daemon
   with no `ws_bind` set is unaffected — it binds this node's tailnet address,
   where WireGuard has already encrypted the path.
-* **SSH is retired.** The Terminal tab rides the same paired connection as the
-  rest of the app, so CodeConnect never installs a key. Taking one back is what
+* **SSH is retired.** CodeConnect never installs a key. Taking one back is what
   it does do: the daemon sweeps `~/.ssh/authorized_keys` before it serves
   anything. It sweeps again on every `codeconnect revoke <device>`,
   unconditionally and including on a device that was already revoked, so
@@ -537,8 +536,8 @@ database, so a genuinely broken store denies access either way rather than
 grandfathering whoever was already inside.
 
 **The device token is the whole of what this daemon grants a phone**, so
-revoking it takes away everything it issued: the terminal rides the same
-connection and dies with it, and nothing minted here outlives the token.
+revoking it takes away everything it issued: nothing minted here outlives the
+token.
 Revocation closes open connections rather than waiting for the next reconnect,
 and a failure to revoke is reported as an error rather than as a partial
 success.
@@ -676,11 +675,10 @@ would work when followed.
 
 **`ws_allow_plaintext: true` is the one key that says otherwise** — an operator
 who knows the network their chosen address is on and accepts what crosses it in
-the clear. It buys back every capability except one: a connection admitted this
-way is advertised `terminal_pty: false` and its `terminal_attach` is refused
-`not_authorised`, because "I vouch for this network" and "these bytes are
-unreadable on it" are different statements, and a live shell's keystrokes are
-only sent on the second. The listener is `OperatorAllowed` rather than
+the clear. It buys back every capability, and a connection admitted this way is
+advertised `private_transport: false`, because "I vouch for this network" and
+"these bytes are unreadable on it" are different statements; the phone's pairing
+screen shows it as not encrypted. The listener is `OperatorAllowed` rather than
 `TrustedPath` internally, which is exactly that distinction: admissible, not
 private. It is honoured only for a bind on the local network: loopback,
 private IPv4, IPv4 link-local, IPv6 unique-local (`fc00::/7`) or IPv6 link-local
@@ -701,7 +699,7 @@ gate then refuses.
 `send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `fail_mode`, `answer_path`, `hold_secs`,
-`command_catalog`, `terminal_pty`, `start_session`, `start_worktree`, `browse_folders`,
+`command_catalog`, `private_transport`, `start_session`, `start_worktree`, `browse_folders`,
 `machine_stats` and `stop_run` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
@@ -1336,58 +1334,6 @@ to probe credentials.
   prompt on screen had been fingerprinted for typing, announced by an
   `approval_prompt_bound` event this daemon no longer sends.
 
-### The live terminal (minor 13)
-
-`terminal_attach{attachment_id, session_uid, cols, rows, output_credit}` opens a
-tmux control-mode carrier on a hosted session, answered by `terminal_attached` or
-`terminal_closed`. Bytes ride base64 inside the JSON frames under a credit window
-in each direction; nothing streams before the attach is verified.
-
-**`terminal_attached` carries the ceilings**, `max_chunk_bytes` (16 KiB) and
-`max_outstanding_credit` (256 KiB), beside the initial `input_credit`. A client
-that hard-codes them instead enforces this daemon's numbers for the life of the
-install, and the first daemon to raise either one kills the terminal of every
-phone already out there. No `terminal_output` exceeds `max_chunk_bytes` decoded —
-including the screen an attach paints, which is one chunk the forwarder splits at
-the bound rather than a frame the phone's grant happened to size.
-
-**A paint states the pane's size.** The carrier's tmux client is
-`ignore-size`, so a phone never resizes the window a Mac viewer is looking at,
-and while one is attached the pane keeps the viewer's size. Each paint — the
-attach, a focus change, and a `%layout-change` of the bound window — opens with
-xterm's window resize, `CSI 8 ; rows ; cols t`, carrying the pane's size from
-the same `display-message` that reads the cursor; a paint whose cursor query is
-not answered for its pane goes without both, and the phone keeps its grid. The iPhone app draws the paint
-and every byte after it on a grid of that size. An app that ignores the sequence
-draws as it did before, so the change needs no protocol minor. The phone's
-`resize` is still its own size, which the window takes once no viewer is left.
-
-**A terminal needs a private transport.** `terminal_pty` is advertised only to a
-paired device on a connection that is `wss://`, loopback, or this Mac's own
-tailnet address, and `terminal_attach` enforces the same rule independently of
-what the client was told. See [TLS](#tls).
-
-**One terminal per session, and a later attach takes it over.** Attaching to a
-session that already has one closes the incumbent with code `superseded` and then
-opens the new one — on the same connection or from another, and whichever device
-asked last wins. Refusing the newcomer, which is what the lease used to do, locks
-a phone out of its own session for as long as a dead connection holds the lease:
-iOS backgrounds the app, the socket dies with no FIN, and nothing frees it until
-TCP notices. The takeover waits up to five seconds for the displaced carrier's
-disposable tmux client to be reaped — two clients on one session must never
-overlap — and refuses with `session_busy` if it is not, which is a different code
-from `attachment_limit` precisely because it is worth retrying and the Mac's
-global cap of eight is not.
-
-**Frames behind an attach wait for it.** An `input`, `resize`, `credit` or
-`detach` that arrives while the attach is still opening is queued in arrival
-order (bounded at 128 frames; input's own credit window makes that unreachable
-for a client honouring the protocol) and applied the moment the terminal exists.
-Every *other* message — an approval answer, a ping, a subscribe — is read and
-handled throughout. It used to be that no message at all was read during an open,
-which cost an approval up to the twenty-second attach deadline and could make the
-user miss its `respond_by`.
-
 ## How it fits together
 
 ```
@@ -1521,8 +1467,7 @@ inherit it. ccd logs the limit it got. On Linux a systemd user service and an
 ssh login both allow far more than 10,240.
 
 The daemon needs a few dozen descriptors for itself — five SQLite connections
-plus their WAL and SHM handles, the listeners, the log files, the pipes of up to
-eight terminal attachments. `ws_max_connections`
+plus their WAL and SHM handles, the listeners, the log files. `ws_max_connections`
 (64, on each of the tailnet and loopback listeners) and `ipc_max_connections`
 (4,096) fit inside the raised limit with room to
 spare. The split is deliberately lopsided: the local socket carries every
