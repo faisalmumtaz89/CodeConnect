@@ -643,7 +643,10 @@ impl CodexAdapter {
     ///   * an `inProgress` turn contributes **no item fact whatsoever** — its message
     ///     ids are known-fabricated, and minting `…:item:item-1` would both invent a fact and
     ///     alias every running turn's first item onto one key — only the confirmation
-    ///     that its turn is alive;
+    ///     that its turn is alive. So an item of it that finished while no ccd listened is
+    ///     filed by the follow-up after the turn ends, below the turn's reply and its end,
+    ///     where v0.18.0's read-back placed it before them: a written miss, since nothing
+    ///     an in-progress answer says of its items is trusted;
     ///   * **what makes the answer itself untrustworthy refuses it**: another thread, a
     ///     page instead of the whole history, contradictory identities, a turn status
     ///     outside the four codex's schema declares. The refusal is loud and names the
