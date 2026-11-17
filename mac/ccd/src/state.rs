@@ -1143,46 +1143,30 @@ impl Daemon {
     /// The run that asked this card has ended, so nobody is left to answer it, and
     /// the card closes. An answer already in flight on it finishes first.
     ///
-    /// Either agent's card: a Codex card is retired in its own store, the way the
-    /// frames that settle it retire it, as a turn that went away.
+    /// Either agent's card: a Claude card is its run's host's, and closes as one; a
+    /// Codex card is retired in its own store, the way the frames that settle it retire
+    /// it, as a turn that went away.
     async fn close_card_of_ended_run(&self, session: &SessionKey, request_id: &str) {
         let id: ApprovalId = (session.uid.clone(), request_id.to_string());
         let gate = self.answer_gate(&id).await;
         let _serialised = gate.lock().await;
-        let (claude, question, link) = match self.inner.lock().await.pending.get_mut(&id) {
-            Some(entry) => (entry.agent.is_claude(), entry.question, entry.link),
+        let claude = match self.inner.lock().await.pending.get_mut(&id) {
+            Some(entry) => entry.agent.is_claude(),
             None => return,
         };
-        // A hosted run's card was its host's: nobody answered it, and nothing was
+        // A Claude card was its run's host's: nobody answered it, and nothing was
         // typed.
-        if link {
+        if claude {
             self.inner.lock().await.pending.remove(&id);
             self.close_host_card(&session.uid, request_id).await;
             return;
         }
-        if !claude {
-            self.retire_codex_approval(
-                session,
-                request_id,
-                protocol::ws::CodexResolution::Cleared {
-                    cause: protocol::ws::ClearCause::TurnAborted,
-                },
-            )
-            .await;
-            return;
-        }
-        let decision = if question {
-            AnswerDecision::Decline
-        } else {
-            AnswerDecision::Deny
-        };
-        self.resolve_without_phone(
-            request_id,
+        self.retire_codex_approval(
             session,
-            decision,
-            ResolvedBy::Timeout,
-            RUN_ENDED,
-            true,
+            request_id,
+            protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::TurnAborted,
+            },
         )
         .await;
     }
@@ -1697,9 +1681,8 @@ impl Daemon {
 
     /// **Retire one Codex card, first terminal wins.**
     ///
-    /// Claim by removal, exactly as [`Daemon::resolve_without_phone`] does: the
-    /// caller that takes the entry out of `inner.pending` owns the resolution,
-    /// so a `serverRequest/resolved` arriving *after* a `turn/completed
+    /// Claim by removal: the caller that takes the entry out of `inner.pending` owns
+    /// the resolution, so a `serverRequest/resolved` arriving *after* a `turn/completed
     /// {interrupted}` already cleared the card finds nothing and overwrites
     /// nothing. That ordering is not hypothetical — it is what the wire does,
     /// measured in `fixtures/codex/interrupt.jsonl`, where the turn terminal is
@@ -3252,9 +3235,6 @@ impl Daemon {
         request_id: Option<&str>,
         payload_hash: Option<&str>,
         submit: bool,
-        // The client's statement that a human saw this command's consequences
-        // and tapped anyway. Never sufficient on its own — see `confirm_view`.
-        complete_native_confirmation: bool,
     ) -> SendTextResult {
         if text.len() > protocol::ws::MAX_SEND_TEXT_BYTES {
             return SendTextResult::Refused {
@@ -3324,7 +3304,6 @@ impl Daemon {
                         text,
                         identity,
                         submit,
-                        complete_native_confirmation,
                     },
                 )
                 .await
@@ -4796,77 +4775,6 @@ impl Daemon {
             );
         }
         Ok(removed)
-    }
-
-    // ------------------------------------------- resolution without the phone
-
-    /// Retire an approval that the phone did not answer.
-    ///
-    /// Writing to the ledger is the load-bearing half: without it a tap that
-    /// arrives seconds later would find the card still open.
-    /// The event is what the phone renders.
-    async fn resolve_without_phone(
-        &self,
-        request_id: &str,
-        session: &SessionKey,
-        decision: AnswerDecision,
-        resolved_by: ResolvedBy,
-        detail: &str,
-        inferred: bool,
-    ) {
-        // Claim by removal: whoever takes the entry out of the map owns the
-        // resolution, so a phone answer racing this either finds the entry (and
-        // wins) or finds the ledger (and is a well-formed duplicate).
-        //
-        // A *claimed* entry is left alone: the phone's answer is in flight, and
-        // it is the better record.
-        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
-        let taken = {
-            let mut inner = self.inner.lock().await;
-            match inner.pending.get(&id) {
-                Some(entry) if entry.claimed => false,
-                Some(_) => inner.pending.remove(&id).is_some(),
-                None => false,
-            }
-        };
-        if !taken {
-            return;
-        }
-
-        let outcome = AnswerOutcome {
-            request_id: request_id.to_string(),
-            session_id: session.name.clone(),
-            decision,
-            resolved_by,
-            answered_on: None,
-            applied_via: AnswerPath::SendKeys,
-            resolved_at: protocol::time::now_rfc3339(),
-            detail: Some(detail.to_string()),
-            inferred,
-            indeterminate: false,
-        };
-        if let Err(err) = self
-            .store
-            .record_answer(&session.uid, request_id, "", &outcome)
-        {
-            crate::log_error!("failed to record resolution for {request_id}: {err:#}");
-        }
-        let _ = self
-            .db
-            .delete_pending_approval(session.uid.clone(), request_id.to_string())
-            .await;
-        crate::log_info!("{request_id} resolved by {resolved_by:?}: {detail}");
-
-        let pending = PendingEvent::new(
-            session,
-            EventKind::ApprovalResolved,
-            serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null),
-            Source::Daemon,
-        )
-        .with_source_event_id(format!("resolved:{request_id}"));
-        if let Err(err) = self.ingest(pending).await {
-            crate::log_error!("failed to record resolution event: {err:#}");
-        }
     }
 
     // ------------------------------------------------------------ diff
@@ -9118,7 +9026,6 @@ mod tests {
                 Some("st-1"),
                 Some(&honest),
                 true,
-                false,
             )
             .await;
         assert!(
@@ -9128,7 +9035,7 @@ mod tests {
 
         // An id with no hash cannot say what it is a retry *of*.
         let unbound = daemon
-            .send_text(uid, "hi".to_string(), Some("st-2"), None, true, false)
+            .send_text(uid, "hi".to_string(), Some("st-2"), None, true)
             .await;
         assert!(
             matches!(unbound, SendTextResult::Refused { .. }),
@@ -9143,7 +9050,7 @@ mod tests {
         seed_session(&daemon, uid, "cc-1", Lifecycle::Live);
 
         let huge = "x".repeat(protocol::ws::MAX_SEND_TEXT_BYTES + 1);
-        let refused = daemon.send_text(uid, huge, None, None, true, false).await;
+        let refused = daemon.send_text(uid, huge, None, None, true).await;
         assert!(
             matches!(&refused, SendTextResult::Refused { reason } if reason.contains("ceiling")),
             "{refused:?}"
@@ -9946,14 +9853,7 @@ mod tests {
         let text = "deploy";
         let hash = protocol::hash::send_text_hash(uid, text, true);
         let result = daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some("st-1"),
-                Some(&hash),
-                true,
-                false,
-            )
+            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
             .await;
 
         // **The reason is asserted, and it is the load-bearing assertion.**
@@ -11125,7 +11025,7 @@ mod tests {
         // And the Codex session refuses the Claude takeover, which is the same statement
         // read from the other end.
         let typed = daemon
-            .send_text(codex, "hello".into(), None, None, true, false)
+            .send_text(codex, "hello".into(), None, None, true)
             .await;
         let protocol::ws::SendTextResult::Refused { reason } = &typed else {
             panic!("a Codex session is not typed into: {typed:?}")
@@ -12010,7 +11910,7 @@ mod tests {
                     &SessionKey::new(uid, "cc-1"),
                     "derived-1",
                     protocol::ws::CodexResolution::Answered {
-                        by: protocol::ws::ResolutionActor::Local,
+                        by: protocol::ws::ResolutionActor::Phone,
                         decision: None,
                         answered_on: None,
                     },
@@ -12210,8 +12110,9 @@ mod tests {
     }
 
     /// **A run's open cards close when it ends.** Nobody is left to answer an
-    /// approval or a question held for the phone, so each is closed as the
-    /// session ending.
+    /// approval or a question held for the phone, so each is closed as its host's card,
+    /// the session ending: no answer is recorded and nothing reads as typed, the one a
+    /// restart could not link included.
     #[tokio::test]
     async fn a_runs_open_cards_close_when_it_ends() {
         let daemon = test_daemon();
@@ -12238,6 +12139,15 @@ mod tests {
             2,
             "the premise: two open cards"
         );
+        // As recovery leaves a card whose run's host it could not read.
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&(TEST_UID.to_string(), QUESTION_ID.to_string()))
+            .unwrap()
+            .link = false;
 
         assert!(
             daemon
@@ -12261,6 +12171,15 @@ mod tests {
             let outcome: AnswerOutcome = serde_json::from_value(event.payload).unwrap();
             assert_eq!(outcome.resolved_by, ResolvedBy::Timeout);
             assert_eq!(outcome.detail.as_deref(), Some(RUN_ENDED));
+            assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
+            assert!(!outcome.inferred, "{}", outcome.request_id);
+            assert_eq!(
+                daemon
+                    .store
+                    .get_answer(TEST_UID, &outcome.request_id)
+                    .unwrap(),
+                None
+            );
             closed.push(outcome.request_id);
         }
         closed.sort();
@@ -12621,11 +12540,9 @@ mod tests {
                 .clone()
         };
         let (receipt, mode) = (by_id("u1"), by_id("u2"));
-        let model = Some(protocol::event::ModelFact {
+        let model = Some(protocol::event::Fact {
             value: "claude-sonnet-5".into(),
             seq: receipt.seq,
-            source: protocol::event::ModelSource::Command,
-            at: receipt.ts.clone(),
         });
         let permission_mode = Some(protocol::event::Fact {
             value: "acceptEdits".into(),

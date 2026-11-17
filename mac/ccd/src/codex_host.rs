@@ -6304,8 +6304,8 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
-    /// The run `uid`'s summary as the fleet sends it, its identity, folder, times (its model's
-    /// receipt among them) and count of events fixed so the fixture is the same on every run.
+    /// The run `uid`'s summary as the fleet sends it, its identity, folder, times and count
+    /// of events fixed so the fixture is the same on every run.
     async fn summary_as_sent(daemon: &Daemon, uid: &str) -> serde_json::Value {
         let mut sent = serde_json::to_value(summary_of(daemon, uid).await).unwrap();
         let fixed = [
@@ -6320,9 +6320,6 @@ mod tests {
         for (key, value) in fixed {
             assert!(sent.get(key).is_some(), "the summary carries no {key}");
             sent[key] = value;
-        }
-        if let Some(at) = sent.pointer_mut("/model/at") {
-            *at = json!("2026-11-15T00:00:00Z");
         }
         sent
     }

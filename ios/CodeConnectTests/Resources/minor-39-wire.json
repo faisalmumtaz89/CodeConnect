@@ -152,9 +152,7 @@
       "selected_model": "sonnet"
     },
     "model": {
-      "at": "2026-11-15T09:00:00.000Z",
       "seq": 3,
-      "source": "command",
       "value": "sonnet (claude-sonnet-5-5)"
     },
     "permission_mode": {
@@ -229,9 +227,7 @@
       "selected_model": "sonnet"
     },
     "model": {
-      "at": "2026-11-15T09:00:00.000Z",
       "seq": 7,
-      "source": "session_start",
       "value": "claude-sonnet-5-5"
     },
     "permission_mode": {
@@ -254,9 +250,7 @@
     "lifecycle": "live",
     "link": "attached",
     "model": {
-      "at": "2026-11-15T09:00:00.000Z",
       "seq": 3,
-      "source": "command",
       "value": "sonnet (claude-sonnet-5-5)"
     },
     "permission_mode": {

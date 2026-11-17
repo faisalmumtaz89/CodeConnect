@@ -345,38 +345,30 @@ pub enum Lifecycle {
 #[serde(rename_all = "snake_case")]
 pub enum Link {
     Attached,
-    Degraded,
     Detached,
-    Stale,
 }
 
 /// **Where this run's Codex control link stands — the one fact that says whether
 /// a Stop or a Compose aimed at THIS session can land right now.**
 ///
 /// Not to be confused with [`Link`], which is about how fresh CodeConnect's
-/// *observation* of a session is. This is about the daemon's connection to the
-/// Codex app-server that is running the session, and the two move independently:
-/// a session can be `Link::Attached` and `CodexLink::Offline` at the same moment.
+/// *observation* of a session is. This is about what an ask can reach, which is why
+/// every Claude run reads [`CodexLink::None`] whatever its `link`.
 ///
 /// **Why it exists.** [`crate::ws::Capabilities::codex_interrupt`] and
 /// [`crate::ws::Capabilities::codex_compose`] are build facts about the whole
-/// daemon; they are true on a connection whose only Codex session's link is
-/// offline. And [`SessionSummary::codex_thread_id`] reads the same whether the
-/// link is subscribed, bound or merely reconnecting, because it is resolved from
-/// the addressee's *binding*. So until this field a client could not compute, from
+/// daemon; they are true on a connection whose only Codex session cannot be
+/// stopped. And [`SessionSummary::codex_thread_id`] reads the same whether or not
+/// the run's link is attached, because it is the thread the run's row holds. So
+/// until this field a client could not compute, from
 /// the fleet, whether one particular session could be stopped — it had to offer
 /// the button and let a refusal be the answer, which is the "offered and silently
 /// broken" affordance this app's rule forbids.
 ///
 /// **[`CodexLink::Subscribed`] is actuatable, and [`CodexLink::BoundNotStarted`] is
-/// actuatable for a COMPOSE alone** — a thread the daemon has proved has never run a
-/// turn can be given its first one, and a run whose app-server ended without the
-/// daemon stopping it is relaunched by the next message, and neither has a turn to
-/// stop. The remaining three are
-/// the daemon's honest reasons why not, and a client greys the control and says which
-/// one rather than hiding it: a link that is offline now is subscribed a moment
-/// later, and four of the daemon's own refusal sentences end with "try again
-/// shortly", so a permanently hidden control would contradict the daemon.
+/// actuatable for a COMPOSE alone**: a run whose app-server ended without the daemon
+/// stopping it is relaunched by the next message, and has no turn to stop.
+/// [`CodexLink::None`] is neither.
 ///
 /// **A refusal still arrives after the fact and still wins.** This is a snapshot
 /// of the fleet at the moment it was assembled; the link can move between the
@@ -388,72 +380,23 @@ pub enum CodexLink {
     /// **Connected and subscribed to this session's thread.** Frames flow, and this
     /// is the one state in which a stop or a compose reaches the model.
     Subscribed,
-    /// **Connected and bound to a thread, but not subscribed to it.** The daemon
-    /// knows which thread this session is on and receives none of its frames — the
-    /// state a link sits in for the whole of a thread's life before its first turn.
-    /// An ask handed to it would be accepted into silence, so it is refused.
+    /// **A run CodeConnect started on its engine whose app-server ended without the
+    /// daemon stopping it** ("Stopped: its process ended": a crash, or a Mac restart):
+    /// a message may be sent into its thread although nothing is subscribed to it,
+    /// because nothing runs on it. Its lifecycle stays `exited`, and the person's next
+    /// message relaunches its app-server, resumes its thread and is sent there. A run
+    /// ended by End run reads [`CodexLink::None`]. A relaunch that cannot be done
+    /// refuses the message with nothing sent and leaves the run `exited` and offered
+    /// this word again, even when the daemon's own watch found the new app-server gone
+    /// first; a daemon that dies during the relaunch leaves it `failed`, read as
+    /// [`CodexLink::None`]. The refusal is the last word, as for any compose.
     ///
-    /// **It is not the same fact as [`CodexLink::BoundNotStarted`]**, and the
-    /// difference is what a client may act on: this word means the daemon does not
-    /// know whether a turn is running, so a `turn/start` might collide with one.
-    Bound,
-    /// **A thread a message may be sent into although nothing is subscribed to it,
-    /// because nothing can be running on it**: one the daemon has proved has never run
-    /// a turn, or the thread of a run whose app-server ended, which the message
-    /// relaunches (below). The one un-subscribed state a compose is admitted in.
+    /// **Compose only.** Nothing runs on the thread until the message relaunches it, so
+    /// there is nothing to stop: a client offers Compose here and does not offer Stop.
     ///
-    /// For a link, the daemon publishes it only when its own `thread/resume` for this
-    /// very thread came back with the measured not-ready answer — `-32600 "no rollout
-    /// found for thread id …"`. No rollout means no turn has ever run on the thread,
-    /// which means no turn can be running now, which means a `turn/start` cannot
-    /// join or collide with one.
-    ///
-    /// **Why the word exists at all.** A fresh Codex thread has no rollout until its
-    /// first turn, so every resume of it is refused and nothing can subscribe to it. A
-    /// phone that may only compose when
-    /// `subscribed` therefore cannot start the first turn — and only a first turn
-    /// creates the rollout. Measured on codex 0.153.4
-    /// (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`): the app-server accepts
-    /// a `turn/start` from exactly this position, the turn writes the rollout, and the
-    /// next resume succeeds.
-    ///
-    /// **Compose only.** There is nothing to stop — no turn has ever run — so a
-    /// client offers Compose here and does not offer Stop.
-    ///
-    /// **And a run CodeConnect started on its engine whose app-server ended without
-    /// the daemon stopping it** ("Stopped: its process ended": a crash, or a Mac
-    /// restart). Its lifecycle stays `exited`, and the person's next message relaunches
-    /// its app-server, resumes its thread and is sent there; nothing runs on it until
-    /// then, so again there is nothing to stop. A run ended by End run reads
-    /// [`CodexLink::None`]. A relaunch that cannot be done refuses the message with
-    /// nothing sent and leaves the run `exited` and offered this word again, even when
-    /// the daemon's own watch found the new app-server gone first; a daemon that dies
-    /// during the relaunch leaves it `failed`, read as [`CodexLink::None`]. The refusal is
-    /// the last word, as for any compose.
-    ///
-    /// **The fifth `codex_link` word, and it costs a minor: it is
-    /// [`crate::PROTOCOL_MINOR`] 20.** It was originally written into minor 19 on the
-    /// ground that 19 had never shipped, so no client could know four of the words and
-    /// not the fifth; build 72 shipped minor 19 on 2026-09-08 and that argument expired
-    /// with it. The ledger entry in `lib.rs` carries the whole reasoning.
-    ///
-    /// A minor-19 client that meets this word must treat it as not actuatable, which is
-    /// what the phone's unrecognised arm already does — the same answer it gives for
-    /// `bound`, and safe, because the only thing this word ever widens is a compose.
-    /// The daemon's refusal is still the last word either way.
+    /// The word is [`crate::PROTOCOL_MINOR`] 20's. A minor-19 client that meets it treats
+    /// it as not actuatable, which is what the phone's unrecognised arm already does.
     BoundNotStarted,
-    /// **A link exists and is not an addressee, and holds no binding on the
-    /// connection it has.** Dialling, backing off, mid-handshake, or connected with
-    /// its `thread/resume` not yet accepted.
-    ///
-    /// **The daemon's `Unbound` — connected, bound to nothing — folds in here, and
-    /// deliberately.** The alternative was to call it `Bound`, which would name a
-    /// binding that does not exist. What separates the two on the daemon's side is
-    /// *why* there is no addressee (no socket, versus a socket without an accepted
-    /// resume), and a client has the same answer for both: not now, and it is
-    /// coming back. A word for a distinction nothing renders would be a word a
-    /// client had to learn and could not use.
-    Offline,
     /// **No Codex control link belongs to this run at all.** Every Claude session,
     /// every Codex run with no link attached that a message would not relaunch, and
     /// any summary from a daemon predating this field. The default, so an older
@@ -545,7 +488,7 @@ pub struct SessionSummary {
     /// The model this run last confirmed, and the event that confirmed it (minor
     /// 23). See [`crate::facts`]. Omitted when nothing has said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelFact>,
+    pub model: Option<Fact>,
     /// The permission mode the main agent last reported, and the event that
     /// reported it (minor 23). See [`crate::facts`]. Omitted when nothing has
     /// said.
@@ -613,17 +556,6 @@ pub struct Fact {
     pub seq: u64,
 }
 
-/// The model fact, with where it came from and when, because the phone says
-/// both beside the model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelFact {
-    pub value: String,
-    pub seq: u64,
-    pub source: ModelSource,
-    /// The deciding event's `ts`.
-    pub at: String,
-}
-
 /// The settings an app may choose for a run (minor 39), as its agent offers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunMenus {
@@ -664,17 +596,6 @@ pub struct MenuMode {
     pub label: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm: bool,
-}
-
-/// Which kind of event said what the model is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelSource {
-    /// The `model` of a `session_start`.
-    SessionStart,
-    /// The agent's own word on its model: Claude Code's `/model` receipt, `Set model to …` or
-    /// `Kept model as …`, or the settings a Codex run's Codex names (minor 43).
-    Command,
 }
 
 #[cfg(test)]
@@ -904,27 +825,72 @@ mod tests {
         );
     }
 
-    /// **The five words the phone matches on, and the one an older daemon means.**
+    /// **A run's `link` is `attached` or `detached`**, spelled by hand, and `degraded`
+    /// and `stale` do not decode.
+    #[test]
+    fn a_link_is_attached_or_detached() {
+        for (link, word) in [(Link::Attached, "attached"), (Link::Detached, "detached")] {
+            let encoded = serde_json::to_string(&link).unwrap();
+            assert_eq!(encoded, format!("\"{word}\""));
+            assert_eq!(serde_json::from_str::<Link>(&encoded).unwrap(), link);
+        }
+        for gone in ["degraded", "stale"] {
+            assert!(
+                serde_json::from_str::<Link>(&format!("\"{gone}\"")).is_err(),
+                "{gone}"
+            );
+        }
+    }
+
+    /// **A summary's `model` is `{value, seq}`**, as its `permission_mode` and `effort`
+    /// are. A summary whose model also carries `source` and `at` still decodes, and is
+    /// sent without them.
+    #[test]
+    fn a_summarys_model_is_its_value_and_seq() {
+        let older = serde_json::json!({
+            "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "session_id": "cc-1",
+            "cwd": "/Users/dev/Aion",
+            "lifecycle": "live",
+            "link": "detached",
+            "last_seq": 3,
+            "created_at": "t",
+            "updated_at": "t",
+            "model": {"value": "claude-opus-5", "seq": 3, "source": "command",
+                      "at": "2026-11-12T00:00:00.000Z"}
+        });
+        let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap()["model"],
+            serde_json::json!({"value": "claude-opus-5", "seq": 3})
+        );
+    }
+
+    /// **The three words the phone matches on, and the one an older daemon means.**
     ///
     /// `codex_link` is what a client scopes Stop and Compose by, so each of the
-    /// five is spelled by hand here rather than trusted to `rename_all`: renaming a
+    /// three is spelled by hand here rather than trusted to `rename_all`: renaming a
     /// variant would compile, pass, ship, and leave a phone greying a control on a
-    /// session that could have been stopped. The default matters just as much —
-    /// every summary from every daemon below this minor arrives without the field,
-    /// and reading that as anything but `none` would offer an action against a link
-    /// the daemon cannot even name.
+    /// session that could have been stopped. `bound` and `offline` do not decode. The
+    /// default matters just as much — every summary from every daemon below this minor
+    /// arrives without the field, and reading that as anything but `none` would offer an
+    /// action against a link the daemon cannot even name.
     #[test]
-    fn the_codex_link_states_are_exactly_the_five_words_the_phone_matches_on() {
+    fn the_codex_link_states_are_exactly_the_three_words_the_phone_matches_on() {
         for (state, word) in [
             (CodexLink::Subscribed, "subscribed"),
-            (CodexLink::Bound, "bound"),
             (CodexLink::BoundNotStarted, "bound_not_started"),
-            (CodexLink::Offline, "offline"),
             (CodexLink::None, "none"),
         ] {
             let encoded = serde_json::to_string(&state).unwrap();
             assert_eq!(encoded, format!("\"{word}\""));
             assert_eq!(serde_json::from_str::<CodexLink>(&encoded).unwrap(), state);
+        }
+        for gone in ["bound", "offline"] {
+            assert!(
+                serde_json::from_str::<CodexLink>(&format!("\"{gone}\"")).is_err(),
+                "{gone}"
+            );
         }
         assert_eq!(CodexLink::default(), CodexLink::None);
 

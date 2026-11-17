@@ -1291,11 +1291,7 @@ where
             text,
             request_id,
             payload_hash,
-            // Decoded so a client below minor 3 still parses, then discarded:
-            // the interlock is the server's to choose.
-            require: _,
             submit,
-            complete_native_confirmation,
         } => {
             let result = daemon
                 .send_text(
@@ -1304,7 +1300,6 @@ where
                     request_id.as_deref(),
                     payload_hash.as_deref(),
                     submit,
-                    complete_native_confirmation,
                 )
                 .await;
             send(sink, &ServerMessage::SendTextResult { session_id, result }).await?;
@@ -2023,7 +2018,7 @@ pub(crate) fn capabilities(
         //
         // **And that is the whole of what it says.** This set is composed once per
         // connection and has no session in hand, so the flag is true on a Claude-only
-        // fleet and true for a Codex run whose control link is offline — see
+        // fleet and true for a Codex run that cannot be stopped — see
         // `Capabilities::codex_interrupt`, which names what a client must add to it to
         // know whether one particular session can be stopped right now.
         codex_interrupt: daemon

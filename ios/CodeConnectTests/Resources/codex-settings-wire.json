@@ -196,9 +196,7 @@
       "selected_model": "gpt-6-astra"
     },
     "model": {
-      "at": "2026-11-15T00:00:00Z",
       "seq": 6,
-      "source": "command",
       "value": "gpt-6-astra"
     },
     "permission_mode": {
@@ -358,9 +356,7 @@
       "selected_model": "gpt-6.1-sol"
     },
     "model": {
-      "at": "2026-11-15T00:00:00Z",
       "seq": 1,
-      "source": "command",
       "value": "gpt-6.1-sol"
     },
     "permission_mode": {

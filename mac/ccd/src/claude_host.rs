@@ -1564,15 +1564,14 @@ const REFUSED_SCREENS: [(&str, &str); 2] = [
 ];
 
 /// Why ccd refuses `text`, sent from an app, as the screen of a command in
-/// [`REFUSED_SCREENS`]: the Model and Effort sheets send theirs with the native
-/// confirmation (`confirmed`), and typed alone (`/model`) each opens that screen at claude's
+/// [`REFUSED_SCREENS`]: typed alone (`/model`), each opens that screen at claude's
 /// keyboard. Typed with an argument (`/effort low`), such a command is a message, as at
 /// claude's keyboard.
-fn refused_screen(text: &str, confirmed: bool) -> Option<&'static str> {
+fn refused_screen(text: &str) -> Option<&'static str> {
     let mut words = text.split_whitespace();
     let command = words.next()?.strip_prefix('/')?;
     let (_, reason) = REFUSED_SCREENS.iter().find(|(name, _)| *name == command)?;
-    (confirmed || words.next().is_none()).then_some(*reason)
+    words.next().is_none().then_some(*reason)
 }
 
 /// A hosted run's command menu, from what the store keeps of it: `unavailable` until
@@ -1619,7 +1618,6 @@ pub(crate) struct Message {
     /// The app's request id with the hash it was checked against, when it gave them.
     pub identity: Option<(String, String)>,
     pub submit: bool,
-    pub complete_native_confirmation: bool,
 }
 
 /// `send_text` to the hosted Claude run `uid`, whose lifecycle was last read as
@@ -1627,8 +1625,8 @@ pub(crate) struct Message {
 /// and the person's words are filed once the host has taken it ([`apply_send_outcome`]).
 /// The send's claim keeps its text, so a restarted ccd still files them from the host's
 /// replay. A retry is answered from that claim first, as a typed send's is; only a new
-/// message meets the run's state. The screens of [`REFUSED_SCREENS`] (the model and effort
-/// confirmations) are refused, as are `/status`, which claude does not offer such a run,
+/// message meets the run's state. The screens of [`REFUSED_SCREENS`] (a bare `/model` or
+/// `/effort`) are refused, as are `/status`, which claude does not offer such a run,
 /// and a message staged without being sent. `/usage`, `/cost` and `/clear` are messages,
 /// whose output the run's events carry (a clear's "Conversation cleared" notice among it).
 pub(crate) async fn send_text(
@@ -1644,9 +1642,8 @@ pub(crate) async fn send_text(
         text,
         identity,
         submit,
-        complete_native_confirmation,
     } = message;
-    if let Some(reason) = refused_screen(&text, complete_native_confirmation) {
+    if let Some(reason) = refused_screen(&text) {
         return refuse(reason);
     }
     if text.split_whitespace().next() == Some("/status") {
@@ -4841,14 +4838,7 @@ mod tests {
     ) -> SendTextResult {
         let hash = protocol::hash::send_text_hash(uid, text, true);
         daemon
-            .send_text(
-                uid,
-                text.to_string(),
-                Some(request_id),
-                Some(&hash),
-                true,
-                false,
-            )
+            .send_text(uid, text.to_string(), Some(request_id), Some(&hash), true)
             .await
     }
 
@@ -6409,9 +6399,10 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **B5 G3, B8 G4: what a run started in a host does not take.** The Model and Effort
-    /// sheets' confirmations and `/status` are refused, and nothing is sent, claimed or
-    /// filed; a message that only mentions a command, `/usage` and `/cost` are messages.
+    /// **B5 G3, B8 G4: what a run started in a host does not take.** A bare `/model` or
+    /// `/effort` and `/status` are refused, and nothing is sent, claimed or filed; a
+    /// message that only mentions a command, `/usage`, `/cost` and `/model opus` are
+    /// messages.
     #[tokio::test]
     async fn what_a_hosted_run_does_not_take_is_refused_and_nothing_is_sent() {
         let rig = rig();
@@ -6421,36 +6412,12 @@ mod tests {
             SendTextResult::Refused { reason } => reason,
             other => panic!("not refused: {other:?}"),
         };
-        let model_hash = protocol::hash::send_text_hash(&uid, "/model opus", true);
         assert_eq!(
-            refused(
-                rig.daemon
-                    .send_text(
-                        &uid,
-                        "/model opus".into(),
-                        Some("m"),
-                        Some(&model_hash),
-                        true,
-                        true
-                    )
-                    .await
-            ),
+            refused(send_as_app(&rig.daemon, &uid, "m", "/model").await),
             "/model's screen isn't available in this session; nothing was changed."
         );
-        let effort_hash = protocol::hash::send_text_hash(&uid, "/effort high", true);
         assert_eq!(
-            refused(
-                rig.daemon
-                    .send_text(
-                        &uid,
-                        "/effort high".into(),
-                        Some("f"),
-                        Some(&effort_hash),
-                        true,
-                        true
-                    )
-                    .await
-            ),
+            refused(send_as_app(&rig.daemon, &uid, "f", "/effort").await),
             "/effort's screen isn't available in this session; nothing was changed."
         );
         assert_eq!(
@@ -6460,13 +6427,13 @@ mod tests {
         let staged = protocol::hash::send_text_hash(&uid, "half", false);
         refused(
             rig.daemon
-                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false, false)
+                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false)
                 .await,
         );
         refused(send_as_app(&rig.daemon, &uid, "e", "  ").await);
         refused(
             rig.daemon
-                .send_text(&uid, "no id".into(), None, None, true, false)
+                .send_text(&uid, "no id".into(), None, None, true)
                 .await,
         );
         assert_eq!(next(&mut played.lines).await, None, "nothing sent");
@@ -6476,7 +6443,7 @@ mod tests {
         );
         assert!(matches!(result, SendTextResult::Sent { .. }));
         assert_eq!(text, "why did /clear not run?");
-        for (seq, command) in [(4, "/usage"), (5, "/cost")] {
+        for (seq, command) in [(4, "/usage"), (5, "/cost"), (6, "/model opus")] {
             let (result, (_, text)) = tokio::join!(
                 send_as_app(&rig.daemon, &uid, command, command),
                 host_takes(&mut played, seq, "done")
@@ -6505,7 +6472,8 @@ mod tests {
                 "fix the tests",
                 "why did /clear not run?",
                 "/usage",
-                "/cost"
+                "/cost",
+                "/model opus"
             ]
         );
         assert!(
@@ -8322,8 +8290,7 @@ mod tests {
     /// `summary` as an app reads it in the fleet, with what differs between runs pinned,
     /// each checked first: the run's uid (`uid` to `pinned`), and its name when that is the
     /// uid; the rig's folder (`root`) in `cwd`, and the label made from it; and the clock reads
-    /// (the two times, and the model fact's). Nothing else of the rig or the run's uid is left
-    /// in it.
+    /// (the two times). Nothing else of the rig or the run's uid is left in it.
     fn pinned_summary(
         summary: &protocol::event::SessionSummary,
         uid: &str,
@@ -8349,13 +8316,6 @@ mod tests {
                 "{key} is a clock read: {wire}"
             );
             wire[key] = "2026-11-15T09:00:00.000Z".into();
-        }
-        if let Some(at) = wire.get_mut("model").and_then(|model| model.get_mut("at")) {
-            assert!(
-                protocol::time::unix_ms_from_rfc3339(at.as_str().unwrap()).is_some(),
-                "the model's at is a clock read: {at}"
-            );
-            *at = "2026-11-15T09:00:00.000Z".into();
         }
         let text = wire.to_string();
         assert!(!text.contains(root) && !text.contains(uid), "{text}");
@@ -8590,7 +8550,7 @@ mod tests {
             .collect();
         for command in commands_changed()["commands"].as_array().unwrap() {
             let name = command["name"].as_str().unwrap();
-            let refused = refused_screen(&format!("/{name}"), true).is_some();
+            let refused = refused_screen(&format!("/{name}")).is_some();
             let screen_only = name == "doctor";
             assert_eq!(
                 names.iter().any(|offered| offered == name),
@@ -8599,9 +8559,8 @@ mod tests {
             );
         }
         for (name, reason) in REFUSED_SCREENS {
-            assert_eq!(refused_screen(&format!("/{name} x"), true), Some(reason));
-            assert_eq!(refused_screen(&format!("/{name}"), false), Some(reason));
-            assert_eq!(refused_screen(&format!("/{name} x"), false), None, "typed");
+            assert_eq!(refused_screen(&format!("/{name}")), Some(reason));
+            assert_eq!(refused_screen(&format!("/{name} x")), None, "typed");
         }
         stop(&played.dir);
         let restarted = daemon_on(&rig.root);
@@ -12406,10 +12365,7 @@ mod tests {
         println!("B8P2 S7: model during the turn {model:?}; effort {effort:?}; mode {mode:?}");
         println!(
             "B8P2 S7: after: model {:?}; mode {:?}; effort {:?}",
-            session
-                .model
-                .as_ref()
-                .map(|fact| (&fact.value, fact.source)),
+            session.model.as_ref().map(|fact| &fact.value),
             session.permission_mode.as_ref().map(|fact| &fact.value),
             session.effort.as_ref().map(|fact| &fact.value)
         );

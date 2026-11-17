@@ -56,8 +56,11 @@ pub const PROTOCOL_MISMATCH: &str =
 ///
 ///   * `0` — hello/sessions/subscribe/answer/send_text/capture. (`capture`, the
 ///     Mac pane snapshot, is gone in X12: no run is left with a pane to read.)
+///     **Gone in X12:** a summary's `link` words `degraded` and `stale`; a run's link
+///     is `attached` or `detached`.
 ///   * `1` — QR pairing + per-device tokens, `wss://`, `get_diff`,
-///     `EventKind::TurnComplete`, `ResolvedBy::Local`, `risk_class`.
+///     `EventKind::TurnComplete`, `ResolvedBy::Local`, `risk_class`. **Gone in
+///     X12:** `ResolvedBy::Local`; nothing records an answer made at the keyboard.
 ///   * `2` — `session_uid` on every session and event, accepted wherever a
 ///     `session_id` is accepted, and `answer{session_id}`. A client on minor 2
 ///     keys its local store by `session_uid`; one on minor 1 keeps using
@@ -69,6 +72,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `send_text_idempotent` / `prompt_identity` capabilities. The supervisor
 ///     side of the same number is [`ipc::RegisterSession::protocol_minor`]:
 ///     minor 3 is what makes a supervisor able to honour a prompt fingerprint.
+///     **Gone in X12:** `send_text.require`; a client that still sends it is
+///     unaffected, as an unknown key is ignored, not refused.
 ///   * `4` — hardening. Everything here is additive, and a client written
 ///     against minor 3 needs no change:
 ///       - a new `error.code`, `protocol_mismatch`, sent to a client whose
@@ -171,6 +176,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `complete_native_confirmation`, the command is one of those two with an
 ///     argument, and the pane it captured still shows that argument selected.
 ///     Advertised per session, so a supervisor below minor 10 keeps escaping.
+///     **Gone in X12:** `complete_native_confirmation`; a send that still carries it
+///     is read without it.
 ///   * `13` — a client can open a **live terminal** on a hosted session over
 ///     this same connection. `terminal_attach`/`terminal_input`/
 ///     `terminal_resize`/`terminal_credit`/`terminal_detach` from the client;
@@ -328,7 +335,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         byte-identical), an additive opaque [`ws::AnswerDecision::OptionId`]
 ///         variant, and an [`ws::ClientMessage::Interrupt`] operation
 ///         (**defined here, and refused daemon-side at this minor**; honoured
-///         from minor 17).
+///         from minor 17). **Gone in X12:** the envelope's `local` actor; a Codex
+///         card is answered by an app or cleared.
 ///       - the [`composite_id`] wire-id codec: a versioned, type-tagged,
 ///         length-bounded base64url encoding of `(session_uid, thread_id,
 ///         server_request_id, generation)`, opaque to the phone's request-id
@@ -455,7 +463,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///         already uses.
 ///       - [`event::SessionSummary::codex_link`] — `"subscribed" | "bound" |
 ///         "offline" | "none"`, resolved from the same addressee
-///         `codex_thread_id` is resolved from.
+///         `codex_thread_id` is resolved from. **Gone in X12:** `"bound"` and
+///         `"offline"`, which nothing sends.
 ///
 ///         The four words minor 19 shipped are exactly those. `"bound_not_started"`
 ///         is minor 20's, and the entry below says why it could not stay here.
@@ -567,7 +576,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///       - [`event::SessionSummary::model`] and
 ///         [`event::SessionSummary::permission_mode`] — each with the seq of the
 ///         event that decided it, so a client keeps whichever of these and its
-///         own events is newer.
+///         own events is newer. **Gone in X12:** the model's `source` and `at`; it
+///         is `{value, seq}`, as the mode is.
 ///
 ///     What changed for every client, including older ones: nothing. The new
 ///     summary fields are omitted when empty and a client that never sends
