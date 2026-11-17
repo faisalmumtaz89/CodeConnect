@@ -3832,7 +3832,9 @@ mod tests {
     /// **G2: a `live` run is connected again at a restart.** The restarted ccd resumes the
     /// run's thread with the preset and its thread config, and files the answer. The answer
     /// reports a turn still running, whose command finished while no ccd listened; when that
-    /// turn ends, ccd resumes once more and files the command, once.
+    /// turn ends, ccd resumes once more and files the command, once: after the turn's reply
+    /// and its end, which arrived live first. v0.18.0's read-back placed it before them; this
+    /// is a written miss (`CodexAdapter::plan_resume_seed`).
     #[tokio::test]
     async fn a_live_run_is_connected_again_at_a_restart_and_its_running_turn_followed_up() {
         let rig = rig();
