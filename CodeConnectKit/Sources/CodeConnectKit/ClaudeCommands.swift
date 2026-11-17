@@ -3,24 +3,15 @@ import Foundation
 /// What the composer should do with one piece of typed text, decided before
 /// anything reaches the Mac.
 public enum CommandAction: Equatable {
-    /// `/model` — anything after the name prefills the sheet's custom
-    /// field; nothing is typed until the sheet says so.
-    case nativeModel(prefillArgs: String)
+    /// `/model` — the run's settings sheet; nothing is typed.
+    case nativeModel
     /// `/diff` — the app renders this itself, better than the Mac's own
     /// view; open that instead of typing anything.
     case nativeDiff
-    /// Bare `/effort` — the sheet chooses. `/effort <arg>` deliberately does
-    /// NOT come here, and must not grow an app-side validity list: the valid
-    /// set has already drifted once (`ultracode`, `auto` appeared without
-    /// notice), so a list here would refuse things the Mac accepts — the
-    /// false-positive class this feature exists to end.
-    ///
-    /// **It is not because every argument runs inline.** Measured on 2.1.223:
-    /// `/effort` with a value *different from the current one* opens a
-    /// `Change effort level?` confirmation whenever the conversation is already
-    /// cached for the current level, exactly as `/model` does. Only a same-value
-    /// `/effort` is reliably inline. Pass-through stands because the honest fix
-    /// is a typed native operation, not a validity list.
+    /// Bare `/effort` — the run's settings sheet. `/effort <arg>` does NOT
+    /// come here, and must not grow an app-side validity list: the valid set
+    /// has already drifted once (`ultracode`, `auto` appeared without notice),
+    /// so a list here would refuse things the Mac accepts.
     case nativeEffort
     /// `/compact [instructions]` — the sheet, with any typed instructions
     /// already in its field.
@@ -73,9 +64,9 @@ public enum ClaudeCommandPolicy {
     /// refused with their own sentence rather than the generic one.
     static let unrecoverableCommands: Set<String> = ["config", "keybindings"]
 
-    /// Commands this app answers itself rather than typing: sheets for
-    /// `/model`, `/effort` and `/compact`, a confirmation for `/clear`, and the
-    /// native diff for `/diff`.
+    /// Commands this app answers itself rather than typing: the run's settings
+    /// sheet for `/model` and `/effort`, a sheet for `/compact`, a confirmation
+    /// for `/clear`, and the native diff for `/diff`.
     static let nativeCommands: Set<String> = [
         "model", "diff", "effort", "compact", "clear",
     ]
@@ -105,9 +96,7 @@ public enum ClaudeCommandPolicy {
     public static func action(for text: String, runSettings: RunSettings = .deferToOtherPath) -> CommandAction {
         guard let command = firstToken(text) else { return .passThrough }
         let args = arguments(of: text, command: command)
-        if command == "model" {
-            return .nativeModel(prefillArgs: args)
-        }
+        if command == "model" { return .nativeModel }
         if command == "diff" { return .nativeDiff }
         if command == "effort" {
             // With an argument, pass it through without a local validity list;
@@ -178,36 +167,29 @@ public enum ClaudeCommandPolicy {
 /// and rendering one of those to a person was a shipped, screenshotted
 /// mistake. Parsing is deliberately narrow: only the `claude-` family shape
 /// is interpreted; anything else (Claude's own display words like
-/// "Sonnet 5", a custom id) passes through verbatim, and `isRawFallback`
-/// tells the view which strings stayed machine-shaped and must wear
-/// `monoSmall`, byte-for-byte.
+/// "Sonnet 5", a custom id) passes through verbatim.
 public struct ModelDisplay: Equatable {
     public var name: String
     /// A variant worth its own quiet line — today only "1M context".
     public var meta: String?
-    /// True when the string stayed machine-shaped (an id this mapper does
-    /// not recognise) and the view should render it in `monoSmall`,
-    /// byte-for-byte. Claude's own display words ("Sonnet 5") are human
-    /// already and are NOT a raw fallback.
-    public var isRawFallback: Bool
 
     /// Claude Code's model families, which `/model` takes as aliases for the
     /// newest of each, named as its own model list names them. Names only:
     /// which version an alias stands for is Claude Code's to say, in its
     /// receipt, and the versions this table used to carry went stale with a
-    /// release. Also the model chooser's rows, in this order.
+    /// release.
     public static let families = ["fable", "opus", "sonnet", "haiku"]
 
     public static func from(_ raw: String) -> ModelDisplay {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowered = trimmed.lowercased()
         if families.contains(lowered) {
-            return ModelDisplay(name: word(lowered), meta: nil, isRawFallback: false)
+            return ModelDisplay(name: word(lowered), meta: nil)
         }
         guard lowered.hasPrefix("claude-") else {
             // Not an API id shape. Claude's own words ("Sonnet 5"), or some
             // human-entered string — display verbatim, human typography.
-            return ModelDisplay(name: trimmed, meta: nil, isRawFallback: false)
+            return ModelDisplay(name: trimmed, meta: nil)
         }
         var body = String(lowered.dropFirst("claude-".count))
         var meta: String?
@@ -226,22 +208,11 @@ public struct ModelDisplay: Equatable {
         guard let family = tokens.first, families.contains(family),
             tokens.dropFirst().allSatisfy({ $0.allSatisfy(\.isNumber) })
         else {
-            return ModelDisplay(name: trimmed, meta: nil, isRawFallback: true)
+            return ModelDisplay(name: trimmed, meta: nil)
         }
         let versions = tokens.dropFirst()
         let name = versions.isEmpty ? word(family) : word(family) + " " + versions.joined(separator: ".")
-        return ModelDisplay(name: name, meta: meta, isRawFallback: false)
-    }
-
-    /// The family a model belongs to: `opus` for `opus`, `Opus 5.5` and
-    /// `claude-opus-5-5[1m]` alike; nil outside the known families.
-    public static func family(of raw: String) -> String? {
-        let display = from(raw)
-        guard !display.isRawFallback,
-            let first = display.name.split(separator: " ").first?.lowercased(),
-            families.contains(first)
-        else { return nil }
-        return first
+        return ModelDisplay(name: name, meta: meta)
     }
 
     /// `opus` → `Opus`.
@@ -250,145 +221,9 @@ public struct ModelDisplay: Equatable {
     }
 }
 
-/// Where a model fact came from. Typed rather than the display string it is
-/// rendered as, so nothing decides anything by comparing prose.
-public enum ModelProvenance: Sendable, Hashable {
-    /// The SessionStart hook's `model` field.
-    case sessionStart
-    /// Claude Code's own `/model` output, whichever verb it used. Which verb
-    /// is a property of the *receipt*, and lives on `ModelConfirmation`; here
-    /// it would only be a second copy to keep in step.
-    case command
-    /// The Mac named the model from a kind of event this build does not know.
-    case reported
-
-    init(_ source: ModelSource) {
-        switch source {
-        case .sessionStart: self = .sessionStart
-        case .command: self = .command
-        case .unrecognised: self = .reported
-        }
-    }
-}
-
-/// A model fact and its provenance — see `SessionState.lastConfirmedModel`.
+/// A model fact — see `SessionState.lastConfirmedModel`.
 public struct ConfirmedModel: Sendable, Hashable {
     public var name: String
-    /// Rendered next to the age, because a fact without its origin reads as
-    /// more certain than it is.
-    public var provenance: ModelProvenance
-    public var at: Date
-}
-
-/// Everything Claude Code's `/model` command is measured to say back.
-///
-/// The error is here beside the receipts because the Model sheet's free-text
-/// field is the only thing that can produce it, and it is that field's
-/// guaranteed outcome for a value Claude Code does not know. Left unread it
-/// would leave the sheet waiting for a confirmation already on screen in the
-/// timeline behind it.
-public enum ModelCommandOutcome: Sendable, Hashable {
-    case receipt(ModelConfirmation)
-    /// `Model 'bananas' not found`, verbatim. Terminal, and never a fact about
-    /// the session's model.
-    case notFound(String)
-
-    static func parse(_ line: String) -> ModelCommandOutcome? {
-        if let receipt = ModelConfirmation.parse(line) { return .receipt(receipt) }
-        // Matched by its measured shape and nothing looser: a line merely
-        // containing "not found" is somebody else's error.
-        if line.hasPrefix("Model '") && line.hasSuffix("' not found") { return .notFound(line) }
-        return nil
-    }
-}
-
-/// A `/model` outcome and **the event that carried it** — see
-/// `SessionState.lastModelCommandSignal`. The sequence is the point: see
-/// `ModelChangeWatch`.
-public struct ModelCommandSignal: Sendable, Hashable {
-    var outcome: ModelCommandOutcome
-    var seq: UInt64
-}
-
-/// What a `/model` watch reads: the last thing `/model` said back, and where
-/// the newest turn ended. One value, so a view that re-reads its watch when
-/// this changes re-reads it on either. Two fields, so a receipt and a later
-/// turn end that arrive together still settle on the receipt.
-public struct ModelWatchSignal: Sendable, Hashable {
-    var command: ModelCommandSignal?
-    var turnEndSeq: UInt64
-}
-
-/// The Model sheet's correlation rule: **a fence in the event stream, and a
-/// match on the value that was asked for.**
-///
-/// The fence alone proves recency, not identity. `SessionState` fills an empty
-/// model slot with the first receipt a backfill finds at any sequence, so
-/// without it a "load earlier" replay landing inside the wait reports an
-/// hour-old change as the answer to this tap. But recency is not enough on its
-/// own either: a receipt from somebody at the Mac, or from a second phone, also
-/// lands above the fence, and reporting `Model set to Opus 5` over a tap that
-/// asked for Sonnet is the same phantom state wearing a fresher timestamp.
-///
-/// So both. A family is matched by family, because the request carries an
-/// alias (`sonnet`) and the receipt the model Claude Code chose for it
-/// (`Sonnet 5.5`); any other value is matched by its display name. The error
-/// carries the argument Claude Code quoted back, which is compared to the
-/// argument that was sent.
-///
-/// What survives is still only ever *Claude Code's own report* — the sheet
-/// never claims to know which actor caused it, only that what it is showing
-/// answers the value this sheet asked for.
-public enum ModelChangeWatch {
-    public static func outcome(
-        after baselineSeq: UInt64, requested: String, signal: ModelCommandSignal?
-    ) -> ModelCommandOutcome? {
-        guard let signal, signal.seq > baselineSeq else { return nil }
-        let asked = ModelDisplay.from(requested).name
-        switch signal.outcome {
-        // `Set model to X` names the model that was *applied*, so it answers
-        // this request only when X is what this request asked for. Somebody
-        // else's switch lands above the fence too, and reporting it here would
-        // be the same phantom state wearing a fresher timestamp.
-        case .receipt(.set(let name)):
-            return answers(requested, with: name) ? signal.outcome : nil
-        // **`Kept model as X` names the model still in force, not the one
-        // asked for** — measured: `/model sonnet`, cancelled, prints
-        // `Kept model as Opus 5`. Matching it against the request would mean a
-        // cancelled confirmation never reports at all, which is the silence
-        // this whole change exists to end. The fence is what it has, and the
-        // sentence it produces is true whoever caused it: Claude Code kept X,
-        // and nothing here claims the request succeeded.
-        case .receipt(.kept):
-            return signal.outcome
-        // `Model 'bananas' not found` quotes the value Claude Code could not
-        // find, so only this sheet's own value makes it this sheet's failure.
-        case .notFound(let line):
-            return Self.quotedValue(in: line).map { ModelDisplay.from($0).name } == asked
-                ? signal.outcome : nil
-        }
-    }
-
-    /// Whether a model named `name` is what a request for `requested` asks
-    /// for: any model of a family, for the family's alias (a row of the
-    /// sheet), because which version it stands for is Claude Code's to say;
-    /// the same model, for any other value.
-    public static func answers(_ requested: String, with name: String) -> Bool {
-        let alias = requested.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if ModelDisplay.family(of: alias) == alias {
-            return ModelDisplay.family(of: name) == alias
-        }
-        return ModelDisplay.from(name).name == ModelDisplay.from(requested).name
-    }
-
-    /// The value between the first pair of single quotes, if any.
-    static func quotedValue(in line: String) -> String? {
-        guard let open = line.firstIndex(of: "'") else { return nil }
-        let after = line.index(after: open)
-        guard let close = line[after...].firstIndex(of: "'") else { return nil }
-        let inner = String(line[after..<close])
-        return inner.isEmpty ? nil : inner
-    }
 }
 
 /// What Claude Code's own model receipt says happened, as recorded in the
@@ -413,28 +248,6 @@ public enum ModelConfirmation: Sendable, Hashable {
     var name: String {
         switch self {
         case .set(let name), .kept(let name): return name
-        }
-    }
-
-    /// True only for `Set model to …`.
-    public var isChange: Bool {
-        if case .set = self { return true }
-        return false
-    }
-
-    /// The sentence the Model sheet shows for this receipt.
-    ///
-    /// Here rather than in the view for two reasons: the live path and the
-    /// already-landed path must not word it differently, and an honesty
-    /// contract that cannot be asserted in a test is a comment. The
-    /// `kept` wording states what Claude Code reported and offers no theory
-    /// about who caused it — the same line is printed when a confirmation is
-    /// declined at the Mac and when the model asked for is already in force.
-    public var sheetStatus: String {
-        let display = ModelDisplay.from(name).name
-        switch self {
-        case .set: return "Model set to \(display)."
-        case .kept: return "Claude Code kept \(display). The model was not changed."
         }
     }
 
@@ -477,10 +290,6 @@ public enum ModelConfirmation: Sendable, Hashable {
 ///   confirmation was cancelled, or the same level was re-chosen. The level
 ///   did **not** change.
 ///
-/// The `kept` form must be parsed for the same reason: unread, it leaves the
-/// sheet waiting and then saying no confirmation arrived — while the receipt is
-/// on screen in the timeline behind it.
-///
 /// **The scope is read, never assumed.** It is measured to differ per value:
 /// `low`, `medium`, `high` and `xhigh` all say "saved as your default for new
 /// sessions"; `max` says "this session only". A build that hardcoded either
@@ -489,28 +298,6 @@ public enum ModelConfirmation: Sendable, Hashable {
 public enum EffortConfirmation: Sendable, Hashable {
     case set(value: String, scope: String?)
     case kept(value: String)
-
-    var value: String {
-        switch self {
-        case .set(let value, _), .kept(let value): return value
-        }
-    }
-
-    public var isChange: Bool {
-        if case .set = self { return true }
-        return false
-    }
-
-    /// The sentence the Effort sheet shows. Here rather than in the view for
-    /// the same reasons as `ModelConfirmation.sheetStatus`.
-    public var sheetStatus: String {
-        let label = EffortConfirmation.label(for: value)
-        guard case .set(_, let scope) = self else {
-            return "Claude Code kept \(label) effort. The level was not changed."
-        }
-        guard let scope else { return "Claude Code confirmed \(label) effort." }
-        return "Claude Code confirmed \(label) effort (\(scope))."
-    }
 
     static func parse(_ line: String) -> EffortConfirmation? {
         if line.hasPrefix("Set effort level to ") {
@@ -541,7 +328,7 @@ public enum EffortConfirmation: Sendable, Hashable {
         return inner.isEmpty ? nil : inner
     }
 
-    /// `xhigh` → `Extra high` — the human labels the sheet uses. A value
+    /// `xhigh` → `Extra high` — the human label for a level. A value
     /// this build has never heard of stays as sent; it will read as the
     /// machine word it is, which is honest.
     static func label(for value: String) -> String {

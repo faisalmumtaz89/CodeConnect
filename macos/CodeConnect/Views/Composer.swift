@@ -366,8 +366,6 @@ private struct Composer: View {
         Task {
             let attempt: ComposeAttempt
             switch command {
-            case .model(let alias): attempt = await model.sendModelCommand(alias, to: key)
-            case .effort(let level): attempt = await model.sendEffortCommand(level, to: key)
             case .compact(let instructions):
                 attempt = await model.sendCompactCommand(instructions: instructions, to: key)
             }

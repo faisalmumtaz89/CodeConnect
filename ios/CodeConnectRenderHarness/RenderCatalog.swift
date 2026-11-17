@@ -123,11 +123,10 @@ struct RenderDriver {
             if photographed() { return element }
             // **Nothing moved, so the press missed what scrolls.** A sheet at
             // its `.medium` detent owns the bottom half of the screen, and
-            // `dragUp` starts at 0.45 — on the dimmed backdrop above it. Four
-            // scenarios failed exactly this way at AX5 (`session-model-sheet`,
-            // `session-effort-sheet`, `session-compact-sheet`,
-            // `session-model-kept`): subject 20 to 600 points below the screen,
-            // twelve drags, and not one point of movement.
+            // `dragUp` starts at 0.45 — on the dimmed backdrop above it. Sheet
+            // scenarios failed exactly this way at AX5 (`session-compact-sheet`
+            // among them): subject 20 to 600 points below the screen, twelve
+            // drags, and not one point of movement.
             if element.frame.minY == before, anchor == nil {
                 dragUpInsideSheet(app)
                 if photographed() { return element }
@@ -764,8 +763,7 @@ enum RenderCatalog {
 
         // **The slash palette and its five native commands.** Every state
         // here shipped broken once for want of a photograph: the first
-        // palette read as "Mac only" scolding, and the first /model sheet
-        // wore raw ids and a disabled-at-rest button.
+        // palette read as "Mac only" scolding.
         RenderScenario(
             name: "session-palette",
             purpose: "bare / — every native row, the caption, the ~4-row scroll cap",
@@ -795,28 +793,6 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "/clear", in: app), "the /clear row",
                     scrollingWithin: driver.list(holding: "/clear", in: app))
-            }),
-        // **Opened on the session that carries the facts.** `fx-4`'s log
-        // holds a SessionStart with the raw hook id `claude-opus-5[1m]` and a
-        // real `/effort` confirmation, so these two sheets render their
-        // *populated* states — the raw id in monospace, its variant line, the
-        // provenance line beneath. That is the exact state that shipped
-        // looking broken, and until the fixture carried a model fact no
-        // render could reach it: every earlier photograph showed "Not
-        // confirmed" and proved nothing about the screen that was rejected.
-        RenderScenario(
-            name: "session-model-sheet",
-            purpose: "the /model sheet with a raw hook id confirmed — the state that shipped broken",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.require(
-                    driver.text(containing: "Choose model", in: app), "the chooser section")
-                try driver.require(
-                    driver.element(containing: "1M context", in: app),
-                    "the variant line the raw id resolves to")
             }),
         RenderScenario(
             name: "session-hosted-settings-sheet",
@@ -857,19 +833,6 @@ enum RenderCatalog {
                 try driver.require(driver.text(containing: "Plan", in: app), "the Plan mode row")
             }),
         RenderScenario(
-            name: "session-effort-sheet",
-            purpose: "the /effort sheet — five rows, no current-state claim",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/e", row: "/effort")
-                try driver.require(
-                    driver.text(containing: "Choose effort", in: app), "the chooser section")
-                try driver.require(
-                    driver.element(containing: "Extra high", in: app), "the xhigh row's label")
-            }),
-        RenderScenario(
             name: "session-compact-sheet",
             purpose: "the /compact sheet — optional field, always-active button",
             arguments: [
@@ -890,93 +853,6 @@ enum RenderCatalog {
                 try driver.require(app.buttons["Clear context"], "the destructive action")
             }),
 
-        // ---------------------------------------------------------------
-        //  The "no change" states.
-        //
-        //  Measured on Claude Code 2.1.223: `/model <alias>` and
-        //  `/effort <value>` open a confirmation whenever the conversation is
-        //  already cached for the current value — which is every session
-        //  somebody would actually use these sheets on. Cancel it and Claude
-        //  Code prints `Kept model as X` / `Kept effort level as X`.
-        //
-        //  These are the states that say so, at reading size and at AX5, where
-        //  a two-clause sentence is where a sheet breaks.
-        // ---------------------------------------------------------------
-        RenderScenario(
-            name: "session-model-kept",
-            purpose: "the model was NOT changed, said plainly",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "kept-model",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet")
-                try driver.require(
-                    driver.text(containing: "was not changed", in: app),
-                    "the honest no-change line")
-            }),
-        RenderScenario(
-            name: "session-model-still-waiting",
-            purpose: "no receipt arrived: the caption stops promising and the rows come back",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "sent",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet")
-                // The watch stays armed — this is the moment it stops claiming
-                // a receipt is coming, and gives the controls back rather than
-                // leaving the sheet inert with a spinner nobody can stop.
-                try driver.require(
-                    driver.text(containing: "Still waiting", in: app),
-                    "the quiet caption")
-            }),
-        RenderScenario(
-            name: "session-model-turn-ended",
-            purpose: "the turn a /model was typed into ended with no receipt: settled, nothing claimed",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "turn-ended",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.tapRow(app, "Sonnet")
-                // The turn's end arrives a second after the send, so this is
-                // the sheet's re-read on `modelSignal`, as on a live run.
-                try driver.require(
-                    driver.text(containing: "can't confirm /model", in: app),
-                    "the unconfirmed line")
-            }),
-        RenderScenario(
-            name: "session-effort-kept",
-            purpose: "the level was NOT changed, said plainly",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "kept-effort",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/e", row: "/effort")
-                try driver.tapRow(app, "Maximum")
-                try driver.require(
-                    driver.text(containing: "was not changed", in: app),
-                    "the honest no-change line")
-            }),
-        RenderScenario(
-            name: "session-effort-scoped",
-            purpose: "a confirmed level carrying Claude Code's own scope words — the longest one",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "set-effort-session",
-                "-CC_DEEPLINK", "codeconnect://session/fx-4",
-            ],
-            reach: { app, driver in
-                try driver.openPaletteRow(app, fragment: "/e", row: "/effort")
-                try driver.tapRow(app, "Maximum")
-                try driver.require(
-                    driver.text(containing: "this session only", in: app),
-                    "the scope clause, verbatim from the receipt")
-            }),
         RenderScenario(
             name: "session-compact-already-sent",
             purpose: "a replayed mutation: typed once, outcome unknown, said neutrally",

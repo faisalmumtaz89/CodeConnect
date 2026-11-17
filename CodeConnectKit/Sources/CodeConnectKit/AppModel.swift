@@ -985,35 +985,10 @@ public final class AppModel {
             else { return }
             fixturesActive = true
             connection.fixtureAnswers = true
-            // `-cc.debug.sendText` resolves typed sends locally and can inject
-            // measured receipts, allowing command-sheet states to be rendered
-            // without arranging live Mac interactions on cue.
+            // `-cc.debug.sendText` resolves typed sends locally, so a send's
+            // outcomes can be rendered without a Mac answering on cue.
             if let sendMode = UserDefaults.standard.string(forKey: "cc.debug.sendText") {
-                connection.sendTextStub = { [weak connection] session, _ in
-                    // A receipt-bearing mode injects Claude Code's own
-                    // transcript line *before* answering, so the sheet's
-                    // immediate post-send check finds it. The real daemon has
-                    // the same two parts in the other order and the sheet
-                    // handles both; injecting first is what makes the render
-                    // deterministic instead of a race with `onChange`.
-                    if let frame = Fixtures.receiptFrame(mode: sendMode, session: session),
-                        let message = Fixtures.decode(frame)
-                    {
-                        connection?.injectForTesting(message)
-                    }
-                    // A turn's end comes after the answer, as it does when the
-                    // turn a send was typed into ends: the sheet settles through
-                    // its re-read on `modelSignal`, not its post-send check.
-                    if let frame = Fixtures.turnEndFrame(mode: sendMode, session: session),
-                        let message = Fixtures.decode(frame)
-                    {
-                        Task { @MainActor [weak connection] in
-                            try? await Task.sleep(for: .seconds(1))
-                            connection?.injectForTesting(message)
-                        }
-                    }
-                    return Fixtures.sendTextResult(mode: sendMode)
-                }
+                connection.sendTextStub = { _, _ in Fixtures.sendTextResult(mode: sendMode) }
             }
             connection.simulateConnectedForTesting()
             // **`-CC_FIXTURE_LATE_APPROVALS_MS <n>` is a socket still catching
@@ -1992,7 +1967,7 @@ public final class AppModel {
         shownSessions[key]?.onCatchUpLanding = observer
     }
 
-    /// What the command sheets watch for: the run's newest receipts as they
+    /// What a compact sheet watches for: the run's newest receipts as they
     /// arrive, never as drawn — a receipt is the answer to a send, and the sheet
     /// fences it against `eventHighWater`, which is the truth too.
     public func receipts(for key: String) -> SessionState.Receipts? {
@@ -2032,9 +2007,7 @@ public final class AppModel {
     public func confirmedModel(for key: String) -> ConfirmedModel? {
         let shown = shown(for: key)
         if let fact = shownSummary(for: key)?.model, fact.seq > shown?.confirmedModelSeq ?? 0 {
-            return ConfirmedModel(
-                name: ModelConfirmation.unwrapped(fact.value), provenance: ModelProvenance(fact.source),
-                at: ISO8601.parse(fact.at) ?? .distantPast)
+            return ConfirmedModel(name: ModelConfirmation.unwrapped(fact.value))
         }
         return shown?.confirmedModel
     }
@@ -3699,11 +3672,11 @@ public final class AppModel {
         // dialog lockout through the side door.
         switch ClaudeCommandPolicy.action(for: text, runSettings: runSettings(for: key)) {
         case .nativeModel:
-            return .refused("/model has its own control in the app — use the Model sheet.")
+            return .refused("/model has its own control in the app — the run's settings.")
         case .nativeDiff:
             return .refused("/diff has its own view in the app — open Changes.")
         case .nativeEffort:
-            return .refused("/effort has its own control in the app — use the Effort sheet.")
+            return .refused("/effort has its own control in the app — the run's settings.")
         case .nativeCompact:
             return .refused("/compact has its own control in the app — use the Compact sheet.")
         case .nativeClear:
@@ -3719,28 +3692,6 @@ public final class AppModel {
     /// The native adapters' own injections — the ONLY paths that may carry
     /// a slash command past the policy, because each sheet *is* the
     /// policy's answer for its command.
-    /// The one caller that permits the daemon to *complete* Claude Code's
-    /// confirmation rather than dismiss it. The Model sheet states both
-    /// consequences — the new default, and the history re-read — above the rows
-    /// it is tapped from, so the tap is the consent that key needs. Nothing
-    /// else sets it, and the daemon still decides which commands it applies to.
-    public func sendModelCommand(_ argument: String, to key: String) async -> ComposeAttempt {
-        await sendUnchecked(
-            text: "/model \(argument)", to: key, submit: true,
-            completeNativeConfirmation: true)
-    }
-
-    /// The Effort sheet's own injection. Like `sendModelCommand`, it permits
-    /// the daemon to complete Claude Code's confirmation, because the sheet
-    /// states the cost above the rows it is tapped from. A *typed*
-    /// `/effort <value>` passes through instead and never sets this, so it gets
-    /// the ordinary rescue — there is no disclosure behind it to point at.
-    public func sendEffortCommand(_ value: String, to key: String) async -> ComposeAttempt {
-        await sendUnchecked(
-            text: "/effort \(value)", to: key, submit: true,
-            completeNativeConfirmation: true)
-    }
-
     public func sendCompactCommand(instructions: String, to key: String) async -> ComposeAttempt {
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = trimmed.isEmpty ? "/compact" : "/compact \(trimmed)"
@@ -3751,12 +3702,9 @@ public final class AppModel {
         await sendUnchecked(text: "/clear", to: key, submit: true)
     }
 
-    private func sendUnchecked(
-        text: String, to key: String, submit: Bool,
-        completeNativeConfirmation: Bool = false
-    ) async -> ComposeAttempt {
+    private func sendUnchecked(text: String, to key: String, submit: Bool) async -> ComposeAttempt {
         // Every typed-text route funnels through here — the compose bar, the
-        // Model/Effort/Compact sheets, `/clear` — so this is where the sample
+        // Compact sheet, `/clear` — so this is where the sample
         // fleet is answered once, in its own vocabulary, rather than per
         // surface. A surface the sample forgot to gate otherwise falls
         // through to the link's sentence ("Not connected to your computer"),
@@ -3787,8 +3735,7 @@ public final class AppModel {
         do {
             let result = try await connection.sendText(
                 session: key, text: trimmed, require: .inputBox, submit: submit,
-                requestID: requestID, payloadHash: payloadHash,
-                completeNativeConfirmation: completeNativeConfirmation)
+                requestID: requestID, payloadHash: payloadHash)
             switch result {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil

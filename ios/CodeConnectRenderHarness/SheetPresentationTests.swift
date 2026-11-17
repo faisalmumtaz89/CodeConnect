@@ -25,21 +25,21 @@ final class SheetPresentationTests: XCTestCase {
     func testExpandingASheetTranslatesItWithoutResizingIt() throws {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
         ]
         app.terminate()
         app.activate()
 
         let driver = RenderDriver(test: self, timeout: 30)
         try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-        try driver.require(driver.text(containing: "Choose model", in: app), "the chooser section")
+        try driver.require(driver.text(containing: "Sonnet", in: app), "the model menu")
 
         // The sheet arrives animating; its frame before the animation settles
         // is not the frame of the detent it is heading for.
         Thread.sleep(forTimeInterval: 1.0)
 
-        let title = try driver.require(app.staticTexts["Model"].firstMatch, "the sheet title")
-        let row = try driver.require(app.staticTexts["Opus"].firstMatch, "a chooser row")
+        let title = try driver.require(app.staticTexts["Settings"].firstMatch, "the sheet title")
+        let row = try driver.require(app.staticTexts["Sonnet"].firstMatch, "a model row")
         let titleBefore = title.frame
         let rowBefore = row.frame
 

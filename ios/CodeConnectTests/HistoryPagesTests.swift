@@ -56,9 +56,7 @@ final class HistoryPagesWireTests: XCTestCase {
         XCTAssertNil(card.turnID, "a Claude card names no turn")
         let model = try XCTUnwrap(blocked.model)
         XCTAssertEqual(model.value, "claude-opus-5[1m]")
-        XCTAssertEqual(model.source, .sessionStart)
         XCTAssertEqual(model.seq, 1)
-        XCTAssertFalse(model.at.isEmpty)
         let mode = try XCTUnwrap(blocked.permissionMode)
         XCTAssertEqual(mode.value, "default")
         XCTAssertGreaterThan(mode.seq, 0)
@@ -221,13 +219,10 @@ final class HistoryPagesTests: XCTestCase {
     }
 
     /// A summary fact as the captured list carries one, saying `value` as of `seq`.
-    private func fact(_ name: String, _ value: String, seq: UInt64, _ changes: [String: JSONValue] = [:])
-        throws -> JSONValue
-    {
+    private func fact(_ name: String, _ value: String, seq: UInt64) throws -> JSONValue {
         let list = try XCTUnwrap(captured("sessions").objectValue?["sessions"]?.arrayValue)
         let template = try XCTUnwrap(list.compactMap { $0.objectValue?[name] }.first { $0 != .null })
-        return try setting(
-            template, ["value": .string(value), "seq": .int(Int64(seq))].merging(changes) { $1 })
+        return try setting(template, ["value": .string(value), "seq": .int(Int64(seq))])
     }
 
     /// Claude's permission-mode transcript line, as an earlier build's tailer filed it.
@@ -1797,25 +1792,12 @@ final class HistoryPagesTests: XCTestCase {
         XCTAssertEqual(model.permissionMode(for: uid), "bypassPermissions")
     }
 
-    func testTheMacsModelStandsWithWhereItCameFrom() async throws {
+    func testTheMacsModelStands() async throws {
         let model = try await factsModel(
             ["model": try fact("model", "claude-opus-5[1m]", seq: 1)]) { try self.event($0) }
         XCTAssertNil(model.statesForTesting[uid]?.lastConfirmedModel, "the window holds no session start")
         let confirmed = try XCTUnwrap(model.confirmedModel(for: uid))
         XCTAssertEqual(confirmed.name, "claude-opus-5[1m]")
-        XCTAssertEqual(confirmed.provenance, .sessionStart)
-        XCTAssertNotEqual(confirmed.at, .distantPast, "the Mac's time is read")
-    }
-
-    func testAModelFromASourceThisBuildDoesNotKnowSaysTheMacReportedIt() async throws {
-        let model = try await factsModel(
-            ["model": try fact("model", "claude-opus-5[1m]", seq: 1, ["source": .string("a_new_kind")])]) {
-                try self.event($0)
-            }
-        let confirmed = try XCTUnwrap(model.confirmedModel(for: uid))
-        XCTAssertEqual(confirmed.provenance, .reported)
-        XCTAssertTrue(
-            ModelSheet.provenanceLine(confirmed, now: confirmed.at).hasPrefix("Reported by the computer"))
     }
 
     /// A window in a test process is never on a display, so nothing drives
