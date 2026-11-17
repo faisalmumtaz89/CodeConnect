@@ -183,10 +183,8 @@ public struct QuestionDraft: Sendable, Hashable {
 public enum QuestionCardStatus: Sendable, Hashable {
     /// Claude is waiting on the daemon, and the phone may answer.
     case answerable
-    /// The question is on the Mac and only the Mac can answer it.
-    case askingAtMac
-    /// The phone's hold ended, or was never stated; the question may still be
-    /// open at the Mac.
+    /// The phone's hold was never stated, or is one this build does not know;
+    /// the question may still be open at the Mac.
     case answerAtMac
     /// The Mac's CodeConnect predates answering questions from the phone.
     case macTooOld
@@ -263,8 +261,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         guard answersQuestions else { return .macTooOld }
         switch hold {
         case .held: return .answerable
-        case .atMac: return .askingAtMac
-        case .ended, .unrecognised, nil: return .answerAtMac
+        case .unrecognised, nil: return .answerAtMac
         }
     }
 
@@ -309,25 +306,23 @@ public enum QuestionCardStatus: Sendable, Hashable {
         switch (outcome.resolvedBy, outcome.decision) {
         case (.phone, .answers(let answers)): return .answeredOnPhone(answers, from: outcome.answeredOn)
         case (.phone, .decline), (.phone, .deny): return .declined
-        case (.local, .answers) where !outcome.inferred: return .answeredAtMac
         default: return .closed
         }
     }
 
     /// A Codex card's end, read from its own resolution: the phone's answers or
-    /// decline show as themselves, the Mac's answer is its own, a write the daemon
-    /// could not confirm is unconfirmed, and everything else is closed.
+    /// decline show as themselves, a write the daemon could not confirm is
+    /// unconfirmed, and everything else is closed.
     private static func endedByCodex(_ resolution: CodexResolution) -> QuestionCardStatus {
         switch resolution {
         case .answered(let by, let decision, let answeredOn):
-            // `by` names a phone or the Mac; `answeredOn` (minor 41) names the device KIND, so a Mac's
+            // `by` names a paired device; `answeredOn` (minor 41) names the device KIND, so a Mac's
             // answer reads "from a Mac" on both apps and an iPhone's "from an iPhone" — named by the
             // resolver, not whoever is reading it. Absent (an older daemon) it is nil and the banner falls
             // back to "a phone", as before.
             switch (by, decision) {
             case (.phone, .some(.answers(let answers))): return .answeredOnPhone(answers, from: answeredOn)
             case (.phone, .some(.decline)): return .declined
-            case (.local, _): return .answeredAtMac
             default: return .closed
             }
         case .unknown: return .unconfirmed
@@ -348,12 +343,6 @@ public enum QuestionCardStatus: Sendable, Hashable {
         switch self {
         case .answerable:
             return nil
-        case .askingAtMac:
-            return (
-                "Asking at \(host.computer("the computer"))",
-                "\(who) is asking this at \(host.computer("the computer")), so it can only be answered there.",
-                .info, "desktop"
-            )
         case .answerAtMac:
             return (
                 "Answer at \(host.computer("the computer"))",

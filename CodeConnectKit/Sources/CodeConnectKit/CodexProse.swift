@@ -9,14 +9,12 @@ import Foundation
 ///
 /// Three rules govern every string below, and each of them was earned:
 ///
-///   1. **The daemon's refusal sentences are shown verbatim.** All eleven of the
-///      interrupt refusals and all ten of the compose ones name which condition
-///      failed and what the operator can do instead; they were written to be
-///      read. Nothing here truncates, re-words or prefixes one.
-///   2. **Nothing claims an actuation the wire did not report.** `answered by
-///      local` carries no decision at all — the Codex wire has no provenance for
-///      a keyboard answer — so the copy says it does not know, rather than
-///      naming a choice.
+///   1. **The daemon's refusal sentences are shown verbatim.** Each names which
+///      condition failed and what the operator can do instead; they were written
+///      to be read. Nothing here truncates, re-words or prefixes one.
+///   2. **Nothing claims an actuation the wire did not report.** An answer whose
+///      record names no decision says it does not know, rather than naming a
+///      choice.
 ///   3. **No raw JSON on a product screen.** The status words,
 ///      the write stage and the option ids are wire vocabulary; what the reader
 ///      sees is a sentence.
@@ -152,16 +150,6 @@ public enum CodexProse {
                 title: "Answered from \(AnswerOutcome.answeringDevice(nil, on: host) ?? "a phone")",
                 message: "Codex has the answer.",
                 icon: "seal-check", tone: .success)
-        // **The honesty this arm exists for.** `decision` is absent for a
-        // keyboard answer and always will be: upstream carries no provenance,
-        // so the daemon knows somebody answered and not what they chose.
-        case .local:
-            return Banner(
-                title: "Answered at \(host.computer("the computer"))",
-                message:
-                    "Someone answered at the keyboard before this \(host.noun) did. "
-                    + "Codex does not report which choice they made.",
-                icon: "keyboard", tone: .info)
         case .unknown(let raw):
             return Banner(
                 title: "Answered",
@@ -172,9 +160,8 @@ public enum CodexProse {
         }
     }
 
-    /// What was chosen, when the wire said. `nil` when nobody may claim one —
-    /// which is the common case for a keyboard answer, and is stated as a
-    /// sentence rather than left as a blank space.
+    /// What was chosen, when the wire said. `nil` when nobody may claim one,
+    /// which is stated as a sentence rather than left as a blank space.
     ///
     /// The option **id** is what the wire carries and what the daemon validated,
     /// so it is what is shown. Rendering the label instead would mean matching
@@ -186,8 +173,6 @@ public enum CodexProse {
             return "The option “\(id)”."
         case .answered(_, .some(let decision), _):
             return decision.label + "."
-        case .answered(.local, nil, _):
-            return "Not known. The Codex wire carries no provenance for a keyboard answer."
         case .answered(_, nil, _):
             return "Not known. \(HostDevice.current.computer("The computer")) recorded who answered but not what they chose."
         case .unknown(_, .some(.optionId(let id)), _, _):

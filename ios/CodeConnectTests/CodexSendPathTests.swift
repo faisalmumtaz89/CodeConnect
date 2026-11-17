@@ -169,12 +169,12 @@ final class CodexSendPathTests: XCTestCase {
     /// The refusal the reader sees names the link, in the phone's own words —
     /// the daemon has said nothing, because nothing was sent.
     func testTheLinkRefusalIsTheAppsOwnSentence() async {
-        let (model, _) = model(link: "offline")
+        let (model, _) = model(link: "none")
         _ = await model.composeToCodex(sessionKey: key(), text: "hello")
         guard case .notSent(let reason) = model.codexControls(for: key()).compose else {
             return XCTFail("expected a not-sent outcome")
         }
-        XCTAssertEqual(reason, CodexLinkState.offline.blockedReason(for: .compose))
+        XCTAssertEqual(reason, CodexLinkState.none.blockedReason(for: .compose))
         XCTAssertEqual(
             model.outcomeNote(for: key(), lastSend: nil),
             ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill"))
@@ -717,11 +717,11 @@ final class CodexSendPathTests: XCTestCase {
             model.standingNote(for: key(), draft: long),
             ComposeProse.Note(text: ceiling, tone: .warning, icon: "warning-circle-fill"))
 
-        let (offline, _) = self.model(link: "offline")
-        let unavailable = try XCTUnwrap(offline.composeUnavailable(for: key()))
-        XCTAssertEqual(offline.sendBlockedReason(for: key(), draft: "hello"), unavailable)
+        let (unlinked, _) = self.model(link: "none")
+        let unavailable = try XCTUnwrap(unlinked.composeUnavailable(for: key()))
+        XCTAssertEqual(unlinked.sendBlockedReason(for: key(), draft: "hello"), unavailable)
         XCTAssertEqual(
-            offline.sendBlockedReason(for: key(), draft: long), ceiling, "the draft's own ceiling comes first")
+            unlinked.sendBlockedReason(for: key(), draft: long), ceiling, "the draft's own ceiling comes first")
 
         model.adoptSummariesForTesting([
             Self.summary(uid: key(), agent: "codex", link: "subscribed", runLink: "detached")

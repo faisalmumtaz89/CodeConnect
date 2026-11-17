@@ -67,7 +67,7 @@ final class ApprovalRowSpeechTests: XCTestCase {
         ])
         for (row, spoken) in [
             (pending, "Pending approval, risk MEDIUM, Bash, make zz-target, waiting "),
-            (answered, "Approval. Sent to Claude from a phone. Bash, make zz-target."),
+            (answered, "Unconfirmed approval. Answer not confirmed. Bash, make zz-target."),
         ] {
             let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
             window.rootViewController = UIHostingController(
@@ -246,10 +246,9 @@ final class ApprovalRowSpeechTests: XCTestCase {
         let answered = try approval([
             try event(root["held_request"]), try event(root["answered_allow"]),
         ])
-        let outcome = try XCTUnwrap(answered.outcome, "the wire's answer is on the row")
-        XCTAssertTrue(outcome.wasSentToClaude)
+        XCTAssertNotNil(answered.outcome, "the wire's answer is on the row")
         XCTAssertEqual(
-            spokenRow(answered), "Approval. Sent to Claude from a phone. Bash, make zz-target.")
+            spokenRow(answered), "Unconfirmed approval. Answer not confirmed. Bash, make zz-target.")
     }
 
     func testACodexCommandItEndedIsStillSpoken() throws {

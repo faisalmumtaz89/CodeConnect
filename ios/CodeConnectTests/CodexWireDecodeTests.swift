@@ -288,10 +288,9 @@ final class CodexWireDecodeTests: XCTestCase {
             "an older daemon sends no codex_link, and `none` is the safe default")
         XCTAssertNil(try summary("").codexThreadID)
 
-        // Minor 19's four words, then minor 20's fifth.
+        // Minor 19's words, then minor 20's.
         for (wire, state) in [
-            ("subscribed", CodexLinkState.subscribed), ("bound", .bound),
-            ("offline", .offline), ("none", CodexLinkState.none),
+            ("subscribed", CodexLinkState.subscribed), ("none", CodexLinkState.none),
             ("bound_not_started", .boundNotStarted),
         ] {
             XCTAssertEqual(try summary(#","codex_link":"\#(wire)""#).codexLink, state, wire)

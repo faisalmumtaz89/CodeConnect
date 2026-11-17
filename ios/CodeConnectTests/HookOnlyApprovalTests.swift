@@ -62,7 +62,7 @@ final class HookOnlyApprovalTests: XCTestCase {
             .noneAnswerable)
         XCTAssertTrue(
             DecisionCard.claudeUnanswerableReason(
-                isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: .held
+                isQuestion: false, hookOnlyApprovals: false, linkReason: nil
             ).contains("too old"))
         for decision in [AnswerDecision.allow, .deny, .option(index: 1), .text("no")] {
             XCTAssertNotNil(
@@ -88,86 +88,27 @@ final class HookOnlyApprovalTests: XCTestCase {
 
         let reason = DecisionCard.claudeUnanswerableReason(
             isQuestion: false, hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
-            linkReason: link, hold: .held)
+            linkReason: link)
 
         XCTAssertNotNil(link)
         XCTAssertEqual(reason, link)
         XCTAssertFalse(reason.contains("too old"))
     }
 
-    /// A background agent's approval asked while someone is at the Mac is shown
-    /// there, and so is one whose hook ended: neither is answerable here.
-    func testAnApprovalAtTheMacOrWhoseHoldEndedIsReadOnly() throws {
-        let atMac = try card("at_mac_request")
-        XCTAssertEqual(atMac.questionHold, .atMac)
-        XCTAssertEqual(
-            DecisionCard.answerSurface(
-                card: atMac, agent: .claude, hold: .atMac, hookOnlyApprovals: true),
-            .noneAnswerable)
-        XCTAssertEqual(
-            DecisionCard.claudeUnanswerableReason(
-                isQuestion: false, hookOnlyApprovals: true, linkReason: nil, hold: .atMac),
-            "Claude is asking this at the computer, so answer it there.")
-
-        let ended = try XCTUnwrap(try event("hold_ended").questionHoldChange)
-        XCTAssertEqual(ended.hold, .ended)
-        XCTAssertEqual(
-            DecisionCard.answerSurface(
-                card: atMac, agent: .claude, hold: ended.hold, hookOnlyApprovals: true),
-            .noneAnswerable)
+    /// An earlier daemon's hold shapes this build no longer names still decode, and say only what is true: the hold
+    /// change is an event kind this build does not name, and the hold `at_mac` is unrecognised.
+    func testAnEarlierDaemonsHoldShapesStillDecode() throws {
+        XCTAssertEqual(try event("hold_ended").kind, .other("question_hold"))
+        XCTAssertEqual(try card("at_mac_request").questionHold, .unrecognised("at_mac"))
     }
 
-    /// A phone answer to an approval is recorded as sent to Claude, which is all
-    /// that is known: Claude takes the first answer and may not use this one.
-    /// Every place the phone shows it says so, and none says confirmed or
-    /// unconfirmed.
-    func testAPhoneAnswerReadsAsSentToClaude() throws {
+    /// An earlier daemon recorded a phone's answer to an approval as sent to Claude, which Claude may not have
+    /// used. Today it reads as what it is: an answer that was never confirmed.
+    func testAnEarlierDaemonsSentAnswerReadsUnconfirmed() throws {
         let outcome = try XCTUnwrap(try event("answered_allow").approvalOutcome)
-        let attempt = AnswerAttempt.classify(applied: outcome)
-        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).title, "Sent")
-        XCTAssertEqual(
-            DecisionCard.resultBanner(for: attempt).message, "Allowed · Sent to Claude from a phone")
-        XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: outcome, now: Date()).title, "Sent")
-        XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Sent to Claude from a phone")
-        let shown = [
-            DecisionCard.resultBanner(for: attempt).title,
-            DecisionCard.resultBanner(for: attempt).message,
-            DecisionCard.resultBanner(for: attempt).provenance ?? "",
-            DecisionCard.alreadyResolvedBanner(for: outcome, now: Date()).title,
-            DecisionCard.alreadyResolvedBanner(for: outcome, now: Date()).message,
-            ApprovalRow.resolvedAccessibilityLabel(for: outcome, call: "Bash"),
-        ].joined(separator: " | ").lowercased()
-        XCTAssertFalse(shown.contains("confirm"), shown)
-    }
-
-    /// A tap on a card another phone already answered gets that phone's
-    /// outcome back as a duplicate. Nothing from this tap was sent, so it reads
-    /// as already answered, never as sent from here.
-    func testATapOnACardAlreadySentToClaudeIsADuplicate() throws {
-        let earlier = try XCTUnwrap(try event("answered_allow").approvalOutcome)
-        let attempt = AnswerAttempt.classify(duplicate: earlier, staleHash: false)
-        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).title, "Duplicate")
-        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).message, "Already answered")
-        XCTAssertEqual(
-            DecisionCard.resultBanner(for: attempt).provenance,
-            "Original outcome: Allowed from a phone, \(earlier.resolvedAt).")
-    }
-
-    /// When the Mac could not write the record, it says so after the same
-    /// sentence, and the phone still shows the answer as sent.
-    func testASentAnswerWhoseRecordFailedStillReadsAsSent() throws {
-        let sent = try XCTUnwrap(try event("answered_allow").approvalOutcome)
-        let unrecorded = AnswerOutcome(
-            requestID: sent.requestID, sessionID: sent.sessionID, decision: sent.decision,
-            resolvedBy: sent.resolvedBy, appliedVia: sent.appliedVia, resolvedAt: sent.resolvedAt,
-            detail: (sent.detail ?? "")
-                + " (sent, but the durable record could not be written; a retry will be refused "
-                + "rather than sent again)",
-            inferred: sent.inferred, indeterminate: sent.indeterminate)
-        let attempt = AnswerAttempt.classify(applied: unrecorded)
-        XCTAssertEqual(DecisionCard.resultBanner(for: attempt).title, "Sent")
-        XCTAssertEqual(DecisionCard.alreadyResolvedBanner(for: unrecorded, now: Date()).title, "Sent")
-        XCTAssertEqual(ApprovalRow.resolutionText(for: unrecorded), "Sent to Claude from a phone")
+        XCTAssertTrue(outcome.indeterminate, "the premise: the record says it was never confirmed")
+        XCTAssertEqual(DecisionCard.resultBanner(for: AnswerAttempt.classify(applied: outcome)).title, "Unconfirmed")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Answer not confirmed")
     }
 
     /// A card whose session ended before anyone answered it says so, and

@@ -1689,17 +1689,10 @@ final class HistoryPagesTests: XCTestCase {
     }
 
     /// The card's own hold is as old as the card; the Mac's is now.
-    func testAPinnedCardsHoldIsTheMacsUntilANewerOneIsHeld() async throws {
+    func testAPinnedCardsHoldIsTheMacs() async throws {
         let model = try await pinnedModel(hold: "ended")
         try await landPin(model)
-        XCTAssertEqual(model.deck.first?.questionHold, .ended, "the Mac's, not the card's own held")
-
-        model.connection.injectForTesting(
-            try approvalEvent(
-                "hold_ended", seq: 1_001,
-                ["payload": .object(["request_id": .string("toolu_allowed"), "question_hold": .string("held")])]))
-        await settle(model)
-        XCTAssertEqual(model.deck.first?.questionHold, .held, "a newer hold in the window wins")
+        XCTAssertEqual(model.deck.first?.questionHold, .unrecognised("ended"), "the Mac's, not the card's own held")
     }
 
     /// Claude's permission notification names the card's prompt; with the card

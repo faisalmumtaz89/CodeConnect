@@ -59,18 +59,18 @@ final class CodexBehaviourTests: XCTestCase {
         app.terminate()
     }
 
-    /// **A card answered at the Mac is not tappable, end to end.**
+    /// **A resolved card is not tappable, end to end.**
     ///
     /// A Codex `approval_resolved` once never reached its card:
     /// its payload is a bare `CodexResolution` carrying none of `AnswerOutcome`'s
     /// fields, so the decode returned nil, nothing was recorded, and the card
     /// stayed live and tappable on the phone **after it had already been
-    /// answered at the Mac**.
+    /// answered**.
     func testAResolvedCodexCardIsNotTappable() throws {
         // Deep-linked by name: once a card is resolved the Codex run is an
         // ordinary row and does not reliably sort first — see `openResolvedCard`.
         let app = launch(
-            "resolved-at-mac", deepLink: "codeconnect://session/\(RenderCatalog.codexSessionKey)")
+            "resolved-accepted", deepLink: "codeconnect://session/\(RenderCatalog.codexSessionKey)")
         let driver = driver()
 
         // The row itself has already changed: no `Review`, no wait clock.
@@ -84,7 +84,7 @@ final class CodexBehaviourTests: XCTestCase {
         try driver.scrollUntil(app, "the View button on screen") { view.isHittable }
         view.tap()
         try driver.require(
-            driver.element(containing: "Answered at the computer", in: app), "the ending's sentence")
+            driver.element(containing: "Answered from a phone", in: app), "the ending's sentence")
         XCTAssertFalse(app.buttons["Allow"].exists)
         XCTAssertFalse(app.buttons["Deny"].exists)
         XCTAssertFalse(

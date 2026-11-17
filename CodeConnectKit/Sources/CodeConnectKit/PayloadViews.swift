@@ -61,10 +61,9 @@ extension Event {
     }
     /// The fields a Codex result adds to what its call carried: `status`, `interrupted`, `exit_code`,
     /// `aggregated_output` and `duration_ms` (ccd's codex_adapter.rs, `tool_result_payload` beside
-    /// `tool_call_payload`), and `belongs_before`, where a result read back after its turn belongs (protocol's
-    /// event.rs, `BELONGS_BEFORE`).
+    /// `tool_call_payload`).
     static let codexResultFields: Set<String> = [
-        "status", "interrupted", "exit_code", "aggregated_output", "duration_ms", "belongs_before",
+        "status", "interrupted", "exit_code", "aggregated_output", "duration_ms",
     ]
     /// What a result says of its call's input, for a row whose call was never seen. A hook's PostToolUse names it
     /// under `tool_input`. A Codex result carries its call's own fields beside the ones a result adds, so it is the
@@ -143,15 +142,6 @@ extension Event {
     public var approvalCard: ApprovalCard? { payload["card"]?.decoded(ApprovalCard.self) }
     public var approvalOutcome: AnswerOutcome? { payload.decoded(AnswerOutcome.self) }
 
-    /// A `question_hold` event: which question card it is about, and whether
-    /// the phone can answer it now.
-    public var questionHoldChange: (requestID: String, hold: QuestionHold)? {
-        guard kind == .questionHold, let requestID = payload["request_id"]?.stringValue,
-            let hold = payload["question_hold"]?.stringValue
-        else { return nil }
-        return (requestID, QuestionHold(wire: hold))
-    }
-
     /// **What became of a Codex approval.**
     ///
     /// A Codex `approval_resolved` payload is a **bare `CodexResolution`** —
@@ -182,14 +172,6 @@ extension Event {
     public var codexResolvedRequestID: String? {
         guard kind == .approvalResolved else { return nil }
         return payload["request_id"]?.stringValue
-    }
-
-    /// The `source_event_id` of the fact a Codex item belongs immediately before,
-    /// when the Mac read it back from the thread's history after later facts of its
-    /// turn were filed (protocol `BELONGS_BEFORE`). Nil for an item filed in place.
-    public var codexBelongsBefore: String? {
-        guard source == .codex else { return nil }
-        return payload["belongs_before"]?.stringValue
     }
 
     /// The daemon's risk block, wherever it put it.

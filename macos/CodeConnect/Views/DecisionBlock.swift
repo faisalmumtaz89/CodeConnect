@@ -285,8 +285,7 @@ struct DecisionBlock: View {
             words = DecisionCard.claudeUnanswerableReason(
                 isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
-                linkReason: model.actionsBlockedReason, hold: (live ?? approval).questionHold,
-                computer: model.machineName)
+                linkReason: model.actionsBlockedReason, computer: model.machineName)
         }
         return Text(words).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("\(id).readOnly")

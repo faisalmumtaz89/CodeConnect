@@ -267,19 +267,19 @@ final class SendTextWireTests: XCTestCase {
     func testSendTextCarriesItsIdentityAndOmitsAnAbsentOne() {
         let with = encoded(
             .sendText(
-                session: "u-1", text: "hi", require: nil, submit: true,
+                session: "u-1", text: "hi", submit: true,
                 requestID: "st-1", payloadHash: "abc123"))
         XCTAssertTrue(with.contains(#""request_id":"st-1""#), with)
         XCTAssertTrue(with.contains(#""payload_hash":"abc123""#), with)
 
         let without = encoded(
             .sendText(
-                session: "u-1", text: "hi", require: nil, submit: true,
+                session: "u-1", text: "hi", submit: true,
                 requestID: nil, payloadHash: nil))
         XCTAssertFalse(without.contains("request_id"), "omitted, never null: \(without)")
         XCTAssertFalse(without.contains("payload_hash"), without)
         XCTAssertFalse(
-            with.contains("complete_native_confirmation"), "the daemon reads its absence as false: \(with)")
+            with.contains("complete_native_confirmation"), "the daemon reads no such key: \(with)")
     }
 
     func testGetCommandCatalogEncodesItsType() {
@@ -752,11 +752,9 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
 
     // MARK: applied_via (AnswerPath)
 
-    /// The bug this test exists to keep closed: an `applied_via` a newer daemon
-    /// invented used to decode to `.sendKeys`, so the app claimed it had typed
-    /// keystrokes it never sent. It must now land in its own `.unknown` case and
-    /// read as *not* `send_keys`.
-    func testUnknownAppliedViaIsNotClaimedAsSendKeys() throws {
+    /// An `applied_via` this build does not name lands in its own `.unknown`
+    /// case, never in a known one: how an answer landed is an actuation claim.
+    func testUnknownAppliedViaLandsInItsOwnCase() throws {
         let message = try decodeServer(
             """
             {"type":"answer_result","request_id":"toolu_1","result":{"status":"applied",
@@ -767,9 +765,6 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
         guard case .answerResult(_, .applied(let outcome)) = message else {
             return XCTFail("wrong result")
         }
-        XCTAssertNotEqual(
-            outcome.appliedVia, .sendKeys,
-            "an unknown path must never be read as keystrokes this build sent")
         guard case .unknown(let raw) = outcome.appliedVia else {
             return XCTFail("unknown applied_via must land in its own case, got \(outcome.appliedVia)")
         }
@@ -789,7 +784,7 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
             {"request_id":"r","session_id":"s","decision":{"type":"allow"},
              "resolved_by":"phone","applied_via":"send_keys","resolved_at":"t"}
             """)
-        XCTAssertEqual(keys.appliedVia, .sendKeys)
+        XCTAssertEqual(keys.appliedVia, .unknown("send_keys"), "an earlier daemon's path this build no longer names")
     }
 
     // MARK: source (EventSource)
@@ -884,12 +879,14 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
         XCTAssertEqual(decision, .allow)
     }
 
-    func testAnsweredByLocalWithoutADecision() throws {
+    /// An answerer an earlier daemon named and today's does not (`local`) is retained as such, never read as
+    /// the phone.
+    func testAnAnswererThisBuildDoesNotNameIsRetained() throws {
         let resolution = try decodeResolution(#"{"status":"answered","by":"local"}"#)
         guard case .answered(let by, let decision, _) = resolution else {
             return XCTFail("expected .answered, got \(resolution)")
         }
-        XCTAssertEqual(by, .local)
+        XCTAssertEqual(by, .unknown("local"))
         XCTAssertNil(decision, "an omitted decision stays nil")
     }
 

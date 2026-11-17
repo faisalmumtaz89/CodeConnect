@@ -62,12 +62,8 @@ public enum AnswerAttempt: Sendable {
     /// `indeterminate: true`. Rendering that as "Already answered" with a
     /// checkmark is the same false-confirmation the app forbids, so an
     /// indeterminate duplicate is reported as `.indeterminate`, never `.duplicate`.
-    ///
-    /// Except an answer sent to Claude: that outcome is an earlier tap's, maybe
-    /// another phone's, and nothing from this tap was sent, so it stays a
-    /// duplicate.
     static func classify(duplicate outcome: AnswerOutcome, staleHash: Bool) -> AnswerAttempt {
-        outcome.indeterminate && !outcome.wasSentToClaude
+        outcome.indeterminate
             ? .indeterminate(outcome) : .duplicate(outcome: outcome, staleHash: staleHash)
     }
 }
@@ -3719,7 +3715,7 @@ public final class AppModel {
             session: key, text: trimmed, submit: submit)
         do {
             let result = try await connection.sendText(
-                session: key, text: trimmed, require: .inputBox, submit: submit,
+                session: key, text: trimmed, submit: submit,
                 requestID: requestID, payloadHash: payloadHash)
             switch result {
             case .sent(let matched):
