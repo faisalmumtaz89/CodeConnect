@@ -442,9 +442,8 @@ final class CodexResolutionTests: XCTestCase {
     }
 
     /// The tracker reads the envelope, never a payload. A Claude session's
-    /// events carry `turn_id` too (`item_id` correlation), and its
-    /// `turn_complete` is a `session_end` carrying `hook_event_name: "Stop"` —
-    /// but nothing in the app offers Stop for a Claude session, and this is
+    /// events carry `turn_id` too (`item_id` correlation), and it has its own
+    /// `turn_complete` — but nothing in the app offers Stop for a Claude session, and this is
     /// scoped by `agent` at every call site rather than by the tracker.
     func testTheTrackerIsSourceAgnosticAndTheAgentScopeLivesAtTheCallSite() throws {
         let claudeish = try event(

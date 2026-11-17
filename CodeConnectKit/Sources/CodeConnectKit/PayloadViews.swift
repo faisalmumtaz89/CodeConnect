@@ -30,7 +30,6 @@ extension Event {
 
     // MARK: Hook facts
 
-    var hookEventName: String? { payload["hook_event_name"]?.stringValue }
     /// The hook says `tool_name`; the Codex adapter says `tool`
     /// (`tool_call_payload`: `command_execution` / `file_change`). Read through
     /// the hook's spelling alone, every Codex tool row was labelled "tool".
@@ -219,18 +218,8 @@ extension Event {
 
     // MARK: Lifecycle
 
-    /// From feature level 1 the turn boundary has its own kind. Before that, the
-    /// `Stop` hook was filed as `EventKind::SessionEnd` even though the session
-    /// was still very much alive, and the raw hook name was the only way to tell
-    /// the two apart.
-    ///
-    /// The legacy clause is kept for older daemons and is inert against a newer
-    /// one by construction — a daemon that emits `turn_complete` for `Stop`
-    /// never emits a `session_end` carrying `hook_event_name: "Stop"`.
-    public var isTurnComplete: Bool {
-        if kind == .turnComplete { return true }
-        return kind == .sessionEnd && hookEventName == "Stop"
-    }
+    /// The end of a turn, which has its own kind; the session lives on.
+    public var isTurnComplete: Bool { kind == .turnComplete }
 
     /// The command whose own turn this turn end closes, on a Claude run CodeConnect started (`local_command`, claude's
     /// own field, minor 40): `/clear`, `/compact`, `/effort low`. Nil on an agent turn's end.
@@ -240,7 +229,7 @@ extension Event {
     }
 
     var isSessionExit: Bool {
-        kind == .sessionEnd && !isTurnComplete
+        kind == .sessionEnd
     }
 
     public var exitCode: Int? { payload["exit_code"]?.intValue }

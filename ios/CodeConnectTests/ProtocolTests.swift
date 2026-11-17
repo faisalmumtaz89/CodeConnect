@@ -139,16 +139,17 @@ final class ProtocolTests: XCTestCase {
         XCTAssertFalse(event.isSessionExit, "a finished turn is not a finished session")
     }
 
-    /// The older shape still reads as a turn boundary, and a real session exit
-    /// still reads as one — which is what makes the legacy clause safe to keep.
-    func testLegacyStopShapeStillReadsAsTurnComplete() throws {
-        let legacy = try decodeServer(
+    /// A session's exit is a session exit, never a turn's end — a hook's
+    /// `session_end` carrying `Stop` included, which no daemon sends now.
+    func testASessionExitIsNotATurnEnd() throws {
+        let stop = try decodeServer(
             """
             {"type":"event","event":{"seq":4,"session_id":"cc-1","ts":"t","kind":"session_end",
              "source":"hook","payload":{"hook_event_name":"Stop"}}}
             """)
-        guard case .event(let event) = legacy else { return XCTFail("wrong message") }
-        XCTAssertTrue(event.isTurnComplete)
+        guard case .event(let stopEvent) = stop else { return XCTFail("wrong message") }
+        XCTAssertFalse(stopEvent.isTurnComplete)
+        XCTAssertTrue(stopEvent.isSessionExit)
 
         let exit = try decodeServer(
             """
