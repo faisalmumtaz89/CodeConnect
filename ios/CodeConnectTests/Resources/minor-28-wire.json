@@ -1,15 +1,12 @@
 {
   "hello_ack_capabilities": {
-    "answer_path": "hook_return",
     "can_approve_reliably": true,
     "codex_compose": true,
     "codex_interrupt": true,
     "command_catalog": true,
     "delete_session": true,
     "diff": true,
-    "fail_mode": "fail_open",
     "history_pages": true,
-    "hold_secs": 0,
     "hook_only_approvals": true,
     "prompt_identity": true,
     "push": false,

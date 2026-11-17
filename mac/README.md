@@ -655,9 +655,8 @@ gate then refuses.
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
 `send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
-`can_approve_reliably`, `fail_mode`, `answer_path`, `hold_secs`,
-`command_catalog`, `private_transport`, `start_session`, `start_worktree`, `browse_folders`,
-`machine_stats` and `stop_run` so the app disables
+`can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
+`start_worktree`, `browse_folders`, `machine_stats` and `stop_run` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1255,9 +1254,6 @@ to probe credentials.
   not writing to a device node. It is a rendering hint for a human, never a gate.
 * **`ResolvedBy::Timeout`** — closed with nobody's answer: any open card of a
   run that ended (detail "the session ended before anyone answered").
-* **`ResolvedBy::Superseded`** — recorded by daemons before minor 22, when a
-  newer prompt replaced a card before it was answered. Nothing was typed, so a
-  tap on it comes back `rejected` with that reason, not `duplicate`.
 * **`AnswerOutcome.indeterminate`** — the decision is known and whether it
   reached the agent is not: the daemon stopped between claiming it and
   recording what became of it. Never retried.

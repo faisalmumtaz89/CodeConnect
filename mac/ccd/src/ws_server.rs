@@ -32,7 +32,7 @@ use protocol::event::{Event, EventKind, Source};
 use protocol::peer::PeerRequest;
 use protocol::secret::Redacted;
 use protocol::ws::{
-    AnswerPath, AnsweredOn, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
+    AnsweredOn, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -1986,11 +1986,6 @@ pub(crate) fn capabilities(
         // able to tell those apart without version arithmetic. True in relay
         // mode as well, because a test is exactly how a relay path is proven.
         test_push: mode.is_configured(),
-        // The value phones read for how a decision fails with no daemon.
-        fail_mode: "fail_open".into(),
-        answer_path: AnswerPath::HookReturn,
-        // No fixed hold: a card is held for as long as Claude waits on it.
-        hold_secs: 0,
         send_text: true,
         // **Direct only, and false in relay mode on purpose.** A client that
         // predates `push_relay` reads this flag alone; a true here would send

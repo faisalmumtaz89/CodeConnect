@@ -71,7 +71,6 @@
     "type": "get_project_git"
   },
   "hello_ack_capabilities": {
-    "answer_path": "hook_return",
     "browse_folders": true,
     "can_approve_reliably": true,
     "claude_interrupt": true,
@@ -80,9 +79,7 @@
     "command_catalog": true,
     "delete_session": true,
     "diff": true,
-    "fail_mode": "fail_open",
     "history_pages": true,
-    "hold_secs": 0,
     "hook_only_approvals": true,
     "machine_stats": true,
     "private_transport": true,
