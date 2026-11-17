@@ -9,7 +9,7 @@ Open an issue first. Much of this codebase is the way it is because of something
 ## Building
 
 ```sh
-cd mac && cargo test --workspace     # daemon, shim, protocol
+cd mac && cargo test --workspace     # daemon, CLI, protocol
 cd mac && ./install.sh               # build and install to ~/.codeconnect/bin
 ```
 
