@@ -21,7 +21,6 @@ struct SetupView: View {
             .padding(.bottom, 16)
             VStack(spacing: 0) {
                 row("Background service", setup.service, id: "setup.service")
-                row("Terminal sessions", setup.tmux, id: "setup.tmux")
                 row("Claude Code", setup.agent(.claude, in: machines), id: "setup.claude")
                 row("Codex", setup.agent(.codex, in: machines), id: "setup.codex")
                 commandLine

@@ -3,8 +3,8 @@ import Foundation
 import Observation
 
 /// First run, and every launch after it: CodeConnect installed and its daemon answering, this Mac paired
-/// with its own daemon without a code, and what the checklist shows — the background service, tmux, the
-/// agents as that daemon finds them, and `codeconnect` on the PATH of a new Terminal.
+/// with its own daemon without a code, and what the checklist shows — the background service, the agents as
+/// that daemon finds them, and `codeconnect` on the PATH of a new Terminal.
 @MainActor @Observable
 final class Setup {
     enum Row: Equatable {
@@ -18,16 +18,15 @@ final class Setup {
     }
 
     private(set) var service: Row = .checking
-    private(set) var tmux: Row = .checking
     private(set) var commandLine: Row = .checking
     /// This Mac's daemon's id (`LocalDaemon.machineID`), read from its CodeConnect folder whatever the install did, so
     /// the agents' rows follow the service once it answers again: the computer whose agents the checklist shows, known
     /// as the start form knows it.
     private(set) var localMachineID: String?
-    /// True once this run has its answers: the service, with this Mac paired with it when it is up, and tmux;
-    /// and, while the checklist is open, the PATH line.
+    /// True once this run has its answers: the service, with this Mac paired with it when it is up, and, while
+    /// the checklist is open, the PATH line.
     private(set) var settled = false
-    /// The checklist is open: on its own when the service or tmux isn't working, and from the menu.
+    /// The checklist is open: on its own when the service isn't working, and from the menu.
     var shown = false
 
     /// This Mac's own computer among those that can start: the one whose daemon said this Mac's daemon's id when it
@@ -49,10 +48,10 @@ final class Setup {
         }
     }
 
-    /// A row that needs the person: the service, tmux, or an agent that can't start. The PATH line is an opt-in with
-    /// its own Set up, so it never asks for Try Again.
+    /// A row that needs the person: the service, or an agent that can't start. The PATH line is an opt-in with its own
+    /// Set up, so it never asks for Try Again.
     func needsAttention(_ machines: Machines) -> Bool {
-        [service, tmux, agent(.claude, in: machines), agent(.codex, in: machines)].contains(where: \.isMissing)
+        [service, agent(.claude, in: machines), agent(.codex, in: machines)].contains(where: \.isMissing)
     }
 
     let installer: Installer?
@@ -91,11 +90,10 @@ final class Setup {
     }
 
     /// Installs or updates, then pairs with this Mac's daemon if it isn't yet, then answers the rows: the
-    /// optional ones only while the checklist is open. The service and tmux read Checking… until they are answered.
+    /// optional ones only while the checklist is open. The service reads Checking… until it is answered.
     func run(machines: Machines) async {
         settled = false
         service = .checking
-        tmux = .checking
         guard let installer else {
             service = .missing("Not installed by this launch.")
             settled = true
@@ -112,12 +110,10 @@ final class Setup {
         }
         localMachineID = LocalDaemon.machineID(root: installer.root)
         let bin = installer.bin
-        tmux = FileManager.default.isExecutableFile(atPath: bin.appendingPathComponent("cc-tmux").path)
-            ? .ready("Ready") : .missing("Missing. Choose Try Again to install it again.")
-        // Only a service or tmux that isn't working opens the checklist by itself. The PATH line is optional, so it
-        // is asked only while the checklist is open: it runs a login shell. The agents are the service's answer,
-        // asked for again here, so Try Again after installing or signing in shows what is there now.
-        shown = shown || service.isMissing || tmux.isMissing
+        // Only a service that isn't working opens the checklist by itself. The PATH line is optional, so it is asked
+        // only while the checklist is open: it runs a login shell. The agents are the service's answer, asked for
+        // again here, so Try Again after installing or signing in shows what is there now.
+        shown = shown || service.isMissing
         if shown {
             thisMacContext(in: machines)?.load()
             let codeconnect = bin.appendingPathComponent("codeconnect").path
