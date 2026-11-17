@@ -216,8 +216,8 @@ private struct Composer: View {
         if blocked == nil, let running, let status = model.commandStatus(running.command, running.phase) {
             return Line(text: status.text, tone: status.tone)
         }
-        // A model, effort or mode call on a run started from the app: its answer, kept by Kit until that setting's fact
-        // moves or the next call starts.
+        // A model, effort or mode call on a run started from the app: its answer, for as long as Kit keeps it
+        // (`HostedSettings.lastOutcome`).
         if case .hostedLive(let settings) = model.runSettings(for: key), let outcome = settings.lastOutcome {
             return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }

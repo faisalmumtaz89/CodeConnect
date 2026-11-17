@@ -195,7 +195,7 @@ struct HostedSettingsSheet: View {
 
     /// **Pinned, not scrolled** — the one line the reader has to see, below the three sections. While a
     /// call is in flight it says so once (the menus above are disabled); then the Kit's own wording for
-    /// what the daemon answered, dropped by the Kit once the run's fact catches up.
+    /// what the daemon answered, for as long as the Kit keeps it (`HostedSettings.lastOutcome`).
     @ViewBuilder
     private var outcomeBar: some View {
         if case .hostedLive(let live) = settings {

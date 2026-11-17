@@ -74,8 +74,9 @@ public struct HostedSettings: Sendable, Hashable {
     public let modelDisplay: String
     /// A set call is in flight: the menus are disabled, and the selection stays on the current fact.
     public let inFlight: Bool
-    /// The last answer still worth showing — retained until that setting's fact changes or the next
-    /// call starts. `nil` when there is nothing to report.
+    /// The last answer still worth showing — retained until that setting's fact moves past it (an answer
+    /// that applies from the next turn: until this device sends the run's next message) or the next call
+    /// starts. `nil` when there is nothing to report.
     public let lastOutcome: SettingOutcome?
 }
 
