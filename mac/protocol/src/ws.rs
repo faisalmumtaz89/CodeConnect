@@ -58,7 +58,7 @@ pub enum ClientMessage {
     },
     Sessions,
     /// `session_id` is a **session reference**: either a `session_uid` (exact,
-    /// preferred, `protocol_minor >= 2`) or a tmux name like `cc-1` (legacy,
+    /// preferred, `protocol_minor >= 2`) or a run's name (legacy,
     /// which resolves to the newest run under that name). The field keeps its
     /// original name because widening what a field accepts is additive;
     /// renaming it would not be.
@@ -87,8 +87,8 @@ pub enum ClientMessage {
     /// Remove one run's record from the Mac.
     ///
     /// Deliberately the only verb that removes a run's record, and deliberately
-    /// narrow: `session_uid`, never a tmux name, because a name is handed to the
-    /// next run and a phone that deleted "cc-1" could destroy a session it never
+    /// narrow: `session_uid`, never a name, because a later run can carry the
+    /// same name and a phone that deleted "cc-1" could destroy a session it never
     /// saw. A run is refused until it has ended: `exited`, or `failed` for a
     /// start that never began (its host did not come up, or its start was
     /// refused).
@@ -2134,7 +2134,7 @@ mod tests {
         assert_eq!(request["session_uid"], "01K1B3XQ8ZC0DE5FGH7JKMNPQR");
         assert!(
             request.get("session_id").is_none(),
-            "a tmux name is handed to the next run and must never carry a delete"
+            "a later run can carry the same name, so a name must never carry a delete"
         );
 
         for (result, expected) in [

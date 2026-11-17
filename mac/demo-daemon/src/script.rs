@@ -28,9 +28,8 @@ pub struct Script {
 
 #[derive(Debug, Deserialize)]
 pub struct Run {
-    /// The tmux name a real run would carry. Reused by the next run in this
-    /// slot, exactly as `ccd` reuses `cc-1` — which is why the identity of a run
-    /// is its uid and this is only a label.
+    /// The run's `session_id`. Reused by the next run in this slot, which is
+    /// why the identity of a run is its uid and this is only a label.
     pub name: String,
     pub cwd: String,
     /// Played once, in order, when the run starts.

@@ -1668,8 +1668,9 @@ pub(crate) fn give_up_if_ended(
 /// What CodeConnect's own service definition sets for the daemon alone.
 const SERVICE_ONLY: [&str; 2] = ["CODECONNECT_LOG", "CODECONNECT_SERVICE"];
 
-/// Where this daemon keeps its state, and the tmux it was pointed at: a phone start has to
-/// reach this daemon, so these go with it whatever the session says.
+/// Where this daemon keeps its state, and the `TMUX_TMPDIR` it was given: a phone start has
+/// to reach this daemon, and a rig's must not fall back to the owner's tmux server, so these
+/// go with it whatever the session says.
 const DAEMON_LOCATION: [&str; 2] = ["CODECONNECT_HOME", "TMUX_TMPDIR"];
 
 /// The character encoding a session displayed by CodeConnect, a UTF-8 terminal,

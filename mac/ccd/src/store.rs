@@ -1804,9 +1804,8 @@ impl Store {
     /// so it is the same ordering as `created_at` without depending on two
     /// clocks agreeing.
     ///
-    /// Ambiguity is resolved rather than reported on purpose: a phone on
-    /// protocol minor 1 can only ever say `cc-1`, and refusing it would break
-    /// every client that has not been rebuilt.
+    /// Ambiguity is resolved rather than reported on purpose: a name a later run
+    /// carries again names the newest of them.
     pub fn find_session(&self, reference: &str) -> Result<Option<SessionRow>> {
         if reference.is_empty() {
             return Ok(None);

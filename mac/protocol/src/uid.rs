@@ -2,8 +2,8 @@
 //!
 //! ## Why this exists
 //!
-//! `cc-1` is a *tmux session name*. `codeconnect claude` picks the lowest free one, so
-//! when a session dies the next one is called `cc-1` again. That name was
+//! A run's name need not be unique: a later run can carry a name like `cc-1`
+//! again. That name was
 //! originally the event log's primary key too, which meant a new session
 //! inherited the dead one's log and continued its `seq` numbering. Two concrete
 //! failures came out of that:
@@ -16,20 +16,19 @@
 //!     duplicate — an answer nobody gave.
 //!
 //! The fix is to separate the two jobs the name was doing. `session_id` stays
-//! the human-facing tmux name (display, `codeconnect attach`, `send-keys` targeting);
-//! `session_uid` is minted once at spawn, never reused, and is what the log,
-//! the tail cursors and the answers ledger are keyed by.
+//! the run's name (a run CodeConnect started is named by its uid);
+//! `session_uid` is minted once at spawn, never reused, and is what the log
+//! and the answers ledger are keyed by.
 //!
 //! ## Why ULID rather than a UUID
 //!
 //! A ULID is 48 bits of millisecond timestamp followed by 80 bits of entropy,
 //! rendered in Crockford Base32. Two properties earn it the choice:
 //!
-//!   * **It sorts by creation time as a plain string**, so "the newest `cc-1`"
-//!     — the resolution a phone that only knows the legacy name needs — is a
-//!     string comparison rather than a join against `created_at`.
+//!   * **It sorts by creation time as a plain string**, so it settles "the newest
+//!     run under a name" where two runs share a `created_at`.
 //!   * **It is one case-insensitive token with no separators**, so it survives
-//!     being a filename, a tmux argument and a JSON key without quoting.
+//!     being a filename and a JSON key without quoting.
 //!
 //! 80 bits of entropy per millisecond is the collision argument: two sessions
 //! minted in the same millisecond collide with probability 2^-80. Not colliding

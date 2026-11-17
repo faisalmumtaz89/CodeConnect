@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "CodeConnect shim: hosts a real claude session in a private tmux server, attached in place."
+description = "CodeConnect command line: daemon install, pairing, sessions, mail tools, updates."
 
 [[bin]]
 name = "codeconnect"

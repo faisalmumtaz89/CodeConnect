@@ -60,8 +60,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     // Before anything is opened, and so before any child: every socket a
-    // session holds draws on this limit, and the tmux server ccd starts for a
-    // phone start inherits it.
+    // session holds draws on this limit, and every agent host and Codex
+    // app-server ccd starts inherits it.
     match protocol::fdlimit::raise() {
         Ok((before, after)) if after > before => {
             crate::log_info!("file limit raised from {before} to {after}")

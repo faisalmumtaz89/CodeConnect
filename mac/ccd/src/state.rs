@@ -1206,7 +1206,7 @@ impl Daemon {
     /// carries the `ticket` its admission minted and re-validates it on
     /// waking — atomically with the exclusion snapshot, so a deletion or
     /// prune is seen whole or not at all, and (for quiet-state pushes,
-    /// `heed_progress`) a tool starting after admission means the announced
+    /// `heed_progress`) a turn starting after admission means the announced
     /// wait is over and the push dies.
     ///
     /// **Best-effort exactly-once, explicitly.** A socket write that

@@ -53,7 +53,7 @@ pub fn approval_payload_hash(tool_name: &str, tool_input: &serde_json::Value) ->
 /// the ledger's answer to "is this the same mutation?" cannot be forged by
 /// changing any part of what would actually be typed.
 ///
-/// The session is hashed exactly as the client named it (a uid or a tmux name),
+/// The session is hashed exactly as the client named it (a uid or a name),
 /// because that is the only string both sides can agree on before the daemon
 /// has resolved it.
 ///
