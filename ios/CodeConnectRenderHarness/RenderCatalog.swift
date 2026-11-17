@@ -833,6 +833,60 @@ enum RenderCatalog {
                 try driver.require(driver.text(containing: "Plan", in: app), "the Plan mode row")
             }),
         RenderScenario(
+            name: "session-settings-claude-plan",
+            purpose: "the composer settings control — a hosted Claude run in Plan, the mode named beside the model",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-settings-claude-bypass",
+            purpose: "the composer settings control — Claude in Bypass permissions, a confirm mode named in red",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-2"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-settings-codex-default",
+            purpose: "the composer settings control — a live Codex run at its default, the model named alone",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-settings-codex-full",
+            purpose: "the composer settings control — Codex in Full Access, a confirm mode named in red",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-2"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-settings-opens-sheet-claude",
+            purpose: "tapping the composer settings control opens the unified settings sheet for a Claude run",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                try driver.require(
+                    driver.text(containing: "Permission mode", in: app),
+                    "the settings sheet, opened by the control")
+            }),
+        RenderScenario(
+            name: "session-settings-opens-sheet-codex",
+            purpose: "tapping the composer settings control opens the unified settings sheet for a Codex run",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                try driver.require(
+                    driver.text(containing: "Permission mode", in: app),
+                    "the settings sheet, opened by the control")
+            }),
+        RenderScenario(
             name: "session-compact-sheet",
             purpose: "the /compact sheet — optional field, always-active button",
             arguments: [

@@ -1027,6 +1027,7 @@ struct SessionDetailView: View {
                 if let palette = paletteContent {
                     CommandPalette(content: palette, onAction: route)
                 }
+                HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
                 SessionComposeBar(
                     key: key,
                     text: $composeText,
