@@ -15,7 +15,7 @@ cd mac && ./install.sh               # build and install to ~/.codeconnect/bin
 
 The Rust workspace is in `mac/`, the iPhone app in `ios/`, the Mac app in `macos/`, the
 code both apps share in the `CodeConnectKit/` package, design notes in `docs/`, and the
-recorded hook payloads and transcripts the tests replay in `fixtures/`.
+recordings the tests replay in `fixtures/`.
 
 Building needs Rust 1.85 or later and Xcode 26 or newer. The app deploys to iOS 17, but
 one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#available`
