@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::event::{
-    EventKind, Lifecycle, MenuMode, MenuModel, PendingEvent, RunMenus, SessionKey, Source,
+    Event, EventKind, Lifecycle, MenuMode, MenuModel, PendingEvent, RunMenus, SessionKey, Source,
 };
 use protocol::host::Trust;
 use protocol::proc_identity::{
@@ -744,6 +744,7 @@ async fn link(
                 match (frame["method"].as_str(), thread, turn) {
                     (Some("turn/started"), Some(thread), Some(turn)) => {
                         running = Some((thread.to_string(), turn.to_string()));
+                        daemon.note_turn_running(&uid);
                     }
                     (Some("turn/completed"), _, Some(turn)) => {
                         record_tools(host.as_ref(), &mut tools);
@@ -765,7 +766,17 @@ async fn link(
                     .then(|| frame["params"]["turn"]["id"].as_str().map(str::to_string))
                     .flatten();
                 let events = adapter.ingest(&frame);
-                file(&daemon, &uid, unfiled(&daemon, &uid, &[&frame["params"]["item"]], events).await).await;
+                let filed =
+                    file(&daemon, &uid, unfiled(&daemon, &uid, &[&frame["params"]["item"]], events).await).await;
+                // A live turn's end is an occasion to ring the phone again about the decisions
+                // still open ([`Daemon::push_turn_complete`]), as a hosted Claude run's is: only a
+                // turn that completed, and only as it is filed, so an end a resume already
+                // filed, here or before a restart, rings nothing.
+                if let Some(end) = filed.iter().find(|event| {
+                    event.kind == EventKind::TurnComplete && event.payload["status"] == "completed"
+                }) {
+                    daemon.push_turn_complete(&session, end).await;
+                }
                 heard(&daemon, &uid, &mut sends, &frame).await;
                 let Some(due) =
                     owed.take_if(|owed| ended.as_deref() == Some(owed.turn.as_str()))
@@ -1776,14 +1787,20 @@ async fn retire(
 
 /// File `events` in order ([`Daemon::ingest`]: once each, then out to every subscriber),
 /// telling the mail wake rule of each one newly filed ([`crate::mail::note_filed_event`]).
-async fn file(daemon: &Arc<Daemon>, uid: &str, events: Vec<PendingEvent>) {
+/// The events newly filed; one the log already held is not among them.
+async fn file(daemon: &Arc<Daemon>, uid: &str, events: Vec<PendingEvent>) -> Vec<Event> {
+    let mut filed = Vec::new();
     for pending in events {
         match daemon.ingest(pending).await {
-            Ok(Some(event)) => crate::mail::note_filed_event(daemon, uid, &event).await,
+            Ok(Some(event)) => {
+                crate::mail::note_filed_event(daemon, uid, &event).await;
+                filed.push(event);
+            }
             Ok(None) => {}
             Err(err) => crate::log_error!("{uid}: could not file a Codex event: {err:#}"),
         }
     }
+    filed
 }
 
 /// `events` but the person's messages among `items` that a phone's message already filed
@@ -2770,6 +2787,11 @@ mod tests {
     }
 
     fn rig() -> Rig {
+        rig_sending(Arc::new(crate::apns::LoggingPushSender::new()))
+    }
+
+    /// [`rig`], its daemon's pushes going to `push`.
+    fn rig_sending(push: Arc<dyn crate::apns::PushSender>) -> Rig {
         let uid = protocol::uid::new().unwrap();
         let root = PathBuf::from(format!("/tmp/ccx3.{}", &uid[16..]));
         std::fs::create_dir_all(root.join("home")).unwrap();
@@ -2780,7 +2802,7 @@ mod tests {
             (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
         ]);
         Rig {
-            daemon: daemon_on(&root),
+            daemon: daemon_sending(&root, "/usr/bin/false", push),
             project: root.join("project").display().to_string(),
             root,
             environment,
@@ -2796,6 +2818,15 @@ mod tests {
 
     /// [`daemon_on`], with `codex` as config.json's `codex_bin`.
     fn daemon_with(root: &Path, codex: &str) -> Arc<Daemon> {
+        daemon_sending(root, codex, Arc::new(crate::apns::LoggingPushSender::new()))
+    }
+
+    /// [`daemon_with`], its pushes going to `push`.
+    fn daemon_sending(
+        root: &Path,
+        codex: &str,
+        push: Arc<dyn crate::apns::PushSender>,
+    ) -> Arc<Daemon> {
         let store = Store::open(&root.join("events.db")).unwrap();
         Daemon::new(
             Config {
@@ -2803,7 +2834,7 @@ mod tests {
                 ..Config::default()
             },
             Arc::new(store),
-            Arc::new(crate::apns::LoggingPushSender::new()),
+            push,
             Endpoint {
                 host: "test.ts.net".into(),
                 port: 8787,
@@ -2868,6 +2899,25 @@ mod tests {
         }
     }
 
+    /// The folder of the run being started, once the start has made it: the one no stand-in
+    /// listens in yet, so a second run in a rig is served apart from the first.
+    async fn starting_run_folder(rig: &Rig) -> PathBuf {
+        loop {
+            let found = std::fs::read_dir(rig.root.join("runs"))
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .find(|dir| !dir.join("as.sock").exists())
+                });
+            if let Some(dir) = found {
+                return dir;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
     /// A repository skill and a user skill, as `skills/list` reports them.
     const REPO_SKILL: &str = "/repo/.codex/skills/deploy/SKILL.md";
 
@@ -2900,7 +2950,7 @@ mod tests {
         rig: &Rig,
         script: Vec<(&str, serde_json::Value)>,
     ) -> (Vec<serde_json::Value>, Socket) {
-        let dir = run_folder(rig).await;
+        let dir = starting_run_folder(rig).await;
         while launches(rig) == 0 {
             tokio::time::sleep(POLL).await;
         }
@@ -4310,12 +4360,21 @@ mod tests {
         first: Socket,
         resume_answer: serde_json::Value,
     ) -> (Arc<Daemon>, Socket, serde_json::Value) {
+        resumed_on(rig, first, resume_answer, daemon_on(&rig.root)).await
+    }
+
+    /// [`resumed_with`], the restarted daemon being `restarted`.
+    async fn resumed_on(
+        rig: &Rig,
+        first: Socket,
+        resume_answer: serde_json::Value,
+        restarted: Arc<Daemon>,
+    ) -> (Arc<Daemon>, Socket, serde_json::Value) {
         drop(first);
         let dir = run_folder(rig).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         std::fs::remove_file(dir.join("as.sock")).unwrap();
         let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
-        let restarted = daemon_on(&rig.root);
         restarted.recover().await;
         let ((), (ws, params)) = tokio::join!(
             restarted.recover_codex_runs(&rig.root, Ok(PathBuf::from(CODECONNECT))),
@@ -8386,5 +8445,191 @@ mod tests {
             "applied_confirmed": answer("mode-3", confirmed),
             "session_codex_full_access": full,
         })
+    }
+
+    // ------------------------------- an engine turn's end as a doorbell
+
+    /// How many doorbells `capture` holds once a dispatch grace, and some, has passed.
+    async fn rung_after_grace(capture: &crate::apns::CaptureSender) -> usize {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        capture.0.lock().unwrap().len()
+    }
+
+    /// The stand-in tells the run on `thread` its turn `turn` started.
+    async fn turn_starts(ws: &mut Socket, thread: &str, turn: &str) {
+        tell(
+            ws,
+            &json!({"method": "turn/started", "params": {"threadId": thread,
+                "turn": {"id": turn, "status": "inProgress", "items": []}}}),
+        )
+        .await;
+    }
+
+    /// The stand-in tells the run on `thread` its turn `turn` ended `status`.
+    async fn turn_ends(ws: &mut Socket, thread: &str, turn: &str, status: &str) {
+        tell(
+            ws,
+            &json!({"method": "turn/completed", "params": {"threadId": thread,
+                "turn": {"id": turn, "status": status, "items": []}}}),
+        )
+        .await;
+    }
+
+    /// A rig whose doorbells land in a capture, and an engine run on it holding one approval
+    /// card the phone can answer, its own doorbell already rung: the decision open elsewhere
+    /// a turn's end rings about. The run's uid and the stand-in's end of its link.
+    async fn a_codex_card_open() -> (Rig, Arc<crate::apns::CaptureSender>, String, Socket) {
+        let capture = Arc::new(crate::apns::CaptureSender::new());
+        let rig = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let frames = frames_of(FILE_FRAMES);
+        let (thread, turn, started, asked) = on_the_running_turn(&frames, 17, 19);
+        let (uid, mut ws) = engine_run(&rig, "req-card", &thread, &turn).await;
+        tell(&mut ws, &started).await;
+        tell(&mut ws, &asked).await;
+        assert_eq!(cards_of(&rig.daemon, &uid, 1).await.len(), 1);
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            1,
+            "the card's own doorbell"
+        );
+        (rig, capture, uid, ws)
+    }
+
+    /// **An engine run's turn end rings again about a decision still open, and about
+    /// nothing else**, as a hosted Claude run's does. With nothing the phone can answer open,
+    /// a Codex turn completing rings nothing; with an approval open on another run, it rings
+    /// once more, about that approval, by the run that finished.
+    ///
+    /// **Mutation:** take the push out of the link and the second leg rings nothing.
+    #[tokio::test]
+    async fn an_engine_turns_end_rings_only_about_a_decision_open_elsewhere() {
+        let capture = Arc::new(crate::apns::CaptureSender::new());
+        let quiet = rig_sending(Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>);
+        let (uid, mut ws) = engine_run(&quiet, "req-quiet", "thr-q", "turn-q1").await;
+        turn_starts(&mut ws, "thr-q", "turn-q2").await;
+        turn_ends(&mut ws, "thr-q", "turn-q2", "completed").await;
+        assert_eq!(rung_after_grace(&capture).await, 0, "with nothing open");
+        drop(ws);
+        end_run(&quiet, &uid).await;
+
+        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
+        turn_starts(&mut ws, "thr-b", "turn-b2").await;
+        turn_ends(&mut ws, "thr-b", "turn-b2", "completed").await;
+        assert_eq!(
+            rung_after_grace(&capture).await,
+            2,
+            "the card's, then the turn's end about it"
+        );
+        {
+            let rings = capture.0.lock().unwrap();
+            let (hint, _) = rings.last().unwrap();
+            assert_eq!(
+                (hint.kind, hint.decisions),
+                (crate::apns::PushKind::Approval, 1)
+            );
+            assert_eq!(hint.session_uid, uid, "rung by the run that finished");
+        }
+        drop((ws, asking_ws));
+        end_run(&rig, &uid).await;
+        end_run(&rig, &asking).await;
+    }
+
+    /// **Two engine turns ending inside one dispatch grace ring once**: the second turn's
+    /// start cancels the first one's doorbell, and its end rings in its place.
+    ///
+    /// **Mutation:** take the push out of the link and nothing rings after the card's.
+    #[tokio::test]
+    async fn two_engine_turns_ending_inside_one_grace_ring_once() {
+        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
+        turn_starts(&mut ws, "thr-b", "turn-b2").await;
+        turn_ends(&mut ws, "thr-b", "turn-b2", "completed").await;
+        turn_starts(&mut ws, "thr-b", "turn-b3").await;
+        turn_ends(&mut ws, "thr-b", "turn-b3", "completed").await;
+        assert_eq!(rung_after_grace(&capture).await, 2, "the card's, then one");
+        drop((ws, asking_ws));
+        end_run(&rig, &uid).await;
+        end_run(&rig, &asking).await;
+    }
+
+    /// **An engine turn starting inside the grace silences the last one's doorbell**: the
+    /// run is working again, so there is no finished turn left to announce.
+    ///
+    /// **Mutation:** take `note_turn_running` out of the link and the first turn's end rings.
+    #[tokio::test]
+    async fn an_engine_turn_starting_inside_the_grace_silences_the_last_ones_doorbell() {
+        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
+        turn_starts(&mut ws, "thr-b", "turn-b2").await;
+        turn_ends(&mut ws, "thr-b", "turn-b2", "completed").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        turn_starts(&mut ws, "thr-b", "turn-b3").await;
+        assert_eq!(rung_after_grace(&capture).await, 1, "the card's alone");
+        drop((ws, asking_ws));
+        end_run(&rig, &uid).await;
+        end_run(&rig, &asking).await;
+    }
+
+    /// **An engine turn that did not complete rings nothing**: an interrupted turn was
+    /// stopped by the person the doorbell would wake.
+    ///
+    /// **Mutation:** ring any turn's end and the interrupted one rings.
+    #[tokio::test]
+    async fn an_interrupted_engine_turns_end_rings_nothing() {
+        let (rig, capture, asking, asking_ws) = a_codex_card_open().await;
+        let (uid, mut ws) = engine_run(&rig, "req-b", "thr-b", "turn-b1").await;
+        turn_starts(&mut ws, "thr-b", "turn-b2").await;
+        turn_ends(&mut ws, "thr-b", "turn-b2", "interrupted").await;
+        assert_eq!(rung_after_grace(&capture).await, 1, "the card's alone");
+        drop((ws, asking_ws));
+        end_run(&rig, &uid).await;
+        end_run(&rig, &asking).await;
+    }
+
+    /// **A turn's end a restarted ccd files from a resume rings nothing**: it ended while ccd
+    /// was down, and nobody is waiting to hear of it now. The run's card stands on its running
+    /// turn across the restart, so a ring would have a decision to be about.
+    ///
+    /// **Mutation:** ring a resume's filed turn end too, and it rings.
+    #[tokio::test]
+    async fn a_turns_end_a_restarted_ccd_files_from_a_resume_rings_nothing() {
+        let (rig, _, uid, ws) = a_codex_card_open().await;
+        let capture = Arc::new(crate::apns::CaptureSender::new());
+        let restarted = daemon_sending(
+            &rig.root,
+            "/usr/bin/false",
+            Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
+        );
+        let follow_up: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mut finished = follow_up["answerMidTurn"]["result"]["thread"]["turns"][0].clone();
+        assert_eq!(finished["status"], "completed");
+        let mut resume: serde_json::Value = serde_json::from_str(RUNNING_TURN).unwrap();
+        let turns = resume["result"]["thread"]["turns"].as_array_mut().unwrap();
+        // A resume lists its turns in the order they started: the finished one before.
+        let running_since = turns[0]["startedAt"].as_i64().unwrap();
+        finished["startedAt"] = json!(running_since - 10);
+        finished["completedAt"] = json!(running_since - 5);
+        turns.insert(0, finished);
+        let (restarted, ws, _) = resumed_on(&rig, ws, resume["result"].clone(), restarted).await;
+        link_attached(&restarted, &uid).await;
+        assert!(
+            restarted
+                .db
+                .events_after(uid.clone(), 0, 10_000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == EventKind::TurnComplete),
+            "the resume filed the finished turn's end"
+        );
+        assert_eq!(
+            cards_of(&restarted, &uid, 1).await.len(),
+            1,
+            "the card stands"
+        );
+        assert_eq!(rung_after_grace(&capture).await, 0, "the resume's end");
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 }
