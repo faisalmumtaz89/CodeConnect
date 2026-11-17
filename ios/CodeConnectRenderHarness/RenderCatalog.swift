@@ -482,7 +482,7 @@ enum RenderCatalog {
     /// A pairing link as `codeconnect pair` prints it (`fixtures/wire/qr-link.txt`),
     /// naming a computer with a long name on a port other than the default.
     static func pairingLink(version: Int) -> String {
-        "https://codeconnect.sh/p#v=\(version)&h=jordans-macbook-pro-16-inch-m4-max.tail1a2b3c.ts.net&p=18794&c=ABCD2345"
+        "https://codeconnect.sh/p#v=\(version)&h=jordans-macbook-pro-16-inch-m4-max.example.ts.net&p=18794&c=ABCD2345"
     }
 
     static let product: [RenderScenario] = [
