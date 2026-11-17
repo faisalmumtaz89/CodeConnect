@@ -300,14 +300,11 @@ enum Fixtures {
     /// having restarted, and its card correctly stops being current —
     /// which is right behaviour and the wrong fixture.
     ///
-    /// Without these the Model sheet's populated state — a raw hook id in
-    /// monospace, a variant line, and a provenance line under it — is
-    /// unreachable by any render, and that exact state is the one that
-    /// shipped looking broken. `claude-opus-5[1m]` is verbatim what the
+    /// Without these no render reaches a run whose model and effort Claude
+    /// Code has confirmed. `claude-opus-5[1m]` is verbatim what the
     /// SessionStart hook hands the app; the effort line is verbatim what
     /// Claude Code's `/effort` writes to its transcript, description and
-    /// all, so the Effort sheet's confirmed state has a real string to
-    /// wrap rather than a tidy one.
+    /// all, so a render has a real string to wrap rather than a tidy one.
     private static func confirmedFactsJSON(now: Date) -> [String] {
         let ts = rfc3339(now)
         let effort =
@@ -399,61 +396,8 @@ enum Fixtures {
         "device_name":"iPhone"}
         """
 
-    /// Claude Code's own receipt for a command, delivered the way the real
-    /// daemon delivers it: the send returns, and the transcript line
-    /// arrives afterwards as an event.
-    ///
-    /// Without it the `kept` states are unreachable by any render, and a
-    /// state nobody can reach is a state nobody has looked at.
-    ///
-    /// Every line is verbatim from the 2.1.223 measurement rig, escape
-    /// codes and all: `Kept model as \u{1b}[1mFable 5\u{1b}[22m` is what
-    /// the transcript actually holds, so the render exercises the same
-    /// stripping the live path does.
-    static func receiptFrame(mode: String, session: String, now: Date = Date()) -> String? {
-        let line: String
-        switch mode {
-        case "kept-model":
-            line = "Kept model as \u{1b}[1mFable 5\u{1b}[22m"
-        case "kept-effort":
-            line = "Kept effort level as high"
-        case "set-effort-session":
-            line =
-                "Set effort level to max (this session only): Maximum capability with "
-                + "deepest reasoning. May use excessive tokens resulting in long response "
-                + "times or overthinking. Use sparingly for the hardest tasks."
-        default:
-            return nil
-        }
-        let escaped = line.replacingOccurrences(of: "\u{1b}", with: "\\u001b")
-        // Seq 14, immediately after `confirmedFactsJSON`'s 12 and 13: a
-        // higher number leaves a hole, and the session then carries a gap
-        // and its banner through a scenario that is about a sheet. A
-        // fixture adds the one fact it is for, not a fault as well.
-        return """
-            {"type":"event","event":{"seq":14,"session_id":"\(session)",\
-            "ts":"\(rfc3339(now))","kind":"user_message","source":"transcript",\
-            "payload":{"type":"user","message":{"role":"user",\
-            "content":"<local-command-stdout>\(escaped)</local-command-stdout>"}}}}
-            """
-    }
-
-    /// `turn-ended`: the turn a `/model` was typed into ends, and no receipt
-    /// ever arrives — ccd's `turn_complete` for Claude Code's `turn_duration`,
-    /// the shape recorded on 2.1.308 (`transcript-local-commands-wire.json`,
-    /// run `commands-mid-turn`, seq 19). Seq 14, for `receiptFrame`'s reason.
-    static func turnEndFrame(mode: String, session: String, now: Date = Date()) -> String? {
-        guard mode == "turn-ended" else { return nil }
-        return """
-            {"type":"event","event":{"seq":14,"session_id":"\(session)",\
-            "ts":"\(rfc3339(now))","kind":"turn_complete","source":"transcript",\
-            "payload":{"type":"system","subtype":"turn_duration","durationMs":15143}}}
-            """
-    }
-
     /// `-cc.debug.sendText <mode>` — what the stubbed daemon says to any
-    /// send. The `kept-*` and `set-effort-session` modes answer `sent` and let `receiptFrame`
-    /// supply the transcript line, which is the shape of the real thing.
+    /// send.
     static func sendTextResult(mode: String) -> SendTextResult {
         switch mode {
         case "duplicate":

@@ -181,20 +181,6 @@ final class SendIdempotencyTests: XCTestCase {
     }
 
 
-    /// The one sanctioned bypass: the Model sheet's own injection.
-    func testTheModelSheetPathBypassesThePolicy() async {
-        let model = AppModel(cache: EventCache())
-        model.connection.simulateConnectedForTesting()
-        var wired: [String] = []
-        model.connection.sendTextStub = { @MainActor _, text in
-            wired.append(text)
-            return .sent(matched: "foragents")
-        }
-        let attempt = await model.sendModelCommand("sonnet", to: "u-1")
-        guard case .sent = attempt else { return XCTFail("\(attempt)") }
-        XCTAssertEqual(wired, ["/model sonnet"])
-    }
-
     func testADuplicateReadsAsAlreadyApplied() async {
         let model = connectedModel { _, _ in
             .duplicate(matched: "foragents", appliedAt: "2026-08-04T20:00:00Z")

@@ -656,7 +656,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     public let pending: [PendingRef]
     /// The model this run last confirmed, with the event that confirmed it
     /// (minor 23). `nil` until something has said.
-    public let model: ModelFact?
+    public let model: SessionFact?
     /// The permission mode the main agent last reported, with the event that
     /// reported it (minor 23). `nil` until something has said.
     public let permissionMode: SessionFact?
@@ -726,7 +726,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         codexLink = try c.decodeIfPresent(CodexLinkState.self, forKey: .codexLink) ?? .none
         relaunchable = try c.decodeIfPresent(Bool.self, forKey: .relaunchable)
         pending = try c.decodeIfPresent([PendingRef].self, forKey: .pending) ?? []
-        model = try c.decodeIfPresent(ModelFact.self, forKey: .model)
+        model = try c.decodeIfPresent(SessionFact.self, forKey: .model)
         permissionMode = try c.decodeIfPresent(SessionFact.self, forKey: .permissionMode)
         effort = try c.decodeIfPresent(SessionFact.self, forKey: .effort)
         menus = try c.decodeIfPresent(RunMenus.self, forKey: .menus)
@@ -807,52 +807,6 @@ public struct PendingRef: Codable, Sendable, Hashable {
 public struct SessionFact: Codable, Sendable, Hashable {
     public let value: String
     public let seq: UInt64
-}
-
-/// The model fact, with which kind of event said it and when.
-public struct ModelFact: Codable, Sendable, Hashable {
-    public let value: String
-    public let seq: UInt64
-    public let source: ModelSource
-    /// The deciding event's `ts`.
-    public let at: String
-}
-
-/// Which kind of event said what the model is.
-public enum ModelSource: Sendable, Hashable {
-    /// The `model` of a `session_start`.
-    case sessionStart
-    /// Claude Code's own `/model` receipt.
-    case command
-    /// A word this build does not know.
-    case unrecognised(String)
-
-    init(wire: String) {
-        switch wire {
-        case "session_start": self = .sessionStart
-        case "command": self = .command
-        default: self = .unrecognised(wire)
-        }
-    }
-
-    var wire: String {
-        switch self {
-        case .sessionStart: return "session_start"
-        case .command: return "command"
-        case .unrecognised(let raw): return raw
-        }
-    }
-}
-
-extension ModelSource: Codable {
-    public init(from decoder: Decoder) throws {
-        self.init(wire: try decoder.singleValueContainer().decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(wire)
-    }
 }
 
 /// The settings an app may choose for a live hosted Claude run (minor 39), as its agent offers
@@ -2123,7 +2077,7 @@ public enum ClientMessage: Sendable {
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?)
     case sendText(
         session: String, text: String, require: PromptPresence?, submit: Bool,
-        requestID: String?, payloadHash: String?, completeNativeConfirmation: Bool)
+        requestID: String?, payloadHash: String?)
     case getDiff(session: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
@@ -2242,7 +2196,6 @@ extension ClientMessage: Encodable {
         case text
         case require
         case submit
-        case completeNativeConfirmation = "complete_native_confirmation"
         case attachmentID = "attachment_id"
         case cols
         case rows
@@ -2314,8 +2267,7 @@ extension ClientMessage: Encodable {
             // "no scope" anyway while making the frame wrong to read.
             try c.encodeIfPresent(session, forKey: .sessionID)
         case .sendText(
-            let session, let text, let require, let submit, let requestID, let payloadHash,
-            let completeNativeConfirmation):
+            let session, let text, let require, let submit, let requestID, let payloadHash):
             try c.encode("send_text", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(text, forKey: .text)
@@ -2325,11 +2277,6 @@ extension ClientMessage: Encodable {
             // null would say "present but empty".
             try c.encodeIfPresent(requestID, forKey: .requestID)
             try c.encodeIfPresent(payloadHash, forKey: .payloadHash)
-            // Only ever true from a control that stated this command's
-            // consequences before the tap. It is a permission, not an
-            // instruction: the daemon still decides which commands it applies
-            // to, so this can never nominate one.
-            try c.encode(completeNativeConfirmation, forKey: .completeNativeConfirmation)
         case .registerPush(let token, let environment, let relayCredential):
             try c.encode("register_push", forKey: .type)
             try c.encode(token, forKey: .token)

@@ -7,8 +7,8 @@ import Foundation
 /// no menus suppresses the picker rather than falling back to a static family list, which is what keeps
 /// a detached, ended or older-daemon run off a list it cannot act on.
 public enum RunSettings: Sendable, Hashable {
-    /// Not a hosted run these controls own: a terminal (tmux) run — Claude or Codex — keeps its own
-    /// controls. This entry draws nothing.
+    /// Not a hosted run these controls own: a terminal (tmux) run, Claude's or Codex's. This entry draws
+    /// nothing.
     case deferToOtherPath
     /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
     /// No picker: the model fact shows read-only exactly as it arrived (no label lookup without a menu

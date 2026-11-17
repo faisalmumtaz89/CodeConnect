@@ -62,11 +62,6 @@ final class RenderPass: XCTestCase {
         try render(at: .ax5, RenderCatalog.startSession)
     }
 
-    /// The Model sheet's screens, which read Kit's `ModelDisplay.families`.
-    func testRendersModelSheetAtLarge() throws {
-        try render(at: .large, RenderCatalog.all.filter { $0.name.hasPrefix("session-model-") })
-    }
-
     /// The "Not sent: stopped" row, on its own, for a quick look at a Stop-cancelled send.
     func testRendersNotSentStoppedAtLarge() throws {
         try render(at: .large, RenderCatalog.all.filter { $0.name == "session-not-sent-stopped" })

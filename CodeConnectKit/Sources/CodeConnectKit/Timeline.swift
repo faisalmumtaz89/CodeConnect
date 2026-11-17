@@ -656,10 +656,10 @@ public enum TimelineBuilder {
                                 kind: .sessionStart,
                                 symbol: "play-circle",
                                 title: title,
-                                // Through the same mapper the Model sheet
-                                // uses, so the two never disagree about the
-                                // same id; one this build does not recognise
-                                // passes through verbatim.
+                                // Through the one model mapper, so no two
+                                // places disagree about the same id; one this
+                                // build does not recognise passes through
+                                // verbatim.
                                 detail: event.modelName.map {
                                     let display = ModelDisplay.from($0)
                                     return [display.name, display.meta]

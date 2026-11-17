@@ -1045,8 +1045,7 @@ public final class DaemonConnection {
     /// a name.
     public func sendText(
         session: String, text: String, require: PromptPresence?, submit: Bool,
-        requestID: String? = nil, payloadHash: String? = nil,
-        completeNativeConfirmation: Bool = false
+        requestID: String? = nil, payloadHash: String? = nil
     ) async throws -> SendTextResult {
         #if DEBUG
             sendTextIdentities.append((requestID: requestID, payloadHash: payloadHash))
@@ -1057,8 +1056,7 @@ public final class DaemonConnection {
             store: \.sendTextWaiters,
             send: .sendText(
                 session: session, text: text, require: require, submit: submit,
-                requestID: requestID, payloadHash: payloadHash,
-                completeNativeConfirmation: completeNativeConfirmation))
+                requestID: requestID, payloadHash: payloadHash))
     }
 
     /// Which slash commands the session's Claude Code actually has, from the

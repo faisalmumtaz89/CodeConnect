@@ -960,9 +960,6 @@ struct SessionDetailView: View {
     /// answer. Editing, another send, or leaving the session drops it.
     @State private var unansweredSend: UnansweredSend?
     @State private var askingAgain = false
-    @State private var showModelSheet = false
-    @State private var modelSheetPrefill = ""
-    @State private var showEffortSheet = false
     @State private var showHostedSettingsSheet = false
     @State private var showCompactSheet = false
     @State private var compactSheetPrefill = ""
@@ -1141,16 +1138,6 @@ struct SessionDetailView: View {
         // not on the timeline's composer, so a handshake while the terminal is showing
         // still counts.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
-        .sheet(isPresented: $showModelSheet) {
-            ModelSheet(sessionKey: key, prefill: modelSheetPrefill, onLanded: consumeDraft)
-                .environment(model)
-                .ccResizableSheet()
-        }
-        .sheet(isPresented: $showEffortSheet) {
-            EffortSheet(sessionKey: key, onLanded: consumeDraft)
-                .environment(model)
-                .ccResizableSheet()
-        }
         .sheet(isPresented: $showHostedSettingsSheet) {
             HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
                 .environment(model)
@@ -1545,28 +1532,15 @@ struct SessionDetailView: View {
     /// land on the Mac; a cancelled sheet leaves the draft exactly as typed.
     private func route(_ action: CommandAction) {
         switch action {
-        case .nativeModel(let prefillArgs):
-            // A hosted run offers structured menus the daemon validates — model, effort and mode in one
-            // sheet; a terminal run has only the typed path and keeps its legacy picker.
-            switch model.runSettings(for: key) {
-            case .hostedLive, .hostedReadOnly:
-                showHostedSettingsSheet = true
-            case .deferToOtherPath:
-                modelSheetPrefill = prefillArgs
-                showModelSheet = true
-            }
+        case .nativeModel, .nativeEffort:
+            // One sheet for model, effort and mode, its menus validated by the daemon; a run it cannot
+            // set says so there.
+            showHostedSettingsSheet = true
         case .nativeDiff:
             // The app renders the working tree itself; typing the Mac's own
             // `/diff` would open a view of something already on this screen.
             composeText = ""
             showDiff = true
-        case .nativeEffort:
-            switch model.runSettings(for: key) {
-            case .hostedLive, .hostedReadOnly:
-                showHostedSettingsSheet = true
-            case .deferToOtherPath:
-                showEffortSheet = true
-            }
         case .nativeCompact(let prefillInstructions):
             compactSheetPrefill = prefillInstructions
             showCompactSheet = true

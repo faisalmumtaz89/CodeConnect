@@ -3,7 +3,7 @@ import XCTest
 @testable import CodeConnect
 @testable import CodeConnectKit
 
-/// The slash-command policy: native adapters for the eight commands the app
+/// The slash-command policy: native adapters for the five commands the app
 /// answers itself, a static guard for the dialog class whose injection
 /// measured as a phone lockout, and untouched passage for everything else —
 /// prose and the user's own skills included.
@@ -14,8 +14,8 @@ final class ClaudeCommandPolicyTests: XCTestCase {
     }
 
     func testModelIsTheNativeAdapterWithAndWithoutArguments() {
-        XCTAssertEqual(action("/model"), .nativeModel(prefillArgs: ""))
-        XCTAssertEqual(action("  /model sonnet  "), .nativeModel(prefillArgs: "sonnet"))
+        XCTAssertEqual(action("/model"), .nativeModel)
+        XCTAssertEqual(action("  /model sonnet  "), .nativeModel)
     }
 
     func testDiffOpensTheAppsOwnView() {
@@ -143,7 +143,7 @@ final class ClaudeCommandPolicyTests: XCTestCase {
                 "\(typed) is sent on a hosted run")
         }
         XCTAssertEqual(
-            ClaudeCommandPolicy.action(for: "/model", runSettings: hosted), .nativeModel(prefillArgs: ""),
+            ClaudeCommandPolicy.action(for: "/model", runSettings: hosted), .nativeModel,
             "a native command stays native on a hosted run")
         guard case .blocked = ClaudeCommandPolicy.action(for: "/config", runSettings: .deferToOtherPath) else {
             return XCTFail("a deferred run still refuses /config")
@@ -234,13 +234,9 @@ final class CommandConfirmationTests: XCTestCase {
     }
 
     /// `Kept effort level as X` is Claude Code's no-change receipt for the
-    /// `Change effort level?` confirmation. Parsed to nothing it leaves the
-    /// Effort sheet waiting, and then saying no confirmation arrived — while
-    /// the receipt is on screen in the timeline behind it.
+    /// `Change effort level?` confirmation, read as the level it kept.
     func testAKeptEffortLineIsParsedAsANonChange() {
-        let receipt = EffortConfirmation.parse("Kept effort level as high")
-        XCTAssertEqual(receipt, .kept(value: "high"))
-        XCTAssertEqual(receipt?.isChange, false)
+        XCTAssertEqual(EffortConfirmation.parse("Kept effort level as high"), .kept(value: "high"))
     }
 
     /// A receipt shape this build has never seen states the level and no
@@ -249,25 +245,6 @@ final class CommandConfirmationTests: XCTestCase {
         XCTAssertEqual(
             EffortConfirmation.parse("Set effort level to high: Comprehensive"),
             .set(value: "high", scope: nil))
-    }
-
-    /// The sentences the sheet shows, asserted here because an honesty
-    /// contract that cannot be tested is a comment.
-    func testEffortSheetSentencesStateExactlyWhatWasObserved() {
-        XCTAssertEqual(
-            EffortConfirmation.set(value: "max", scope: "this session only").sheetStatus,
-            "Claude Code confirmed Maximum effort (this session only).")
-        XCTAssertEqual(
-            EffortConfirmation.set(
-                value: "xhigh", scope: "saved as your default for new sessions"
-            ).sheetStatus,
-            "Claude Code confirmed Extra high effort (saved as your default for new sessions).")
-        XCTAssertEqual(
-            EffortConfirmation.kept(value: "high").sheetStatus,
-            "Claude Code kept High effort. The level was not changed.")
-        XCTAssertEqual(
-            EffortConfirmation.set(value: "high", scope: nil).sheetStatus,
-            "Claude Code confirmed High effort.")
     }
 
     /// The scope must follow the value immediately. `xhigh`'s description ends
@@ -305,140 +282,23 @@ final class CommandConfirmationTests: XCTestCase {
         XCTAssertNil(CompactConfirmation.parse("compacting now…"))
         XCTAssertNil(CompactConfirmation.parse("Not enough messages"))
     }
-}
 
-/// One provenance line, one shape — origin and age together, never three
-/// floating pieces.
-@MainActor
-final class ProvenanceLineTests: XCTestCase {
-
-    func testBothOriginsRenderWithTheirAge() {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let start = ConfirmedModel(
-            name: "claude-opus-5[1m]", provenance: .sessionStart,
-            at: now.addingTimeInterval(-120))
-        XCTAssertEqual(
-            ModelSheet.provenanceLine(start, now: now),
-            "Confirmed at session start · 2m ago")
-        let command = ConfirmedModel(
-            name: "Sonnet 5", provenance: .command,
-            at: now.addingTimeInterval(-5))
-        XCTAssertEqual(
-            ModelSheet.provenanceLine(command, now: now),
-            "Confirmed by /model · just now")
-    }
-
-    /// A cancelled confirmation keeps the same origin words: it is still
-    /// `/model` reporting the model in force, and a third phrase would say
-    /// more about the request than about the fact.
-    func testAKeptReceiptKeepsTheCommandOrigin() {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let kept = ConfirmedModel(
-            name: "Fable 5", provenance: .command, at: now.addingTimeInterval(-5))
-        XCTAssertEqual(
-            ModelSheet.provenanceLine(kept, now: now),
-            "Confirmed by /model · just now")
-    }
-}
-
-/// The sheet's correlation rule, as a pure function: **a fence in the event
-/// stream, and a match on the value that was asked for.**
-final class ModelChangeWatchTests: XCTestCase {
-    private func signal(_ outcome: ModelCommandOutcome, _ seq: UInt64) -> ModelCommandSignal {
-        ModelCommandSignal(outcome: outcome, seq: seq)
-    }
-
-    func testASignalAboveTheFenceForTheRequestedValueCounts() {
-        XCTAssertEqual(
-            ModelChangeWatch.outcome(
-                after: 10, requested: "sonnet", signal: signal(.receipt(.set("Sonnet 5")), 11)),
-            .receipt(.set("Sonnet 5")),
-            "the request carries an alias and the receipt a display name")
-    }
-
-    /// **The backfill hazard.** `SessionState` fills an empty model slot with
-    /// the first receipt it finds at any sequence, so without a fence a "load
-    /// earlier" replay landing inside the wait is reported as the answer to
-    /// this tap.
-    func testASignalAtOrBelowTheFenceDoesNot() {
-        for seq in [UInt64(10), 3] {
-            XCTAssertNil(
-                ModelChangeWatch.outcome(
-                    after: 10, requested: "sonnet",
-                    signal: signal(.receipt(.set("Sonnet 5")), seq)),
-                "seq \(seq)")
+    /// The rule the phone and the daemon share, case by case, from the
+    /// transcript line as it arrives: the name out of one code span around it,
+    /// and nothing else.
+    func testTheReceiptRuleThePhoneAndTheDaemonShare() {
+        let cases: [(String, ModelConfirmation?)] = [
+            ("Set model to `Opus 5.5` and saved as your default for new sessions", .set("Opus 5.5")),
+            ("Kept model as `Opus 5.5`", .kept("Opus 5.5")),
+            ("Set model to ``", .set("``")),
+            ("Set model to ` `", .set(" ")),
+            ("Set model to `opus` (claude-opus-5[1m])", .set("`opus` (claude-opus-5[1m])")),
+        ]
+        for (line, expected) in cases {
+            guard case .output(let text)? = LocalCommandLine.parse("<local-command-stdout>\(line)</local-command-stdout>")
+            else { XCTFail(line); continue }
+            XCTAssertEqual(ModelConfirmation.parse(text), expected, line)
         }
-    }
-
-    /// **Recency is not identity.** A receipt from somebody at the Mac, or from
-    /// a second phone, also lands above the fence. Reporting it as this tap's
-    /// outcome is the same phantom state wearing a fresher timestamp.
-    func testARecentSignalForADifferentValueDoesNotAnswerThisRequest() {
-        XCTAssertNil(
-            ModelChangeWatch.outcome(
-                after: 1, requested: "sonnet", signal: signal(.receipt(.set("Opus 5")), 2)),
-            "somebody else switched to Opus; this sheet asked for Sonnet")
-        // A `kept` receipt is exempt, and measurably must be: it names the
-        // model still in force, so it can never equal the value asked for.
-        XCTAssertEqual(
-            ModelChangeWatch.outcome(
-                after: 1, requested: "sonnet", signal: signal(.receipt(.kept("Opus 5")), 2)),
-            .receipt(.kept("Opus 5")),
-            "cancelling /model sonnet prints `Kept model as Opus 5`")
-        XCTAssertNil(
-            ModelChangeWatch.outcome(
-                after: 1, requested: "sonnet",
-                signal: signal(.notFound("Model 'bananas' not found"), 2)),
-            "an error about a value nobody here typed is not this sheet's failure")
-    }
-
-    /// The error for *this* sheet's own value is its failure, quoted verbatim.
-    func testANotFoundForTheRequestedValueDoesAnswerIt() {
-        XCTAssertEqual(
-            ModelChangeWatch.outcome(
-                after: 1, requested: "bananas",
-                signal: signal(.notFound("Model 'bananas' not found"), 2)),
-            .notFound("Model 'bananas' not found"))
-    }
-
-    /// A `Set model to X` that re-applies the model already in force is still
-    /// an answer: identity here is the event, not a change in value.
-    func testAnIdenticalReceiptAtAHigherSequenceStillCounts() {
-        XCTAssertEqual(
-            ModelChangeWatch.outcome(
-                after: 5, requested: "opus", signal: signal(.receipt(.set("Opus 5")), 6)),
-            .receipt(.set("Opus 5")))
-    }
-
-    func testNoSignalDoesNot() {
-        XCTAssertNil(ModelChangeWatch.outcome(after: 0, requested: "opus", signal: nil))
-    }
-
-    /// **A row asks for a family, and Claude Code answers with the version it
-    /// chose.** Measured on Claude Code 2.1.319: `/model opus` writes this line
-    /// to its transcript, the name a code span. The tap is answered whatever
-    /// version the family is at, with Claude Code's name, unwrapped.
-    func testATapOnAFamilyIsAnsweredByTheModelClaudeCodeSet() {
-        let outcome = ModelCommandOutcome.parse(
-            "Set model to `Opus 5.5` and saved as your default for new sessions")
-        XCTAssertEqual(outcome, .receipt(.set("Opus 5.5")))
-        let received = outcome.map { signal($0, 2) }
-        XCTAssertEqual(ModelChangeWatch.outcome(after: 1, requested: "opus", signal: received), outcome)
-        XCTAssertNil(
-            ModelChangeWatch.outcome(after: 1, requested: "sonnet", signal: received),
-            "an Opus receipt does not answer a tap on Sonnet")
-    }
-
-    /// A cancelled confirmation for the requested value is reported as the
-    /// non-change it is — never as the answer the sheet hoped for.
-    func testAKeptReceiptAboveTheFenceIsAKeptReceipt() {
-        let outcome = ModelChangeWatch.outcome(
-            after: 1, requested: "fable", signal: signal(.receipt(.kept("Fable 5")), 2))
-        XCTAssertEqual(outcome, .receipt(.kept("Fable 5")))
-        guard case .receipt(let receipt)? = outcome else {
-            return XCTFail("\(String(describing: outcome))")
-        }
-        XCTAssertFalse(receipt.isChange)
     }
 }
 
@@ -466,8 +326,8 @@ final class DaemonModelFactTests: XCTestCase {
     }
 }
 
-/// The Model sheet's rows are Claude Code's families, named as its own model
-/// list names them, with no version for this build to keep up to date.
+/// Claude Code's families read as its own model list names them, with no
+/// version for this build to keep up to date.
 final class ModelFamilyRowTests: XCTestCase {
     func testARowIsItsFamilysName() {
         XCTAssertEqual(
@@ -476,47 +336,8 @@ final class ModelFamilyRowTests: XCTestCase {
     }
 }
 
-/// `/model`'s measured outcomes, receipts and the one error alike.
-final class ModelCommandOutcomeTests: XCTestCase {
-    func testTheMeasuredNotFoundLineIsParsedVerbatim() {
-        XCTAssertEqual(
-            ModelCommandOutcome.parse("Model \'bananas\' not found"),
-            .notFound("Model \'bananas\' not found"))
-    }
-
-    func testReceiptsStillWin() {
-        XCTAssertEqual(
-            ModelCommandOutcome.parse("Kept model as Fable 5"), .receipt(.kept("Fable 5")))
-    }
-
-    /// The rule the phone and the daemon share, case by case, from the
-    /// transcript line as it arrives: the name out of one code span around it,
-    /// and nothing else.
-    func testTheReceiptRuleThePhoneAndTheDaemonShare() {
-        let cases: [(String, ModelConfirmation?)] = [
-            ("Set model to `Opus 5.5` and saved as your default for new sessions", .set("Opus 5.5")),
-            ("Kept model as `Opus 5.5`", .kept("Opus 5.5")),
-            ("Set model to ``", .set("``")),
-            ("Set model to ` `", .set(" ")),
-            ("Set model to `opus` (claude-opus-5[1m])", .set("`opus` (claude-opus-5[1m])")),
-        ]
-        for (line, expected) in cases {
-            guard case .output(let text)? = LocalCommandLine.parse("<local-command-stdout>\(line)</local-command-stdout>")
-            else { XCTFail(line); continue }
-            XCTAssertEqual(ModelConfirmation.parse(text), expected, line)
-        }
-    }
-
-    /// Matched by its measured shape and nothing looser.
-    func testUnrelatedOutputIsNotAnOutcome() {
-        XCTAssertNil(ModelCommandOutcome.parse("Model bananas not found"))
-        XCTAssertNil(ModelCommandOutcome.parse("Something else not found"))
-        XCTAssertNil(ModelCommandOutcome.parse("Compacted (ctrl+o to see full summary)"))
-    }
-}
-
 /// `lastConfirmedModel`: seeded by the SessionStart hook, replaced only by
-/// Claude Code's own confirmation lines, provenance carried.
+/// Claude Code's own confirmation lines.
 @MainActor
 final class LastConfirmedModelTests: XCTestCase {
 
@@ -534,7 +355,6 @@ final class LastConfirmedModelTests: XCTestCase {
                  "payload":{"hook_event_name":"SessionStart","model":"claude-fable-5"}}
                 """))
         XCTAssertEqual(state.lastConfirmedModel?.name, "claude-fable-5")
-        XCTAssertEqual(state.lastConfirmedModel?.provenance, .sessionStart)
 
         state.ingest(
             try event(
@@ -545,13 +365,12 @@ final class LastConfirmedModelTests: XCTestCase {
                  "<local-command-stdout>Set model to \\u001b[1mSonnet 5\\u001b[22m and saved as your default for new sessions</local-command-stdout>"}}}
                 """))
         XCTAssertEqual(state.lastConfirmedModel?.name, "Sonnet 5")
-        XCTAssertEqual(state.lastConfirmedModel?.provenance, .command)
     }
 
     /// A `Kept model as X` line is still a fact about the model in force — it
     /// is the only way this app learns the model after somebody cancels a
-    /// confirmation at the Mac — but it is recorded as the non-change it is.
-    func testAKeptModelLineIsAFactButNotAChange() throws {
+    /// confirmation at the Mac.
+    func testAKeptModelLineIsAFact() throws {
         let state = SessionState(sessionKey: "cc-1")
         state.ingest(
             try event(
@@ -562,75 +381,6 @@ final class LastConfirmedModelTests: XCTestCase {
                  "<local-command-stdout>Kept model as Fable 5</local-command-stdout>"}}}
                 """))
         XCTAssertEqual(state.lastConfirmedModel?.name, "Fable 5")
-        XCTAssertEqual(
-            state.lastConfirmedModel?.provenance, .command,
-            "the verb must survive into the fact, or a cancellation reads as a change")
-    }
-
-    /// A session-start seed is not an answer to a request: it produces a model
-    /// fact for the current-model card and **no** `/model` signal at all, so it
-    /// can never satisfy the sheet however recent it is.
-    func testASessionStartSeedRaisesNoCommandSignal() throws {
-        let state = SessionState(sessionKey: "cc-1")
-        state.ingest(
-            try event(
-                """
-                {"seq":9,"session_id":"cc-1","ts":"2026-08-04T20:00:00.000Z",
-                 "kind":"session_start","source":"hook",
-                 "payload":{"hook_event_name":"SessionStart","model":"claude-fable-5"}}
-                """))
-        XCTAssertEqual(state.lastConfirmedModel?.name, "claude-fable-5")
-        XCTAssertNil(state.lastModelCommandSignal, "a seed is not something /model said")
-    }
-
-    /// The signal carries the sequence that delivered it — the fence the sheet
-    /// compares against.
-    func testACommandSignalCarriesItsSequence() throws {
-        let state = SessionState(sessionKey: "cc-1")
-        state.ingest(
-            try event(
-                """
-                {"seq":12,"session_id":"cc-1","ts":"2026-08-04T20:01:00.000Z",
-                 "kind":"user_message","source":"transcript",
-                 "payload":{"type":"user","message":{"role":"user","content":
-                 "<local-command-stdout>Kept model as Fable 5</local-command-stdout>"}}}
-                """))
-        XCTAssertEqual(
-            state.lastModelCommandSignal,
-            ModelCommandSignal(outcome: .receipt(.kept("Fable 5")), seq: 12))
-    }
-
-    /// A turn's end moves the `/model` watch's signal, so a sheet that re-reads
-    /// on it re-reads then: a `turn_complete`, and the marker an Esc writes
-    /// instead of one. A replayed older end never lowers it; a rewound log
-    /// clears it, or its old height would settle the next wait at once.
-    func testATurnsEndMovesTheModelWatchSignal() async throws {
-        let state = SessionState(sessionKey: "cc-1")
-        func ended(_ seq: UInt64) throws -> Event {
-            try event(
-                """
-                {"seq":\(seq),"session_id":"cc-1","ts":"2026-08-04T20:02:00.000Z",
-                 "kind":"turn_complete","source":"transcript",
-                 "payload":{"type":"system","subtype":"turn_duration","durationMs":15143}}
-                """)
-        }
-        state.ingest(try ended(10))
-        XCTAssertEqual(state.receipts.modelSignal, ModelWatchSignal(command: nil, turnEndSeq: 10))
-        state.ingest(
-            try event(
-                """
-                {"seq":11,"session_id":"cc-1","ts":"2026-08-04T20:03:00.000Z",
-                 "kind":"user_message","source":"transcript",
-                 "payload":{"type":"user","message":{"role":"user",
-                 "content":[{"type":"text","text":"[Request interrupted by user]"}]}}}
-                """))
-        XCTAssertEqual(state.receipts.modelSignal.turnEndSeq, 11, "an Esc ends the turn")
-        state.ingest(try ended(30))
-        state.ingest(try ended(19))
-        await state.settleForTesting()
-        XCTAssertEqual(state.receipts.modelSignal.turnEndSeq, 30, "a replayed older end never lowers it")
-        state.resetForRewoundLog()
-        XCTAssertEqual(state.receipts.modelSignal.turnEndSeq, 0)
     }
 
     /// **The bytes a real transcript actually holds.** Claude Code bolds the
@@ -648,7 +398,6 @@ final class LastConfirmedModelTests: XCTestCase {
                  "<local-command-stdout>Kept model as \\u001b[1mFable 5\\u001b[22m</local-command-stdout>"}}}
                 """))
         XCTAssertEqual(state.lastConfirmedModel?.name, "Fable 5")
-        XCTAssertEqual(state.lastConfirmedModel?.provenance, .command)
     }
 
     /// The replay path: a backfilled *older* confirmation may fill an empty
@@ -715,12 +464,12 @@ final class EffortAndCompactFactTests: XCTestCase {
 
     func testAnEffortConfirmationBecomesTheFact() throws {
         let state = SessionState(sessionKey: "cc-1")
-        XCTAssertNil(state.lastConfirmedEffort)
+        XCTAssertEqual(state.lastConfirmedEffortSeq, 0)
         state.ingest(
             try stdoutEvent(
                 seq: 1,
                 "Set effort level to xhigh (saved as your default for new sessions): Deeper"))
-        XCTAssertEqual(state.lastConfirmedEffort?.value, "xhigh")
+        XCTAssertEqual(state.lastConfirmedEffortSeq, 1)
     }
 
     func testACompactionOutcomeBecomesTheFact() throws {
@@ -736,7 +485,7 @@ final class EffortAndCompactFactTests: XCTestCase {
         state.ingest(
             try stdoutEvent(
                 seq: 1, "Invalid argument: bananas. Valid options are: low, medium, high"))
-        XCTAssertNil(state.lastConfirmedEffort)
+        XCTAssertEqual(state.lastConfirmedEffortSeq, 0)
     }
 }
 

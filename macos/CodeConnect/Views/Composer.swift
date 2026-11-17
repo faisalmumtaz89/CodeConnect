@@ -29,7 +29,7 @@ private struct Composer: View {
     @State private var askingAgain = false
     /// The field has the keyboard: Esc leaves it before it closes the run.
     @FocusState private var fieldFocused: Bool
-    /// The Model, Effort or Compact command typed last, and where it stands.
+    /// The Compact command typed last, and where it stands.
     @State private var running: Running?
     @State private var quiet: Task<Void, Never>?
     @State private var commandsOpen = false
@@ -93,8 +93,6 @@ private struct Composer: View {
         // Esc closes the list, then leaves the field, before the window's Esc closes the run. Published to the whole
         // window, not only along the focus: a list opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, commandsOpen || fieldFocused)
-        .onChange(of: model.receipts(for: key)?.modelSignal) { _, _ in settle() }
-        .onChange(of: model.receipts(for: key)?.effortSeq) { _, _ in settle() }
         .onChange(of: model.receipts(for: key)?.compactSeq) { _, _ in settle() }
         .onDisappear {
             retire?.cancel()
@@ -162,15 +160,11 @@ private struct Composer: View {
                 }
                 Spacer()
                 if !isCodex {
-                    // Which model control this run has is Kit's to say: a run in a terminal keeps the list that types
-                    // into it, a run started from the app gets its own menus, or its model as a fact when it has none.
+                    // Which model control this run has is Kit's to say: a run started from the app gets its own menus,
+                    // or its model as a fact when it has none; a run these controls do not own draws none.
                     switch model.runSettings(for: key) {
                     case .deferToOtherPath:
-                        CommandsButton(
-                            model: model, key: key, help: blocked ?? "Model, effort and compact", open: $commandsOpen,
-                            choose: run
-                        ) { compact(prefill: "") }
-                        .disabled(blocked != nil || busy)
+                        EmptyView()
                     case .hostedReadOnly(let fact):
                         ModelFactLabel(fact: fact)
                     case .hostedLive(let settings):
@@ -323,7 +317,7 @@ private struct Composer: View {
     // MARK: Commands
 
     /// A slash command answered with this box's own control, before anything reaches the computer. Model and Effort
-    /// open the list, whose lines state what a change does: the daemon completes Claude Code's confirmation for them.
+    /// open the run's settings list, where the choice is made from the run's own menus.
     private func route(_ action: CommandAction, draft: String) {
         switch action {
         case .nativeModel, .nativeEffort:
@@ -372,8 +366,6 @@ private struct Composer: View {
         Task {
             let attempt: ComposeAttempt
             switch command {
-            case .model(let alias): attempt = await model.sendModelCommand(alias, to: key)
-            case .effort(let level): attempt = await model.sendEffortCommand(level, to: key)
             case .compact(let instructions):
                 attempt = await model.sendCompactCommand(instructions: instructions, to: key)
             }
@@ -434,130 +426,6 @@ private struct Composer: View {
             if attempt.landed, let draft, kept.reply == draft { kept.reply = "" }
             noteResult(attempt)
         }
-    }
-}
-
-/// The button beside Send naming the run's model, and its list opening upward over the conversation: the four
-/// families, the five effort levels, and Compact. The current model is marked; the effort is not, as Claude Code does
-/// not report it.
-private struct CommandsButton: View {
-    let model: AppModel
-    let key: String
-    /// The button's own tooltip: why it is disabled, or what it holds. Not the list's, whose rows say what they are.
-    let help: String
-    @Binding var open: Bool
-    let choose: (NativeCommand) -> Void
-    let compact: () -> Void
-
-    private var current: ModelDisplay? { model.confirmedModel(for: key).map { ModelDisplay.from($0.name) } }
-
-    var body: some View {
-        Button {
-            open.toggle()
-        } label: {
-            HStack(spacing: 5) {
-                AgentMark(agent: .claude)
-                Text(current?.name ?? "Model").foregroundStyle(Theme.text)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-            }
-            .font(Theme.ui(12))
-            .foregroundStyle(Theme.text2)
-            .padding(.horizontal, 6)
-            .frame(height: 24)
-            .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.hover(radius: 5, id: "session.composer.commands"))
-        .help(help)
-        .accessibilityLabel(current?.name ?? "Model")
-        .accessibilityIdentifier("session.composer.commands")
-        .accessibilityValue(open ? "open" : "closed")
-        .overlay(alignment: .bottomTrailing) {
-            if open {
-                list.offset(y: -30)
-                    // Esc closes the list first: the window's own Esc stands down while the list is open.
-                    .background {
-                        Button("Close list") { open = false }
-                            .keyboardShortcut(.cancelAction)
-                            .accessibilityIdentifier("session.composer.commands.close")
-                            .opacity(0)
-                            .allowsHitTesting(false)
-                    }
-            }
-        }
-    }
-
-    private var list: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header("Model")
-            footnote(NativeCommand.modelConsent)
-            ForEach(ModelDisplay.families, id: \.self) { alias in
-                let isCurrent = current.map { ModelChangeWatch.answers(alias, with: $0.name) } ?? false
-                row(ModelDisplay.from(alias).name, marked: isCurrent, id: "session.composer.model.\(alias)") {
-                    choose(.model(alias))
-                }
-                .disabled(isCurrent)
-            }
-            divider
-            header("Effort")
-            footnote(NativeCommand.effortConsent)
-            ForEach(NativeCommand.effortLevels, id: \.value) { level in
-                row(level.label, marked: false, id: "session.composer.effort.\(level.value)") {
-                    choose(.effort(level.value))
-                }
-            }
-            divider
-            row("Compact…", marked: false, id: "session.composer.compact", perform: compact)
-        }
-        .padding(.vertical, 5)
-        .frame(width: 280)
-        .fixedSize(horizontal: false, vertical: true)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
-    }
-
-    private func header(_ text: String) -> some View {
-        Text(text).font(Theme.ui(11, .semibold)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
-            .padding(.top, 5)
-            .padding(.bottom, 3)
-    }
-
-    private func footnote(_ text: String) -> some View {
-        Text(text).font(Theme.ui(11)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
-            .padding(.bottom, 4)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var divider: some View {
-        Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
-    }
-
-    private func row(_ title: String, marked: Bool, id: String, perform: @escaping () -> Void) -> some View {
-        Button {
-            open = false
-            perform()
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .opacity(marked ? 1 : 0)
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
-                Text(title).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 24)
-            .background(marked ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.hover(radius: 5, id: id))
-        .padding(.horizontal, 4)
-        .accessibilityIdentifier(id)
-        .accessibilityAddTraits(marked ? .isSelected : [])
     }
 }
 

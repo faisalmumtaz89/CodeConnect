@@ -5,8 +5,7 @@ import SwiftUI
 ///
 /// One sheet, three sections, one outcome line — reached from `/model` and `/effort`, because a run
 /// CodeConnect started offers all three as structured menus the daemon validates, not as typed
-/// commands. The legacy `ModelSheet`/`EffortSheet` stay for a terminal (tmux) run, which has only the
-/// typed path; the routing in `SessionDetailView` sends a hosted run here and a tmux run there.
+/// commands. `SessionDetailView` sends every run's `/model` and `/effort` here.
 ///
 /// Everything drawn comes from `AppModel.runSettings(for:)` — the one place both apps read — so the
 /// selection, the labels and the in-flight state are the Kit's, never re-derived here. The view
@@ -41,9 +40,8 @@ struct HostedSettingsSheet: View {
                         case .hostedReadOnly(let modelFact):
                             readOnly(modelFact)
                         case .deferToOtherPath:
-                            // Not reached from the routing — a tmux or Codex run uses its own controls.
-                            // Handled, not defaulted, so the picker is never drawn for a run this sheet
-                            // cannot speak for.
+                            // A tmux or Codex run, which these menus do not speak for: it says so.
+                            // Handled, not defaulted, so the picker is never drawn for such a run.
                             unavailable
                         }
                     }
