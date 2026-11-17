@@ -12357,6 +12357,7 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_skips_watchers_and_carries_no_agent_text() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
 
         // A phone was watching live: its socket has delivered past anything
         // this test files, so the seen-filter must exclude it at dispatch.
@@ -12374,8 +12375,9 @@ mod tests {
         )
         .await;
         // Dispatch runs behind a short grace so in-flight socket writes can
-        // record themselves first; the assertions must outwait it.
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        // record themselves first; the test ends it, then reads what rang.
+        hold.end();
+        rung_after(&capture, 1).await;
 
         let rings = capture.0.lock().unwrap();
         assert_eq!(rings.len(), 1, "one card, one ring: {rings:?}");
@@ -12583,6 +12585,7 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_that_speaks_for_the_fleet_names_the_blocked_run() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         let blocked_uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
         hosted_run(&daemon, blocked_uid, "/srv/dev/aion");
         hosted_card(
@@ -12595,12 +12598,14 @@ mod tests {
         )
         .await;
         // Past the decision's own grace, so what follows is counted alone.
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         capture.0.lock().unwrap().clear();
 
         raise_ring(&daemon, Ring::CodexCompleted).await;
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         let rings = capture.0.lock().unwrap();
         let (hint, _) = rings.first().expect("the completion rings");
         assert_eq!(
@@ -12620,6 +12625,7 @@ mod tests {
     #[tokio::test]
     async fn the_badge_counts_the_decisions_waiting_across_runs() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         hosted_card(
             &daemon,
             TEST_UID,
@@ -12639,7 +12645,8 @@ mod tests {
         )
         .await;
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 2).await;
         let rings = capture.0.lock().unwrap();
         let counts: Vec<usize> = rings.iter().map(|(h, _)| h.decisions).collect();
         assert_eq!(
@@ -12658,6 +12665,7 @@ mod tests {
     #[tokio::test]
     async fn the_doorbell_counts_every_decision_waiting() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         hosted_card(
             &daemon,
             TEST_UID,
@@ -12686,7 +12694,8 @@ mod tests {
         )
         .await;
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 3).await;
         let rings = capture.0.lock().unwrap();
         let (last, _) = rings.last().expect("a doorbell rang");
         assert_eq!(last.decisions, 3, "{rings:?}");
@@ -12702,6 +12711,7 @@ mod tests {
     #[tokio::test]
     async fn a_push_in_flight_when_its_session_is_deleted_never_rings() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         open_a_decision(&daemon).await;
 
         // An ended run with no card of its own, so the deletion below is legal:
@@ -12720,7 +12730,8 @@ mod tests {
             matches!(outcome, protocol::ws::DeleteSessionResult::Deleted { .. }),
             "the premise is a *deleted* run: {outcome:?}"
         );
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 0).await;
 
         let rings = capture.0.lock().unwrap();
         assert!(
@@ -12740,6 +12751,7 @@ mod tests {
     #[tokio::test]
     async fn a_push_admitted_for_a_run_that_is_already_gone_never_rings() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         open_a_decision(&daemon).await;
 
         // Nothing has ever filed a row under this uid, which is the state a
@@ -12749,7 +12761,8 @@ mod tests {
             .admit_decision(TEST_UID, "r-gone")
             .expect("a fresh run admits");
         daemon.dispatch_push(TEST_UID.into(), 1, ticket, false, None);
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 0).await;
         assert!(
             capture.0.lock().unwrap().is_empty(),
             "a run that is not there has nothing to ring about"
@@ -12763,7 +12776,8 @@ mod tests {
             .admit_decision(TEST_UID, "r-there")
             .expect("a new card is news");
         daemon.dispatch_push(TEST_UID.into(), 1, ticket, false, None);
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         assert_eq!(
             capture.0.lock().unwrap().len(),
             1,
@@ -12776,6 +12790,7 @@ mod tests {
     #[tokio::test]
     async fn a_card_retired_before_its_doorbell_rang_does_not_ring() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         hosted_card(
             &daemon,
             TEST_UID,
@@ -12799,7 +12814,8 @@ mod tests {
         )
         .await;
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         let rung = format!("{:?}", capture.0.lock().unwrap());
         let count = capture.0.lock().unwrap().len();
         assert_eq!(
@@ -20461,6 +20477,7 @@ mod tests {
     #[tokio::test]
     async fn a_codex_approval_rings_one_doorbell_and_a_redelivery_rings_none() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         let uid = TEST_UID;
         seed_codex_session(&daemon, uid, "cc-1");
         let session = SessionKey::new(uid, "cc-1");
@@ -20498,7 +20515,8 @@ mod tests {
 
         // The dispatch grace: a doorbell describes the world at the moment it
         // rings, not the moment it was admitted, so it is read after that window.
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         let rings: Vec<(crate::apns::PushKind, String)> = capture
             .0
             .lock()
@@ -25319,8 +25337,10 @@ mod tests {
     #[tokio::test]
     async fn a_question_rings_as_a_question() {
         let (daemon, capture) = capture_daemon();
+        let hold = daemon.push_gate.hold_grace();
         raise_ring(&daemon, Ring::ClaudeQuestion).await;
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        hold.end();
+        rung_after(&capture, 1).await;
         let rings = capture.0.lock().unwrap();
         assert_eq!(rings.len(), 1, "{rings:?}");
         assert_eq!(rings[0].0.kind, crate::apns::PushKind::Question);
