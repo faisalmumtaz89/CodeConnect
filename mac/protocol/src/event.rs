@@ -236,17 +236,6 @@ impl Event {
     }
 }
 
-/// **The payload key that places a Codex item read back after its turn moved on.**
-///
-/// The daemon reads a Codex thread's history (`thread/resume`) to recover the items
-/// it missed — those that finished while it was not subscribed. The log is
-/// append-only, so such an item is filed after facts that happened later in its
-/// turn. On that item, this key names the `source_event_id` of the fact it belongs
-/// immediately before: the next fact of the same turn, in the history's own order,
-/// that was already filed. A client draws the item there; an item without it is in
-/// order already.
-pub const BELONGS_BEFORE: &str = "belongs_before";
-
 /// A fact ready for ingest, before the daemon has assigned a `seq`.
 ///
 /// Constructed against a [`SessionKey`] rather than a bare string so no ingest
@@ -397,11 +386,12 @@ pub enum CodexLink {
     /// The word is [`crate::PROTOCOL_MINOR`] 20's. A minor-19 client that meets it treats
     /// it as not actuatable, which is what the phone's unrecognised arm already does.
     BoundNotStarted,
-    /// **No Codex control link belongs to this run at all.** Every Claude session,
-    /// every Codex run with no link attached that a message would not relaunch, and
-    /// any summary from a daemon predating this field. The default, so an older
-    /// daemon's fleet decodes as what it is: nothing here can be stopped over a
-    /// Codex link.
+    /// **Nothing reaches this run over a Codex link right now.** Every Claude session,
+    /// and every Codex run that is neither of the above: before its reconnect, after
+    /// one that failed, while it is stopping and once End run ended it. Also any
+    /// summary from a daemon predating this field. The
+    /// default, so an older daemon's fleet decodes as what it is: nothing here can be
+    /// stopped over a Codex link.
     #[default]
     None,
 }
@@ -538,8 +528,8 @@ pub struct PendingRef {
     pub request_id: String,
     /// The seq of the card's `approval_request` event.
     pub seq: u64,
-    /// The card's hold as it stands now — the value its latest `question_hold`
-    /// event carried. Absent on a card that has none, which is every Codex card.
+    /// The card's hold, as the card carries it. Absent on a card that has none,
+    /// which is every Codex card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<crate::ws::QuestionHold>,
     /// The turn a Codex card belongs to, which a Stop has to name. Absent on a

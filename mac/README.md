@@ -697,9 +697,10 @@ approval; `>= 17` honours `interrupt` and adds `codex_interrupt`; `>= 18` adds
 `codex_interrupt` and `codex_compose` are build facts about the daemon, so a
 client scopes both controls by the session's own `agent` and `codex_link` as
 well. `>= 21` answers Claude's `AskUserQuestion` from the phone: the
-`question_card` capability, `ApprovalCard.question_hold` (`held`, `at_mac`,
-`ended`, updated by `question_hold` events), and the `answers` and `decline`
-decisions; `allow` and `option` on a question card are refused for every client.
+`question_card` capability, `ApprovalCard.question_hold` (`held`; `at_mac`,
+`ended` and the `question_hold` events gone in X12), and the `answers` and
+`decline` decisions; `allow` and `option` on a question card are refused for
+every client.
 `>= 22` answers every Claude card only through its own call's hook (or, for a run
 started from an app, through its agent host), and nothing
 is typed: the `hook_only_approvals` capability, `question_hold` on every Claude
@@ -1259,8 +1260,7 @@ to probe credentials.
   tap on it comes back `rejected` with that reason, not `duplicate`.
 * **`AnswerOutcome.indeterminate`** — the decision is known and whether it
   reached the agent is not: the daemon stopped between claiming it and
-  recording what became of it. Distinct from
-  `inferred`, which is uncertainty about the *decision*. Never retried.
+  recording what became of it. Never retried.
 * **`AnswerOutcome.answered_on`** (minor 34) — `iphone` or `mac` on an answer
   from a paired device: the Mac app's when its connection said hello as
   "CodeConnect Mac", an iPhone's otherwise. Absent on every other outcome, from

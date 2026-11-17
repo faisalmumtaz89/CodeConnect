@@ -634,7 +634,7 @@ impl Daemon {
                     if let Ok(Some(_)) = self.db.hosted_link(claim.session_uid.clone()).await {
                         continue;
                     }
-                    self.settle_indeterminate(&claim, None, None).await;
+                    self.settle_indeterminate(&claim).await;
                     settled += 1;
                 }
                 if settled > 0 {
@@ -798,68 +798,31 @@ impl Daemon {
     }
 
     /// Record a claimed-but-unsettled answer as a terminal unknown: one a
-    /// stopped daemon left behind, or, with `unconfirmed`, one this daemon sent
-    /// that way and never saw land.
-    async fn settle_indeterminate(
-        &self,
-        claim: &AnswerClaim,
-        unconfirmed: Option<(AnswerPath, &str)>,
-        answered_on: Option<AnsweredOn>,
-    ) {
+    /// stopped daemon left behind, or one whose card closed before its host
+    /// confirmed it.
+    async fn settle_indeterminate(&self, claim: &AnswerClaim) {
         let session = SessionKey::new(&claim.session_uid, &claim.session_id);
         let decision =
             serde_json::from_str::<AnswerDecision>(&claim.decision).unwrap_or(AnswerDecision::Deny);
-        // A claim on a run this build does not host was left by an earlier
-        // build, whose answers went back through the card's hook, if sent at
-        // all: nothing was typed. Answers and a decline are claimed for nothing
-        // else; anything else needs its card, and a card with no hold was filed
-        // by an older daemon still, which typed approvals.
-        let through_hook = matches!(
-            decision,
-            AnswerDecision::Answers { .. } | AnswerDecision::Decline
-        ) || self
-            .store
-            .list_pending_approvals()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|row| row.session_uid == claim.session_uid && row.request_id == claim.request_id)
-            .and_then(|row| serde_json::from_str::<ApprovalCard>(&row.card).ok())
-            .is_some_and(|card| card.question_hold.is_some());
+        // Every answer this build claims is a hosted Claude run's, returned through
+        // its agent host. `recover` also settles a claim whose run's host link it
+        // could not read, a store error only: that claim is settled here rather than
+        // by its host's replay, along the same path.
         let outcome = AnswerOutcome {
             request_id: claim.request_id.clone(),
             session_id: session.name.clone(),
             decision,
             resolved_by: ResolvedBy::Phone,
-            answered_on,
-            applied_via: unconfirmed.map_or(
-                if through_hook {
-                    AnswerPath::HookReturn
-                } else {
-                    AnswerPath::SendKeys
-                },
-                |(via, _)| via,
-            ),
+            answered_on: None,
+            applied_via: AnswerPath::HookReturn,
             resolved_at: protocol::time::now_rfc3339(),
-            detail: Some(match unconfirmed {
-                Some((_, reason)) => format!(
-                    "{reason}; whether it reached the agent was never observed, and it will not \
-                     be sent again"
-                ),
-                None if through_hook => format!(
-                    "the daemon stopped after claiming this answer and before recording what \
-                     became of it (claimed at {}); whether it was handed to Claude's permission \
-                     hook, and whether Claude took it, was never observed, and it will not be \
-                     sent again",
-                    claim.started_at
-                ),
-                None => format!(
-                    "the daemon stopped after claiming this answer and before recording what \
-                     became of it (claimed at {}); whether it was typed, and whether it reached \
-                     the agent, was never observed, and it will not be typed again",
-                    claim.started_at
-                ),
-            }),
-            inferred: false,
+            detail: Some(format!(
+                "the daemon stopped after claiming this answer and before recording what \
+                 became of it (claimed at {}); whether it was handed to Claude's permission \
+                 hook, and whether Claude took it, was never observed, and it will not be \
+                 sent again",
+                claim.started_at
+            )),
             indeterminate: true,
         };
         if let Err(err) = self
@@ -1095,22 +1058,12 @@ impl Daemon {
                 }
             }
         }
-        // Where a Codex item read back late belongs is the daemon's own placement,
-        // not the item's content, so it survives the cut.
-        let belongs_before = pending
-            .payload
-            .get(protocol::event::BELONGS_BEFORE)
-            .cloned();
         let replacement = |preview: &str| {
-            let mut payload = serde_json::json!({
+            serde_json::json!({
                 "_codeconnect_truncated": true,
                 "_original_bytes": original_bytes,
                 "_preview": preview,
-            });
-            if let Some(anchor) = &belongs_before {
-                payload[protocol::event::BELONGS_BEFORE] = anchor.clone();
-            }
-            payload
+            })
         };
         // `encoded` is JSON, which holds no raw control character: written again
         // inside the replacement, a quote or a backslash takes two bytes and
@@ -2301,7 +2254,6 @@ impl Daemon {
                     applied_via: protocol::ws::AnswerPath::CodexResponse,
                     resolved_at: protocol::time::now_rfc3339(),
                     detail: None,
-                    inferred: false,
                     indeterminate: false,
                 },
             },
@@ -4414,7 +4366,7 @@ impl Daemon {
             .answer_claim(uid.to_string(), request_id.to_string())
             .await
         {
-            self.settle_indeterminate(&claim, None, None).await;
+            self.settle_indeterminate(&claim).await;
             return;
         }
         let _ = self
@@ -5304,7 +5256,6 @@ fn host_card_closure(session: &SessionKey, request_id: &str, detail: &str) -> Pe
         applied_via: AnswerPath::HookReturn,
         resolved_at: protocol::time::now_rfc3339(),
         detail: Some(detail.into()),
-        inferred: false,
         indeterminate: false,
     };
     PendingEvent::new(
@@ -7008,10 +6959,9 @@ mod tests {
                     decision: AnswerDecision::Allow,
                     resolved_by: ResolvedBy::Phone,
                     answered_on: None,
-                    applied_via: AnswerPath::SendKeys,
+                    applied_via: AnswerPath::HookReturn,
                     resolved_at: protocol::time::now_rfc3339(),
                     detail: None,
-                    inferred: false,
                     indeterminate: false,
                 },
             )
@@ -8763,32 +8713,37 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     }
 
-    /// **A Codex item read back late keeps its place when its payload is cut.** Where it
-    /// belongs is the daemon's own placement, not the item's content; dropped with the
-    /// content, a long command read back after its turn's end was drawn under the end.
+    /// **A cut payload keeps only the cut's own keys.** Nothing places a Codex item read
+    /// back late any more, so a `belongs_before` it carried goes with its content.
     #[tokio::test]
-    async fn a_cut_payload_keeps_where_a_read_back_item_belongs() {
+    async fn a_cut_payload_keeps_only_the_cut() {
         let daemon = daemon_with(Config {
             max_payload_bytes: 4096,
             ..Config::default()
         });
-        let anchor = "01a1777e-f38f:item:msg_0de00084643b";
         let mut pending = PendingEvent::new(
             &test_key(),
             EventKind::ToolResult,
             json!({
                 "aggregated_output": "x".repeat(8192),
-                protocol::event::BELONGS_BEFORE: anchor,
+                "belongs_before": "01a1777e-f38f:item:msg_0de00084643b",
             }),
             Source::Codex,
         );
 
         daemon.truncate_payload(&mut pending);
 
-        assert_eq!(pending.payload["_codeconnect_truncated"], true);
-        assert_eq!(pending.payload[protocol::event::BELONGS_BEFORE], anchor);
-        let written = pending.payload.to_string().len();
-        assert!(written <= 4096, "the replacement is {written} bytes");
+        let keys: Vec<&str> = pending
+            .payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["_codeconnect_truncated", "_original_bytes", "_preview"]
+        );
     }
 
     #[tokio::test]
@@ -12172,7 +12127,6 @@ mod tests {
             assert_eq!(outcome.resolved_by, ResolvedBy::Timeout);
             assert_eq!(outcome.detail.as_deref(), Some(RUN_ENDED));
             assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
-            assert!(!outcome.inferred, "{}", outcome.request_id);
             assert_eq!(
                 daemon
                     .store

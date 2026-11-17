@@ -2150,7 +2150,6 @@ pub(crate) async fn answer(
         applied_via: AnswerPath::HookReturn,
         resolved_at: protocol::time::now_rfc3339(),
         detail: None,
-        inferred: false,
         indeterminate: false,
     };
     daemon.hold_host_answer(&uuid, outcome).await;
@@ -2543,7 +2542,6 @@ async fn apply_answer_outcome(
             applied_via: AnswerPath::HookReturn,
             resolved_at: protocol::time::now_rfc3339(),
             detail: None,
-            inferred: false,
             indeterminate: false,
         });
         (claim.payload_hash.clone(), outcome)
@@ -6971,7 +6969,6 @@ mod tests {
             .find(|event| event["kind"] == "approval_resolved")
             .expect("the card's closing");
         assert_eq!(resolved["payload"]["resolved_by"], "timeout");
-        assert_ne!(resolved["payload"]["applied_via"], "send_keys");
         assert_eq!(
             rig.daemon
                 .db

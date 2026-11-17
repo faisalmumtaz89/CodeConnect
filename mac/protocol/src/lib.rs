@@ -57,7 +57,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `0` — hello/sessions/subscribe/answer/send_text/capture. (`capture`, the
 ///     Mac pane snapshot, is gone in X12: no run is left with a pane to read.)
 ///     **Gone in X12:** a summary's `link` words `degraded` and `stale`; a run's link
-///     is `attached` or `detached`.
+///     is `attached` or `detached`. Also the `answer_path` and `applied_via` word
+///     `send_keys`, since nothing is typed, and an outcome's `inferred`.
 ///   * `1` — QR pairing + per-device tokens, `wss://`, `get_diff`,
 ///     `EventKind::TurnComplete`, `ResolvedBy::Local`, `risk_class`. **Gone in
 ///     X12:** `ResolvedBy::Local`; nothing records an answer made at the keyboard.
@@ -392,7 +393,7 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     durable claim makes a retry replay a recorded outcome instead of stopping
 ///     something twice. Two things a client must know, and a client written
 ///     against minor 16 needs neither:
-///       - [`ws::Capabilities::interrupt`] — this daemon honours the operation.
+///       - [`ws::Capabilities::codex_interrupt`] — this daemon honours the operation.
 ///         Advertised rather than assumed, because nothing else on the wire
 ///         separates a daemon that stops the turn from one that refuses every
 ///         ask: both accept the message and both answer an `interrupt_result`. A
@@ -539,6 +540,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     on a question card are refused before anything is claimed or typed, and
 ///     `deny` on one is a decline. A minor-20 phone still shows the question as an
 ///     approval; nothing it can tap chooses an answer for the person.
+///     **Gone in X12:** the holds `at_mac` and `ended`, and the `question_hold` event; a
+///     card's hold is `held`.
 ///   * `22` — **Every Claude card is answered only through the hook Claude holds
 ///     for its own call (or, for a run started in an agent host, through that
 ///     host). Nothing is typed into a permission prompt.**
@@ -585,10 +588,11 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `24` — **Where a Codex item read back from history belongs.**
 ///
 ///     A Codex item the daemon recovers from a thread's history after later facts
-///     of its turn were filed carries [`event::BELONGS_BEFORE`] in its payload: the
+///     of its turn were filed carries `belongs_before` in its payload: the
 ///     `source_event_id` of the fact it belongs immediately before. A client draws
 ///     it there. Additive, and a client written against minor 23 needs none of it:
 ///     without it such an item is drawn where it was filed, as before.
+///     **Gone in X12:** `belongs_before`; nothing sends it.
 ///   * `25` — **Which computer this is.**
 ///
 ///     A phone names the computer it is paired with the way its owner does.
