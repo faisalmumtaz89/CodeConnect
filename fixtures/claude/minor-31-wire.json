@@ -68,7 +68,6 @@
         "project_label": "app",
         "session_id": "cc-1",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-        "tmux_session": "cc-1",
         "updated_at": "2026-11-07T04:00:00.000Z"
       },
       {
@@ -83,7 +82,6 @@
         "project_label": "notes",
         "session_id": "cc-2",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
-        "tmux_session": "cc-2",
         "updated_at": "2026-11-07T04:00:00.000Z"
       }
     ],

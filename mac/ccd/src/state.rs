@@ -8686,7 +8686,6 @@ impl Daemon {
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
-                tmux_session: row.tmux_session,
                 // Resolved here rather than on the phone, because a push has
                 // to be named by something the phone cannot compute — it may
                 // not be running — and two rules for one name produce two

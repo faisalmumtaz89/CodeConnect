@@ -5415,7 +5415,6 @@ mod tests {
         let stopping = protocol::event::SessionSummary {
             session_uid: uid.into(),
             session_id: uid.into(),
-            tmux_session: String::new(),
             cwd: "/tmp/ccd-minor-35/app".into(),
             lifecycle: protocol::event::Lifecycle::Stopping,
             link: protocol::event::Link::Attached,
@@ -5478,7 +5477,6 @@ mod tests {
             protocol::event::SessionSummary {
                 session_uid: uid.into(),
                 session_id: name.into(),
-                tmux_session: name.into(),
                 cwd: cwd.into(),
                 lifecycle: protocol::event::Lifecycle::Live,
                 link: protocol::event::Link::Attached,

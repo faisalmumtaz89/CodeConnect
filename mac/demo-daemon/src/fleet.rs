@@ -631,7 +631,6 @@ impl Run {
         SessionSummary {
             session_uid: self.uid.clone(),
             session_id: self.name.clone(),
-            tmux_session: self.name.clone(),
             cwd: self.cwd.clone(),
             lifecycle: self.lifecycle,
             link: match self.lifecycle {

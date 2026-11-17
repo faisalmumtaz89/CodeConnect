@@ -231,7 +231,6 @@ mod tests {
         SessionSummary {
             session_uid: uid.into(),
             session_id: "cc-1".into(),
-            tmux_session: "cc-1".into(),
             cwd: "/tmp".into(),
             project_label: "tmp".into(),
             lifecycle,
