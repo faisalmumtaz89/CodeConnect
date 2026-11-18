@@ -229,7 +229,7 @@ private struct ToolLine: View {
         VStack(alignment: .leading, spacing: 8) {
             if opens {
                 Button { toggle() } label: { line(opens: true) }
-                    .buttonStyle(.hover(outset: 4, id: "session.tool.\(id)"))
+                    .buttonStyle(.hover(bare: true, id: "session.tool.\(id)"))
                     .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")

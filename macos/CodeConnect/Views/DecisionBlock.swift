@@ -248,7 +248,7 @@ struct DecisionBlock: View {
             }
             .foregroundStyle(Theme.text2)
         }
-        .buttonStyle(.hover(outset: 4, id: "\(id).input"))
+        .buttonStyle(.hover(bare: true, id: "\(id).input"))
         .accessibilityIdentifier("\(id).input")
         .accessibilityValue(showInput ? "open" : "closed")
         if showInput {
@@ -318,7 +318,7 @@ struct DecisionBlock: View {
                 }
                 if all.count > shown.count {
                     Button("Show \(all.count - shown.count) more files") { openAllChanges() }
-                        .buttonStyle(.hover(outset: 4, id: "\(id).moreChanges"))
+                        .buttonStyle(.hover(bare: true, id: "\(id).moreChanges"))
                         .font(Theme.ui(12)).foregroundStyle(Theme.text2)
                         .accessibilityIdentifier("\(id).moreChanges")
                 }

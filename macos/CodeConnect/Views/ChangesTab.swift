@@ -200,7 +200,7 @@ private struct FileBlock: View {
             FileDiffView(file: file, lineLimit: limit)
             if total > limit {
                 Button("Show \(min(total - limit, Self.step)) more lines") { limit += Self.step }
-                    .buttonStyle(.hover(outset: 4, id: "changes.file.\(file.id).more"))
+                    .buttonStyle(.hover(bare: true, id: "changes.file.\(file.id).more"))
                     .font(Theme.ui(12))
                     .foregroundStyle(Theme.text2)
                     .accessibilityIdentifier("changes.file.\(file.id).more")
