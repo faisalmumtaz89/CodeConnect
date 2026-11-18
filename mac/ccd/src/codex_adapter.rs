@@ -465,6 +465,28 @@ impl CodexAdapter {
         self.settings.as_ref()
     }
 
+    /// The thread's settings once Codex has taken a `thread/settings/update` with `params` over
+    /// `current`, the settings it was asked from: each field the update sets, the rest as they
+    /// were. They stand until Codex reports the thread's settings, which then name them again.
+    /// Memory only: the run's settings facts are Codex's own reports, so a ccd restart or a
+    /// relaunch before Codex reports a change it took reads the settings Codex last reported.
+    /// When Codex reports a change it takes while a turn runs is not measured.
+    pub fn settings_taken(&mut self, current: Option<Value>, params: &Value) {
+        let mut settings = current.unwrap_or_else(|| Value::Object(Default::default()));
+        for (field, value) in [
+            ("model", &params["model"]),
+            ("effort", &params["effort"]),
+            ("approval_policy", &params["approvalPolicy"]),
+            ("sandbox", &params["sandboxPolicy"]["type"]),
+            ("collaboration_mode", &params["collaborationMode"]["mode"]),
+        ] {
+            if !value.is_null() {
+                settings[field] = value.clone();
+            }
+        }
+        self.settings = Some(settings);
+    }
+
     /// One `codex_settings` fact from a `thread/start` or `thread/resume` answer for
     /// `thread`, which names the settings the thread runs with (X6 P12: `model`,
     /// `reasoningEffort`, `approvalPolicy`, `sandbox`, and a resume's `collaborationMode`).

@@ -921,9 +921,22 @@ answer to the run's start and to each resume, and in its report of each change
 that asks nothing reads `full-access`, in Plan too, and a combination none of the four is gives
 no mode. A run whose Codex ccd reconnects to after its own restart is resumed with the
 approval and sandbox Codex last named for it, so the same Codex keeps Full Access; a run whose
-Codex is started again (relaunched) is given Default's, as its start was (the owner's decision
-233). Either reads what the
-resume's answer names. A resume does not carry Plan.
+Codex is started again (relaunched) comes back in Read Only or Plan when it was in one of them,
+and is given Default's otherwise, as its start was: a run never gains permissions by restarting,
+and a new Codex is never given Full Access (the owner's decisions 233 and 253). A resume does not
+carry Plan, so every resume of a run in Plan, a relaunch's, a reconnect's and the follow-up
+after a turn that ran across a reconnect, sets Plan again before the run takes a message; when
+Codex does not take it, a relaunch sends nothing and the person is told, and a reconnected run
+takes no message until ccd's next start. A resume that sets Plan again keeps Codex's report of
+Plan as the run's settings, not the answer's Default, so a refusal, a crash or a restart before
+that report leaves Plan the kept mode and the next resume sets it again; any other resume reads
+what its answer names. A settings change Codex takes, an app's or the Plan a resume sets again, is
+the thread's settings for the run's link until Codex reports them, so the follow-up resume after a
+turn that ran across a reconnect asks for what the person set. Only Codex's reports are filed, and
+a reconnect after ccd's own restart and a relaunch read those, so **a change Codex took while a
+turn ran and had not yet reported when ccd restarted or Codex was started again is not kept**: the
+run comes back with the settings Codex last reported. When Codex reports a change it takes while a
+turn runs is not measured; if it reports at once, this does not occur.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
