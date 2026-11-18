@@ -901,8 +901,9 @@ Codex run in one, take no settings from an app.
 From minor 43 a Codex run CodeConnect started takes the same `set_model` and `set_mode`. Its
 `menus` are the models the start's check of Codex listed (`model/list`, kept with the run),
 with the model the run started on first when that list does not carry it (one the person's
-config names, or a signed-in account's default, which Codex takes from its catalog online),
-labelled with its id and offering no effort, since Codex names none for it; and
+config names that Codex does not list, or an account default Codex's online catalog gained
+after the check kept its signed-in answer), labelled with its id and offering no effort,
+since Codex names none for it; and
 four modes, the asking default first, an order that is CodeConnect's and not Codex's: "Default"
 (`auto`: approval on request, workspace-write sandbox), "Read Only", "Plan" and "Full Access"
 (`full-access`: approval never, no sandbox), marked `confirm` and refused without it as
