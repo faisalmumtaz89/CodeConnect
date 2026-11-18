@@ -206,6 +206,24 @@ Each block starts from the repository root.
    that should be discarded:
    `gh release delete vX.Y.Z --yes` (the tag itself stays).
 
+   To prove the update on the very files people will get before anyone is
+   offered them, publish the verified draft as a **pre-release** first.
+   `releases/latest`, the only release `codeconnect update` and the website
+   installer read, skips a pre-release, and the Mac app's update feed is the
+   site's, unchanged until it is deployed:
+
+   ```sh
+   gh api -X PATCH 'repos/{owner}/{repo}/releases/<draft id>' \
+     -F draft=false -F prerelease=true -f make_latest=false
+   gh api 'repos/{owner}/{repo}/releases/latest' --jq .tag_name   # still the previous version
+   ```
+
+   Then move clean machines from the previous release to it, with no
+   credential on them (a copy of the website installer whose one release
+   lookup names `tags/vX.Y.Z` instead of `latest`). The publish run above
+   promotes that pre-release exactly as it would the draft. One that fails is
+   deleted with `gh release delete vX.Y.Z --yes`; it was never latest.
+
 6. **Verify the claim on the server, not just locally** — this is what the
    checkers will actually read:
 
@@ -223,6 +241,14 @@ Each block starts from the repository root.
    codeconnect update             # installs the release, restarts the daemon
    codeconnect --version          # prints X.Y.Z
    codeconnect daemon status      # "daemon   pid … · version X.Y.Z · build …"
+   ```
+
+   A machine on 0.18.0 or earlier cannot take 0.19.0 or later this way:
+   its updater asks for the archives the earlier releases carried. Move it
+   once with the website installer, after which `codeconnect update` works:
+
+   ```sh
+   curl -fsSL https://codeconnect.sh | sh -s -- --reinstall
    ```
 
    Nothing tells a machine installed from the command line that a release
