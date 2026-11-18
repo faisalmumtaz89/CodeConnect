@@ -272,6 +272,21 @@ final class ModelFamilyRowTests: XCTestCase {
     }
 }
 
+/// Claude's receipt of a model change, `alias (claude-id)`, is a run's model fact until the next turn's
+/// init: it reads by the id in its brackets, as that init's fact will.
+final class ModelReceiptNameTests: XCTestCase {
+    func testAReceiptReadsByTheIDInItsBrackets() {
+        XCTAssertEqual(ModelDisplay.from("sonnet (claude-sonnet-5-5)"), ModelDisplay(name: "Sonnet 5.5", meta: nil))
+        XCTAssertEqual(ModelDisplay.from("opus[1m] (claude-opus-5[1m])"), ModelDisplay(name: "Opus 5", meta: "1M context"))
+        XCTAssertEqual(ModelDisplay.from("`opus` (claude-opus-5-5)"), ModelDisplay(name: "Opus 5.5", meta: nil))
+    }
+
+    func testAnythingElseInBracketsStaysVerbatim() {
+        XCTAssertEqual(ModelDisplay.from("x (claude-foo-bar)").name, "x (claude-foo-bar)")
+        XCTAssertEqual(ModelDisplay.from("My model (beta)").name, "My model (beta)")
+    }
+}
+
 /// `lastConfirmedModel`: seeded by the SessionStart hook, replaced only by
 /// Claude Code's own confirmation lines.
 @MainActor

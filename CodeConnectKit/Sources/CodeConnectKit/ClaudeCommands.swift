@@ -110,6 +110,13 @@ public struct ModelDisplay: Equatable {
     public static func from(_ raw: String) -> ModelDisplay {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowered = trimmed.lowercased()
+        // Claude's receipt of a model change, `alias (claude-id)`, names the model by the id in its
+        // brackets; one whose id this parse does not interpret stays verbatim, whole.
+        if trimmed.hasSuffix(")"), let open = trimmed.range(of: " (", options: .backwards) {
+            let id = String(trimmed[open.upperBound..<trimmed.index(before: trimmed.endIndex)])
+            let named = from(id)
+            if id.lowercased().hasPrefix("claude-"), named.name != id { return named }
+        }
         if families.contains(lowered) {
             return ModelDisplay(name: word(lowered), meta: nil)
         }

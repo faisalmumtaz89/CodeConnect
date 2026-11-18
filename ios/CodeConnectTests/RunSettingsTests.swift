@@ -205,6 +205,15 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus), "Sonnet 5.5")
     }
 
+    /// After an app's model change a Claude run's fact is claude's receipt, which no entry carries: it
+    /// reads by the id the receipt names, as the next turn's init will.
+    func testARunsModelAfterAChangeReadsByTheIDItsReceiptNames() throws {
+        let run = try summary("session_hosted_live")
+        XCTAssertEqual(run.model?.value, "sonnet (claude-sonnet-5-5)")
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus), "Sonnet 5.5")
+    }
+
     /// A row the agent labels with its id alone reads as that id.
     func testARunsModelOnAnIDOnlyRowReadsAsTheID() throws {
         let run = try summary("session_codex_unlisted_default", in: "codex-settings-wire")

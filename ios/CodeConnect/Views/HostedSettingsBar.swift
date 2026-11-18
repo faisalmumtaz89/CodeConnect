@@ -32,7 +32,7 @@ struct HostedSettingsBar: View {
             // still-starting run has no model fact yet; it shows nothing rather than a "Model" placeholder.
             if let fact, !fact.isEmpty {
                 row {
-                    label(modelName: fact, mode: nil)
+                    label(modelName: ModelDisplay.from(fact).name, mode: nil)
                         .foregroundStyle(CC.text.secondary)
                         .accessibilityIdentifier("session.composer.model")
                 }
