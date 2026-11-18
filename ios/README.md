@@ -651,6 +651,8 @@ function of the events:
   call), and at a command's own end (`/clear`, `/compact`, `/effort low`). A command an app sends
   draws as a command row, and the run reads Running until the command's own turn ends;
   a `/clear` draws only "Conversation cleared.";
+* a Codex plan in Plan mode (ccd's `codex_plan` fact, its payload Codex's `plan` item) is
+  drawn as the agent's reply, where it happened; a plan with no visible text draws no row;
 * Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
   drawn, as the card states the question and how it ended. Every other tool keeps its
   row beside its card.
