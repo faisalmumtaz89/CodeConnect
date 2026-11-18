@@ -5292,8 +5292,7 @@ mod tests {
     /// item of its `item/completed`, whole, as ccd filed it. Its id is its turn's plus `-plan`.
     const PLAN_ITEM: &str = r#"{"completedAtMs":1795011310270,"id":"01a1ef02-a587-7982-99d5-2b63bab1d1c6-plan","startedAtMs":1795011309959,"text":"Once `notes.txt` exists, rename it to `a.txt`.\n","type":"plan"}"#;
 
-    /// [`PLAN_ITEM`] as the plan of `turn` on `thread`: its id named from `turn` as Codex names
-    /// it.
+    /// [`PLAN_ITEM`] as the plan of `turn`: its id named from `turn` as Codex names it.
     fn plan_item(turn: &str) -> serde_json::Value {
         let mut item: serde_json::Value = serde_json::from_str(PLAN_ITEM).unwrap();
         item["id"] = json!(format!("{turn}-plan"));
