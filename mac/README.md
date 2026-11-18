@@ -875,8 +875,8 @@ the app's confirmation, as when they run claude directly, and a project's settin
 set it (claude drops an escalating `defaultMode` from repo-committed settings); the run's
 mode fact says so from its first turn. A start the person's own settings put in a mode the
 menu does not list (such as `dontAsk`) carries that mode as its fact, which no menu row
-matches: neither app checks a mode then, the Mac's closed settings button reads as at the
-asking default, and the person can still choose a listed mode. A card already open when Bypass permissions is
+matches: neither app checks a mode then, the Mac's mode button reads "Mode", and the person
+can still choose a listed mode. A card already open when Bypass permissions is
 turned on stays open and answerable; the mode applies from claude's next request. A ccd restart keeps the mode the person confirmed for
 the same process, and a new claude starts in the person's own default. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it
@@ -904,7 +904,7 @@ From minor 43 a Codex run CodeConnect started takes the same `set_model` and `se
 list kept, or, with none kept that says it is signed in, asked at the start; kept with the run),
 with the model the run started on first when that list does not carry it (one the person's
 config names that Codex does not list, or an account default Codex's online catalog gained
-after the check kept its signed-in answer), labelled with its id and offering no effort,
+after its signed-in answer was kept), labelled with its id and offering no effort,
 since Codex names none for it; and
 four modes, the asking default first, an order that is CodeConnect's and not Codex's: "Default"
 (`auto`: approval on request, workspace-write sandbox), "Read Only", "Plan" and "Full Access"
