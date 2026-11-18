@@ -41,14 +41,14 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## A run's settings name its mode
 
-- A run's settings name its mode at rest, and a mode that works without asking is shown in red. On
-  the Mac the reply box has one button for the model and its effort and one for the mode, a Claude
-  run's Compact… and Clear… sit under "⋯", and nothing in the reply box shows through an open list.
+- A run's settings name its mode beside its model, and a mode that works without asking is shown
+  in red.
 
 ## Codex's questions in Plan mode
 
 - In Plan mode, Codex's questions arrive as cards you answer from the iPhone or the Mac, as Claude's
   do, and an answer says which device sent it.
+- If CodeConnect's service restarts just as Codex finishes a plan, that plan isn't shown.
 
 ## Codex's settings
 
