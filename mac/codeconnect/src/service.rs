@@ -1532,12 +1532,20 @@ mod tests {
     #[test]
     fn with_ccd_down_uninstall_names_the_hosts_still_running() {
         let dir = scratch("down");
-        let host_program = dir.join("cc-agent-host");
-        std::fs::copy("/bin/sleep", &host_program).unwrap();
-        let codex_program = dir.join("codex");
-        std::fs::copy("/bin/sleep", &codex_program).unwrap();
-        let mut host = Command::new(&host_program).arg("60").spawn().unwrap();
-        let mut codex = Command::new(&codex_program).arg("60").spawn().unwrap();
+        // Each stand-in is a copy of bash waiting on its open stdin. Not a copy of sleep:
+        // where sleep is uutils coreutils, one binary for every tool, a copy runs only
+        // under a tool's own name.
+        let stand_in = |name: &str| {
+            let program = dir.join(name);
+            std::fs::copy("/bin/bash", &program).unwrap();
+            Command::new(&program)
+                .args(["-c", "read -r _"])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let mut host = stand_in("cc-agent-host");
+        let mut codex = stand_in("codex");
         let mut other = Command::new("/bin/sleep").arg("60").spawn().unwrap();
         for (run, pid) in [
             ("a", host.id() as i32),
