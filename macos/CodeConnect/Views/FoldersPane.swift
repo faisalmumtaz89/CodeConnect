@@ -123,7 +123,7 @@ struct FoldersPane: View {
             Button("Forget") {
                 Task { await send(context) { try await $0.forgetFolderTrust(path: answer.path) } }
             }
-            .buttonStyle(.hover(outset: 4, id: "\(id).forget"))
+            .buttonStyle(.hover(over: true, id: "\(id).forget"))
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text2)
             .help(FolderWords.forgetHelp)

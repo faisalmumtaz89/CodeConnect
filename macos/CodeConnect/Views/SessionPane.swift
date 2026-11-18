@@ -207,7 +207,7 @@ private struct TabButton: View {
             }
             .fixedSize()
         }
-        .buttonStyle(.hover(outset: 4, id: tab.id))
+        .buttonStyle(.hover(over: true, id: tab.id))
         .accessibilityAddTraits(selected ? [.isHeader, .isSelected] : [.isHeader])
         .accessibilityIdentifier(tab.id)
     }
