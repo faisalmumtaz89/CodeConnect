@@ -505,6 +505,12 @@ public enum TimelineBuilder {
                                 output: call.output,
                                 isTruncated: event.isTruncated))))
 
+            case .other("codex_plan"):
+                // Codex's plan, filed as Other by ccd, is the turn's reply in Plan mode: drawn as the agent's
+                // prose, where it happened.
+                guard let text = event.codexPlanText else { break }
+                items.append(event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
+
             case .approvalRequest:
                 guard let card = event.approvalCard else {
                     items.append(
