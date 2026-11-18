@@ -108,7 +108,7 @@ Each block starts from the repository root.
    binaries, and the agent host from the Bun `mac/agent-host/SOURCES`
    pins and the packages its `bun.lock` pins, each slice run and tested
    (`mac/agent-host/test.sh`) on its own runner under the hardened runtime
-   with allow-jit alone, and refused there if it runs without it — signs
+   with allow-jit alone — signs
    and notarizes them, attaches the
    two archives (binaries, and the agent host beside them) to a
    **draft**, downloads those exact
@@ -194,6 +194,17 @@ Each block starts from the repository root.
    anyone tested. This is the moment `codeconnect update` on every machine can
    see it. `--ref` runs the workflow as it is at the tag; without it, `main`'s
    copy runs, and an older workflow checks an older set of assets.
+
+   Before this run, the agent host's control, which no GitHub runner can
+   give: there the host re-signed without allow-jit passes `check.sh` too. On
+   a Mac whose `csrutil status` reads enabled, with `mac/agent-host/check.sh`
+   from the tag, the `cc-agent-host` in the release's
+   `codeconnect-X.Y.Z-agent-host-macos-universal.tar.gz` must pass it, and a
+   copy of it re-signed without its entitlement
+   (`codesign --force --options runtime --sign -`) must fail it. Only a Mac
+   where that copy fails holds the control: when no Mac at hand shows the
+   failure, nothing is published. When the host itself fails, the release is
+   deleted with `gh release delete vX.Y.Z --yes`, as below.
 
    ```sh
    gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z -f publish=true
