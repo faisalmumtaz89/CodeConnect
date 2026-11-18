@@ -885,8 +885,9 @@ async fn link(
                     stop_gracefully(&daemon, &uid, &client, &mut running).await;
                 }
                 LinkCommand::Settings { setting, reply } => {
+                    let current = adapter.settings().cloned();
                     let told = change_settings(
-                        &client, &thread, adapter.settings(), running.is_some(), &setting,
+                        &client, &thread, &mut adapter, current, running.is_some(), &setting,
                     )
                     .await;
                     let _ = reply.send(told);
@@ -1927,18 +1928,17 @@ async fn resumed(
         }
     };
     let now = adapter.settings().or(kept).cloned();
-    if keep_plan(
+    if !keep_plan(
         client,
         thread,
+        adapter,
         kept,
         answer,
-        now.as_ref(),
+        now,
         !running.is_empty(),
     )
     .await?
     {
-        adapter.settings_in_plan(now.unwrap_or_default());
-    } else {
         file(daemon, uid, settings).await;
     }
     Ok(running)
@@ -1949,14 +1949,15 @@ async fn resumed(
 /// `thread/resume` takes no collaboration mode, so a resume leaves Plan. One
 /// `thread/settings/update`, as an app's change to Plan is ([`change_settings`]), carrying the
 /// model and the effort of the settings Codex names `now`, from the next turn while one runs
-/// (`running`). Whether it was sent and taken; `Err`, with Codex's reason, when Codex refuses
-/// it or does not answer.
+/// (`running`), the `adapter` taking the thread to be in Plan once Codex takes it. Whether it
+/// was sent and taken; `Err`, with Codex's reason, when Codex refuses it or does not answer.
 async fn keep_plan(
     client: &Client,
     thread: &str,
+    adapter: &mut CodexAdapter,
     kept: Option<&Value>,
     answer: &Value,
-    now: Option<&Value>,
+    now: Option<Value>,
     running: bool,
 ) -> Result<bool, String> {
     if kept.is_none_or(|kept| kept["collaboration_mode"] != "plan")
@@ -1968,7 +1969,7 @@ async fn keep_plan(
         mode: "plan".into(),
         confirmed: false,
     };
-    match change_settings(client, thread, now, running, &plan).await {
+    match change_settings(client, thread, adapter, now, running, &plan).await {
         SettingResult::Applied { .. } => Ok(true),
         SettingResult::Refused { reason } | SettingResult::Indeterminate { reason } => {
             Err(format!("Plan was not set again: {reason}"))
@@ -2519,15 +2520,18 @@ const SETTING_WAIT: Duration = Duration::from_secs(10);
 /// takes a change from its next request, X6 P4) and at once otherwise; `refused` with Codex's
 /// own words when it answers with an error; `indeterminate` when it does not answer within
 /// [`SETTING_WAIT`]. What the run's settings are after it is Codex's own report
-/// (`thread/settings/updated`), filed as its facts.
+/// (`thread/settings/updated`), filed as its facts; until that report, a change Codex took is
+/// the thread's settings in the `adapter` ([`CodexAdapter::settings_taken`]), so a resume
+/// before it asks for what the person set.
 async fn change_settings(
     client: &Client,
     thread: &str,
-    current: Option<&Value>,
+    adapter: &mut CodexAdapter,
+    current: Option<Value>,
     running: bool,
     setting: &crate::claude_host::Setting,
 ) -> SettingResult {
-    let Some(mut params) = update_params(setting, current) else {
+    let Some(mut params) = update_params(setting, current.as_ref()) else {
         return SettingResult::Refused {
             reason: "Codex hasn't said what this session's settings are yet, so nothing was \
                      changed."
@@ -2535,14 +2539,18 @@ async fn change_settings(
         };
     };
     params["threadId"] = thread.into();
-    match tokio::time::timeout(SETTING_WAIT, client.call("thread/settings/update", params)).await {
-        Ok(Ok(_)) => SettingResult::Applied {
-            applies: if running {
-                Applies::NextTurn
-            } else {
-                Applies::Now
-            },
-        },
+    let call = client.call("thread/settings/update", params.clone());
+    match tokio::time::timeout(SETTING_WAIT, call).await {
+        Ok(Ok(_)) => {
+            adapter.settings_taken(current, &params);
+            SettingResult::Applied {
+                applies: if running {
+                    Applies::NextTurn
+                } else {
+                    Applies::Now
+                },
+            }
+        }
         Ok(Err(CallError::Rpc { message, .. })) => SettingResult::Refused {
             reason: format!("Codex didn't take the change ({message}); nothing was changed."),
         },
@@ -8939,6 +8947,121 @@ mod tests {
         let update = asked(&mut ws, "thread/settings/update").await;
         assert_eq!(update["params"]["collaborationMode"]["mode"], "plan");
         answer(&mut ws, &update, json!({})).await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A mode an app sets while a reconnected turn runs is what the follow-up resume asks
+    /// for** (decision 253): a Default run whose ccd restarted mid-turn is set to Read Only
+    /// during that turn and Codex takes it; its follow-up resume, once the turn ends, asks for
+    /// Read Only before Codex has reported the change.
+    #[tokio::test]
+    async fn a_mode_set_during_a_reconnected_turn_is_what_its_follow_up_asks_for() {
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mut mid_turn = capture["answerMidTurn"]["result"].clone();
+        mid_turn["sandbox"]["type"] = json!("workspaceWrite");
+        let thread = mid_turn["thread"]["id"].as_str().unwrap().to_string();
+        let first_turn = capture["answerAfter"]["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap();
+        let mut auto = settings_report(
+            "gpt-6.1-sol",
+            "high",
+            "on-request",
+            "workspaceWrite",
+            "default",
+        );
+        auto["params"]["threadId"] = json!(thread);
+        let rig = rig();
+        let (uid, mut ws) = engine_run(&rig, "req-ro-mid", &thread, first_turn).await;
+        tell(&mut ws, &auto).await;
+        settings_as_sent(&rig.daemon, &uid, "auto").await;
+        let (restarted, mut ws, _) = resumed_with(&rig, ws, mid_turn).await;
+        link_attached(&restarted, &uid).await;
+        let read_only = crate::claude_host::Setting::Mode {
+            mode: "read-only".into(),
+            confirmed: false,
+        };
+        let (told, ()) = tokio::join!(restarted.set_setting(&uid, read_only), async {
+            let update = asked(&mut ws, "thread/settings/update").await;
+            answer(&mut ws, &update, json!({})).await;
+        });
+        assert!(matches!(told, SettingResult::Applied { .. }), "{told:?}");
+        for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+            tell(&mut ws, frame).await;
+        }
+        let follow_up = asked(&mut ws, "thread/resume").await;
+        assert_eq!(
+            (
+                &follow_up["params"]["approvalPolicy"],
+                &follow_up["params"]["sandbox"]
+            ),
+            (&json!("on-request"), &json!("read-only")),
+            "the follow-up asked for wider than the Read Only the person set"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A Plan set again does not override a person's later change** (decision 253): a Plan
+    /// run whose ccd restarted mid-turn is put back in Plan, then set to Default from an app
+    /// during that turn; the follow-up resume asks for Default's sandbox and does not set Plan
+    /// again.
+    #[tokio::test]
+    async fn a_plan_set_again_gives_way_to_a_later_change() {
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mid_turn = &capture["answerMidTurn"]["result"];
+        let thread = mid_turn["thread"]["id"].as_str().unwrap();
+        let first_turn = capture["answerAfter"]["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap();
+        let mut plan = settings_report("gpt-6.1-sol", "high", "on-request", "readOnly", "plan");
+        plan["params"]["threadId"] = json!(thread);
+        let rig = rig();
+        let (uid, mut ws) = engine_run(&rig, "req-plan-then-auto", thread, first_turn).await;
+        tell(&mut ws, &plan).await;
+        settings_as_sent(&rig.daemon, &uid, "plan").await;
+        let (restarted, mut ws, _) = resumed_with(&rig, ws, mid_turn.clone()).await;
+        let update = asked(&mut ws, "thread/settings/update").await;
+        assert_eq!(update["params"]["collaborationMode"]["mode"], "plan");
+        answer(&mut ws, &update, json!({})).await;
+        link_attached(&restarted, &uid).await;
+        let auto = crate::claude_host::Setting::Mode {
+            mode: "auto".into(),
+            confirmed: false,
+        };
+        let (told, ()) = tokio::join!(restarted.set_setting(&uid, auto), async {
+            let update = asked(&mut ws, "thread/settings/update").await;
+            assert_eq!(update["params"]["collaborationMode"]["mode"], "default");
+            answer(&mut ws, &update, json!({})).await;
+        });
+        assert!(matches!(told, SettingResult::Applied { .. }), "{told:?}");
+        for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+            tell(&mut ws, frame).await;
+        }
+        let follow_up = asked(&mut ws, "thread/resume").await;
+        assert_eq!(follow_up["params"]["sandbox"], "workspace-write");
+        answer(
+            &mut ws,
+            &follow_up,
+            capture["answerAfter"]["result"].clone(),
+        )
+        .await;
+        let again = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let frame = next_frame(&mut ws).await?;
+                if frame["method"] == "thread/settings/update" && frame.get("id").is_some() {
+                    return Some(frame);
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        assert!(
+            again.is_none(),
+            "the follow-up set Plan again over the change to Default: {again:?}"
+        );
         drop(ws);
         end_run(&rig, &uid).await;
     }

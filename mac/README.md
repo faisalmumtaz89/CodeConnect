@@ -930,7 +930,11 @@ Codex does not take it, a relaunch sends nothing and the person is told, and a r
 takes no message until ccd's next start. A resume that sets Plan again keeps Codex's report of
 Plan as the run's settings, not the answer's Default, so a refusal, a crash or a restart before
 that report leaves Plan the kept mode and the next resume sets it again; any other resume reads
-what its answer names.
+what its answer names. A settings change Codex takes, an app's or the Plan a resume sets again, is
+the thread's settings for ccd until Codex reports them, so a resume before that report asks for
+what the person set. When Codex reports a change it takes while a turn runs is not measured (it
+may be only at the next turn); either way ccd asks for the change Codex took, and only Codex's
+reports are filed.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
