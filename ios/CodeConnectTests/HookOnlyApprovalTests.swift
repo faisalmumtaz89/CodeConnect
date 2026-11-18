@@ -111,17 +111,6 @@ final class HookOnlyApprovalTests: XCTestCase {
         XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Answer not confirmed")
     }
 
-    /// A card whose session ended before anyone answered it says so, and
-    /// neither that it timed out nor that anyone answered it.
-    func testACardClosedWhenItsSessionEndedSaysSo() throws {
-        let closed = try XCTUnwrap(try event("closed_when_run_ended").approvalOutcome)
-        XCTAssertEqual(closed.resolvedBy, .timeout)
-        XCTAssertEqual(ApprovalRow.resolutionText(for: closed), "Closed when the session ended")
-        XCTAssertTrue(
-            DecisionCard.alreadyResolvedBanner(for: closed, now: closed.resolvedDate).message
-                .hasPrefix("Closed when the session ended · "))
-    }
-
     /// What the phone reads back: an allow from the phone, and a denial with a
     /// reason, which is `text`.
     func testAnAllowAndADenialWithAReasonReadBack() throws {

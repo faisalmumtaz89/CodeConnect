@@ -20,7 +20,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         AnswerOutcome(
             requestID: "r", sessionID: "cc-1", decision: decision, resolvedBy: .phone,
             appliedVia: appliedVia, resolvedAt: "2026-08-18T09:00:00.000Z", detail: detail,
-            inferred: false, indeterminate: indeterminate)
+            indeterminate: indeterminate)
     }
 
     // MARK: Each device names the computer in its own words
@@ -291,8 +291,7 @@ final class CompositeIdOpacityTests: XCTestCase {
         .applied(
             outcome: AnswerOutcome(
                 requestID: requestID, sessionID: "u-1", decision: .allow, resolvedBy: .phone,
-                appliedVia: .hookReturn, resolvedAt: "2026-08-18T09:00:00.000Z", detail: nil,
-                inferred: false))
+                appliedVia: .hookReturn, resolvedAt: "2026-08-18T09:00:00.000Z", detail: nil))
     }
 
     /// (c) The two ids are genuinely different strings — the premise everything
@@ -744,8 +743,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         let applied = AnswerAttempt.applied(
             AnswerOutcome(
                 requestID: "toolu_1", sessionID: "cc-1", decision: .allow, resolvedBy: .phone,
-                appliedVia: .hookReturn, resolvedAt: "2026-08-18T09:00:01.000Z", detail: nil,
-                inferred: false))
+                appliedVia: .hookReturn, resolvedAt: "2026-08-18T09:00:01.000Z", detail: nil))
         guard case .attempt = liveBanner(model, attempt: applied) else {
             return XCTFail("a terminal receipt stands even without live backing")
         }

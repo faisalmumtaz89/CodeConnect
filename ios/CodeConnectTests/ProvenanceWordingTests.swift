@@ -6,19 +6,19 @@ import XCTest
 /// What an approval's ending says about who answered and where — only as far
 /// as the record proves it. `resolved_by: phone` names a paired phone, not
 /// this one; an answerer this build does not name, such as an earlier daemon's
-/// `local`, is said to be one; an inferred ending is the prompt leaving, with no
+/// `local`, is said to be one; a `timeout` is a card nobody answered, with no
 /// answer seen.
 @MainActor
 final class ProvenanceWordingTests: XCTestCase {
 
-    private func outcome(_ resolvedBy: String, inferred: Bool = false) throws -> AnswerOutcome {
+    private func outcome(_ resolvedBy: String) throws -> AnswerOutcome {
         try JSONDecoder().decode(
             AnswerOutcome.self,
             from: Data(
                 """
                 {"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},
                  "resolved_by":"\(resolvedBy)","applied_via":"send_keys",
-                 "resolved_at":"2026-10-05T10:00:00.000Z","inferred":\(inferred)}
+                 "resolved_at":"2026-10-05T10:00:00.000Z"}
                 """.utf8))
     }
 
@@ -26,16 +26,16 @@ final class ProvenanceWordingTests: XCTestCase {
         XCTAssertEqual(ApprovalRow.resolutionText(for: try outcome("phone")), "Allowed from a phone")
     }
 
-    /// The daemon saw the prompt leave, not an answer: closed, never answered.
-    func testAnInferredEndingClaimsNoAnswer() throws {
-        let inferred = try outcome("local", inferred: true)
-        XCTAssertEqual(
-            ApprovalRow.resolutionText(for: inferred), "Closed by an answerer this app does not recognise")
-        XCTAssertEqual(inferred.decisionLabel, "Closed")
+    /// A card nobody answered, closed for a reason this build does not name: closed, never answered, in the
+    /// timeout words.
+    func testATimeoutClaimsNoAnswer() throws {
+        let closed = try outcome("timeout")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: closed), "Closed by timeout - nobody answered")
+        XCTAssertEqual(closed.decisionLabel, "Closed")
         XCTAssertEqual(
             DecisionCard.alreadyResolvedBanner(
-                for: inferred, now: inferred.resolvedDate.addingTimeInterval(65)).message,
-            "Closed by an answerer this app does not recognise · 1m ago", "the answerer said once")
+                for: closed, now: closed.resolvedDate.addingTimeInterval(65)).message,
+            "Closed by timeout - nobody answered · 1m ago", "the reason said once")
     }
 
     /// No daemon names an answer superseded any more: an earlier one's record names an answerer this app does not

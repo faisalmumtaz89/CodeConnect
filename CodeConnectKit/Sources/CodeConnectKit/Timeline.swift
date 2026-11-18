@@ -711,11 +711,14 @@ public enum TimelineBuilder {
     /// An indeterminate answer is one the daemon could not confirm reached the
     /// agent, so it is no evidence the call was blocked and must never stamp a
     /// definitive `denied` — it falls through exactly as an unrecognised decision
-    /// does.
+    /// does. A `timeout` is a card nobody answered, so its `deny` blocked nothing
+    /// anyone decided, and it falls through too.
     static func statusFromApproval(
         toolUseID: String?, approvals: [String: AnswerOutcome]
     ) -> ToolStatus? {
-        guard let toolUseID, let answer = approvals[toolUseID], !answer.indeterminate else {
+        guard let toolUseID, let answer = approvals[toolUseID], !answer.indeterminate,
+            answer.resolvedBy != .timeout
+        else {
             return nil
         }
         switch answer.decision {

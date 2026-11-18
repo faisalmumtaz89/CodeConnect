@@ -1162,13 +1162,8 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
     public let appliedVia: AnswerPath
     public let resolvedAt: String
     public let detail: String?
-    /// True when `decision` is the daemon's *inference* rather than an observed
-    /// answer — the local-resolution path, where all it truly knows is that the
-    /// prompt is gone. The UI must not state an inferred decision as fact.
-    public let inferred: Bool
     /// True when the daemon could not establish whether the answer landed at
-    /// all — the agent-seam case, parallel to `inferred` but weaker: `inferred`
-    /// still asserts the prompt is gone, this asserts nothing about the write.
+    /// all — the agent-seam case: it asserts nothing about the write.
     /// Absent ⇒ false, mirroring the Rust `#[serde(default)]` bool.
     public let indeterminate: Bool
 
@@ -1181,14 +1176,13 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         case appliedVia = "applied_via"
         case resolvedAt = "resolved_at"
         case detail
-        case inferred
         case indeterminate
     }
 
     public init(
         requestID: String, sessionID: String, decision: AnswerDecision, resolvedBy: ResolvedBy,
         answeredOn: AnsweredOn? = nil, appliedVia: AnswerPath, resolvedAt: String, detail: String?,
-        inferred: Bool, indeterminate: Bool = false
+        indeterminate: Bool = false
     ) {
         self.requestID = requestID
         self.sessionID = sessionID
@@ -1198,7 +1192,6 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         self.appliedVia = appliedVia
         self.resolvedAt = resolvedAt
         self.detail = detail
-        self.inferred = inferred
         self.indeterminate = indeterminate
     }
 
@@ -1212,17 +1205,16 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         appliedVia = try c.decode(AnswerPath.self, forKey: .appliedVia)
         resolvedAt = try c.decode(String.self, forKey: .resolvedAt)
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
-        inferred = try c.decodeIfPresent(Bool.self, forKey: .inferred) ?? false
         indeterminate = try c.decodeIfPresent(Bool.self, forKey: .indeterminate) ?? false
     }
 
     public var resolvedDate: Date { ISO8601.parse(resolvedAt) ?? .distantPast }
 
-    /// How to describe this outcome without overclaiming. An inferred decision
-    /// is the daemon seeing the prompt leave the Mac, not an answer, so it is
-    /// "Closed" — never "Allowed", and never "Answered".
+    /// How to describe this outcome without overclaiming. A `timeout` is how the
+    /// daemon files a card nobody answered, closed when its run ended or its turn
+    /// was stopped: its `deny` is nobody's decision, so it is "Closed".
     public var decisionLabel: String {
-        inferred ? "Closed" : decision.label
+        resolvedBy == .timeout ? "Closed" : decision.label
     }
 
     /// The device a paired answer came from, by its kind, or nil where the
@@ -1239,9 +1231,12 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         }
     }
 
-    /// The daemon's words (`RUN_ENDED` in ccd) for a card closed because the
-    /// session that asked it ended, which it records as a `timeout`.
+    /// The daemon's words (`RUN_ENDED` and `STOPPED_BEFORE_ANSWER` in ccd) for a card
+    /// closed, as a `timeout`, because its session ended or its turn was stopped. They
+    /// are matched to choose a reason phrase rather than shown, because the two are not
+    /// written as one grammatical shape; any other detail falls back to the timeout words.
     static let sessionEnded = "the session ended before anyone answered"
+    static let turnStopped = "The turn was stopped before anyone answered."
 
     /// Where the answer came from, as far as the record proves it: `phone`
     /// names a paired device by its kind (`answeredOn`), and where the record
@@ -1251,6 +1246,7 @@ public struct AnswerOutcome: Codable, Sendable, Hashable {
         case .phone: return Self.answeringDevice(answeredOn, on: host).map { "from \($0)" } ?? "from a phone"
         case .unknown: return "by an answerer this app does not recognise"
         case .timeout where detail == Self.sessionEnded: return "when the session ended"
+        case .timeout where detail == Self.turnStopped: return "when the turn was stopped"
         case .timeout: return "by timeout - nobody answered"
         }
     }
