@@ -180,33 +180,31 @@ final class ProtocolTests: XCTestCase {
 
     // MARK: outcomes
 
-    /// An inferred decision is the daemon noticing the prompt is gone. It must
-    /// never be rendered as an observed answer.
-    func testInferredOutcomeIsLabelledAsSuch() throws {
+    /// A card nobody answered is filed as a deny resolved by `timeout`. It must
+    /// never be rendered as a decision.
+    func testATimeoutOutcomeIsLabelledClosed() throws {
         let message = try decodeServer(
             """
             {"type":"answer_result","request_id":"toolu_1","result":{"status":"applied",
-             "outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},
-               "resolved_by":"local","applied_via":"send_keys",
-               "resolved_at":"2026-07-31T09:00:00.000Z","inferred":true}}}
+             "outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"deny"},
+               "resolved_by":"timeout","applied_via":"hook_return",
+               "resolved_at":"2026-07-31T09:00:00.000Z"}}}
             """)
         guard case .answerResult(_, .applied(let outcome)) = message else {
             return XCTFail("wrong result")
         }
-        XCTAssertTrue(outcome.inferred)
         XCTAssertEqual(outcome.decisionLabel, "Closed")
-        XCTAssertEqual(outcome.decision.label, "Allowed", "the raw decision is still available")
+        XCTAssertEqual(outcome.decision.label, "Denied", "the raw decision is still available")
     }
 
-    func testOutcomeWithoutInferredDefaultsToObserved() throws {
+    func testAPhonesDenyIsADecision() throws {
         let outcome = try JSONDecoder().decode(
             AnswerOutcome.self,
             from: Data(
                 """
                 {"request_id":"r","session_id":"s","decision":{"type":"deny"},
-                 "resolved_by":"phone","applied_via":"send_keys","resolved_at":"t"}
+                 "resolved_by":"phone","applied_via":"hook_return","resolved_at":"t"}
                 """.utf8))
-        XCTAssertFalse(outcome.inferred)
         XCTAssertEqual(outcome.decisionLabel, "Denied")
     }
 }

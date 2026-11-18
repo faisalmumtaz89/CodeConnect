@@ -787,9 +787,9 @@ struct ApprovalRow: View {
         // The daemon accepted the answer but never confirmed it reached the
         // agent, so the footer must not state a decision or an actor as fact.
         if outcome.indeterminate { return "Answer not confirmed" }
-        // An inferred decision is the daemon noticing the prompt is gone, not
-        // watching an answer happen. Rendering it as "Allowed" would put a fact
-        // on screen that nobody observed (`decisionLabel` says "Closed").
+        // A card nobody answered (a `timeout`) closed without a decision.
+        // Rendering its `deny` as "Denied" would put a decision on screen that
+        // nobody made (`decisionLabel` says "Closed").
         return "\(outcome.decisionLabel) \(outcome.provenance())"
     }
 

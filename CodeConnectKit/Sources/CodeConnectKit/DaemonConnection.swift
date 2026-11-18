@@ -1016,7 +1016,7 @@ public final class DaemonConnection {
                         resolvedBy: .phone, appliedVia: .hookReturn,
                         resolvedAt: Date().formatted(
                             Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
-                        detail: "fixture", inferred: false))
+                        detail: "fixture"))
             }
         #endif
         return try await request(

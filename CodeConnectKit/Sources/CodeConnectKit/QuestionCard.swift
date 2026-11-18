@@ -299,7 +299,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         }
     }
 
-    /// Only what the daemon observed is stated: an inferred ending, and a
+    /// Only what the daemon observed is stated: an ending nobody answered, and a
     /// decision a question cannot carry, is closed.
     private static func ended(by outcome: AnswerOutcome) -> QuestionCardStatus {
         if outcome.indeterminate { return .unconfirmed }

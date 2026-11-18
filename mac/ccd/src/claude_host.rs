@@ -8222,6 +8222,138 @@ mod tests {
         stop(&played.dir);
     }
 
+    /// **A hosted run's card nobody answered, closed by its run's end and by a Stop, as an
+    /// app is sent it.** `fixtures/claude/card-closed-unanswered-wire.json` is emitted by this
+    /// build; a copy of it under `ios/` is kept byte-identical by
+    /// `fixtures/check-duplicated-fixtures.sh`.
+    #[tokio::test]
+    async fn the_card_closed_unanswered_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str =
+            include_str!("../../../fixtures/claude/card-closed-unanswered-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_card_closed_unanswered_wire().await,
+            committed,
+            "the committed card-closed-unanswered wire no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_card_closed_unanswered_wire_fixture, then copy it over its copy \
+             under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/card-closed-unanswered-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_card_closed_unanswered_wire_fixture() {
+        let wire =
+            serde_json::to_string_pretty(&derived_card_closed_unanswered_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/card-closed-unanswered-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// Two hosted runs, each with a card open in a turn: one whose run ends (End run ends
+    /// its host), one whose turn an app's Stop ends. Each card's `approval_request` and
+    /// `approval_resolved` as the `event` frames an app is sent, with the run's uid, the clock
+    /// reads and the request's own times pinned.
+    async fn derived_card_closed_unanswered_wire() -> serde_json::Value {
+        // The run ends with the card open: its host exits, as End run ends it.
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        host_asks(&mut played, 4, "toolu_1", serde_json::json!({})).await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while cards(&rig.daemon, &uid).await != (vec![], vec![]) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the card outlived its run"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        let run_ended = card_frames(&rig, &uid).await;
+        stop(&played.dir);
+
+        // An app's Stop ends the turn: the host withdraws the request while the Stop waits.
+        let rig = self::rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        host_asks(&mut played, 4, "toolu_1", serde_json::json!({})).await;
+        let (stopped, _) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "withdrawn", "seq": 5, "tool_use_id": "toolu_1"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+                host_ends_turn(&mut played, 6, &uuid, "aborted_tools", &[]).await;
+            });
+        assert!(
+            matches!(stopped, protocol::ws::InterruptResult::Aborted { .. }),
+            "{stopped:?}"
+        );
+        let turn_stopped = card_frames(&rig, &uid).await;
+        stop(&played.dir);
+
+        serde_json::json!({
+            "closed_by_run_end": run_ended,
+            "closed_by_stop": turn_stopped,
+        })
+    }
+
+    /// The run `uid`'s card events (`approval_request`, `approval_resolved`) as the `event`
+    /// frames an app is sent, with its uid (a resolution's payload names it too), the clock reads
+    /// and the card's own times pinned.
+    async fn card_frames(rig: &Rig, uid: &str) -> Vec<serde_json::Value> {
+        let pinned = "01K1B3XQ8ZC0DE5FGH7CL05ED0";
+        rig.daemon
+            .db
+            .events_after(uid.to_string(), 0, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ApprovalRequest | EventKind::ApprovalResolved
+                )
+            })
+            .map(|event| {
+                let mut frame =
+                    serde_json::to_value(protocol::ws::ServerMessage::Event { event }).unwrap();
+                let event = &mut frame["event"];
+                assert_eq!(event["session_uid"], uid);
+                event["session_uid"] = pinned.into();
+                event["session_id"] = pinned.into();
+                event["ts"] = "2026-11-18T01:00:00.000Z".into();
+                if event["payload"].get("session_id").is_some() {
+                    assert_eq!(event["payload"]["session_id"], uid);
+                    event["payload"]["session_id"] = pinned.into();
+                }
+                for clock in ["resolved_at", "requested_at", "expires_at"] {
+                    if event["payload"].get(clock).is_some() {
+                        event["payload"][clock] = "2026-11-18T01:00:00Z".into();
+                    }
+                }
+                frame
+            })
+            .collect()
+    }
+
     /// **Stop on a Claude run, as a minor-37 daemon sends it, emitted by this build.** A copy
     /// of it under `ios/` is kept byte-identical by `fixtures/check-duplicated-fixtures.sh`.
     #[tokio::test]

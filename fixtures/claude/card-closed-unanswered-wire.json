@@ -1,0 +1,110 @@
+{
+  "closed_by_run_end": [
+    {
+      "event": {
+        "kind": "approval_request",
+        "payload": {
+          "card": {
+            "display_text": "Bash\n{\"command\":\"ls\"}",
+            "generation": 0,
+            "identity_bound": true,
+            "payload_hash": "3def8390520b23ee38d810bbd40e58cf894962a0f62f2d70472ff18cb58ab468",
+            "question_hold": "held",
+            "request_id": "toolu_1",
+            "risk": {
+              "class": "medium"
+            },
+            "tool_input": {
+              "command": "ls"
+            },
+            "tool_name": "Bash"
+          }
+        },
+        "seq": 4,
+        "session_id": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "source": "daemon",
+        "source_event_id": "perm:toolu_1",
+        "ts": "2026-11-18T01:00:00.000Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "approval_resolved",
+        "payload": {
+          "applied_via": "hook_return",
+          "decision": {
+            "type": "deny"
+          },
+          "detail": "the session ended before anyone answered",
+          "request_id": "toolu_1",
+          "resolved_at": "2026-11-18T01:00:00Z",
+          "resolved_by": "timeout",
+          "session_id": "01K1B3XQ8ZC0DE5FGH7CL05ED0"
+        },
+        "seq": 6,
+        "session_id": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "source": "daemon",
+        "source_event_id": "resolved:toolu_1",
+        "ts": "2026-11-18T01:00:00.000Z"
+      },
+      "type": "event"
+    }
+  ],
+  "closed_by_stop": [
+    {
+      "event": {
+        "kind": "approval_request",
+        "payload": {
+          "card": {
+            "display_text": "Bash\n{\"command\":\"ls\"}",
+            "generation": 0,
+            "identity_bound": true,
+            "payload_hash": "3def8390520b23ee38d810bbd40e58cf894962a0f62f2d70472ff18cb58ab468",
+            "question_hold": "held",
+            "request_id": "toolu_1",
+            "risk": {
+              "class": "medium"
+            },
+            "tool_input": {
+              "command": "ls"
+            },
+            "tool_name": "Bash"
+          }
+        },
+        "seq": 4,
+        "session_id": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "source": "daemon",
+        "source_event_id": "perm:toolu_1",
+        "ts": "2026-11-18T01:00:00.000Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "approval_resolved",
+        "payload": {
+          "applied_via": "hook_return",
+          "decision": {
+            "type": "deny"
+          },
+          "detail": "The turn was stopped before anyone answered.",
+          "request_id": "toolu_1",
+          "resolved_at": "2026-11-18T01:00:00Z",
+          "resolved_by": "timeout",
+          "session_id": "01K1B3XQ8ZC0DE5FGH7CL05ED0"
+        },
+        "seq": 5,
+        "session_id": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7CL05ED0",
+        "source": "daemon",
+        "source_event_id": "resolved:toolu_1",
+        "ts": "2026-11-18T01:00:00.000Z"
+      },
+      "type": "event"
+    }
+  ]
+}

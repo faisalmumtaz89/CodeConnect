@@ -353,6 +353,8 @@ extension DecisionCard {
                 ].compactMap { $0 }.joined(separator: " · "),
                 tone: .warning, icon: "question-fill")
         case .duplicate(let outcome, let stale):
+            // A card that closes unanswered between the tap and the end of a face check reaches here too and reads
+            // "Already answered" over its closure: an accepted miss, since it needs that race and is not seen on a run.
             let original =
                 "Original outcome: \(outcome.decisionLabel) \(outcome.provenance(on: host)), \(outcome.resolvedAt)."
             return Banner(
