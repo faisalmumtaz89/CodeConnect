@@ -132,12 +132,11 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## A Mac app
 
-- CodeConnect now has a Mac app, `CodeConnect-0.18.0.dmg` on the release page, for macOS 26. Opened
-  the first time, it installs CodeConnect itself (`ccd`, `codeconnect`, `cc-hook` and CodeConnect's
-  own tmux, into `~/.codeconnect/bin`), starts the background service, which then runs at every
-  login, and pairs with it without a code. It keeps them up to date from then on: `codeconnect
-  update` leaves an install the app made to the app, and `codeconnect claude` and `codeconnect codex`
-  no longer ask GitHub for a newer release there.
+- CodeConnect now has a Mac app, `CodeConnect-0.19.0.dmg` on the release page, for macOS 26. Opened
+  the first time, it installs CodeConnect itself (`ccd`, `codeconnect` and `cc-agent-host`, into
+  `~/.codeconnect/bin`), starts the background service, which then runs at every login, and pairs
+  with it without a code. It keeps them up to date from then on: `codeconnect update` leaves an
+  install the app made to the app.
 - Its window lists the agents running on your computers, grouped by computer or by project, each
   with its state, what it is doing, its agent and how long ago, and every "… ago" keeps counting. A
   group says how many decisions wait in it, and folds away.
