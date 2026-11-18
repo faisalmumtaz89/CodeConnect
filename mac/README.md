@@ -1505,6 +1505,10 @@ shared `/tmp` is not yours to change.
   turn is filed after that turn's reply.** ccd attaches again while the turn runs, files the
   reply and the turn's end as they arrive, and reads the command back once the turn has
   ended, so the command shows below the reply. Nothing is lost.
+* **On a Codex run started from an app, a plan Codex proposes while ccd is not attached is
+  not shown.** If ccd restarts in a Plan turn's last step, Codex finishes the plan before ccd
+  attaches again, and ccd does not read a plan back from Codex's history, so the turn shows
+  its question, its answer and its end without the plan.
 * **On a Codex run started from an app, a message whose turn's end ccd never sees keeps
   its last state.** If the connection to Codex ends, or ccd restarts, while a message added
   to a running turn waits for Codex to read it, ccd records that what became of it is not

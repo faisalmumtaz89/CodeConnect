@@ -1,0 +1,154 @@
+{
+  "completed": {
+    "frames": [
+      {
+        "event": {
+          "kind": "link_state",
+          "payload": {
+            "link": "attached",
+            "reason": "agent host linked"
+          },
+          "seq": 1,
+          "session_id": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "source": "daemon",
+          "ts": "2026-11-16T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "Run the shell command `sleep 5 && echo ready`, then write out the integers from 1 to 150, one per line, with no commentary."
+          },
+          "seq": 2,
+          "session_id": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "source": "codex",
+          "source_event_id": "01a1e105-1040-7363-8557-bec0daa95b25:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "ts": "2026-11-16T00:00:00.000Z",
+          "turn_id": "01a1e105-10df-7663-a02e-677597116d96"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "approval_request",
+          "payload": {
+            "card": {
+              "display_text": "request_user_input\n{\"questions\":[{\"header\":\"Colour\",\"id\":\"colour\",\"multiSelect\":false,\"options\":[{\"description\":\"the red one\",\"label\":\"Red\"},{\"description\":\"the blue one\",\"label\":\"Blue\"}],\"question\":\"Which colour?\"}]}",
+              "generation": 0,
+              "identity_bound": false,
+              "payload_hash": "ccee0f9dfb9a8e99e475e25875e7ffa6ec1531a73526777c2abebd0c3df31458",
+              "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN1FQMUFOMDAAJDAxYTFlMTA1LTEwNDAtNzM2My04NTU3LWJlYzBkYWE5NWIyNQAAAAAAAAAAAAAGYFl1gOAA",
+              "risk": {
+                "class": "medium"
+              },
+              "tool_input": {
+                "questions": [
+                  {
+                    "header": "Colour",
+                    "id": "colour",
+                    "multiSelect": false,
+                    "options": [
+                      {
+                        "description": "the red one",
+                        "label": "Red"
+                      },
+                      {
+                        "description": "the blue one",
+                        "label": "Blue"
+                      }
+                    ],
+                    "question": "Which colour?"
+                  }
+                ]
+              },
+              "tool_name": "request_user_input"
+            }
+          },
+          "seq": 3,
+          "session_id": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "source": "daemon",
+          "source_event_id": "perm:AQAaMDFLMUIzWFE4WkMwREU1RkdIN1FQMUFOMDAAJDAxYTFlMTA1LTEwNDAtNzM2My04NTU3LWJlYzBkYWE5NWIyNQAAAAAAAAAAAAAGYFl1gOAA",
+          "ts": "2026-11-16T00:00:00.000Z",
+          "turn_id": "01a1e105-10df-7663-a02e-677597116d96"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "approval_resolved",
+          "payload": {
+            "answered_on": "iphone",
+            "by": "phone",
+            "decision": {
+              "answers": [
+                {
+                  "selected": [
+                    1
+                  ]
+                }
+              ],
+              "type": "answers"
+            },
+            "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN1FQMUFOMDAAJDAxYTFlMTA1LTEwNDAtNzM2My04NTU3LWJlYzBkYWE5NWIyNQAAAAAAAAAAAAAGYFl1gOAA",
+            "status": "answered"
+          },
+          "seq": 4,
+          "session_id": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "source": "daemon",
+          "source_event_id": "resolved:AQAaMDFLMUIzWFE4WkMwREU1RkdIN1FQMUFOMDAAJDAxYTFlMTA1LTEwNDAtNzM2My04NTU3LWJlYzBkYWE5NWIyNQAAAAAAAAAAAAAGYFl1gOAA",
+          "ts": "2026-11-16T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1e105-10df-7663-a02e-677597116d96-plan",
+          "kind": "codex_plan",
+          "payload": {
+            "completedAtMs": 1795011310270,
+            "id": "01a1e105-10df-7663-a02e-677597116d96-plan",
+            "startedAtMs": 1795011309959,
+            "text": "Once `notes.txt` exists, rename it to `a.txt`.\n",
+            "type": "plan"
+          },
+          "seq": 5,
+          "session_id": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "source": "codex",
+          "source_event_id": "01a1e105-1040-7363-8557-bec0daa95b25:item:01a1e105-10df-7663-a02e-677597116d96-plan",
+          "ts": "2026-11-16T00:00:00.000Z",
+          "turn_id": "01a1e105-10df-7663-a02e-677597116d96"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006190,
+            "duration_ms": 16074,
+            "error": null,
+            "started_at": 1793006174,
+            "status": "completed"
+          },
+          "seq": 6,
+          "session_id": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7QP1AN00",
+          "source": "codex",
+          "source_event_id": "01a1e105-1040-7363-8557-bec0daa95b25:turn:01a1e105-10df-7663-a02e-677597116d96",
+          "ts": "2026-11-16T00:00:00.000Z",
+          "turn_id": "01a1e105-10df-7663-a02e-677597116d96"
+        },
+        "type": "event"
+      }
+    ]
+  }
+}

@@ -5283,6 +5283,188 @@ mod tests {
         .unwrap();
     }
 
+    /// The run the plan-item fixture is emitted for, written in place of the run's own uid.
+    const PLAN_ITEM_UID: &str = "01K1B3XQ8ZC0DE5FGH7QP1AN00";
+    const PLAN_ITEM_WIRE: &str = include_str!("../../../fixtures/codex/plan-item-wire.json");
+    const REGENERATE_PLAN_ITEM: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_codex_plan_item_fixture";
+    /// The plan codex 0.170.0 proposed in a real Plan turn once its question was answered: the
+    /// item of its `item/completed`, whole, as ccd filed it. Its id is its turn's plus `-plan`.
+    const PLAN_ITEM: &str = r#"{"completedAtMs":1795011310270,"id":"01a1ef02-a587-7982-99d5-2b63bab1d1c6-plan","startedAtMs":1795011309959,"text":"Once `notes.txt` exists, rename it to `a.txt`.\n","type":"plan"}"#;
+
+    /// [`PLAN_ITEM`] as the plan of `turn`: its id named from `turn` as Codex names it.
+    fn plan_item(turn: &str) -> serde_json::Value {
+        let mut item: serde_json::Value = serde_json::from_str(PLAN_ITEM).unwrap();
+        item["id"] = json!(format!("{turn}-plan"));
+        item
+    }
+
+    /// The events this build files for a Plan turn on a run started on the engine, as the
+    /// `event` frames a subscribed app is sent, in seq order: the link's `attached`, the
+    /// person's message as Codex records it, [`PLAN_QUESTION`]'s card answered from an app with
+    /// its second option and resolved by Codex, the turn's plan ([`plan_item`]) and the turn's
+    /// end. Codex's frames are in the shape codex 0.164.0 sent them
+    /// (`fixtures/codex/resume-follow-up-turn-0.164.0.json`), on the question's thread and turn.
+    /// The run's uid is written [`PLAN_ITEM_UID`], the card's request id the one the daemon
+    /// derives under that uid and [`QUESTION_CARD_LAUNCH`], and each clock read
+    /// [`QUESTION_CARD_AT`].
+    async fn plan_item_wire() -> serde_json::Value {
+        let rig = rig();
+        let (asked, thread, turn) = plan_question();
+        let (uid, mut ws) = engine_run(&rig, "req-plan-item", &thread, &turn).await;
+        link_states_once(&rig.daemon, &uid, 1).await;
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mut said = capture["live"]["untilThePromptAnswer"][3].clone();
+        said["params"]["threadId"] = json!(thread);
+        said["params"]["turnId"] = json!(turn);
+        tell(&mut ws, &turn_started(&thread, &turn)).await;
+        tell(&mut ws, &said).await;
+        let card = {
+            tell(&mut ws, &asked).await;
+            cards_of(&rig.daemon, &uid, 1).await.remove(0)
+        };
+        let answers = AnswerDecision::Answers {
+            answers: vec![pick(1)],
+        };
+        let (result, _) = tokio::join!(decided(&rig.daemon, &uid, &card, answers), async {
+            response_to(&mut ws, &asked["id"], Duration::from_secs(20)).await;
+            tell(
+                &mut ws,
+                &resolved(&asked["params"]["threadId"], &asked["id"]),
+            )
+            .await;
+        });
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "{result:?}"
+        );
+        filed_until(&rig.daemon, &uid, &format!("resolved:{}", card.request_id)).await;
+        let item = plan_item(&turn);
+        tell(
+            &mut ws,
+            &json!({"emittedAtMs": item["completedAtMs"], "method": "item/completed",
+                    "params": {"completedAtMs": item["completedAtMs"], "item": item,
+                               "threadId": thread, "turnId": turn}}),
+        )
+        .await;
+        let mut ended = capture["live"]["afterTheMidTurnAnswer"][4].clone();
+        ended["params"]["threadId"] = json!(thread);
+        ended["params"]["turn"]["id"] = json!(turn);
+        ended["params"]["turn"]["rootTurnId"] = json!(turn);
+        ended["params"]["turn"]["items"] = json!([]);
+        tell(&mut ws, &ended).await;
+        filed_until(&rig.daemon, &uid, &format!(":turn:{turn}")).await;
+        let frames: Vec<serde_json::Value> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|event| {
+                serde_json::to_value(protocol::ws::ServerMessage::Event { event }).unwrap()
+            })
+            .collect();
+        drop(ws);
+        end_run(&rig, &uid).await;
+        let pinned = card_id(PLAN_ITEM_UID, &thread, &asked["id"], QUESTION_CARD_LAUNCH).unwrap();
+        let mut out: serde_json::Value = serde_json::from_str(
+            &json!({ "completed": { "frames": frames } })
+                .to_string()
+                .replace(&card.request_id, &pinned)
+                .replace(&uid, PLAN_ITEM_UID),
+        )
+        .unwrap();
+        for frame in out["completed"]["frames"].as_array_mut().unwrap() {
+            let ts = &mut frame["event"]["ts"];
+            assert!(
+                ts.as_str()
+                    .is_some_and(|read| read.len() == 24 && read.ends_with('Z')),
+                "ts was expected to be an RFC3339 clock read, and is {ts}"
+            );
+            *ts = json!(QUESTION_CARD_AT);
+        }
+        out
+    }
+
+    /// **A Codex plan reaches the apps as this file says, and this file is what this build
+    /// sends for it.**
+    ///
+    /// `fixtures/codex/plan-item-wire.json` is the apps' input for the plan Codex proposes in
+    /// Plan mode, which ccd files as a `codex_plan` fact. Gate one reads the committed bytes:
+    /// one turn, in which the person's message, the question's card and its resolution come
+    /// before one `codex_plan` whose payload is the real item whole, which comes before the
+    /// turn's end. Gate two re-derives the file from this build and requires the same bytes.
+    ///
+    /// **Mutation:** edit the plan's words in the checked-in file and gate one fails at the
+    /// payload; stop filing an item type ccd does not model and gate two fails, naming the
+    /// command that rewrites the file.
+    #[tokio::test]
+    async fn the_codex_plan_item_fixture_is_what_this_build_emits() {
+        let committed: serde_json::Value =
+            serde_json::from_str(PLAN_ITEM_WIRE).expect("the fixture must be JSON");
+        let events: Vec<protocol::event::Event> = committed["completed"]["frames"]
+            .as_array()
+            .expect("the run is a list of frames")
+            .iter()
+            .map(|frame| {
+                serde_json::from_value(frame["event"].clone()).expect("an Event the apps decode")
+            })
+            .collect();
+        let (_, _, turn) = plan_question();
+        // A resolution names its card, not a turn.
+        let at = |kind: EventKind| {
+            let found: Vec<_> = events.iter().filter(|event| event.kind == kind).collect();
+            assert_eq!(found.len(), 1, "one {kind:?}: {events:?}");
+            let named = (kind != EventKind::ApprovalResolved).then_some(turn.as_str());
+            assert_eq!(found[0].turn_id.as_deref(), named, "{kind:?}'s turn");
+            found[0].seq
+        };
+        let plan = at(EventKind::Other("codex_plan".into()));
+        let order = [
+            at(EventKind::UserMessage),
+            at(EventKind::ApprovalRequest),
+            at(EventKind::ApprovalResolved),
+            plan,
+            at(EventKind::TurnComplete),
+        ];
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+        let filed = events.iter().find(|event| event.seq == plan).unwrap();
+        assert_eq!(
+            filed.payload,
+            plan_item(&turn),
+            "the plan's payload is the item, whole"
+        );
+
+        let derived = plan_item_wire().await;
+        assert_eq!(
+            derived, committed,
+            "the committed plan item no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_PLAN_ITEM}"
+        );
+        assert_eq!(
+            PLAN_ITEM_WIRE,
+            format!("{}\n", serde_json::to_string_pretty(&derived).unwrap()),
+            "the committed bytes are not this build's rendering of them (a reformat, or an edit \
+             by hand). Regenerate it: {REGENERATE_PLAN_ITEM}"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/plan-item-wire.json` with what this build sends.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_codex_plan_item_fixture() {
+        let wire = serde_json::to_string_pretty(&plan_item_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/plan-item-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
     /// `git -C dir <args>`, quietly.
     fn git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
