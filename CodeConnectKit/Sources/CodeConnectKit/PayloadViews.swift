@@ -131,6 +131,13 @@ extension Event {
             Self.mcpBlocksText(payload["result"]?["content"]), status,
             payload["durationMs"]?.intValue)
     }
+    /// **A Codex plan: in Plan mode, that turn's reply.** ccd files Codex's `plan` item whole under
+    /// `EventKind.other("codex_plan")` (`codex_adapter.rs`), its `text` the plan as Codex wrote it. Nil for any other
+    /// kind, and for a plan with no visible text.
+    public var codexPlanText: String? {
+        guard kind == .other("codex_plan") else { return nil }
+        return payload["text"]?.stringValue.flatMap(Self.withoutOuterBlankLines)
+    }
     public var durationMS: Int? { payload["duration_ms"]?.intValue }
     var permissionMode: String? { payload["permission_mode"]?.stringValue }
     public var modelName: String? { payload["model"]?.stringValue }
