@@ -927,8 +927,10 @@ and a new Codex is never given Full Access (the owner's decisions 233 and 253). 
 carry Plan, so every resume of a run in Plan, a relaunch's, a reconnect's and the follow-up
 after a turn that ran across a reconnect, sets Plan again before the run takes a message; when
 Codex does not take it, a relaunch sends nothing and the person is told, and a reconnected run
-takes no message until ccd's next start. Each reads what the resume's answer names, then
-Codex's report of Plan.
+takes no message until ccd's next start. A resume that sets Plan again keeps Codex's report of
+Plan as the run's settings, not the answer's Default, so a refusal, a crash or a restart before
+that report leaves Plan the kept mode and the next resume sets it again; any other resume reads
+what its answer names.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

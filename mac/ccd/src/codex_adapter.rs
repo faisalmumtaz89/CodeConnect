@@ -465,6 +465,13 @@ impl CodexAdapter {
         self.settings.as_ref()
     }
 
+    /// The thread's settings taken to be `settings` in Plan, once Codex has taken a change to
+    /// Plan and before its report of it, which then names them again.
+    pub fn settings_in_plan(&mut self, mut settings: Value) {
+        settings["collaboration_mode"] = "plan".into();
+        self.settings = Some(settings);
+    }
+
     /// One `codex_settings` fact from a `thread/start` or `thread/resume` answer for
     /// `thread`, which names the settings the thread runs with (X6 P12: `model`,
     /// `reasoningEffort`, `approvalPolicy`, `sandbox`, and a resume's `collaborationMode`).

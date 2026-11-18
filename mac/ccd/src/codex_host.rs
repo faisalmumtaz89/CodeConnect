@@ -1889,8 +1889,10 @@ async fn unfiled(
 /// A `thread/resume` answer's facts filed, then the adapter told what was filed, and the run
 /// put back in Plan when the settings it was resumed from (`kept`) were in Plan
 /// ([`keep_plan`]); the turns the answer reports still running. Every resume passes here, so
-/// none leaves a run wider than its kept mode (decision 253). `Err` when Plan was not put
-/// back.
+/// none leaves a run wider than its kept mode (decision 253). The answer's own settings are
+/// filed only when Plan was not set again: when it was, Codex's report of Plan is the run's
+/// next settings fact, so a refusal, a crash or a restart before that report leaves Plan the
+/// kept mode, and the next resume sets it again. `Err` when Plan was not put back.
 async fn resumed(
     daemon: &Arc<Daemon>,
     uid: &str,
@@ -1900,7 +1902,7 @@ async fn resumed(
     thread: &str,
     kept: Option<&Value>,
 ) -> Result<Vec<String>, String> {
-    let running = match adapter.plan_resume_seed(answer, thread) {
+    let (running, settings) = match adapter.plan_resume_seed(answer, thread) {
         Some(mut seed) => {
             let items: Vec<&Value> = answer["thread"]["turns"]
                 .as_array()
@@ -1916,44 +1918,58 @@ async fn resumed(
             )
             .await;
             adapter.apply_resume_seed(&seed);
-            file(daemon, uid, adapter.settings_answered(thread, answer)).await;
-            seed.running_turn_ids().to_vec()
+            let settings = adapter.settings_answered(thread, answer);
+            (seed.running_turn_ids().to_vec(), settings)
         }
         None => {
             crate::log_info!("{uid}: Codex's resume answer for thread {thread} was not read");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
-    keep_plan(client, thread, kept, adapter.settings(), !running.is_empty()).await?;
+    let now = adapter.settings().or(kept).cloned();
+    if keep_plan(
+        client,
+        thread,
+        kept,
+        answer,
+        now.as_ref(),
+        !running.is_empty(),
+    )
+    .await?
+    {
+        adapter.settings_in_plan(now.unwrap_or_default());
+    } else {
+        file(daemon, uid, settings).await;
+    }
     Ok(running)
 }
 
 /// The thread `thread` put back in Plan when the settings it was resumed from (`kept`, a
-/// `codex_settings` fact) were in Plan and Codex does not name Plan now (`now`, the settings it
-/// last named): `thread/resume` takes no collaboration mode, so a resume leaves Plan. One
+/// `codex_settings` fact) were in Plan and the resume's `answer` does not name Plan:
+/// `thread/resume` takes no collaboration mode, so a resume leaves Plan. One
 /// `thread/settings/update`, as an app's change to Plan is ([`change_settings`]), carrying the
-/// model and the effort Codex names, from the next turn while one runs (`running`). `Err`, with
-/// Codex's reason, when Codex refuses it or does not answer.
+/// model and the effort of the settings Codex names `now`, from the next turn while one runs
+/// (`running`). Whether it was sent and taken; `Err`, with Codex's reason, when Codex refuses
+/// it or does not answer.
 async fn keep_plan(
     client: &Client,
     thread: &str,
     kept: Option<&Value>,
+    answer: &Value,
     now: Option<&Value>,
     running: bool,
-) -> Result<(), String> {
-    let Some(kept) = kept.filter(|kept| kept["collaboration_mode"] == "plan") else {
-        return Ok(());
-    };
-    let now = now.unwrap_or(kept);
-    if now["collaboration_mode"] == "plan" {
-        return Ok(());
+) -> Result<bool, String> {
+    if kept.is_none_or(|kept| kept["collaboration_mode"] != "plan")
+        || answer["collaborationMode"]["mode"] == "plan"
+    {
+        return Ok(false);
     }
     let plan = crate::claude_host::Setting::Mode {
         mode: "plan".into(),
         confirmed: false,
     };
-    match change_settings(client, thread, Some(now), running, &plan).await {
-        SettingResult::Applied { .. } => Ok(()),
+    match change_settings(client, thread, now, running, &plan).await {
+        SettingResult::Applied { .. } => Ok(true),
         SettingResult::Refused { reason } | SettingResult::Indeterminate { reason } => {
             Err(format!("Plan was not set again: {reason}"))
         }
@@ -8792,20 +8808,40 @@ mod tests {
         let rig = rig();
         let (uid, ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
         let kept = ("on-request", "workspaceWrite", "plan", "plan");
-        let (daemon, ws, _resumed, calls, told) =
-            relaunched_from(&rig, &uid, ws, kept, None).await;
+        let (daemon, ws, _resumed, calls, told) = relaunched_from(&rig, &uid, ws, kept, None).await;
         assert_eq!(told, engine_no_connection());
         assert_eq!(methods(&calls), ["thread/settings/update"]);
         assert_eq!(
             row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
             Lifecycle::Exited
         );
-        drop((daemon, ws));
+        drop(ws);
+        // The person tries again: Plan is still the run's kept mode, and is set again before
+        // the message's turn.
+        let launch = launches(&rig) + 1;
+        let mut again = saying(&daemon, &uid, "say-again", "are you still there");
+        let (mut ws, _) = tokio::select! {
+            served = relaunch_served_with(&rig, launch, resume_answer_as_asked) => served,
+            refused = &mut again => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let update = asked(&mut ws, "thread/settings/update").await;
+        assert_eq!(update["params"]["collaborationMode"]["mode"], "plan");
+        answer(&mut ws, &update, json!({})).await;
+        let start = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &start, json!({"turn": {"id": "turn-3"}})).await;
+        let told = again.await.unwrap();
+        assert!(
+            matches!(told, protocol::ws::ComposeResult::Started { .. }),
+            "{told:?}"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 
     /// **No resume leaves a run in Plan out of it** (decision 253): a run in Plan whose ccd
     /// restarts mid-turn is put back in Plan after the reconnect's resume, whose answer names
-    /// Default, and again after the follow-up resume once that turn ends.
+    /// Default, and again after the follow-up resume once that turn ends, also when the turn's
+    /// end reaches ccd ahead of Codex's report of Plan.
     #[tokio::test]
     async fn every_resume_puts_a_plan_run_back_in_plan() {
         let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
@@ -8832,6 +8868,49 @@ mod tests {
         let update = asked(&mut ws, "thread/settings/update").await;
         wants_plan(&update);
         answer(&mut ws, &update, json!({})).await;
+        for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+            tell(&mut ws, frame).await;
+        }
+        tell(&mut ws, &plan()).await;
+        let follow_up = asked(&mut ws, "thread/resume").await;
+        answer(
+            &mut ws,
+            &follow_up,
+            capture["answerAfter"]["result"].clone(),
+        )
+        .await;
+        let again = asked(&mut ws, "thread/settings/update").await;
+        wants_plan(&again);
+        answer(&mut ws, &again, json!({})).await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A Plan run whose follow-up resume could not set Plan again is put back in Plan by the
+    /// next ccd start** (decision 253): the link ends, a message is refused meanwhile, and the
+    /// reconnect sets Plan again, since the follow-up's answer, which named Default, was not
+    /// filed as the run's settings.
+    #[tokio::test]
+    async fn a_plan_the_follow_up_could_not_set_is_set_by_the_next_start() {
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mid_turn = &capture["answerMidTurn"]["result"];
+        let thread = mid_turn["thread"]["id"].as_str().unwrap();
+        let first_turn = capture["answerAfter"]["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap();
+        let plan = || {
+            let mut report =
+                settings_report("gpt-6.1-sol", "high", "on-request", "readOnly", "plan");
+            report["params"]["threadId"] = json!(thread);
+            report
+        };
+        let rig = rig();
+        let (uid, mut ws) = engine_run(&rig, "req-plan-refused", thread, first_turn).await;
+        tell(&mut ws, &plan()).await;
+        settings_as_sent(&rig.daemon, &uid, "plan").await;
+        let (restarted, mut ws, _) = resumed_with(&rig, ws, mid_turn.clone()).await;
+        let update = asked(&mut ws, "thread/settings/update").await;
+        answer(&mut ws, &update, json!({})).await;
         tell(&mut ws, &plan()).await;
         for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
             tell(&mut ws, frame).await;
@@ -8843,9 +8922,23 @@ mod tests {
             capture["answerAfter"]["result"].clone(),
         )
         .await;
-        let again = asked(&mut ws, "thread/settings/update").await;
-        wants_plan(&again);
-        answer(&mut ws, &again, json!({})).await;
+        let refused = asked(&mut ws, "thread/settings/update").await;
+        let refusal = json!({"id": refused["id"], "error": {"code": -32600, "message": "not now"}});
+        ws.send(Message::Text(refusal.to_string())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while next_frame(&mut ws).await.is_some() {}
+        })
+        .await
+        .expect("ccd did not end its link");
+        assert_eq!(
+            said_now(&restarted, &uid, "say-meanwhile").await,
+            engine_no_connection()
+        );
+        let (_again, mut ws, _) =
+            resumed_with(&rig, ws, capture["answerAfter"]["result"].clone()).await;
+        let update = asked(&mut ws, "thread/settings/update").await;
+        assert_eq!(update["params"]["collaborationMode"]["mode"], "plan");
+        answer(&mut ws, &update, json!({})).await;
         drop(ws);
         end_run(&rig, &uid).await;
     }
