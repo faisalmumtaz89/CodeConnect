@@ -930,7 +930,7 @@ struct DecisionCardView: View {
         if let resolution = effectiveCodexResolution {
             VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
                 CCSectionHeader("What was chosen")
-                Text(CodexProse.whatWasChosen(resolution))
+                Text(CodexProse.whatWasChosen(resolution, card: approval.card))
                     .ccType(CC.type.callout)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)

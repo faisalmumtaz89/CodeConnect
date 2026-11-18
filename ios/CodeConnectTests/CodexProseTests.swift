@@ -70,8 +70,41 @@ final class CodexProseTests: XCTestCase {
     /// thing the daemon validated, and the only spelling that is certainly right.
     func testAPhoneAnswerNamesTheOptionItSent() {
         let chosen = CodexProse.whatWasChosen(
-            .answered(by: .phone, decision: .optionId("acceptWithExecpolicyAmendment"), answeredOn: nil))
+            .answered(by: .phone, decision: .optionId("acceptWithExecpolicyAmendment"), answeredOn: nil), card: nil)
         XCTAssertTrue(chosen.contains("acceptWithExecpolicyAmendment"), chosen)
+    }
+
+    /// The daemon's own capture of a command card a phone answered (`phone-turn-stream-0.153.4.json`): the settled
+    /// card names the option by the words it offered it in, and by its id when the card cannot vouch for that.
+    func testASettledCardNamesTheOptionByItsLabel() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "phone-turn-stream-0.153.4", withExtension: "json"))
+        let frames = try XCTUnwrap(
+            try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).objectValue?["frames"]?.arrayValue)
+        let events = try frames.dropFirst().map { try XCTUnwrap($0["event"]?.decoded(Event.self)) }
+        let settled = try XCTUnwrap(
+            TimelineBuilder.build(events).lazy.compactMap { item -> ApprovalItem? in
+                guard case .approval(let approval) = item.content,
+                    case .answered(.phone, .optionId("accept"), _) = approval.codexResolution
+                else { return nil }
+                return approval
+            }.first, "the command card the phone answered with accept")
+        let resolution = try XCTUnwrap(settled.codexResolution)
+
+        XCTAssertEqual(CodexProse.whatWasChosen(resolution, card: settled.card), "Yes, proceed.")
+        XCTAssertEqual(
+            CodexProse.whatWasChosen(
+                .unknown(
+                    attemptedBy: .phone, attemptedDecision: .optionId("accept"),
+                    writeStage: .upstreamWriteUnconfirmed, cause: "reset"),
+                card: settled.card),
+            "The option “Yes, proceed” was written, and its outcome was never confirmed.")
+        // No card, or a card that does not hold the id: the id, exactly as before.
+        XCTAssertEqual(CodexProse.whatWasChosen(resolution, card: nil), "The option “accept”.")
+        XCTAssertEqual(
+            CodexProse.whatWasChosen(
+                .answered(by: .phone, decision: .optionId("acceptForSession"), answeredOn: nil), card: settled.card),
+            "The option “acceptForSession”.")
     }
 
     /// A cleared card never claims a decision. Four causes, one rule.
@@ -79,7 +112,7 @@ final class CodexProseTests: XCTestCase {
         for cause in [
             ClearCause.turnAborted, .turnCompleted, .superseded, .itemCompleted,
         ] {
-            let chosen = CodexProse.whatWasChosen(.cleared(cause: cause))
+            let chosen = CodexProse.whatWasChosen(.cleared(cause: cause), card: nil)
             XCTAssertEqual(chosen, "Nothing. This question ended without an answer.", "\(cause)")
         }
     }
@@ -513,7 +546,7 @@ final class CodexProseTests: XCTestCase {
                 writeStage: .upstreamWriteUnconfirmed, cause: "reset"),
             CodexResolution.unrecognisedStatus("teleported"),
         ] {
-            let chosen = CodexProse.whatWasChosen(resolution)
+            let chosen = CodexProse.whatWasChosen(resolution, card: nil)
             XCTAssertFalse(
                 chosen.hasPrefix("Nothing."),
                 "an unaccounted-for write did not end with nothing happening: \(chosen)")
@@ -524,7 +557,7 @@ final class CodexProseTests: XCTestCase {
         let named = CodexProse.whatWasChosen(
             .unknown(
                 attemptedBy: .phone, attemptedDecision: .optionId("accept"),
-                writeStage: .upstreamWriteUnconfirmed, cause: "reset"))
+                writeStage: .upstreamWriteUnconfirmed, cause: "reset"), card: nil)
         XCTAssertTrue(named.contains("accept"), named)
         XCTAssertTrue(named.contains("never confirmed"), named)
     }
