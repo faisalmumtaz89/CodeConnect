@@ -668,9 +668,10 @@ means every session and event carries a `session_uid`, every message that names
 a session accepts one, and `answer` may carry `session_id` to scope itself to a
 run; `>= 3` means `send_text` is an idempotent mutation and approval cards carry
 a prompt generation; `>= 4` adds the `protocol_mismatch` and `message_too_large`
-error codes, the truncated-event placeholder, and the transcript tailer's two
-`error` payload shapes; `>= 5` means `lifecycle` is reconciled against tmux
-rather than merely remembered, so `live` is proven rather than unrefuted, and a
+error codes, the truncated-event placeholder, and two `error` payload shapes an
+earlier build's transcript tailer sent; `>= 5` means `lifecycle` is reconciled
+rather than merely remembered (an earlier daemon against tmux; this one against
+each run's agent host or Codex app-server), so `live` is proven rather than unrefuted, and a
 derived `session_end` carries a `reason`; `>= 6` adds `register_push`, the
 phone telling the daemon where to send a notification; `>= 7` adds
 `delete_session`; `>= 8` through `>= 10` cover the diff, the composer and the
@@ -700,8 +701,8 @@ well. `>= 21` answers Claude's `AskUserQuestion` from the phone: the
 `ended` and the `question_hold` events gone in X12), and the `answers` and
 `decline` decisions; `allow` and `option` on a question card are refused for
 every client.
-`>= 22` answers every Claude card only through its own call's hook (or, for a run
-started from an app, through its agent host), and nothing
+`>= 22` answers every Claude card only through Claude itself (an earlier daemon
+through the call's own hook; this one through the run's agent host), and nothing
 is typed: the `hook_only_approvals` capability, `question_hold` on every Claude
 card, and `text` on a Claude approval as a denial with that reason. For every
 client, any `option` but `1` on an approval is refused, and so is any decision
@@ -1091,8 +1092,9 @@ same environment. The shell starts from the
 user's session environment, not the daemon's service one: on macOS launchd's,
 with its `PATH` (`launchctl setenv`'s, or launchd's default) and `XPC_SERVICE_NAME=0`,
 `XPC_FLAGS=0x0`; on Linux the systemd user manager's, read whole. Either way the
-daemon's own location (`CODECONNECT_HOME`, `TMUX_TMPDIR`)
-goes with it and `CODECONNECT_LOG` and `CODECONNECT_SERVICE` do not. A daemon
+daemon's own location (`CODECONNECT_HOME`) goes with it, and so does its
+`TMUX_TMPDIR`, so that an agent in a test rig cannot reach the owner's tmux server;
+`CODECONNECT_LOG` and `CODECONNECT_SERVICE` do not. A daemon
 started by hand has the session's environment already and uses its own; so
 does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
 it names an encoding (`LC_ALL`, `LC_CTYPE`, `LANG`), `LC_CTYPE` is the platform's
@@ -1267,8 +1269,7 @@ to probe credentials.
   an older daemon, and on an answer a restart settled. It chooses words only.
 * **`CodexResolution.answered_on`** (minor 41) — the same on a Codex card's
   `answered` resolution by a paired device (`by: phone`). Absent on every other
-  resolution, from an older daemon, on an answer a restart settled, and on an
-  answer through a tmux-era control link.
+  resolution, from an older daemon, and on an answer a restart settled.
 * **`ApprovalCard.allow_for_session`** (minor 36) — `true` on a card from a run
   started in an app whose request suggests an allow rule: the card offers "Allow for
   this session", answered `option_id: "acceptForSession"`. Left out when false, so an
@@ -1495,10 +1496,10 @@ shared `/tmp` is not yours to change.
 * **On a Codex run started from an app, every one of CodeConnect's mail tools asks
   first.** `list_agents` and `read_messages` show a card like `send_message` until they
   are marked as only reading.
-* **A Claude run started from an app before CodeConnect was updated is not woken for its
-  mail.** Its agent host is the older one, which does not take the wake. Its agent reads its
-  mail when it calls `read_messages` itself; the mail waits a day at most. A run started
-  after the update is woken.
+* **On a Codex run started from an app, a command that finished while ccd restarted during a
+  turn is filed after that turn's reply.** ccd attaches again while the turn runs, files the
+  reply and the turn's end as they arrive, and reads the command back once the turn has
+  ended, so the command shows below the reply. Nothing is lost.
 * **On a Codex run started from an app, a message whose turn's end ccd never sees keeps
   its last state.** If the connection to Codex ends, or ccd restarts, while a message added
   to a running turn waits for Codex to read it, ccd records that what became of it is not
