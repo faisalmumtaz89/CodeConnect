@@ -39,10 +39,11 @@ User-facing changes, newest first. Mac releases are cut per
 
 - Claude's Bypass permissions can be turned on for a run started from the app, once you confirm it.
 
-## A run's settings button names its mode
+## A run's settings name its mode
 
-- A run's settings button names its mode beside its model, and a mode that works without asking is
-  shown in red.
+- A run's settings name its mode at rest, and a mode that works without asking is shown in red. On
+  the Mac the reply box has one button for the model and its effort and one for the mode, a Claude
+  run's Compact… and Clear… sit under "⋯", and nothing in the reply box shows through an open list.
 
 ## Codex's questions in Plan mode
 
@@ -66,7 +67,7 @@ User-facing changes, newest first. Mac releases are cut per
 - Claude runs started from the app take Claude Code's commands. `/model`, `/effort`, `/compact` and
   `/clear` open the app's own controls, `/diff` is handled by the app's own view of the changes, and
   any other command is sent to Claude and shown as its own row, with Claude's answer or a note that
-  it isn't available there. The Mac also has Clear… in a Claude run's settings list.
+  it isn't available there. The Mac also has Clear… under a Claude run's "⋯".
 
 ## Remove a finished run on the Mac
 
