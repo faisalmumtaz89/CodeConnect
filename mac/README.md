@@ -921,9 +921,14 @@ answer to the run's start and to each resume, and in its report of each change
 that asks nothing reads `full-access`, in Plan too, and a combination none of the four is gives
 no mode. A run whose Codex ccd reconnects to after its own restart is resumed with the
 approval and sandbox Codex last named for it, so the same Codex keeps Full Access; a run whose
-Codex is started again (relaunched) is given Default's, as its start was (the owner's decision
-233). Either reads what the
-resume's answer names. A resume does not carry Plan.
+Codex is started again (relaunched) comes back in Read Only or Plan when it was in one of them,
+and is given Default's otherwise, as its start was: a run never gains permissions by restarting,
+and a new Codex is never given Full Access (the owner's decisions 233 and 253). A resume does not
+carry Plan, so every resume of a run in Plan, a relaunch's, a reconnect's and the follow-up
+after a turn that ran across a reconnect, sets Plan again before the run takes a message; when
+Codex does not take it, a relaunch sends nothing and the person is told, and a reconnected run
+takes no message until ccd's next start. Each reads what the resume's answer names, then
+Codex's report of Plan.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

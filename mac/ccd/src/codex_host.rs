@@ -41,7 +41,8 @@
 //! A run whose app-server ended without ccd stopping it ("Stopped: its process ended": a crash,
 //! or a Mac restart) is relaunched by the person's next message, never at ccd start
 //! ([`relaunch`], P3 R4): its app-server is launched again into the run's folder, its thread
-//! resumed at Default's approval and sandbox, and the message sent on the new link.
+//! resumed in the mode it was in when that is narrower than Default (Read Only or Plan), in
+//! Default otherwise, and the message sent on the new link.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -816,7 +817,8 @@ async fn link(
                 // As Codex last named the run's settings, not as the reconnect resumed it: a
                 // change made while the turn ran stays made.
                 let mut resume = due.resume;
-                if let Some(kept) = adapter.settings() {
+                let kept = adapter.settings().cloned();
+                if let Some(kept) = &kept {
                     keep_settings(&mut resume, kept);
                 }
                 match tokio::time::timeout(
@@ -826,7 +828,21 @@ async fn link(
                 .await
                 {
                     Ok(Ok(answer)) => {
-                        resumed(&daemon, &uid, &mut adapter, &answer, &due.thread).await;
+                        let thread = &due.thread;
+                        let kept = kept.as_ref();
+                        if let Err(why) =
+                            resumed(&daemon, &uid, &client, &mut adapter, &answer, thread, kept)
+                                .await
+                        {
+                            // Out of Plan, the run takes no message: the link ends, and the
+                            // run is left `live` and unlinked, as a reconnect that failed
+                            // leaves it, until the next ccd start resumes it again.
+                            crate::log_info!(
+                                "{uid}: the follow-up resume after turn {}: {why}; unlinked",
+                                due.turn
+                            );
+                            break;
+                        }
                     }
                     Ok(Err(err)) => crate::log_info!(
                         "{uid}: the follow-up resume after turn {} failed: {err}",
@@ -1870,35 +1886,95 @@ async fn unfiled(
         .collect()
 }
 
-/// A `thread/resume` answer's facts filed, then the adapter told what was filed; the turns
-/// the answer reports still running.
+/// A `thread/resume` answer's facts filed, then the adapter told what was filed, and the run
+/// put back in Plan when the settings it was resumed from (`kept`) were in Plan
+/// ([`keep_plan`]); the turns the answer reports still running. Every resume passes here, so
+/// none leaves a run wider than its kept mode (decision 253). `Err` when Plan was not put
+/// back.
 async fn resumed(
     daemon: &Arc<Daemon>,
     uid: &str,
+    client: &Client,
     adapter: &mut CodexAdapter,
     answer: &Value,
     thread: &str,
-) -> Vec<String> {
-    let Some(mut seed) = adapter.plan_resume_seed(answer, thread) else {
-        crate::log_info!("{uid}: Codex's resume answer for thread {thread} was not read");
-        return Vec::new();
+    kept: Option<&Value>,
+) -> Result<Vec<String>, String> {
+    let running = match adapter.plan_resume_seed(answer, thread) {
+        Some(mut seed) => {
+            let items: Vec<&Value> = answer["thread"]["turns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|turn| turn["items"].as_array())
+                .flatten()
+                .collect();
+            file(
+                daemon,
+                uid,
+                unfiled(daemon, uid, &items, seed.take_events()).await,
+            )
+            .await;
+            adapter.apply_resume_seed(&seed);
+            file(daemon, uid, adapter.settings_answered(thread, answer)).await;
+            seed.running_turn_ids().to_vec()
+        }
+        None => {
+            crate::log_info!("{uid}: Codex's resume answer for thread {thread} was not read");
+            Vec::new()
+        }
     };
-    let items: Vec<&Value> = answer["thread"]["turns"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|turn| turn["items"].as_array())
-        .flatten()
-        .collect();
-    file(
-        daemon,
-        uid,
-        unfiled(daemon, uid, &items, seed.take_events()).await,
+    keep_plan(client, thread, kept, adapter.settings(), !running.is_empty()).await?;
+    Ok(running)
+}
+
+/// The thread `thread` put back in Plan when the settings it was resumed from (`kept`, a
+/// `codex_settings` fact) were in Plan and Codex does not name Plan now (`now`, the settings it
+/// last named): `thread/resume` takes no collaboration mode, so a resume leaves Plan. One
+/// `thread/settings/update`, as an app's change to Plan is ([`change_settings`]), carrying the
+/// model and the effort Codex names, from the next turn while one runs (`running`). `Err`, with
+/// Codex's reason, when Codex refuses it or does not answer.
+async fn keep_plan(
+    client: &Client,
+    thread: &str,
+    kept: Option<&Value>,
+    now: Option<&Value>,
+    running: bool,
+) -> Result<(), String> {
+    let Some(kept) = kept.filter(|kept| kept["collaboration_mode"] == "plan") else {
+        return Ok(());
+    };
+    let now = now.unwrap_or(kept);
+    if now["collaboration_mode"] == "plan" {
+        return Ok(());
+    }
+    let plan = crate::claude_host::Setting::Mode {
+        mode: "plan".into(),
+        confirmed: false,
+    };
+    match change_settings(client, thread, Some(now), running, &plan).await {
+        SettingResult::Applied { .. } => Ok(()),
+        SettingResult::Refused { reason } | SettingResult::Indeterminate { reason } => {
+            Err(format!("Plan was not set again: {reason}"))
+        }
+    }
+}
+
+/// `kept`, a run's newest `codex_settings` fact, when it is narrower than the preset Default:
+/// Read Only or Plan as the apps read it ([`protocol::facts::codex_mode`]). A run whose Codex is
+/// started again comes back in that mode, and in Default otherwise, Full Access included
+/// (decisions 233 and 253).
+fn narrower_than_default(kept: Value) -> Option<Value> {
+    let text = |key: &str| kept[key].as_str().unwrap_or_default();
+    matches!(
+        protocol::facts::codex_mode(
+            text("approval_policy"),
+            text("sandbox"),
+            text("collaboration_mode")
+        ),
+        Some("read-only" | "plan")
     )
-    .await;
-    adapter.apply_resume_seed(&seed);
-    file(daemon, uid, adapter.settings_answered(thread, answer)).await;
-    seed.running_turn_ids().to_vec()
+    .then_some(kept)
 }
 
 /// A restarted ccd's link to the `live` run `run`, whose recorded app-server is alive (P3
@@ -1948,15 +2024,11 @@ async fn resume(
         .initialize()
         .await
         .map_err(|err| format!("Codex's app-server did not initialize: {err}"))?;
-    let kept = match daemon.db.newest_codex_settings(uid.clone()).await {
-        Ok(kept) => kept,
-        Err(err) => {
-            crate::log_error!(
-                "{uid}: could not read its settings, so it resumes at Default: {err:#}"
-            );
-            None
-        }
-    };
+    let kept = daemon
+        .db
+        .newest_codex_settings(uid.clone())
+        .await
+        .map_err(|err| format!("could not read its settings: {err:#}"))?;
     let (adapter, owed, cards) = resume_thread(daemon, &client, run, codeconnect, kept).await?;
     Ok((client, adapter, owed, cards))
 }
@@ -1964,8 +2036,9 @@ async fn resume(
 /// The run's thread resumed on `client`, connected and initialized: a fresh skills scan, then
 /// `thread/resume` with the run's thread config and the approval policy and sandbox `kept`
 /// names (its newest `codex_settings` fact, [`keep_settings`]), the preset Default's without
-/// one, its answer filed. The adapter told what was filed, the turn the answer reports running
-/// owed its follow-up, and the run's standing cards.
+/// one, its answer filed and the run put back in Plan when `kept` was in Plan ([`resumed`]).
+/// The adapter told what was filed, the turn the answer reports running owed its follow-up, and
+/// the run's standing cards.
 async fn resume_thread(
     daemon: &Arc<Daemon>,
     client: &Client,
@@ -1999,7 +2072,16 @@ async fn resume_thread(
         .await
         .map_err(|err| format!("Codex did not resume the thread: {err}"))?;
     let mut adapter = CodexAdapter::new(SessionKey::new(uid, uid));
-    let running = resumed(daemon, uid, &mut adapter, &answer, &run.thread).await;
+    let running = resumed(
+        daemon,
+        uid,
+        client,
+        &mut adapter,
+        &answer,
+        &run.thread,
+        kept.as_ref(),
+    )
+    .await?;
     crate::log_info!(
         "{uid}: connected again to its app-server; thread {} resumed, {} turn(s) still running",
         run.thread,
@@ -2025,8 +2107,11 @@ async fn resume_thread(
 /// `as.sock` are removed; the codex a start would find, with the environment a
 /// start reads, is launched into the run's folder with the run's kept folder answer, appending
 /// to its `host.log` ([`bring_up`]); and the thread is resumed on that connection as a
-/// reconnect resumes it ([`resume_thread`]), at Default's approval and sandbox: a new
-/// app-server keeps nothing the run was set to (ruling b). The run is then `live`, before its link is in
+/// reconnect resumes it ([`resume_thread`]), from the run's newest settings when they are
+/// narrower than Default ([`narrower_than_default`]: Read Only or Plan, put back before the
+/// message is sent) and at Default's approval and sandbox otherwise, Full Access included: a
+/// run never gains permissions by restarting, and a new app-server is not given Full Access
+/// (decisions 233 and 253). The run is then `live`, before its link is in
 /// place, its start is filed under this launch so the apps' timeline reopens, and its [`link`]
 /// takes `ask` as its first command.
 ///
@@ -2176,8 +2261,14 @@ async fn launch_again(
         trust: run.trust,
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
+    let kept = daemon
+        .db
+        .newest_codex_settings(uid.clone())
+        .await
+        .map_err(|err| format!("could not read its settings: {err:#}"))?
+        .and_then(narrower_than_default);
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
-    let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect, None).await?;
+    let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect, kept).await?;
     Ok((client, adapter, owed, cards))
 }
 
@@ -7504,6 +7595,15 @@ mod tests {
         n: usize,
         resume_answer: serde_json::Value,
     ) -> (Socket, serde_json::Value) {
+        relaunch_served_with(rig, n, |_| resume_answer).await
+    }
+
+    /// [`relaunch_served`], its `thread/resume` answered with what `answer_for` makes of it.
+    async fn relaunch_served_with(
+        rig: &Rig,
+        n: usize,
+        answer_for: impl FnOnce(&serde_json::Value) -> serde_json::Value,
+    ) -> (Socket, serde_json::Value) {
         let dir = run_folder(rig).await;
         let deadline = Instant::now() + Duration::from_secs(20);
         while launches(rig) < n {
@@ -7521,6 +7621,7 @@ mod tests {
         let skills = asked(&mut ws, "skills/list").await;
         answer(&mut ws, &skills, json!({"data": []})).await;
         let resumed = asked(&mut ws, "thread/resume").await;
+        let resume_answer = answer_for(&resumed);
         answer(&mut ws, &resumed, resume_answer).await;
         (ws, resumed)
     }
@@ -8459,9 +8560,9 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
-    /// **A relaunched Codex run comes back at Default** (ruling b): its new app-server keeps
-    /// nothing the run was set to, so a run set to Full Access whose app-server ended is resumed
-    /// with the preset Default, as its start was.
+    /// **A relaunched Codex run in Full Access comes back at Default** (decision 233): a run
+    /// set to Full Access whose app-server ended is resumed with the preset Default, as its
+    /// start was.
     #[tokio::test]
     async fn a_relaunched_codex_run_resumes_at_default() {
         let _env = crate::ProcessEnvRead::take();
@@ -8488,6 +8589,263 @@ mod tests {
             ),
             (&json!("on-request"), &json!("workspace-write"))
         );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// A `thread/resume` answer for `thr-x6` as Codex gives one: a recorded answer (Codex
+    /// 0.164, gpt-6.1-sol, Default's collaboration mode, which a resume does not carry) on the
+    /// run's thread, naming the approval policy and sandbox the resume `asked` for, which Codex
+    /// takes as the thread's own (X6 P12c).
+    fn resume_answer_as_asked(asked: &serde_json::Value) -> serde_json::Value {
+        let sandbox = match asked["params"]["sandbox"].as_str() {
+            Some("read-only") => "readOnly",
+            Some("danger-full-access") => "dangerFullAccess",
+            _ => "workspaceWrite",
+        };
+        let recorded: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/resume-after-approved-tool-turn-0.164.0.json"
+        ))
+        .unwrap();
+        let mut resume = recorded["result"].clone();
+        resume["thread"]["id"] = json!("thr-x6");
+        resume["thread"]["sessionId"] = json!("thr-x6");
+        resume["approvalPolicy"] = asked["params"]["approvalPolicy"].clone();
+        resume["sandbox"]["type"] = json!(sandbox);
+        resume
+    }
+
+    /// The engine run `uid` on `thr-x6`, which Codex reported at `approval`, `sandbox` and
+    /// collaboration `mode` (the apps reading `wire`), its app-server ended, then relaunched by
+    /// a message, the stand-in answering its resume as Codex does ([`resume_answer_as_asked`]),
+    /// a `thread/settings/update` with `update` (its error when `None`) and a `turn/start` with
+    /// `turn-2`. The daemon it was relaunched on, the stand-in's end, the `thread/resume` ccd
+    /// sent, every call it made after it in order, and what the message was told.
+    async fn relaunched_from(
+        rig: &Rig,
+        uid: &str,
+        mut ws: Socket,
+        (approval, sandbox, mode, wire): (&str, &str, &str, &str),
+        update: Option<serde_json::Value>,
+    ) -> (
+        Arc<Daemon>,
+        Socket,
+        serde_json::Value,
+        Vec<serde_json::Value>,
+        protocol::ws::ComposeResult,
+    ) {
+        tell(
+            &mut ws,
+            &settings_report("gpt-6.1-sol", "high", approval, sandbox, mode),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, uid, wire).await;
+        app_server_ended(rig, uid, ws).await;
+        let launch = launches(rig) + 1;
+        let daemon = relauncher(rig);
+        let mut said = saying(&daemon, uid, "say-kept", "are you still there");
+        let (mut ws, resumed) = tokio::select! {
+            served = relaunch_served_with(rig, launch, resume_answer_as_asked) => served,
+            refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let mut calls = Vec::new();
+        let told = loop {
+            tokio::select! {
+                frame = next_frame(&mut ws) => {
+                    let Some(frame) = frame else { break (&mut said).await.unwrap() };
+                    if frame.get("id").is_none() || frame.get("method").is_none() {
+                        continue;
+                    }
+                    calls.push(frame.clone());
+                    match (frame["method"].as_str(), &update) {
+                        (Some("thread/settings/update"), Some(result)) => {
+                            answer(&mut ws, &frame, result.clone()).await
+                        }
+                        (Some("thread/settings/update"), None) => {
+                            let refusal = json!({"id": frame["id"],
+                                "error": {"code": -32600, "message": "not now"}});
+                            ws.send(Message::Text(refusal.to_string())).await.unwrap();
+                        }
+                        (Some("turn/start"), _) => {
+                            answer(&mut ws, &frame, json!({"turn": {"id": "turn-2"}})).await
+                        }
+                        _ => {}
+                    }
+                }
+                told = &mut said => break told.unwrap(),
+            }
+        };
+        (daemon, ws, resumed, calls, told)
+    }
+
+    /// **A relaunched run in Read Only comes back in Read Only** (decision 253): its message's
+    /// turn starts on a thread resumed with Read Only's approval and sandbox, and the apps read
+    /// Read Only from Codex's answer, not Default.
+    #[tokio::test]
+    async fn a_relaunched_read_only_run_comes_back_read_only() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let (uid, ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        let kept = ("on-request", "readOnly", "default", "read-only");
+        let (daemon, ws, resumed, calls, told) =
+            relaunched_from(&rig, &uid, ws, kept, Some(json!({}))).await;
+        assert!(
+            matches!(told, protocol::ws::ComposeResult::Started { .. }),
+            "{told:?}"
+        );
+        assert_eq!(
+            (
+                &resumed["params"]["approvalPolicy"],
+                &resumed["params"]["sandbox"]
+            ),
+            (&json!("on-request"), &json!("read-only"))
+        );
+        assert_eq!(methods(&calls), ["turn/start"]);
+        settings_as_sent(&daemon, &uid, "read-only").await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A relaunched run in Plan comes back in Plan before its message is sent** (decision
+    /// 253): a resume cannot carry Plan, so Plan is set on the resumed thread, with the run's
+    /// own approval and sandbox (decision 174), and only then is the message's turn started.
+    #[tokio::test]
+    async fn a_relaunched_plan_run_comes_back_in_plan_before_its_message() {
+        let _env = crate::ProcessEnvRead::take();
+        for (sandbox, resumed_in) in [
+            ("workspaceWrite", "workspace-write"),
+            ("readOnly", "read-only"),
+        ] {
+            let rig = rig();
+            let (uid, ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+            let kept = ("on-request", sandbox, "plan", "plan");
+            let (daemon, mut ws, resumed, calls, told) =
+                relaunched_from(&rig, &uid, ws, kept, Some(json!({}))).await;
+            assert!(
+                matches!(told, protocol::ws::ComposeResult::Started { .. }),
+                "{told:?}"
+            );
+            assert_eq!(
+                (
+                    &resumed["params"]["approvalPolicy"],
+                    &resumed["params"]["sandbox"]
+                ),
+                (&json!("on-request"), &json!(resumed_in))
+            );
+            assert_eq!(methods(&calls), ["thread/settings/update", "turn/start"]);
+            assert_eq!(
+                calls[0]["params"],
+                json!({"threadId": "thr-x6", "collaborationMode": {"mode": "plan",
+                    "settings": {"model": "gpt-6.1-sol", "reasoning_effort": "high",
+                        "developer_instructions": null}}})
+            );
+            tell(
+                &mut ws,
+                &settings_report("gpt-6.1-sol", "high", "on-request", sandbox, "plan"),
+            )
+            .await;
+            settings_as_sent(&daemon, &uid, "plan").await;
+            drop(ws);
+            end_run(&rig, &uid).await;
+        }
+    }
+
+    /// **A relaunched run in Default, Full Access, or Full Access in Plan comes back in
+    /// Default** (decisions 233 and 253): Default's approval and sandbox, nothing set before
+    /// its message.
+    #[tokio::test]
+    async fn a_relaunched_run_not_narrower_than_default_comes_back_in_default() {
+        let _env = crate::ProcessEnvRead::take();
+        for kept in [
+            ("on-request", "workspaceWrite", "default", "auto"),
+            ("never", "dangerFullAccess", "default", "full-access"),
+            ("never", "dangerFullAccess", "plan", "full-access"),
+        ] {
+            let rig = rig();
+            let (uid, ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+            let (daemon, ws, resumed, calls, told) =
+                relaunched_from(&rig, &uid, ws, kept, Some(json!({}))).await;
+            assert!(
+                matches!(told, protocol::ws::ComposeResult::Started { .. }),
+                "{kept:?}: {told:?}"
+            );
+            assert_eq!(
+                (
+                    &resumed["params"]["approvalPolicy"],
+                    &resumed["params"]["sandbox"]
+                ),
+                (&json!("on-request"), &json!("workspace-write")),
+                "{kept:?}"
+            );
+            assert_eq!(methods(&calls), ["turn/start"], "{kept:?}");
+            settings_as_sent(&daemon, &uid, "auto").await;
+            drop(ws);
+            end_run(&rig, &uid).await;
+        }
+    }
+
+    /// **A relaunch whose Plan Codex does not take sends nothing** (decision 253): the message
+    /// is not sent and the person is told, the run back `exited`, rather than a turn at Default.
+    #[tokio::test]
+    async fn a_relaunch_whose_plan_is_refused_sends_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let (uid, ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        let kept = ("on-request", "workspaceWrite", "plan", "plan");
+        let (daemon, ws, _resumed, calls, told) =
+            relaunched_from(&rig, &uid, ws, kept, None).await;
+        assert_eq!(told, engine_no_connection());
+        assert_eq!(methods(&calls), ["thread/settings/update"]);
+        assert_eq!(
+            row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
+            Lifecycle::Exited
+        );
+        drop((daemon, ws));
+    }
+
+    /// **No resume leaves a run in Plan out of it** (decision 253): a run in Plan whose ccd
+    /// restarts mid-turn is put back in Plan after the reconnect's resume, whose answer names
+    /// Default, and again after the follow-up resume once that turn ends.
+    #[tokio::test]
+    async fn every_resume_puts_a_plan_run_back_in_plan() {
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let mid_turn = &capture["answerMidTurn"]["result"];
+        let thread = mid_turn["thread"]["id"].as_str().unwrap();
+        let first_turn = capture["answerAfter"]["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap();
+        let plan = || {
+            let mut report =
+                settings_report("gpt-6.1-sol", "high", "on-request", "readOnly", "plan");
+            report["params"]["threadId"] = json!(thread);
+            report
+        };
+        let wants_plan = |update: &serde_json::Value| {
+            assert_eq!(update["params"]["threadId"], thread);
+            assert_eq!(update["params"]["collaborationMode"]["mode"], "plan");
+        };
+        let rig = rig();
+        let (uid, mut ws) = engine_run(&rig, "req-plan-kept", thread, first_turn).await;
+        tell(&mut ws, &plan()).await;
+        settings_as_sent(&rig.daemon, &uid, "plan").await;
+        let (_restarted, mut ws, _) = resumed_with(&rig, ws, mid_turn.clone()).await;
+        let update = asked(&mut ws, "thread/settings/update").await;
+        wants_plan(&update);
+        answer(&mut ws, &update, json!({})).await;
+        tell(&mut ws, &plan()).await;
+        for frame in capture["live"]["afterTheMidTurnAnswer"].as_array().unwrap() {
+            tell(&mut ws, frame).await;
+        }
+        let follow_up = asked(&mut ws, "thread/resume").await;
+        answer(
+            &mut ws,
+            &follow_up,
+            capture["answerAfter"]["result"].clone(),
+        )
+        .await;
+        let again = asked(&mut ws, "thread/settings/update").await;
+        wants_plan(&again);
+        answer(&mut ws, &again, json!({})).await;
         drop(ws);
         end_run(&rig, &uid).await;
     }
