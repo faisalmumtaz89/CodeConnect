@@ -1063,9 +1063,11 @@ file no `detached` fact.
 An app's message (`compose`) goes through the same link as `turn/start`, under a uuid named
 from the run and the request id, as a Claude run's message is. Codex runs it as a new turn
 when the run is idle, and adds it to the running turn otherwise. The answer names that turn
-(`started` or `steered`), and the person's row of the message, with its `request_id`, is
-filed then; Codex's own record of the same words is not filed again. Codex reads a message
-added to a running turn at the turn's next step. If the turn is stopped first, Codex drops
+(`started` or `steered`), and the person's row of the message, with its `request_id` and
+that turn's `turn_id`, is filed then, so every app learns the turn is running, and can stop
+it, before Codex records any item of it; Codex's own record of the same words is not filed
+again. Codex reads a message added to a running turn at the turn's next step. If the turn is
+stopped first, Codex drops
 the message without saying so, and ccd files a `send_not_sent` notice for it ("Not sent:
 stopped", with its `request_id`). The evidence is that Codex recorded no message under its
 uuid before the turn ended interrupted, which is the evidence Codex's own client hands a
