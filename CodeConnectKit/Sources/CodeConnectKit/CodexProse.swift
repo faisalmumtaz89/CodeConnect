@@ -69,8 +69,8 @@ public enum CodexProse {
     /// different fact and usually a completely ordinary one.
     public static func resolution(_ resolution: CodexResolution, on host: HostDevice = .current) -> Banner {
         switch resolution {
-        case .answered(let by, let decision, _):
-            return answered(by: by, decision: decision, on: host)
+        case .answered(let by, let decision, let answeredOn):
+            return answered(by: by, decision: decision, answeredOn: answeredOn, on: host)
 
         case .cleared(.turnAborted):
             return Banner(
@@ -142,12 +142,15 @@ public enum CodexProse {
         }
     }
 
-    private static func answered(by: ResolutionActor, decision: AnswerDecision?, on host: HostDevice) -> Banner {
+    private static func answered(
+        by: ResolutionActor, decision: AnswerDecision?, answeredOn: AnsweredOn?, on host: HostDevice
+    ) -> Banner {
         switch by {
         case .phone:
-            // `phone` is any paired device, and the record names none: the iPhone keeps "a phone".
+            // `phone` is any paired device, named by the kind `answeredOn` records, as a Claude answer's provenance is;
+            // where the iPhone has no other words, "a phone".
             return Banner(
-                title: "Answered from \(AnswerOutcome.answeringDevice(nil, on: host) ?? "a phone")",
+                title: "Answered from \(AnswerOutcome.answeringDevice(answeredOn, on: host) ?? "a phone")",
                 message: "Codex has the answer.",
                 icon: "seal-check", tone: .success)
         case .unknown(let raw):

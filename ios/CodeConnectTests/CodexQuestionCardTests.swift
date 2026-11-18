@@ -136,12 +136,16 @@ final class CodexQuestionCardTests: XCTestCase {
         XCTAssertFalse(onMac.message.contains("the Mac"), onMac.message)
         let onPhone = try XCTUnwrap(status.banner(on: .iPhone, agent: .codex))
         XCTAssertTrue(onPhone.message.contains("from the phone"), onPhone.message)
+        // Every other Codex card ends in `CodexProse.resolution`, which reads the card's kind nowhere.
+        XCTAssertEqual(CodexProse.resolution(try resolution("answered"), on: .mac).title, "Answered from an iPhone")
+        XCTAssertEqual(CodexProse.resolution(try resolution("answered"), on: .iPhone).title, "Answered from a phone")
     }
 
     /// The companion to the above (answered_on, minor 41): a Mac answer is the same
     /// resolution with `answered_on` set to "mac", derived here by changing that one
-    /// value. Either device reading it is told the Mac sent the answer — the resolver
-    /// is named, not the reader. Must-fail: a read that ignores `answered_on` says a phone.
+    /// value. Either device reading it is told the Mac sent the answer, on a question
+    /// card and on every other card's ending — the resolver is named, not the reader.
+    /// Must-fail: a read that ignores `answered_on` says a phone.
     func testAMacAnsweredCodexCardNamesTheMacOnEitherView() throws {
         let frames = try XCTUnwrap(try wire()["answered"]?["frames"]?.arrayValue, "answered.frames")
         let eventJSON = try XCTUnwrap(
@@ -161,6 +165,9 @@ final class CodexQuestionCardTests: XCTestCase {
             XCTAssertTrue(
                 banner.message.contains("from a Mac"),
                 "read on \(host.noun): a Mac answer names the Mac — \(banner.message)")
+            XCTAssertEqual(
+                CodexProse.resolution(try XCTUnwrap(macEvent.codexResolution), on: host).title, "Answered from a Mac",
+                "read on \(host.noun)")
         }
     }
 
