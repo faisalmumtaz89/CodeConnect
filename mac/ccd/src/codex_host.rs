@@ -1451,8 +1451,8 @@ async fn recorded_interrupt(
 /// ([`crate::claude_host::send_uuid`]). Codex runs it as a new turn when the thread is idle
 /// and adds it to the turn it is running otherwise, and answers with that turn: one of the
 /// `live` turns, which it joined, or a new one, which it started. Once Codex takes it, the
-/// person's words are filed with its request id, and it waits for what Codex records of it
-/// ([`heard`]). Codex's own refusal gives the claim back, so the same ask is a first attempt
+/// person's words are filed with its request id and that turn, and it waits for what Codex
+/// records of it ([`heard`]). Codex's own refusal gives the claim back, so the same ask is a first attempt
 /// again; a connection that ends first leaves it `applying`, for startup's settle.
 async fn compose(
     daemon: &Arc<Daemon>,
@@ -1570,7 +1570,8 @@ async fn compose(
     } else {
         crate::store::COMPOSE_ROUTE_START
     };
-    let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id), None);
+    let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id), None)
+        .with_turn_id(Some(turn.to_string()));
     file(daemon, uid, vec![words]).await;
     let send = WaitingSend {
         request_id: ask.request_id.clone(),
@@ -6041,6 +6042,75 @@ mod tests {
             words(&restarted, &uid, text).await.len(),
             1,
             "after the resume: {ids:?}"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A phone's message is filed naming the turn it started or joined**, so a device that did
+    /// not send it learns the turn is running, and can stop it, before Codex records any item of
+    /// it: Codex's own record of those words, which names the turn, is not filed a second time.
+    #[tokio::test]
+    async fn a_message_names_the_turn_it_started_or_joined() {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let turns = &capture["answerAfter"]["result"]["thread"]["turns"];
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .unwrap();
+        let (first, turn) = (
+            turns[0]["id"].as_str().unwrap(),
+            turns[1]["id"].as_str().unwrap(),
+        );
+        let (uid, mut ws) = engine_run(&rig, "req-named", thread, first).await;
+        let named = |daemon: Arc<Daemon>, uid: String| async move {
+            daemon
+                .db
+                .events_after(uid, 0, 10_000)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|event| (event.payload["request_id"].clone(), event.turn_id))
+                .collect::<Vec<_>>()
+        };
+        let sent = saying(&rig.daemon, &uid, "say-start", "and the docs");
+        let start = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        assert_eq!(
+            sent.await.unwrap(),
+            protocol::ws::ComposeResult::Started {
+                turn_id: turn.into()
+            }
+        );
+        assert!(
+            named(Arc::clone(&rig.daemon), uid.clone())
+                .await
+                .contains(&(json!("say-start"), Some(turn.to_string()))),
+            "the message that started the turn: {:?}",
+            named(Arc::clone(&rig.daemon), uid.clone()).await
+        );
+        tell(&mut ws, &turn_started(thread, turn)).await;
+        let thought =
+            json!({"type": "reasoning", "id": "item-thought", "summary": [], "content": []});
+        for frame in recorded(thread, turn, &thought) {
+            tell(&mut ws, &frame).await;
+        }
+        filed_until(&rig.daemon, &uid, ":item:item-thought").await;
+        let sent = saying(&rig.daemon, &uid, "say-steer", "and the tests");
+        let steer = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &steer, json!({"turn": {"id": turn}})).await;
+        assert_eq!(
+            sent.await.unwrap(),
+            protocol::ws::ComposeResult::Steered {
+                turn_id: turn.into()
+            }
+        );
+        assert!(
+            named(Arc::clone(&rig.daemon), uid.clone())
+                .await
+                .contains(&(json!("say-steer"), Some(turn.to_string()))),
+            "the message that joined the turn: {:?}",
+            named(Arc::clone(&rig.daemon), uid.clone()).await
         );
         drop(ws);
         end_run(&rig, &uid).await;
