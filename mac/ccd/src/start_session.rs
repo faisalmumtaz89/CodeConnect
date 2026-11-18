@@ -373,13 +373,20 @@ async fn codex_start(
     } else {
         trust
     };
-    // The models this codex's check listed, for the run's settings menu: none when no check
-    // has asked this version yet, and the run then offers its modes alone.
-    let models = daemon
-        .agents
-        .offered(&AgentKind::Codex, &ready.version)
-        .map(|offer| offer.menu)
-        .unwrap_or_default();
+    // The models this codex offers, for the run's settings menu, as a list finds them: the
+    // answer kept for this version, or this codex asked now when none is kept that says it
+    // is signed in (no list since ccd started, or one from before its sign-in). None when it
+    // cannot be asked, and the run then offers its modes alone.
+    let models = offer(
+        &daemon.agents,
+        environment,
+        &ready.path,
+        &AgentKind::Codex,
+        &ready.version,
+    )
+    .await
+    .map(|offer| offer.menu)
+    .unwrap_or_default();
     crate::codex_host::start(
         daemon,
         crate::codex_host::Run {
@@ -1934,6 +1941,8 @@ mod tests {
                     "printf 'HOME=%s PATH=%s XPC_SERVICE_NAME=%s X2_MARKER=%s\\n' \"${{HOME-unset}}\" \
                      \"${{PATH-unset}}\" \"${{XPC_SERVICE_NAME-unset}}\" \"${{X2_MARKER-unset}}\" >> \"$0.env\"\n\
                      [ \"$1\" = --version ] && {{ echo 'codex-cli 0.167.0'; exit 0; }}\n\
+                     [ \"$*\" = 'login status' ] && exit 1\n\
+                     [ \"$*\" = app-server ] && exit 1\n\
                      echo run >> \"$0.runs\"; printf '%s\\0' \"$@\" > \"$0.argv\"; echo '{CODEX_SAYS}'; exit 1"
                 ),
             );
@@ -3475,9 +3484,128 @@ mod tests {
         assert!(reached(&result), "{result:?}");
         let seen = std::fs::read_to_string(rig.root.join("stand-in-codex.env")).unwrap();
         let lines: Vec<&str> = seen.lines().collect();
-        assert_eq!(lines.len(), 2, "the check and the launch: {seen}");
-        assert_eq!(lines[0], lines[1]);
+        assert_eq!(
+            lines.len(),
+            4,
+            "the check, its `login status` and its ask for the models, and the launch: {seen}"
+        );
+        assert!(lines.iter().all(|line| *line == lines[0]), "{seen}");
         assert!(lines[0].ends_with("X2_MARKER=x2-env-marker"), "{seen}");
+    }
+
+    /// **A Codex start whose ask for the models never answers still starts**, within the
+    /// ask's own bound and with no models kept, its run offering its modes alone, as a
+    /// start did before it asked.
+    #[tokio::test]
+    async fn a_codex_start_whose_ask_never_answers_still_starts() {
+        let rig = counting("codex-ask-hangs");
+        let codex = rig.root.join("stand-in-codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n--version) echo 'codex-cli 0.167.0' ;;\n\
+             \"login status\") exit 0 ;;\napp-server) exec sleep 60 ;;\n\
+             *) echo run >> \"$0.runs\"; echo '{CODEX_SAYS}'; exit 1 ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let result = rig
+            .start_request(
+                "r-hangs",
+                AgentKind::Codex,
+                &rig.project(),
+                "fix it",
+                None,
+                Some(Trust::Trusted),
+            )
+            .await;
+        let took = started.elapsed();
+        assert!(reached(&result), "{result:?}");
+        assert!(
+            took < PROBE_TIMEOUT + Duration::from_secs(5),
+            "took {took:?}"
+        );
+        assert_eq!(rig.runs(), 1, "the run was launched");
+        let run = rig
+            .db
+            .hosted_run_for_request("r-hangs".into())
+            .await
+            .unwrap()
+            .expect("the start's run");
+        assert_eq!(
+            rig.db.hosted_models(run.session_uid).await.unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    /// **A Codex start with no list before it offers the models Codex lists** (97, 11-18):
+    /// with no answer kept since ccd started, the start asks this codex as a list asks it,
+    /// so the run keeps Codex's models for its settings menu, whoever asked first; a second
+    /// start takes the signed-in answer kept, and asks nothing more.
+    #[tokio::test]
+    async fn a_codex_start_with_no_list_before_it_keeps_the_models_codex_lists() {
+        let rig = counting("codex-no-list");
+        let codex = rig.root.join("stand-in-codex");
+        std::fs::write(
+            &codex,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.asks\"\ncase \"$*\" in\n\
+             --version) echo 'codex-cli 0.167.0' ;;\n\"login status\") exit 0 ;;\n\
+             app-server) cat \"$0.codex\"; exec sleep 60 ;;\n*) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        let models_only: String = CODEX_API_KEY
+            .lines()
+            .filter(|line| !line.contains(r#""id":3"#))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        codex_says(&codex, "codex", &models_only);
+        async fn kept(rig: &Rig, request_id: &str) -> Option<Vec<serde_json::Value>> {
+            let run = rig
+                .db
+                .hosted_run_for_request(request_id.into())
+                .await
+                .unwrap()
+                .expect("the start's run");
+            rig.db.hosted_models(run.session_uid).await.unwrap()
+        }
+        let (project, trust) = (rig.project(), Some(Trust::Trusted));
+        rig.start_request("r-first", AgentKind::Codex, &project, "fix it", None, trust)
+            .await;
+        let first = kept(&rig, "r-first").await.expect("the run keeps models");
+        assert_eq!(first.len(), 9, "Codex's listed models: {first:?}");
+        let menus = crate::codex_host::menus(&first);
+        assert_eq!(menus.models[0].value, "gpt-6.1-sol");
+        assert_eq!(menus.models[0].label, "GPT-6.1-Sol");
+        assert!(!menus.models[0].efforts.is_empty());
+        let asked = codex_runs(&codex);
+        assert_eq!(
+            asked.lines().filter(|line| *line == "app-server").count(),
+            1,
+            "{asked}"
+        );
+
+        rig.start_request(
+            "r-second",
+            AgentKind::Codex,
+            &project,
+            "fix it",
+            None,
+            trust,
+        )
+        .await;
+        assert_eq!(kept(&rig, "r-second").await, Some(first));
+        let again = codex_runs(&codex);
+        assert_eq!(
+            again.lines().filter(|line| *line == "app-server").count(),
+            1,
+            "the kept signed-in answer is taken, nothing asked: {again}"
+        );
+        assert_eq!(
+            again.lines().filter(|line| *line == "login status").count(),
+            1,
+            "{again}"
+        );
     }
 
     /// The `-c projects=` list the stand-in codex was last launched with.

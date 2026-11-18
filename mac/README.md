@@ -900,7 +900,8 @@ wording is not read). A retry applies the change again. A change whose answer is
 across a ccd restart leaves the effort as it was last set. A Claude run in a terminal, and a
 Codex run in one, take no settings from an app.
 From minor 43 a Codex run CodeConnect started takes the same `set_model` and `set_mode`. Its
-`menus` are the models the start's check of Codex listed (`model/list`, kept with the run),
+`menus` are the models Codex lists as the agents' check asks it (`model/list`; the answer a
+list kept, or, with none kept that says it is signed in, asked at the start; kept with the run),
 with the model the run started on first when that list does not carry it (one the person's
 config names that Codex does not list, or an account default Codex's online catalog gained
 after the check kept its signed-in answer), labelled with its id and offering no effort,
@@ -1187,8 +1188,10 @@ at all, since its start is refused. One whose sign-in is not known is asked at
 every list. A signed-out Codex's answer is asked again only once `codex login
 status`, which starts nothing, says it is signed in; that status does not count a
 model provider of the user's own, so one set up while the daemon runs is offered
-once Codex is updated or the daemon restarts. An agent that does not answer
-within the check's 10 s offers no models. `start_session`'s `model` is given to Claude
+once Codex is updated or the daemon restarts. A Codex start asks the same way when
+no answer kept for its version says it is signed in (no list since the daemon started, or one
+from before its sign-in), so its run's settings never depend on whether a list came first.
+An agent that does not answer within the check's 10 s offers no models. `start_session`'s `model` is given to Claude
 Code's host as the run's model; absent, or Claude Code's own `default`, it gets none
 and starts with the model its settings name. A Codex run's goes on its `thread/start`,
 and Codex's own `default` as none, the same way.
