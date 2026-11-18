@@ -154,9 +154,13 @@ private struct Heading: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
     }
 
-    /// The agent, and the model it says it runs when it has said.
+    /// The agent, and the model it says it runs when it has said: by the label of the run's menu entry for that
+    /// model when there is one, so the line and the settings list spell it alike (Kit's `modelName`).
     private var agentLine: String {
-        [row.summary.agent.displayName, model.confirmedModel(for: row.id).map { ModelDisplay.from($0.name).name }]
+        [
+            row.summary.agent.displayName,
+            model.confirmedModel(for: row.id).map { RunSettings.modelName(confirmed: $0.name, menus: row.summary.menus) },
+        ]
             .compactMap { $0 }
             .joined(separator: " · ")
     }
