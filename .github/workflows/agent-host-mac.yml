@@ -41,20 +41,17 @@ jobs:
       - name: Build
         run: mac/agent-host/build.sh "$RUNNER_TEMP/agent-host"
 
-      # Signed with the hardened runtime and allow-jit alone, it must start here
-      # and start a child, and the same executable signed without allow-jit
-      # must not (check.sh): JavaScriptCore needs the entitlement to JIT.
+      # Signed with the hardened runtime and allow-jit alone (entitled.sh), it
+      # must start here and start a child (check.sh). That the same executable
+      # signed without allow-jit fails check.sh is not shown here: on GitHub's
+      # macOS runners it passes, on both architectures, so that control runs
+      # before the release is published, on a Mac where the copy fails
+      # (RELEASING.md step 5).
       - name: Check the slice runs under its signature
         run: |
           host="$RUNNER_TEMP/agent-host/cc-agent-host-darwin-${{ matrix.arch }}"
           mac/agent-host/entitled.sh "$host"
           mac/agent-host/check.sh "$host"
-          cp "$host" "$RUNNER_TEMP/unentitled"
-          codesign --force --options runtime --sign - "$RUNNER_TEMP/unentitled"
-          if mac/agent-host/check.sh "$RUNNER_TEMP/unentitled"; then
-            echo "::error::the agent host ran without allow-jit, so the check proves nothing"
-            exit 1
-          fi
 
       # The host's own tests, on the slice as signed (test.sh): the protocol's
       # types against the lines ccd's tests emit, and the host's rules over its
