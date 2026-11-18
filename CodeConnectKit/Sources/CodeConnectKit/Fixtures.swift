@@ -148,7 +148,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .spoofedCommand, .single: return 4
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             case .empty: return 0
-            case .hostedSettings: return 1
+            case .hostedSettings: return 5
             case .timeline, .timelineLongName: return 7
             }
         }
@@ -227,11 +227,21 @@ enum Fixtures {
         let cards = variant.cards
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
-        let ackJSON =
-            variant == .timelineLongName
-            ? helloAckJSON.replacingOccurrences(
+        let ackJSON: String
+        switch variant {
+        case .timelineLongName:
+            ackJSON = helloAckJSON.replacingOccurrences(
                 of: "Jordan’s Mac Studio", with: "Jordan’s MacBook Pro (16-inch, Nov 2024)")
-            : helloAckJSON
+        case .hostedSettings:
+            // The fixture carries live Codex runs beside the Claude ones, so the ack advertises the
+            // Codex capabilities a Codex-hosting daemon sends — otherwise the composer reads "too
+            // old to carry a message to Codex" on the Codex runs.
+            ackJSON = helloAckJSON.replacingOccurrences(
+                of: #""browse_folders":true}"#,
+                with: #""browse_folders":true,"codex_interrupt":true,"codex_compose":true,"supported_agents":["claude","codex"]}"#)
+        default:
+            ackJSON = helloAckJSON
+        }
         if let ack = decode(ackJSON) { messages.append(ack) }
         if let sessions = decode(sessionsJSON(now: now, variant: variant, cards: cards + held)) {
             messages.append(sessions)
@@ -571,32 +581,18 @@ enum Fixtures {
         return "{\"type\":\"sessions\",\"sessions\":[\(all)]}"
     }
 
-    /// The one run the `hostedSettings` fixture carries: live, started by this app, with minor-39's
-    /// menus in their worst shapes — the longest model detail, all five efforts, the three permission
-    /// modes — and the facts that select "sonnet", "high" and "plan". Decoded like every other frame,
-    /// so the sheet draws it through `runSettings` as it would a daemon's own summary.
+    /// The five runs the `hostedSettings` fixture carries, one per composer-settings state: a hosted
+    /// Claude run in Plan (fx-1, a non-default mode named beside the model), one in Bypass permissions
+    /// (fx-2, a confirm mode in red), a live Codex run at its default (cx-1, the model named alone), and
+    /// one in Full Access (cx-2, a confirm mode in red), and a live Codex run with a card waiting
+    /// (cx-blocked, its settings control disabled with its reason) — minor-39’s menus in their worst shapes.
+    /// Decoded like every other frame, so the control and sheet draw them through `runSettings` as a
+    /// daemon’s own summary.
     private static func hostedSettingsSessionsJSON(stamp: String) -> String {
-        """
-        {"type":"sessions","sessions":[\
-        {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"fx-1",\
-        "agent":"claude","cwd":"/Users/dev/app","project_label":"app",\
-        "lifecycle":"live","link":"attached","last_seq":5,\
-        "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[],\
-        "model":{"value":"sonnet (claude-sonnet-5-5)","seq":2,"source":"command","at":"\(stamp)"},\
-        "permission_mode":{"value":"plan","seq":4},"effort":{"value":"high","seq":5},\
-        "menus":{"selected_model":"sonnet","models":[\
-        {"value":"default","label":"Default (recommended)",\
-        "detail":"Use the default model (currently Opus 5.5) · $4/$20 per Mtok",\
-        "efforts":["low","medium","high","xhigh","max"]},\
-        {"value":"sonnet","label":"Sonnet",\
-        "detail":"Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",\
-        "efforts":["low","medium","high","xhigh","max"]}],\
-        "modes":[{"value":"default","label":"Ask before edits"},\
-        {"value":"acceptEdits","label":"Accept edits"},{"value":"plan","label":"Plan"},\
-        {"value":"bypassPermissions","label":"Bypass permissions","confirm":true}]}}\
-        ]}
-        """
+        hostedSettingsBodyJSON.replacingOccurrences(of: "@STAMP@", with: stamp)
     }
+
+    private static let hostedSettingsBodyJSON = #"{"type":"sessions","sessions":[{"session_uid":"01CL000000000000000000DEF1","session_id":"fx-1","tmux_session":"","agent":"claude","cwd":"/Users/dev/app","project_label":"app","lifecycle":"live","link":"attached","last_seq":5,"created_at":"@STAMP@","updated_at":"@STAMP@","blocked_on":[],"model":{"value":"sonnet (claude-sonnet-5-5)","seq":2,"source":"command","at":"@STAMP@"},"permission_mode":{"value":"plan","seq":4},"effort":{"value":"high","seq":5},"menus":{"selected_model":"sonnet","models":[{"value":"default","label":"Default (recommended)","detail":"Use the default model (currently Opus 5.5) · $4/$20 per Mtok","efforts":["low","medium","high","xhigh","max"]},{"value":"sonnet","label":"Sonnet","detail":"Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok","efforts":["low","medium","high","xhigh","max"]}],"modes":[{"value":"default","label":"Ask before edits"},{"value":"acceptEdits","label":"Accept edits"},{"value":"plan","label":"Plan"},{"value":"bypassPermissions","label":"Bypass permissions","confirm":true}]}},{"session_uid":"01CL000000000000000000DEF2","session_id":"fx-2","tmux_session":"","agent":"claude","cwd":"/Users/dev/app","project_label":"app","lifecycle":"live","link":"attached","last_seq":5,"created_at":"@STAMP@","updated_at":"@STAMP@","blocked_on":[],"model":{"value":"opus (claude-opus-5-5)","seq":2,"source":"command","at":"@STAMP@"},"permission_mode":{"value":"bypassPermissions","seq":4},"effort":{"value":"high","seq":5},"menus":{"selected_model":"default","models":[{"value":"default","label":"Default (recommended)","detail":"Use the default model (currently Opus 5.5) · $4/$20 per Mtok","efforts":["low","medium","high","xhigh","max"]},{"value":"sonnet","label":"Sonnet","detail":"Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok","efforts":["low","medium","high","xhigh","max"]}],"modes":[{"value":"default","label":"Ask before edits"},{"value":"acceptEdits","label":"Accept edits"},{"value":"plan","label":"Plan"},{"value":"bypassPermissions","label":"Bypass permissions","confirm":true}]}},{"agent":"codex","blocked_on":[],"codex_link":"subscribed","codex_thread_id":"thr-x6","created_at":"@STAMP@","cwd":"/Users/person/project","last_seq":0,"lifecycle":"live","link":"attached","menus":{"models":[{"detail":"Latest workhorse model for coding and everyday work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6.1-Sol","value":"gpt-6.1-sol"},{"detail":"Frontier intelligence for the most demanding work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6-Astra","value":"gpt-6-astra"},{"detail":"Previous generation workhorse model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6-Sol","value":"gpt-6-sol"},{"detail":"Fast and affordable model for easier tasks.","efforts":["low","medium","high","xhigh","max"],"label":"GPT-6-Luna","value":"gpt-6-luna"},{"detail":"Older generation workhorse model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-5.6-Sol","value":"gpt-5.6-sol"},{"detail":"GPT-6.1 Terra Codex model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6.1 Terra","value":"gpt-6.1-terra"},{"detail":"Older balanced model for straightforward work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-5.6-Terra","value":"gpt-5.6-terra"},{"detail":"Older fast and efficient model.","efforts":["low","medium","high","xhigh","max"],"label":"GPT-5.6-Luna","value":"gpt-5.6-luna"},{"detail":"Legacy coding model.","efforts":["low","medium","high","xhigh"],"label":"GPT-5.5","value":"gpt-5.5"}],"modes":[{"label":"Default","value":"auto"},{"label":"Read Only","value":"read-only"},{"label":"Plan","value":"plan"},{"confirm":true,"label":"Full Access","value":"full-access"}],"selected_model":"gpt-6.1-sol"},"model":{"at":"@STAMP@","seq":1,"source":"command","value":"gpt-6.1-sol"},"permission_mode":{"seq":1,"value":"auto"},"project_label":"project","session_id":"cx-1","session_uid":"01CX000000000000000000DEF1","tmux_session":"","updated_at":"@STAMP@"},{"agent":"codex","blocked_on":[],"codex_link":"subscribed","codex_thread_id":"thr-x6","created_at":"@STAMP@","cwd":"/Users/person/project","effort":{"seq":6,"value":"high"},"last_seq":0,"lifecycle":"live","link":"attached","menus":{"models":[{"detail":"Latest workhorse model for coding and everyday work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6.1-Sol","value":"gpt-6.1-sol"},{"detail":"Frontier intelligence for the most demanding work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6-Astra","value":"gpt-6-astra"},{"detail":"Previous generation workhorse model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6-Sol","value":"gpt-6-sol"},{"detail":"Fast and affordable model for easier tasks.","efforts":["low","medium","high","xhigh","max"],"label":"GPT-6-Luna","value":"gpt-6-luna"},{"detail":"Older generation workhorse model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-5.6-Sol","value":"gpt-5.6-sol"},{"detail":"GPT-6.1 Terra Codex model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6.1 Terra","value":"gpt-6.1-terra"},{"detail":"Older balanced model for straightforward work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-5.6-Terra","value":"gpt-5.6-terra"},{"detail":"Older fast and efficient model.","efforts":["low","medium","high","xhigh","max"],"label":"GPT-5.6-Luna","value":"gpt-5.6-luna"},{"detail":"Legacy coding model.","efforts":["low","medium","high","xhigh"],"label":"GPT-5.5","value":"gpt-5.5"}],"modes":[{"label":"Default","value":"auto"},{"label":"Read Only","value":"read-only"},{"label":"Plan","value":"plan"},{"confirm":true,"label":"Full Access","value":"full-access"}],"selected_model":"gpt-6.1-terra"},"model":{"at":"@STAMP@","seq":6,"source":"command","value":"gpt-6.1-terra"},"permission_mode":{"seq":6,"value":"full-access"},"project_label":"project","session_id":"cx-2","session_uid":"01CX000000000000000000DEF2","tmux_session":"","updated_at":"@STAMP@"},{"agent":"codex","blocked_on":[],"codex_link":"subscribed","codex_thread_id":"thr-x6","created_at":"@STAMP@","cwd":"/Users/person/project","last_seq":10,"lifecycle":"live","link":"attached","menus":{"models":[{"detail":"Latest workhorse model for coding and everyday work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6.1-Sol","value":"gpt-6.1-sol"},{"detail":"Frontier intelligence for the most demanding work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6-Astra","value":"gpt-6-astra"},{"detail":"Previous generation workhorse model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6-Sol","value":"gpt-6-sol"},{"detail":"Fast and affordable model for easier tasks.","efforts":["low","medium","high","xhigh","max"],"label":"GPT-6-Luna","value":"gpt-6-luna"},{"detail":"Older generation workhorse model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-5.6-Sol","value":"gpt-5.6-sol"},{"detail":"GPT-6.1 Terra Codex model.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-6.1 Terra","value":"gpt-6.1-terra"},{"detail":"Older balanced model for straightforward work.","efforts":["low","medium","high","xhigh","max","ultra"],"label":"GPT-5.6-Terra","value":"gpt-5.6-terra"},{"detail":"Older fast and efficient model.","efforts":["low","medium","high","xhigh","max"],"label":"GPT-5.6-Luna","value":"gpt-5.6-luna"},{"detail":"Legacy coding model.","efforts":["low","medium","high","xhigh"],"label":"GPT-5.5","value":"gpt-5.5"}],"modes":[{"label":"Default","value":"auto"},{"label":"Read Only","value":"read-only"},{"label":"Plan","value":"plan"},{"confirm":true,"label":"Full Access","value":"full-access"}],"selected_model":"gpt-6.1-sol"},"model":{"at":"@STAMP@","seq":1,"source":"command","value":"gpt-6.1-sol"},"permission_mode":{"seq":1,"value":"auto"},"project_label":"project","session_id":"cx-blocked","session_uid":"01CX0000000000000000BLOCK1","tmux_session":"","updated_at":"@STAMP@","pending":[{"request_id":"req-blocked","seq":10,"turn_id":"thr-x6"}]}]}"#
 
     private static func approvalEventJSON(_ card: Card, seq: UInt64, now: Date) -> String {
         let inputJSON = card.input.canonicalJSONString

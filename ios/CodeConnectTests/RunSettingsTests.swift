@@ -153,4 +153,32 @@ final class RunSettingsTests: XCTestCase {
                 text: "Claude didn't answer, so the change may or may not have been made.",
                 tone: .warning))
     }
+
+    /// **The standing mode the control names beside the model (decision 228).** `nil` when the run sits in
+    /// the agent's asking default (the menu's first mode); the mode otherwise, carrying the `confirm` flag
+    /// the view draws in red. The one place both apps read this, so iPhone and Mac name the same mode.
+    func testStandingModeNamesTheModeOnlyWhenNotTheAskingDefault() throws {
+        // The asking default (the menu's first mode): nothing to name beside the model.
+        guard case .hostedLive(let auto) = RunSettings.of(
+            summary: try summary("session_codex_live", in: "codex-settings-wire"))
+        else { return XCTFail("a live Codex run is hostedLive") }
+        XCTAssertEqual(auto.selectedMode?.value, auto.modes.first?.value, "auto is the menu's first mode")
+        XCTAssertNil(auto.standingMode, "the asking default names no mode")
+        XCTAssertEqual(auto.modelDisplay, "GPT-6.1-Sol")
+
+        // A non-default, non-confirm mode: named, not red.
+        guard case .hostedLive(let plan) = RunSettings.of(summary: try summary("session_hosted_live"))
+        else { return XCTFail("a live hosted Claude run is hostedLive") }
+        XCTAssertEqual(plan.standingMode?.value, "plan")
+        XCTAssertEqual(plan.standingMode?.confirm, false, "Plan is not a confirm mode")
+        XCTAssertEqual(plan.modelDisplay, "Sonnet")
+
+        // A confirm mode: named, confirm-marked — the view draws it red.
+        guard case .hostedLive(let full) = RunSettings.of(
+            summary: try summary("session_codex_full_access", in: "codex-settings-wire"))
+        else { return XCTFail("a live Codex run is hostedLive") }
+        XCTAssertEqual(full.standingMode?.value, "full-access")
+        XCTAssertEqual(full.standingMode?.confirm, true, "Full Access is confirm-marked")
+        XCTAssertEqual(full.modelDisplay, "GPT-6-Astra")
+    }
 }

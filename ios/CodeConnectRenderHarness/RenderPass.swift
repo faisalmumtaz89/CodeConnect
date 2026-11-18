@@ -32,11 +32,22 @@ final class RenderPass: XCTestCase {
     /// where the two ramps cross.
     enum Size: String {
         case large = "UICTContentSizeCategoryL"
+        case xxLarge = "UICTContentSizeCategoryXXL"
+        case xxxLarge = "UICTContentSizeCategoryXXXL"
+        case ax1 = "UICTContentSizeCategoryAccessibilityM"
         case ax5 = "UICTContentSizeCategoryAccessibilityXXXL"
 
         /// The file suffix, and what `render-screens.sh` names the directory it
         /// sorts these into.
-        var suffix: String { self == .large ? "L" : "ax5" }
+        var suffix: String {
+            switch self {
+            case .large: return "L"
+            case .xxLarge: return "xxl"
+            case .xxxLarge: return "xxxl"
+            case .ax1: return "ax1"
+            case .ax5: return "ax5"
+            }
+        }
     }
 
     override func setUp() {
@@ -53,6 +64,14 @@ final class RenderPass: XCTestCase {
     func testRendersEveryScenarioAtAX5() throws {
         try render(at: .ax5)
     }
+
+    /// The single-line label sizes (xxLarge, xxxLarge) and the two-line boundary just above (AX1), for
+    /// the narrow-device sweep that pins "the mode's whole text is on screen" around the single-line edge.
+    func testRendersEveryScenarioAtXXLarge() throws { try render(at: .xxLarge) }
+
+    func testRendersEveryScenarioAtXXXLarge() throws { try render(at: .xxxLarge) }
+
+    func testRendersEveryScenarioAtAX1() throws { try render(at: .ax1) }
 
     func testRendersStartSessionAtLarge() throws {
         try render(at: .large, RenderCatalog.startSession)

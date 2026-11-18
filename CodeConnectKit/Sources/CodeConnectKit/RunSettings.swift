@@ -78,6 +78,14 @@ public struct HostedSettings: Sendable, Hashable {
     /// that applies from the next turn: until this device sends the run's next message) or the next call
     /// starts. `nil` when there is nothing to report.
     public let lastOutcome: SettingOutcome?
+
+    /// The run's mode when it is not the agent's asking default (the menu's first mode), to name beside the
+    /// model at rest so a run left in another mode says so (decision 228); `nil` when it is the asking default.
+    /// A mode the menu marks `confirm` is drawn in the alert's red by the view. The one place this rule is
+    /// composed, so the iPhone and the Mac name the same mode.
+    public var standingMode: MenuMode? {
+        selectedMode == modes.first ? nil : selectedMode
+    }
 }
 
 /// One effort choice: the wire `value` a `set_model` carries, and the display name it shows.

@@ -38,7 +38,7 @@ usage() {
 usage: render-screens.sh [--device <name>] [--size L|ax5] [--keep-simulator]
 
   --device <name>     simulator device type to clone (default: "iPhone 17 Pro")
-  --size L|ax5        render only one size (default: both)
+  --size L|xxl|xxxl|ax1|ax5   render only one size (default: L+ax5; xxl/xxxl/ax1 opt-in)
   --keep-simulator    do not delete the simulator this run created
 USAGE
 }
@@ -253,6 +253,15 @@ fi
 if [[ -z "$ONLY_SIZE" || "$ONLY_SIZE" == "ax5" ]]; then
     render_size ax5 accessibility-extra-extra-extra-large testRendersEveryScenarioAtAX5 \
         || FAILED=1
+fi
+if [[ "$ONLY_SIZE" == "xxl" ]]; then
+    render_size xxl extra-extra-large testRendersEveryScenarioAtXXLarge || FAILED=1
+fi
+if [[ "$ONLY_SIZE" == "xxxl" ]]; then
+    render_size xxxl extra-extra-extra-large testRendersEveryScenarioAtXXXLarge || FAILED=1
+fi
+if [[ "$ONLY_SIZE" == "ax1" ]]; then
+    render_size ax1 accessibility-medium testRendersEveryScenarioAtAX1 || FAILED=1
 fi
 
 say ""
