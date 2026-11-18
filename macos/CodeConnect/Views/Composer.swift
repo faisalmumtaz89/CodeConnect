@@ -32,7 +32,8 @@ private struct Composer: View {
     /// The Compact command typed last, and where it stands.
     @State private var running: Running?
     @State private var quiet: Task<Void, Never>?
-    @State private var commandsOpen = false
+    /// The settings panel open above the reply row, if any.
+    @State private var panel: SettingsPanel?
     @State private var compacting = false
     @State private var instructions = ""
     @State private var clearing = false
@@ -90,9 +91,11 @@ private struct Composer: View {
         // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .onAppear { askUnansweredAgain() }
-        // Esc closes the list, then leaves the field, before the window's Esc closes the run. Published to the whole
-        // window, not only along the focus: a list opened by a click leaves nothing in the box focused.
-        .focusedSceneValue(\.composerHoldsEscape, commandsOpen || fieldFocused)
+        // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
+        // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
+        .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
+        // A request that arrives is answered above the box: no settings panel may cover its answers.
+        .onChange(of: model.shown(for: key)?.pendingApprovals.first?.id) { _, now in if now != nil { panel = nil } }
         .onChange(of: model.receipts(for: key)?.compactSeq) { _, _ in settle() }
         .onDisappear {
             retire?.cancel()
@@ -148,7 +151,7 @@ private struct Composer: View {
                 .lineLimit(1...5)
                 .onSubmit(submit)
                 .focused($fieldFocused)
-                .onExitCommand { if commandsOpen { commandsOpen = false } else { fieldFocused = false } }
+                .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
                 .accessibilityLabel("Reply to \(agent)…")
                 .accessibilityIdentifier("session.composer.field")
             HStack(spacing: 10) {
@@ -169,8 +172,7 @@ private struct Composer: View {
                 case .hostedLive(let settings):
                     HostedSettingsButton(
                         model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
-                        help: blocked ?? (isCodex ? "Model, effort and mode" : "Model, effort, mode, compact and clear"),
-                        open: $commandsOpen, chose: takeOpener, compact: { compact(prefill: "") },
+                        blocked: blocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
                         clear: {
                             opener = nil
                             clearing = true
@@ -182,8 +184,12 @@ private struct Composer: View {
             }
         }
         .padding(12)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09)))
+        // The outline is drawn under the box's contents, not over them: a settings panel opens out of the box and
+        // nothing of the box may cross it.
+        .background {
+            RoundedRectangle(cornerRadius: 10).fill(Theme.raised)
+            RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09))
+        }
     }
 
     private var sendButton: some View {
@@ -315,12 +321,12 @@ private struct Composer: View {
     // MARK: Commands
 
     /// A slash command answered with this box's own control, before anything reaches the computer. Model and Effort
-    /// open the run's settings list, where the choice is made from the run's own menus.
+    /// open the run's model panel, where the choice is made from the run's own menus.
     private func route(_ action: CommandAction, draft: String) {
         switch action {
         case .nativeModel, .nativeEffort:
             opener = draft
-            commandsOpen = true
+            panel = .model
         case .nativeCompact(let prefill):
             compact(prefill: prefill)
             opener = draft
