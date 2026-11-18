@@ -163,20 +163,22 @@ public enum CodexProse {
     /// What was chosen, when the wire said. `nil` when nobody may claim one,
     /// which is stated as a sentence rather than left as a blank space.
     ///
-    /// The option **id** is what the wire carries and what the daemon validated,
-    /// so it is what is shown. Rendering the label instead would mean matching
-    /// an id against the card's own table and quietly showing nothing when the
-    /// card is gone — a caption that disappears is worse than one that is exact.
-    public static func whatWasChosen(_ resolution: CodexResolution) -> String {
+    /// An option is named by its label on `card`, the words the reader chose it by, when the card's table is the one
+    /// the daemon sent (`renderMatchesDisplayText`) and holds that id. Otherwise it is named by its **id**, what the
+    /// wire carries and the daemon validated: a card that is gone, or a table that no longer holds the id, still gets
+    /// an exact caption rather than none.
+    public static func whatWasChosen(_ resolution: CodexResolution, card: ApprovalCard?) -> String {
+        let options = card.map { $0.verification.renderMatchesDisplayText ? CodexCard.options(in: $0.toolInput) : [] } ?? []
+        func label(_ id: String) -> String? { options.first { $0.id == id }?.label }
         switch resolution {
         case .answered(_, .some(.optionId(let id)), _):
-            return "The option “\(id)”."
+            return label(id).map { $0 + "." } ?? "The option “\(id)”."
         case .answered(_, .some(let decision), _):
             return decision.label + "."
         case .answered(_, nil, _):
             return "Not known. \(HostDevice.current.computer("The computer")) recorded who answered but not what they chose."
         case .unknown(_, .some(.optionId(let id)), _, _):
-            return "The option “\(id)” was written, and its outcome was never confirmed."
+            return "The option “\(label(id) ?? id)” was written, and its outcome was never confirmed."
         case .cleared, .timeout:
             return "Nothing. This question ended without an answer."
         // **Not "Nothing".** An unknown write, or a status this build cannot

@@ -185,7 +185,8 @@ struct DecisionBlock: View {
             if let codexEnding {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("What was chosen").font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text)
-                    Text(CodexProse.whatWasChosen(codexEnding)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                    Text(CodexProse.whatWasChosen(codexEnding, card: approval.card)).font(Theme.ui(12))
+                        .foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
