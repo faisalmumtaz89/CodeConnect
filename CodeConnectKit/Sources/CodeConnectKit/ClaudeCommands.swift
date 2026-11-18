@@ -100,6 +100,9 @@ public struct ModelDisplay: Equatable {
     /// A variant worth its own quiet line — today only "1M context".
     public var meta: String?
 
+    /// The name and its variant on one line, as a label that names the model alone shows it: `Opus 5 · 1M context`.
+    public var line: String { [name, meta].compactMap { $0 }.joined(separator: " · ") }
+
     /// Claude Code's model families, which `/model` takes as aliases for the
     /// newest of each, named as its own model list names them. Names only:
     /// which version an alias stands for is Claude Code's to say, in its

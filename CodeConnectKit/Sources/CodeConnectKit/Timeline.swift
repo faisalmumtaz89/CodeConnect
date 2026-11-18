@@ -570,12 +570,7 @@ public enum TimelineBuilder {
                                 // places disagree about the same id; one this
                                 // build does not recognise passes through
                                 // verbatim.
-                                detail: event.modelName.map {
-                                    let display = ModelDisplay.from($0)
-                                    return [display.name, display.meta]
-                                        .compactMap { $0 }
-                                        .joined(separator: " · ")
-                                },
+                                detail: event.modelName.map { ModelDisplay.from($0).line },
                                 severity: .info))))
 
             case .linkState:

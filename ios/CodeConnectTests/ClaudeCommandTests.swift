@@ -281,6 +281,14 @@ final class ModelReceiptNameTests: XCTestCase {
         XCTAssertEqual(ModelDisplay.from("`opus` (claude-opus-5-5)"), ModelDisplay(name: "Opus 5.5", meta: nil))
     }
 
+    /// The line a model-only label shows keeps the variant: a 1M-context run says so.
+    func testAModelsLineKeepsItsVariant() {
+        XCTAssertEqual(ModelDisplay.from("claude-opus-5[1m]").line, "Opus 5 · 1M context")
+        XCTAssertEqual(ModelDisplay.from("opus[1m] (claude-opus-5[1m])").line, "Opus 5 · 1M context")
+        XCTAssertEqual(ModelDisplay.from("claude-opus-5-5").line, "Opus 5.5")
+        XCTAssertEqual(ModelDisplay.from("gpt-6.1-sol").line, "gpt-6.1-sol")
+    }
+
     func testAnythingElseInBracketsStaysVerbatim() {
         XCTAssertEqual(ModelDisplay.from("x (claude-foo-bar)").name, "x (claude-foo-bar)")
         XCTAssertEqual(ModelDisplay.from("My model (beta)").name, "My model (beta)")

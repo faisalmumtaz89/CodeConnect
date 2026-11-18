@@ -205,7 +205,7 @@ struct ModelFactLabel: View {
     var body: some View {
         HStack(spacing: 5) {
             AgentMark(agent: agent)
-            Text(fact.map { ModelDisplay.from($0).name } ?? "Model").foregroundStyle(Theme.text)
+            Text(fact.map { ModelDisplay.from($0).line } ?? "Model").foregroundStyle(Theme.text)
         }
         .font(Theme.ui(12))
         .padding(.horizontal, 6)
