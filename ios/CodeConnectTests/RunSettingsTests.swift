@@ -181,4 +181,33 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(full.standingMode?.confirm, true, "Full Access is confirm-marked")
         XCTAssertEqual(full.modelDisplay, "GPT-6-Astra")
     }
+
+    /// **The model a run is on, named as its menu names it.** A Codex run's model fact is a menu value,
+    /// so it reads by that row's label, the button's own words.
+    func testARunsModelMatchingAMenuEntryReadsByItsLabel() throws {
+        let run = try summary("session_codex_live", in: "codex-settings-wire")
+        XCTAssertEqual(run.model?.value, "gpt-6.1-sol")
+        XCTAssertEqual(RunSettings.modelName(confirmed: "gpt-6.1-sol", menus: run.menus), "GPT-6.1-Sol")
+    }
+
+    /// A Claude run's model fact is claude's full id, which no menu entry carries: it reads as the id's
+    /// own name, while the button names the setting.
+    func testARunsModelMatchingNoEntryReadsByItsOwnName() throws {
+        let run = try summary("session_hosted_live_init")
+        XCTAssertNotNil(run.menus)
+        XCTAssertEqual(RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus), "Sonnet 5.5")
+    }
+
+    /// A run with no menus has nothing to match: its model reads as the id's own name.
+    func testARunsModelWithNoMenusReadsByItsOwnName() throws {
+        let run = try summary("session_hosted_live_minor_38")
+        XCTAssertNil(run.menus)
+        XCTAssertEqual(RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus), "Sonnet 5.5")
+    }
+
+    /// A row the agent labels with its id alone reads as that id.
+    func testARunsModelOnAnIDOnlyRowReadsAsTheID() throws {
+        let run = try summary("session_codex_unlisted_default", in: "codex-settings-wire")
+        XCTAssertEqual(RunSettings.modelName(confirmed: "stub-model", menus: run.menus), "stub-model")
+    }
 }

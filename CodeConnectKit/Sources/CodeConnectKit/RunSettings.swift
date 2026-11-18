@@ -53,6 +53,14 @@ public enum RunSettings: Sendable, Hashable {
                 efforts: efforts, selectedEffort: selectedEffort,
                 modelDisplay: modelDisplay, inFlight: inFlight, lastOutcome: lastOutcome))
     }
+
+    /// The model a run is on, as a line names it: the label of the run's menu entry whose `value` is
+    /// that model, so the line and the settings button spell one model alike, and `ModelDisplay` for
+    /// a model no entry carries (a Claude run's full id, or its receipt's `alias (full-id)` until the
+    /// next turn's init) or a run with no menus.
+    public static func modelName(confirmed: String, menus: RunMenus?) -> String {
+        menus?.models.first { $0.value == confirmed }?.label ?? ModelDisplay.from(confirmed).name
+    }
 }
 
 /// A live hosted run's settings, ready to draw. The menus are the daemon's own; the selection and the
