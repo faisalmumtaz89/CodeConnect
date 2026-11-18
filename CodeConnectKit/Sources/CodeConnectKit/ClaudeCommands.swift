@@ -100,6 +100,9 @@ public struct ModelDisplay: Equatable {
     /// A variant worth its own quiet line — today only "1M context".
     public var meta: String?
 
+    /// The name and its variant on one line, as a label that names the model alone shows it: `Opus 5 · 1M context`.
+    public var line: String { [name, meta].compactMap { $0 }.joined(separator: " · ") }
+
     /// Claude Code's model families, which `/model` takes as aliases for the
     /// newest of each, named as its own model list names them. Names only:
     /// which version an alias stands for is Claude Code's to say, in its
@@ -110,6 +113,13 @@ public struct ModelDisplay: Equatable {
     public static func from(_ raw: String) -> ModelDisplay {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowered = trimmed.lowercased()
+        // Claude's receipt of a model change, `alias (claude-id)`, names the model by the id in its
+        // brackets; one whose id this parse does not interpret stays verbatim, whole.
+        if trimmed.hasSuffix(")"), let open = trimmed.range(of: " (", options: .backwards) {
+            let id = String(trimmed[open.upperBound..<trimmed.index(before: trimmed.endIndex)])
+            let named = from(id)
+            if id.lowercased().hasPrefix("claude-"), named.name != id { return named }
+        }
         if families.contains(lowered) {
             return ModelDisplay(name: word(lowered), meta: nil)
         }

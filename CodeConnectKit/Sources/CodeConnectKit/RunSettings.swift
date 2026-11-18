@@ -11,8 +11,8 @@ public enum RunSettings: Sendable, Hashable {
     /// nothing.
     case deferToOtherPath
     /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
-    /// No picker: the model fact shows read-only exactly as it arrived (no label lookup without a menu
-    /// to match against), and no effort or mode line at all.
+    /// No picker: the model fact, carried as it arrived, shows read-only by `ModelDisplay`'s name (no label
+    /// lookup without a menu to match against), and no effort or mode line at all.
     case hostedReadOnly(model: String?)
     /// A live hosted Claude run offering its menus.
     case hostedLive(HostedSettings)
