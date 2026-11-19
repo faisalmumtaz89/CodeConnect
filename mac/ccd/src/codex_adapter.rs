@@ -470,7 +470,6 @@ impl CodexAdapter {
     /// were. They stand until Codex reports the thread's settings, which then name them again.
     /// Memory only: the run's settings facts are Codex's own reports, so a ccd restart or a
     /// relaunch before Codex reports a change it took reads the settings Codex last reported.
-    /// When Codex reports a change it takes while a turn runs is not measured.
     pub fn settings_taken(&mut self, current: Option<Value>, params: &Value) {
         let mut settings = current.unwrap_or_else(|| Value::Object(Default::default()));
         for (field, value) in [
