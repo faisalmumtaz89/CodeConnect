@@ -9,6 +9,11 @@ User-facing changes, newest first. Mac releases are cut per
   message.
 - The start menu and a run's settings name each model by its name alone, without the description
   and pricing an agent sends beside it.
+- On the Mac, a selected row in a list is square, as the list is, and list boxes share one corner
+  radius.
+- On the Mac, a choice shows one plate at a time: in a switch or the sidebar the chosen one is filled
+  and the one under the pointer only brightens, and in a menu the checkmark marks the choice and only
+  the row under the pointer is filled.
 
 ## Agents start from the app, and the old engine is gone
 

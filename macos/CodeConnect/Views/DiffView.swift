@@ -95,7 +95,7 @@ private struct DiffLine: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 1.5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(background)
+        .background(background, in: Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken)
     }

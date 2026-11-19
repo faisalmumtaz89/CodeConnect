@@ -150,26 +150,15 @@ struct HostedSettingsButton: View {
 
     /// The selected model's efforts as one row of segments, the selected one filled.
     private var efforts: some View {
-        HStack(spacing: 2) {
-            ForEach(settings.efforts, id: \.value) { effort in
-                let marked = effort == settings.selectedEffort
-                Button {
-                    choose { _ = await model.setEffort(for: key, effortValue: effort.value) }
-                } label: {
-                    Text(effort.label).font(Theme.ui(11.5)).lineLimit(1)
-                        .foregroundStyle(marked ? Theme.text : Theme.text2)
-                        .frame(maxWidth: .infinity, minHeight: 24)
-                        .background(marked ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.hover(radius: 5, id: "session.composer.effort.\(effort.value)"))
-                .disabled(marked)
-                .accessibilityIdentifier("session.composer.effort.\(effort.value)")
-                .accessibilityAddTraits(marked ? .isSelected : [])
-            }
+        SegmentedTrack(
+            options: settings.efforts, chosen: settings.selectedEffort, fill: Theme.window.opacity(0.6),
+            id: { "session.composer.effort.\($0.value)" },
+            choose: { effort in choose { _ = await model.setEffort(for: key, effortValue: effort.value) } }
+        ) { effort, chosen in
+            Text(effort.label).font(Theme.ui(11.5)).lineLimit(1)
+                .foregroundStyle(chosen ? Theme.text : Theme.text2)
+                .frame(maxWidth: .infinity, minHeight: 24)
         }
-        .padding(3)
-        .background(Theme.window.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Effort")
         .padding(.horizontal, 8)
@@ -196,7 +185,7 @@ struct HostedSettingsButton: View {
         } label: {
             rowLabel(title, marked: false)
         }
-        .buttonStyle(.hover(radius: 5, id: id))
+        .buttonStyle(.hover(radius: 4, id: id))
         .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
     }
@@ -255,7 +244,7 @@ struct HostedSettingsButton: View {
         } label: {
             rowLabel(title, marked: marked)
         }
-        .buttonStyle(.hover(radius: 5, id: id))
+        .buttonStyle(.hover(radius: 4, id: id))
         .padding(.horizontal, 4)
         .disabled(marked)
         .accessibilityElement(children: .combine)
@@ -276,7 +265,6 @@ struct HostedSettingsButton: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(marked ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
     }
 }

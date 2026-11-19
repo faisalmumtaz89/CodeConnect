@@ -106,8 +106,8 @@ struct DevicesPane: View {
                 row(group)
             }
         }
-        .background(Theme.window, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
+        .background(Theme.window, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+        .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
     }
 
     private func row(_ group: DeviceGroup) -> some View {

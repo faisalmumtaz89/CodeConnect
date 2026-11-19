@@ -58,23 +58,15 @@ struct AddSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                HStack(spacing: 0) {
-                    ForEach(AddKind.allCases) { option in
-                        Button { kind = option } label: {
-                            Text(option.tab).font(Theme.ui(12, kind == option ? .medium : .regular))
-                                .foregroundStyle(kind == option ? Theme.text : Theme.text3)
-                                .padding(.horizontal, 10)
-                                .frame(height: 24)
-                                .background(kind == option ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-                        }
-                        .buttonStyle(.hover(radius: 5, id: "add.tab.\(option.rawValue.lowercased())"))
-                        .accessibilityIdentifier("add.tab.\(option.rawValue.lowercased())")
-                        .accessibilityAddTraits(kind == option ? .isSelected : [])
-                    }
+                SegmentedTrack(
+                    options: AddKind.allCases, chosen: kind, fill: Theme.window,
+                    id: { "add.tab.\($0.rawValue.lowercased())" }, choose: { kind = $0 }
+                ) { option, chosen in
+                    Text(option.tab).font(Theme.ui(12, chosen ? .medium : .regular))
+                        .foregroundStyle(chosen ? Theme.text : Theme.text3)
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
                 }
-                .padding(2)
-                .background(Theme.window, in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
                 Spacer()
             }
             .padding(.horizontal, 14)

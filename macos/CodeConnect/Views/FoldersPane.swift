@@ -87,8 +87,8 @@ struct FoldersPane: View {
                             row(answer, context)
                         }
                     }
-                    .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                    .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
                     .disabled(busy.contains(context.id))
                 }
             } else {
