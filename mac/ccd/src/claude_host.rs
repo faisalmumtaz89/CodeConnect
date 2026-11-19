@@ -9044,8 +9044,9 @@ mod tests {
     /// names a mode.** Across a ccd restart the host and its claude carry on as the same
     /// process: the restarted daemon reads the run's mode from the store, as claude reported
     /// it, and sends the host no `set_mode`. A start, the line ccd keeps to send again, names
-    /// no mode, so a claude ccd starts, sends a kept start to, or relaunches begins in the
-    /// person's own default, never in a mode confirmed for another process.
+    /// no mode, so a claude ccd starts or sends a kept start to begins in the person's own
+    /// default, never in a mode confirmed for another process; a relaunch names Bypass
+    /// permissions neither ([`relaunch_mode`]).
     #[tokio::test]
     async fn a_confirmed_bypass_lasts_across_a_restart_and_no_start_names_a_mode() {
         let rig = rig();
@@ -11243,7 +11244,8 @@ mod tests {
     /// the person's next message.** Its host's `exited` ends it with the reason, so the fleet
     /// says `relaunchable`. A message then spawns a new host in the run's folder that reads
     /// `start` resuming claude's session, under the send's uuid, with the message as its
-    /// prompt and no mode; its first message is committed (the cursor went back to 0). Done,
+    /// prompt and the mode the run was in; its first message is committed (the cursor went back
+    /// to 0). Done,
     /// the run is `live`, the send `Sent`, the words filed once with the request id, a retry
     /// `Duplicate`, and the new init says `resume`. Its next end is filed as a second end.
     #[tokio::test]

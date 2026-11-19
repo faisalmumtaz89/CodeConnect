@@ -837,10 +837,12 @@ must pass. The run then reads `starting`, so a second message meanwhile is refus
 host in the run's folder resumes claude's session in the folder claude ran in, with the
 message as its first words: the run's model as its menu marks it chosen, the folder answer it
 started with (lowered if the folder has since been answered not trusted), and the mode the
-run was in when it is "Ask before edits", "Accept edits" or "Plan", so a run never gains
+run was in when it is "Ask before edits", "Accept edits" or "Plan", so such a run does not gain
 permissions by starting again (the owner's decision 253); a run in Bypass permissions, or in a
-mode the menu does not list, is given none, so the new claude starts in the person's own
-default; a mode that cannot be read refuses the message, nothing sent. Its first init says
+mode the menu does not list (such as `dontAsk`), is given none, so the new claude starts in the
+person's own default, which can be wider than an unlisted mode; a mode that cannot be read
+refuses the message, nothing sent. The mode is the one claude last reported: a change claude
+took and did not report before it ended is not kept. Its first init says
 `source: "resume"`. Done,
 the run is `live` and the message `sent`; claude's refusal leaves the run `exited` and still
 relaunchable, with claude's reason; a launch that fails first puts it back `exited`, nothing
@@ -882,7 +884,7 @@ menu does not list (such as `dontAsk`) carries that mode as its fact, which no m
 matches: neither app checks a mode then, the Mac's mode button reads "Mode", and the person
 can still choose a listed mode. A card already open when Bypass permissions is
 turned on stays open and answerable; the mode applies from claude's next request. A ccd restart keeps the mode the person confirmed for
-the same process, and a new claude, after a relaunch, starts in the person's own default. Each part then goes to the host as a
+the same process; a new claude, whether a fresh run or a relaunch of a run in Bypass permissions, starts in the person's own default. Each part then goes to the host as a
 line of its own, the model before the effort, and the host makes the SDK's own call for it
 (`setModel`, `applyFlagSettings`, `setPermissionMode`), one line at a time. The answer is
 `applied` `now`, as claude takes a model or a mode from its next request, the running turn's
