@@ -603,10 +603,7 @@ struct StartStepsSheet: View {
                 if !(composing && typeSize.isAccessibilitySize) {
                     CCActionBar {
                         if !typeSize.isAccessibilitySize { messagePill(project, agent) }
-                        CCButton(
-                            "Start", size: .lg, fullWidth: true,
-                            disabledReason: StartContext.firstMessageReason(message).map(CCDisabledReason.init)
-                        ) { start(project, agent) }
+                        CCButton("Start", size: .lg, fullWidth: true) { start(project, agent) }
                             .accessibilityIdentifier("start-go")
                     }
                 }
