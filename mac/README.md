@@ -674,14 +674,17 @@ rather than merely remembered (an earlier daemon against tmux; this one against
 each run's agent host or Codex app-server), so `live` is proven rather than unrefuted, and a
 derived `session_end` carries a `reason`; `>= 6` adds `register_push`, the
 phone telling the daemon where to send a notification; `>= 7` adds
-`delete_session`; `>= 8` through `>= 10` cover the diff, the composer and the
-native slash-command adapters; `>= 11` adds `SessionSummary.project_label` —
+`delete_session`; `>= 8` adds the slash-command catalog (`command_catalog`);
+`>= 9` and `>= 10` added the composer's recovery and the native confirmation after
+a typed slash command (gone in X12: nothing is typed into a pane); `>= 11` adds
+`SessionSummary.project_label` —
 the daemon resolving what a run is *called* (the last component of its working
 directory), so that every surface that names a run, including a **direct**
 notification the phone cannot compose for itself, uses one string (relay
 notifications, introduced at minor 14, deliberately carry no project label and
-are titled `CodeConnect`); `>= 13` adds the live
-terminal; `>= 14` adds relay-backed push — the `push_relay` capability,
+are titled `CodeConnect`); `>= 13` added the live
+terminal (gone in X12; its capability is now `private_transport`); `>= 14` adds
+relay-backed push — the `push_relay` capability,
 `register_push.relay_credential`, the `credential_invalid` test result, and
 `hello_ack.push_environment`, which is the daemon's authoritative APNs
 environment for that device's token and the path a relay-side correction takes
