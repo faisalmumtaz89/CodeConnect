@@ -117,13 +117,6 @@ User-facing changes, newest first. Mac releases are cut per
   showed macOS's dialog offering to install them, and it came back after Cancel. It no longer
   appears: without git, a run shows no branch or changes, as in a folder that isn't a repository.
 
-## A request waiting at the computer stays open
-
-- A permission request that only the computer could answer closed after 15 minutes as "Closed by
-  timeout - nobody answered", and the run showed as running while the agent still waited. This
-  happened after the daemon restarted, as an update does, or when the request was made while you
-  were at the Mac. It now stays open for as long as the request is on the computer's screen.
-
 ## Sending says nothing when it works
 
 - A message you send no longer puts "Typed into the session." above the message box, on the iPhone
@@ -150,8 +143,8 @@ User-facing changes, newest first. Mac releases are cut per
   loads earlier history. Clicking the agent again, or Esc, closes it.
 - A reply box under the conversation sends the agent a message, which then shows in the
   conversation; the line above the box says something only when a message didn't simply go through,
-  or can't be sent right now. For Claude Code, the button beside Send changes the model or the
-  effort, or compacts the context, with instructions if you like; /clear asks first. What you are
+  or can't be sent right now. For Claude Code, the buttons beside Send change the model or the
+  effort, or compact the context, with instructions if you like; /clear asks first. What you are
   writing stays in the box while you look at another tab, and Esc leaves the box first.
 - A request waiting on you is answered where you write to the agent. What it asks sits at the foot
   of the conversation: the command it asks to run, how risky that is and why, a Claude request's
@@ -167,14 +160,11 @@ User-facing changes, newest first. Mac releases are cut per
   typing a reply waits above the box, with buttons but no keys, until you leave the field.
 - A Codex run can be stopped from the top of its pane while its conversation shows (Stop this
   turn), and the box under the conversation then says what became of the stop.
-- A Changes tab, between Conversation and Terminal, shows what the run has changed since its last
-  commit, as `git diff HEAD` reads it on its computer: each file with what happened to it and its
-  lines added and removed, and a total at the top. It reads them when you first open it and again
-  on Check again, says how long ago it checked, and then counts the files on the tab. When there is
-  nothing to show, or the changes can't be read, it says why.
-- A Terminal tab, the last of the three, opens a Claude Code run's live terminal when you click
-  Open terminal. While it is shown, what you type goes to the agent, Esc included. When it can't open,
-  the tab says why, with the fix when there is one.
+- A Changes tab, beside Conversation, shows what the run has changed since its last commit, as
+  `git diff HEAD` reads it on its computer: each file with what happened to it and its lines added
+  and removed, and a total at the top. It reads them when you first open it and again on Check
+  again, says how long ago it checked, and then counts the files on the tab. When there is nothing
+  to show, or the changes can't be read, it says why.
 - File › New Agent… (⌘N) starts Claude Code or Codex on one of your computers: pick the computer, a
   folder, and a model from those the agents offer there (choosing the model chooses the agent), and
   add a first message if you like.
@@ -183,9 +173,9 @@ User-facing changes, newest first. Mac releases are cut per
 - CodeConnect › Settings… lists the phones and computers paired with this Mac. Block keeps one out,
   and Allow again lets a blocked one back in; each asks first.
 - CodeConnect › Set Up CodeConnect… shows what CodeConnect needs on this Mac: the background service,
-  tmux, Claude Code, Codex, and `codeconnect` in a new Terminal window, which it can add to
-  `~/.zprofile`. It opens by itself only when the background service or tmux isn't working, says
-  what failed in one sentence, and offers Try Again.
+  Claude Code, Codex, and `codeconnect` in a new Terminal window, which it can add to
+  `~/.zprofile`. It opens by itself only when the background service isn't working, says what
+  failed in one sentence, and offers Try Again.
 - The app updates itself: it checks once a day, and CodeConnect › Check for Updates… checks now.
 - Every control in the app has an accessibility name and identifier, so automation and assistive
   tools can find, press and read it.
@@ -202,11 +192,6 @@ User-facing changes, newest first. Mac releases are cut per
   agents' messages with it in either direction.
 - Allow again (or `codeconnect unblock <device>`) lets it back in with the pairing it already holds,
   as the same device, with no new code.
-
-## `fg` continues an agent that was stopped twice
-
-- On a Mac, an agent stopped with Ctrl+Z that was stopped once more while it waited, as a program
-  reading the terminal can be, could stay stopped after `fg`. It now continues.
 
 ## The end of a long session is no longer lost
 
@@ -236,21 +221,12 @@ User-facing changes, newest first. Mac releases are cut per
   now reads the name out of them, as the phone does, so the model it sends the phone for a session
   is the plain name.
 
-## A Codex start that fails says why
-
-- When a Codex session failed while it was starting, `codeconnect codex` could say "tmux reading the
-  codex pane failed … no server running" instead of why it failed. It now says why it failed.
-
 ## A start picks the model
 
 - A computer now tells the Mac app which models Claude Code and Codex offer on it, in the agents'
   own words (Claude Code's default first, with the model it is now), and whether each is signed in,
   and starts a session with the model picked. It asks each agent itself, from the home folder, with
   no hooks, MCP servers or session file; while an agent is signed in it is asked once per version.
-- `codeconnect codex` with no terminal to show a session in — a script, a pipe, `ssh` without
-  `-t` — runs Codex itself, as `codeconnect claude` runs Claude Code, so `codeconnect codex login
-  status` or `codeconnect codex exec …` in a script does what `codex` does. It used to refuse
-  everything there but `--help` and `--version`.
 
 ## An ended session keeps only its own messages
 
