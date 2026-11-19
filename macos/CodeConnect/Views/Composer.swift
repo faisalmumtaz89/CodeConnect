@@ -90,7 +90,11 @@ private struct Composer: View {
         // A new handshake is the link back, and so is the box coming back, from another tab or another run: the
         // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
-        .onAppear { askUnansweredAgain() }
+        .onAppear {
+            askUnansweredAgain()
+            // A run started with no first message opens on its empty conversation, the box ready for that message.
+            if model.shown(for: key)?.timeline.isEmpty == true { fieldFocused = true }
+        }
         // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
         // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
