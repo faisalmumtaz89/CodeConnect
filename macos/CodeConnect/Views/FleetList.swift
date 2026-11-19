@@ -294,24 +294,16 @@ private struct GroupingSwitch: View {
     @Binding var selection: FleetGroup.Kind
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(FleetGroup.Kind.allCases, id: \.self) { option in
-                Button { selection = option } label: {
-                    Text(option.title)
-                        .font(Theme.ui(11.5, selection == option ? .medium : .regular))
-                        .foregroundStyle(selection == option ? Theme.text : Theme.text3)
-                        .padding(.horizontal, 9)
-                        .frame(height: 22)
-                        .background(selection == option ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-                }
-                .buttonStyle(.hover(radius: 5, id: "fleet.grouping.\(option.title.lowercased())"))
-                .accessibilityIdentifier("fleet.grouping.\(option.title.lowercased())")
-                .accessibilityAddTraits(selection == option ? .isSelected : [])
-            }
+        SegmentedTrack(
+            options: FleetGroup.Kind.allCases, chosen: selection, fill: Theme.raised.opacity(0.6),
+            id: { "fleet.grouping.\($0.title.lowercased())" }, choose: { selection = $0 }
+        ) { option, chosen in
+            Text(option.title)
+                .font(Theme.ui(11.5, chosen ? .medium : .regular))
+                .foregroundStyle(chosen ? Theme.text : Theme.text3)
+                .padding(.horizontal, 9)
+                .frame(height: 22)
         }
-        .padding(2)
-        .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
-        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
     }
 }
 
@@ -472,7 +464,7 @@ private struct RunMore: View {
                 .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 5, id: "\(id).\(action.id)"))
+        .buttonStyle(.hover(radius: 4, id: "\(id).\(action.id)"))
         .padding(4)
         .frame(width: 180)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))

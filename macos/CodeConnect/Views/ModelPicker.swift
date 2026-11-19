@@ -102,10 +102,9 @@ struct ModelButton: View {
             }
             .padding(.horizontal, 8)
             .frame(height: 24)
-            .background(choice == pick ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 5, id: "start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")"))
+        .buttonStyle(.hover(radius: 4, id: "start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")"))
         .padding(.horizontal, 4)
         .accessibilityIdentifier("start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")")
         .accessibilityAddTraits(choice == pick ? .isSelected : [])

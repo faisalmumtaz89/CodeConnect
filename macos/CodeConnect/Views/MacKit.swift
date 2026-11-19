@@ -54,7 +54,9 @@ extension FleetGroup {
 struct HoverButtonStyle: ButtonStyle {
     var radius: CGFloat = 6
     /// Lightens instead of taking a fill: a label with an opaque face of its own (a raised chip, a filled button), a tab,
-    /// which its underline marks, or a word right beside another button in a row (a sheet's Cancel, a folder's Forget).
+    /// which its underline marks, a word right beside another button in a row (a sheet's Cancel, a folder's Forget), or
+    /// one choice of an exclusive group whose chosen one carries the plate (a segment, a sidebar row), so a group never
+    /// shows two plates at once.
     var over = false
     /// A label with no padding of its own, such as a word alone: the fill stands `bareBleed` off it.
     var bare = false
@@ -116,6 +118,43 @@ extension ButtonStyle where Self == HoverButtonStyle {
         HoverButtonStyle(radius: radius, over: over, bare: bare, id: id)
     }
 }
+
+/// One exclusive choice among a few options in one rounded track: the chosen segment carries the only plate, and
+/// hovering another lightens its label. The segments' corners are the track's less its inset, so the two are concentric.
+/// `segment` draws an option's label, given whether it is the chosen one.
+struct SegmentedTrack<Option: Equatable, Segment: View>: View {
+    let options: [Option]
+    let chosen: Option?
+    /// The track's own fill, under its segments.
+    let fill: Color
+    let id: (Option) -> String
+    let choose: (Option) -> Void
+    @ViewBuilder let segment: (Option, Bool) -> Segment
+
+    var body: some View {
+        HStack(spacing: trackInset) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                let isChosen = option == chosen
+                Button {
+                    if !isChosen { choose(option) }
+                } label: {
+                    segment(option, isChosen)
+                        .background(isChosen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: trackRadius - trackInset))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.hover(radius: trackRadius - trackInset, over: true, id: id(option)))
+                .accessibilityIdentifier(id(option))
+                .accessibilityAddTraits(isChosen ? .isSelected : [])
+            }
+        }
+        .padding(trackInset)
+        .background(fill, in: RoundedRectangle(cornerRadius: trackRadius))
+        .overlay(RoundedRectangle(cornerRadius: trackRadius).strokeBorder(Theme.hairline))
+    }
+}
+
+private let trackRadius: CGFloat = 7
+private let trackInset: CGFloat = 2
 
 extension FocusedValues {
     /// The composer is using Esc itself: its commands list is open or its field has focus.
