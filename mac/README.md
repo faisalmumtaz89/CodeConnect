@@ -903,8 +903,7 @@ It is left out when none matches (a typed `/model`'s `Sonnet 5.5`). claude echoe
 files when claude takes it, even from an answer that comes late; an effort typed as
 `/effort low` shows from claude's own `Set effort level to low …` receipt (a receipt in another
 wording is not read). A retry applies the change again. A change whose answer is lost
-across a ccd restart leaves the effort as it was last set. A Claude run in a terminal, and a
-Codex run in one, take no settings from an app.
+across a ccd restart leaves the effort as it was last set.
 From minor 43 a Codex run CodeConnect started takes the same `set_model` and `set_mode`. Its
 `menus` are the models Codex lists as the agents' check asks it (`model/list`; the answer a
 list kept, or, with none kept that says it is signed in, asked at the start; kept with the run),
