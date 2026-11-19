@@ -65,8 +65,17 @@ struct FoldersPane: View {
         }
         .frame(width: 560, height: 460)
         .background(Theme.sheet)
+        #if DEBUG
+            .background(RenderWindow(ready: contexts.allSatisfy { lists[$0.id] != nil || unreadable.contains($0.id) }))
+        #endif
         .onAppear { refusal = nil }
         .task(id: contexts.map(\.id)) {
+            #if DEBUG
+                if let shown = RenderWindow.folders {
+                    for context in contexts { lists[context.id] = shown }
+                    return
+                }
+            #endif
             while !Task.isCancelled {
                 for context in contexts { await send(context) }
                 try? await Task.sleep(for: .seconds(5))
