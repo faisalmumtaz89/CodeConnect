@@ -13,8 +13,8 @@ struct StartForm: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
     @Environment(\.dismiss) private var dismiss
-    /// The run is in the list: the list shows Active.
-    let started: () -> Void
+    /// The run is in the list, by its id: the window opens it.
+    let started: (String) -> Void
     /// Why no computer can start one now, said in the form while its computer's link is down.
     let whyNone: String
 
@@ -40,7 +40,7 @@ struct StartForm: View {
     @State private var thisMac: String?
 
     /// `resuming`: a start this Mac sent with no answer yet, which the sheet opens on instead of a fresh form.
-    init(resuming: String?, whyNone: String, started: @escaping () -> Void) {
+    init(resuming: String?, whyNone: String, started: @escaping (String) -> Void) {
         _requestID = State(initialValue: resuming)
         self.whyNone = whyNone
         self.started = started
@@ -101,7 +101,7 @@ struct StartForm: View {
                             dismiss()
                         },
                         started: {
-                            started()
+                            started($0)
                             dismiss()
                         })
                 }
@@ -395,7 +395,7 @@ private struct StartProgress: View {
     let again: () -> Void
     /// No more sends of the start from this Mac, and the sheet closes.
     let stopRetrying: () -> Void
-    let started: () -> Void
+    let started: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     /// The computer's own words for a launch that failed are shown.
     @State private var details = false
@@ -408,9 +408,9 @@ private struct StartProgress: View {
                 starting
             }
         }
-        .onChange(of: liveUID) { _, uid in if uid != nil { started() } }
+        .onChange(of: liveUID) { _, uid in if let uid { started(uid) } }
         .task {
-            if liveUID != nil { started() }
+            if let liveUID { started(liveUID) }
         }
     }
 

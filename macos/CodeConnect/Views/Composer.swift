@@ -90,11 +90,10 @@ private struct Composer: View {
         // A new handshake is the link back, and so is the box coming back, from another tab or another run: the
         // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
-        .onAppear {
-            askUnansweredAgain()
-            // A run started with no first message opens on its empty conversation, the box ready for that message.
-            if model.shown(for: key)?.timeline.isEmpty == true { fieldFocused = true }
-        }
+        .onAppear { askUnansweredAgain() }
+        // A run nothing has been said to yet, as one started with no first message, has the cursor in its box once its
+        // conversation is in. Not "an empty conversation": a Codex run files its session start before any message.
+        .task(id: awaitsFirstMessage) { if awaitsFirstMessage { fieldFocused = true } }
         // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
         // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
@@ -299,6 +298,12 @@ private struct Composer: View {
             sending = false
             if outcome?.landed == true, kept.reply == draft { kept.reply = "" }
         }
+    }
+
+    /// The run's conversation is in and holds no message of the person's.
+    private var awaitsFirstMessage: Bool {
+        guard let timeline = model.shown(for: key)?.timeline else { return false }
+        return !timeline.contains { if case .userMessage = $0.content { true } else { false } }
     }
 
     private func askUnansweredAgain() {

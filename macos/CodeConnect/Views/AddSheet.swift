@@ -46,10 +46,10 @@ struct AddSheet: View {
     /// The address Add a computer starts with: a refused computer pairing again. A binding, so the sheet reads the
     /// address as it is when it opens, not as the window last rendered it.
     @Binding private var address: String?
-    /// An agent was started and is in the list.
-    private let started: () -> Void
+    /// An agent was started and is in the list, by its id.
+    private let started: (String) -> Void
 
-    init(kind: AddKind, address: Binding<String?> = .constant(nil), started: @escaping () -> Void = {}) {
+    init(kind: AddKind, address: Binding<String?> = .constant(nil), started: @escaping (String) -> Void = { _ in }) {
         _kind = State(initialValue: kind)
         _address = address
         self.started = started
@@ -132,7 +132,7 @@ private struct AgentSide: View {
     @Environment(Machines.self) private var machines
     @Environment(\.dismiss) private var dismiss
     let addComputer: () -> Void
-    let started: () -> Void
+    let started: (String) -> Void
     /// The form has been shown. It stays when its computer's link drops, which empties the computers that can start,
     /// so what was typed and chosen is there when the link is back.
     @State private var formShown = false

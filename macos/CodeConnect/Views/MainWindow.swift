@@ -91,10 +91,11 @@ struct MainWindow: View {
             }
         #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: $repairing) {
-                // The run just started is on screen: every active agent, unfiltered.
+            AddSheet(kind: kind, address: $repairing) { run in
+                // The run just started is open, in the list of every active agent, unfiltered.
                 scope = .active
                 filter = nil
+                opened = run
             }
                 #if DEBUG
                     .renderLook()
