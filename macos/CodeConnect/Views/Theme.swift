@@ -12,6 +12,8 @@ enum Theme {
     static let sheet = Color(themeHex: 0x19191C)
     static let code = Color(themeHex: 0x0E0E10)
     static let hairline = Color.white.opacity(0.07)
+    /// A list box's corners: a box of rows, as a text field's.
+    static let boxRadius: CGFloat = 7
     static let selected = Color.white.opacity(0.075)
     /// Under a clickable thing while the pointer is on it: fainter than `selected`, so the two never read alike.
     static let hover = Color.white.opacity(0.04)

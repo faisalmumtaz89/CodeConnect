@@ -25,8 +25,8 @@ struct SetupView: View {
                 row("Codex", setup.agent(.codex, in: machines), id: "setup.codex")
                 commandLine
             }
-            .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
+            .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             .padding(.horizontal, 24)
             Spacer(minLength: 16)
             VStack(spacing: 0) {

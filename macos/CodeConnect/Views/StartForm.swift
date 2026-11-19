@@ -267,8 +267,10 @@ struct StartForm: View {
                     }
                 }
                 .frame(height: 170)
-                .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
+                .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
+                .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+                .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             }
         }
     }
@@ -293,7 +295,7 @@ struct StartForm: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(folderPath == project.path ? Theme.selected : .clear)
+            .background(folderPath == project.path ? Theme.selected : .clear, in: Rectangle())
             .contentShape(Rectangle())
         }
         .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
@@ -350,7 +352,7 @@ struct StartForm: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.selected)
+        .background(Theme.selected, in: Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("start.picked")
         .accessibilityAddTraits(.isSelected)

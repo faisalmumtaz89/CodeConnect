@@ -345,7 +345,7 @@ private struct GroupHeader: View {
         .padding(.horizontal, 16)
         .frame(height: 32)
         .contentShape(Rectangle())
-        .background(Theme.pane.opacity(0.55))
+        .background(Theme.pane.opacity(0.55), in: Rectangle())
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
     }
 }
@@ -417,7 +417,7 @@ private struct FleetLine: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 36)
-        .background(selected ? Theme.selected : .clear)
+        .background(selected ? Theme.selected : .clear, in: Rectangle())
         .overlay(alignment: .leading) {
             if selected { Rectangle().fill(Theme.text2).frame(width: 2) }
         }

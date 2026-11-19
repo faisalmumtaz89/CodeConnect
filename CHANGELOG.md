@@ -9,6 +9,8 @@ User-facing changes, newest first. Mac releases are cut per
   message.
 - The start menu and a run's settings name each model by its name alone, without the description
   and pricing an agent sends beside it.
+- On the Mac, a selected row in a list is square, as the list is, and list boxes share one corner
+  radius.
 
 ## Agents start from the app, and the old engine is gone
 
