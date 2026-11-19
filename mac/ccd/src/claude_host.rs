@@ -1218,6 +1218,20 @@ const MODES: [(&str, &str, bool); 4] = [
     ("bypassPermissions", "Bypass permissions", true),
 ];
 
+/// The mode a relaunch names, from the mode the run was in (`kept`, its `permission_mode`
+/// fact): that mode when it is one of [`MODES`] an app sets without the person's confirmation,
+/// since a new claude given none starts in the person's own `defaultMode`, which can be wider
+/// (decision 253); none for Bypass permissions, which comes back at that default and is
+/// turned on again only with a confirmation (decisions 214 and 215), and none for a mode the
+/// apps do not offer.
+fn relaunch_mode(kept: Option<String>) -> Option<String> {
+    kept.filter(|kept| {
+        MODES
+            .iter()
+            .any(|(mode, _, confirm)| mode == kept && !confirm)
+    })
+}
+
 /// An app's change of a hosted run's settings.
 pub(crate) enum Setting {
     /// A model, an effort, or both.
@@ -1751,8 +1765,10 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 /// nothing now; then a start's own checks. The start line resumes claude's session in the
 /// folder claude ran in, with the run's model as its menu marks it chosen
 /// ([`Daemon::selected_model`]), else the start's; the kept folder answer, lowered when the
-/// folder has since been answered not trusted; no mode, so a new claude starts in the
-/// person's default; and the message as its prompt under the send's uuid. One write moves the
+/// folder has since been answered not trusted; the mode the run was in when it is one an app
+/// may choose without the person's confirmation ([`relaunch_mode`]), so a run never gains
+/// permissions by starting again, and none otherwise, so a run in Bypass permissions comes
+/// back in the person's own default; and the message as its prompt under the send's uuid. One write moves the
 /// run `exited` → `starting`, its host cleared, its cursor zeroed and that start line kept
 /// ([`crate::store::Store::begin_claude_relaunch`]), so a second message meets `starting`.
 /// The host is spawned into the run's folder and sent the start ([`bring_up`]); a failure
@@ -1841,6 +1857,15 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
             kept.model.clone()
         }
     };
+    let mode = match daemon.db.session_facts(uid.to_string()).await {
+        Ok(facts) => relaunch_mode(facts.permission_mode.map(|fact| fact.value)),
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its mode to relaunch it: {err:#}");
+            let reason = "This session could not start again (its mode could not be read); \
+                          nothing was sent.";
+            return refuse_relaunch(daemon, uid, request_id, reason).await;
+        }
+    };
     let run = Run {
         root,
         request_id,
@@ -1857,6 +1882,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
     let uuid = send_uuid(uid, request_id);
     let mut options = start_options(uid, &run);
     options.resume = Some(ended.claude_session_id.clone());
+    options.permission_mode = mode;
     let start = ToHost::Start {
         uuid: uuid.clone(),
         options,
@@ -9018,8 +9044,9 @@ mod tests {
     /// names a mode.** Across a ccd restart the host and its claude carry on as the same
     /// process: the restarted daemon reads the run's mode from the store, as claude reported
     /// it, and sends the host no `set_mode`. A start, the line ccd keeps to send again, names
-    /// no mode, so a claude ccd starts, sends a kept start to, or relaunches begins in the
-    /// person's own default, never in a mode confirmed for another process.
+    /// no mode, so a claude ccd starts or sends a kept start to begins in the person's own
+    /// default, never in a mode confirmed for another process; a relaunch names Bypass
+    /// permissions neither ([`relaunch_mode`]).
     #[tokio::test]
     async fn a_confirmed_bypass_lasts_across_a_restart_and_no_start_names_a_mode() {
         let rig = rig();
@@ -11110,15 +11137,40 @@ mod tests {
     /// then ended without ccd stopping it: its host reported claude's exit, code 1, and is gone,
     /// its socket closed as the kernel closes a dead host's, so the run's link is detached.
     async fn ended_on_its_own(rig: &Rig) -> Ended {
+        ended_in_mode(rig, None, None).await
+    }
+
+    /// [`ended_on_its_own`], its claude's init naming `started` as its mode when given, then,
+    /// when `kept` is given, claude's own report of that mode, as it writes one after
+    /// `setPermissionMode`: the mode the run was in when it ended.
+    async fn ended_in_mode(rig: &Rig, started: Option<&str>, kept: Option<&str>) -> Ended {
         let mut played = live_run_on(rig, &rig.root.join("stub-host")).await;
-        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        let mut init = init_in(&rig.root);
+        if let Some(started) = started {
+            init["permissionMode"] = started.into();
+        }
+        sdk(&mut played.write, 3, init).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let mut seq = 4;
+        if let Some(kept) = kept {
+            sdk(
+                &mut played.write,
+                seq,
+                serde_json::json!({"type": "system", "subtype": "status", "status": null,
+                    "permissionMode": kept,
+                    "uuid": "9d1f0000-0000-4000-8000-0000000002b1",
+                    "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+            seq += 1;
+        }
         say(
             &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+            serde_json::json!({"type": "exited", "seq": seq, "code": 1}),
         )
         .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
         let pid = pid_in(&played.dir, "stub.pid");
         stop(&played.dir);
         gone(pid).await;
@@ -11192,7 +11244,8 @@ mod tests {
     /// the person's next message.** Its host's `exited` ends it with the reason, so the fleet
     /// says `relaunchable`. A message then spawns a new host in the run's folder that reads
     /// `start` resuming claude's session, under the send's uuid, with the message as its
-    /// prompt and no mode; its first message is committed (the cursor went back to 0). Done,
+    /// prompt and the mode the run was in; its first message is committed (the cursor went back
+    /// to 0). Done,
     /// the run is `live`, the send `Sent`, the words filed once with the request id, a retry
     /// `Duplicate`, and the new init says `resume`. Its next end is filed as a second end.
     #[tokio::test]
@@ -11206,7 +11259,9 @@ mod tests {
             ends(&rig, &uid),
             [serde_json::json!({"exit_code": 1, "reason": PROCESS_ENDED})]
         );
-        assert!(summary(&rig.daemon, &uid).await.relaunchable);
+        let summary_before = summary(&rig.daemon, &uid).await;
+        assert!(summary_before.relaunchable);
+        let mode_before = summary_before.permission_mode.map(|fact| fact.value);
         let old = pid_in(&ended.dir, "stub.pid");
         let (sent, mut played) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
@@ -11224,8 +11279,8 @@ mod tests {
                 assert_eq!(prompt, "carry on");
                 assert_eq!(options.resume.as_deref(), Some(session_id.as_str()));
                 assert_eq!(
-                    options.permission_mode, None,
-                    "a new claude starts in the default"
+                    options.permission_mode, mode_before,
+                    "a new claude starts in the mode the run was in"
                 );
                 say(
                     &mut played.write,
@@ -11273,6 +11328,80 @@ mod tests {
             "the relaunched run's end is filed beside the first"
         );
         stop(&played.dir);
+    }
+
+    /// **A relaunch names the mode the run was in, but Bypass permissions** (decision 253): a
+    /// run in Plan, Ask before edits or Accept edits whose claude ended on its own starts again
+    /// in that mode, so a new claude does not start in the person's own default, which can be
+    /// wider; also when that default is Bypass permissions and the person had turned the run
+    /// down from it. A run in Bypass permissions comes back at the person's own default, as a
+    /// start does. The apps then read the mode the new claude reports.
+    #[tokio::test]
+    async fn a_relaunch_names_the_mode_the_run_was_in_but_bypass() {
+        let _env = crate::ProcessEnvRead::take();
+        for (started, kept, named) in [
+            (None, "plan", Some("plan")),
+            (None, "default", Some("default")),
+            (None, "acceptEdits", Some("acceptEdits")),
+            (None, "bypassPermissions", None),
+            (Some("bypassPermissions"), "default", Some("default")),
+        ] {
+            let rig = relaunch_rig();
+            let ended = ended_in_mode(&rig, started, Some(kept)).await;
+            let uid = ended.uid.clone();
+            assert_eq!(
+                summary(&rig.daemon, &uid)
+                    .await
+                    .permission_mode
+                    .map(|fact| fact.value),
+                Some(kept.to_string())
+            );
+            let old = pid_in(&ended.dir, "stub.pid");
+            let (sent, mut played) = tokio::join!(
+                send_as_app(&rig.daemon, &uid, "r-mode", "carry on"),
+                async {
+                    let mut played = play_relaunched(&ended.dir, old).await;
+                    let ToHost::Start { uuid, options, .. } = played.start.clone() else {
+                        panic!("not a start: {:?}", played.start);
+                    };
+                    assert_eq!(
+                        options.permission_mode.as_deref(),
+                        named,
+                        "kept {kept}, started {started:?}"
+                    );
+                    say(
+                        &mut played.write,
+                        serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                           "status": "done", "initialize": initialize_answer()}),
+                    )
+                    .await;
+                    assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                    played
+                }
+            );
+            assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+            let reported = named.unwrap_or("default");
+            let mut resumed = init_in(&rig.root);
+            resumed["uuid"] = "9d1f0000-0000-4000-8000-0000000002a2".into();
+            resumed["permissionMode"] = reported.into();
+            sdk(&mut played.write, 3, resumed).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+            assert_eq!(
+                summary(&rig.daemon, &uid)
+                    .await
+                    .permission_mode
+                    .map(|fact| fact.value),
+                Some(reported.to_string()),
+                "kept {kept}: the apps read the mode the new claude reports"
+            );
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "exited", "seq": 4, "signal": "SIGKILL"}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+            stop(&played.dir);
+        }
     }
 
     /// **Decision 210: a host recorded before this boot is not consulted.** A run whose host was
