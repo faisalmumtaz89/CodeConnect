@@ -14,6 +14,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, a choice shows one plate at a time: in a switch or the sidebar the chosen one is filled
   and the one under the pointer only brightens, and in a menu the checkmark marks the choice and only
   the row under the pointer is filled.
+- The Mac app's update prompt now matches the app: a dark window with the release notes and Install,
+  Later and Skip This Version, in place of Sparkle's standard window.
 
 ## Agents start from the app, and the old engine is gone
 

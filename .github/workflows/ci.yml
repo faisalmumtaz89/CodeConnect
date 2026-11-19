@@ -187,10 +187,10 @@ jobs:
   # without the helpers, which a Debug build may lack (embed-helpers.sh), since
   # the release builds the shipping configuration with them. Built twice: as
   # Debug, and again without the DEBUG condition, so the code only Release
-  # compiles (`#if !DEBUG`: Sparkle's updater, the app's own setup, the Kit's
-  # keychain) is compiled too. Xcode 27.1, the one the app is built and tested
-  # with, pinned by path on the image that carries it, as the release pins it:
-  # a missing path fails here.
+  # compiles (`#if !DEBUG`: the updater's start with the app's own feed, the
+  # app's own setup, the Kit's keychain) is compiled too. Xcode 27.1, the one
+  # the app is built and tested with, pinned by path on the image that carries
+  # it, as the release pins it: a missing path fails here.
   mac-app:
     name: Mac app (build)
     runs-on: xcode-27
