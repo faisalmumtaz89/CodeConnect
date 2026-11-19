@@ -16,8 +16,9 @@
 #     The app can start: every @rpath library its executable loads resolves, through the executable's own LC_RPATHs,
 #     to a file inside the app, as dyld resolves it at launch. Must-fail: a copy without that rpath is refused.
 #     The agent host the app installs carries exactly the entitlements mac/agent-host/entitlements.plist names
-#     (allow-jit): without it the host does not start under the hardened runtime, and anything more widens what it may
-#     do. Must-fail: a copy signed without entitlements, and one signed with a second, are refused.
+#     (allow-jit): without it the host does not start under the hardened runtime on a Mac with System Integrity
+#     Protection on, and anything more widens what it may do. Must-fail: a copy signed without entitlements, and one
+#     signed with a second, are refused.
 #
 # OPENSSL names an OpenSSL 3 or later (Ed25519 with -rawin); its version is printed.
 set -euo pipefail

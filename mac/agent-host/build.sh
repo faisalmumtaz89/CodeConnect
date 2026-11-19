@@ -15,10 +15,10 @@
 # Code of its own; the host runs the user's) or the peers the host does not import, and with no install scripts. Both
 # autoloads are off: a standalone Bun executable otherwise loads `.env` and `bunfig.toml` from the folder it starts
 # in, and the host starts in people's projects. Each macOS executable is signed with the hardened runtime and exactly
-# entitlements.plist: allow-jit, without which JavaScriptCore cannot JIT and the SDK does not start. Ad hoc here; the
-# release signs the universal one with its Developer ID. The same sources give the same bytes. It needs bash, curl
-# and unzip, and for macOS targets lipo and codesign. Outside <out-dir> and a temporary folder it writes only Bun's
-# package cache, ~/.bun/install/cache.
+# entitlements.plist: allow-jit, without which, on a Mac with System Integrity Protection on, JavaScriptCore cannot JIT
+# and the SDK does not start. Ad hoc here; the release signs the universal one with its Developer ID. The same sources
+# give the same bytes. It needs bash, curl and unzip, and for macOS targets lipo and codesign. Outside <out-dir> and a
+# temporary folder it writes only Bun's package cache, ~/.bun/install/cache.
 #
 # To change a package: edit package.json, run the pinned Bun's `bun install --lockfile-only` here, commit bun.lock.
 set -euo pipefail
