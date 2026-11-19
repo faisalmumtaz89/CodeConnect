@@ -3,10 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
-## A run can start without a first message
+## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
 - Start a Claude or Codex run with the message box empty, and the run opens waiting for your first
   message.
+- The start menu and a run's settings name each model by its name alone, without the description
+  and pricing an agent sends beside it.
 
 ## Agents start from the app, and the old engine is gone
 

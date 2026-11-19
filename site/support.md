@@ -39,7 +39,7 @@ Run the same command as your own user, not as root. On a machine where you have 
 
 Coming from CodeConnect 0.18.0 or earlier, `codeconnect update` can't install a later release: run `curl -fsSL https://codeconnect.sh | sh -s -- --reinstall` once instead. Without `--reinstall`, the installer on an existing install downloads nothing.
 
-The iPhone app updates from the App Store. When the app and a computer cannot understand each other, the app names the computer and says which to update: it "has an older CodeConnect. Update CodeConnect on it", it "has a newer CodeConnect. Update CodeConnect on this iPhone", or, when the app cannot tell which is older, it "runs a different version of CodeConnect. Update CodeConnect on it and on this iPhone". This page describes CodeConnect 0.19.0, installer 1.7.9 and the iPhone app 1.1.17.
+The iPhone app updates from the App Store. When the app and a computer cannot understand each other, the app names the computer and says which to update: it "has an older CodeConnect. Update CodeConnect on it", it "has a newer CodeConnect. Update CodeConnect on this iPhone", or, when the app cannot tell which is older, it "runs a different version of CodeConnect. Update CodeConnect on it and on this iPhone". This page describes CodeConnect 0.19.1, installer 1.7.9 and the iPhone app 1.1.18.
 
 ## Uninstalling
 
