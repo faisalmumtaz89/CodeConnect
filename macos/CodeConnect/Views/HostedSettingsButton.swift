@@ -34,8 +34,6 @@ struct HostedSettingsButton: View {
 
     /// Where the controls and the open panel are in the window, for the click that closes it.
     @State private var frames = PanelFrames()
-    /// The model row the pointer is on.
-    @State private var hovered: String?
 
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
 
@@ -47,8 +45,6 @@ struct HostedSettingsButton: View {
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.controls = $0 }
         .modifier(ClosesOnClickElsewhere(open: $open, frames: frames))
-        // The pointer's row is the open model panel's; a closed panel has none (its rows send no exit as they go).
-        .onChange(of: open) { _, now in if now != .model { hovered = nil } }
         // The run's menus went away (it ended, or its link is down): nothing of them stays open.
         .onDisappear { open = nil }
     }
@@ -133,17 +129,16 @@ struct HostedSettingsButton: View {
 
     // MARK: The panels
 
-    /// The models, one line each with the selected one's detail under it, then the selected model's efforts.
+    /// The models, one line each, then the selected model's efforts.
     private var modelPanel: some View {
         card(width: 420) {
             header("Model")
             ForEach(settings.models, id: \.value) { entry in
                 let marked = entry == settings.selectedModel
                 let id = "session.composer.model.\(entry.value)"
-                row(entry.label, detail: marked || isHovered(entry, id) ? entry.detail : nil, marked: marked, id: id) {
+                row(entry.label, marked: marked, id: id) {
                     _ = await model.setModel(for: key, modelValue: entry.value)
                 }
-                .onHover { hovered = $0 ? entry.value : (hovered == entry.value ? nil : hovered) }
             }
             if !settings.efforts.isEmpty {
                 divider
@@ -151,14 +146,6 @@ struct HostedSettingsButton: View {
                 efforts
             }
         }
-    }
-
-    /// The pointer is on this model's row (or, in a render, the row is drawn as if it were: `-CC_HOVER`).
-    private func isHovered(_ entry: MenuModel, _ id: String) -> Bool {
-        #if DEBUG
-            if RenderWindow.hovered.contains(id) { return true }
-        #endif
-        return hovered == entry.value
     }
 
     /// The selected model's efforts as one row of segments, the selected one filled.
@@ -191,7 +178,7 @@ struct HostedSettingsButton: View {
 
     private var modeRows: some View {
         ForEach(settings.modes, id: \.value) { mode in
-            row(mode.confirm ? "\(mode.label)…" : mode.label, detail: nil, marked: mode == settings.selectedMode,
+            row(mode.confirm ? "\(mode.label)…" : mode.label, marked: mode == settings.selectedMode,
                 id: "session.composer.mode.\(mode.value)", asksFirst: mode.confirm) {
                 if mode.confirm {
                     confirmMode(mode)
@@ -207,7 +194,7 @@ struct HostedSettingsButton: View {
             open = nil
             run()
         } label: {
-            rowLabel(title, detail: nil, marked: false)
+            rowLabel(title, marked: false)
         }
         .buttonStyle(.hover(radius: 5, id: id))
         .padding(.horizontal, 4)
@@ -260,38 +247,31 @@ struct HostedSettingsButton: View {
 
     /// One choice. The checked one is the run's fact already.
     private func row(
-        _ title: String, detail: String?, marked: Bool, id: String, asksFirst: Bool = false,
+        _ title: String, marked: Bool, id: String, asksFirst: Bool = false,
         set: @escaping () async -> Void
     ) -> some View {
         Button {
             choose(asksFirst: asksFirst, set)
         } label: {
-            rowLabel(title, detail: detail, marked: marked)
+            rowLabel(title, marked: marked)
         }
         .buttonStyle(.hover(radius: 5, id: id))
         .padding(.horizontal, 4)
         .disabled(marked)
-        // One element, so a row with a detail line reports its selection as a one-line row does.
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(marked ? .isSelected : [])
     }
 
-    private func rowLabel(_ title: String, detail: String?, marked: Bool) -> some View {
+    private func rowLabel(_ title: String, marked: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "checkmark")
                 .font(.system(size: 9.5, weight: .bold))
                 .opacity(marked ? 1 : 0)
                 .frame(width: 12)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(Theme.ui(12.5)).foregroundStyle(settings.inFlight ? Theme.text3 : Theme.text)
-                    .lineLimit(1)
-                if let detail, !detail.isEmpty {
-                    Text(detail).font(Theme.ui(11)).foregroundStyle(Theme.text3)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            Text(title).font(Theme.ui(12.5)).foregroundStyle(settings.inFlight ? Theme.text3 : Theme.text)
+                .lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
