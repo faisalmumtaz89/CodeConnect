@@ -48,7 +48,8 @@ pub enum ToHost {
     Ack {
         seq: u64,
     },
-    /// Starts the run's one `query()` with its first message.
+    /// Starts the run's one `query()` with its first message, or, when `prompt` is empty, with
+    /// none: the run then waits for the person's first `say`.
     Start {
         uuid: String,
         options: StartOptions,

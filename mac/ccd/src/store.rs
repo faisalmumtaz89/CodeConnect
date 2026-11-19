@@ -3265,6 +3265,22 @@ impl Store {
         Ok(recorded == 1)
     }
 
+    /// Record `thread_id` as a ccd-hosted Codex run's thread in place of the one it has, only
+    /// while the run has no message: a thread that never ran a turn holds nothing to lose.
+    /// Whether it was recorded.
+    pub fn replace_unsaid_thread(&self, session_uid: &str, thread_id: &str) -> Result<bool> {
+        let (table, _) = session_tables_for(&AgentKind::Codex);
+        let recorded = self.write().execute(
+            &format!(
+                "UPDATE {table} SET codex_thread_id = ?2
+                  WHERE session_uid = ?1
+                    AND NOT EXISTS (SELECT 1 FROM events WHERE session_uid = ?1 AND kind = ?3)"
+            ),
+            params![session_uid, thread_id, EventKind::UserMessage.as_str()],
+        )?;
+        Ok(recorded == 1)
+    }
+
     /// Insert-once ledger write: [`LedgerWrite::Existing`], writing nothing, if an
     /// outcome is already recorded.
     ///

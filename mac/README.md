@@ -743,10 +743,11 @@ and its `--version` through that login shell, at least 0.167.0; one not found, b
 that or not saying its version is listed unavailable with the sentence that says so,
 and a signed-out one with "Codex on <computer> isn’t signed in."): the first list after the daemon starts waits for the
 check, and every later one answers from the last check and checks again; when that check finds the agents changed,
-`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt, trust?}` takes a listed
-folder (from `>= 30`, any absolute folder) and a first message, and a start
-without one (`prompt` absent, empty or only white space) is refused with
-`launch_failed` before anything is checked or run. `trust` is the person's
+`projects` goes out again, unasked, to the device that asked, with the same folders and the agents as they are now. `start_session {request_id, path, agent, prompt?, trust?}` takes a listed
+folder (from `>= 30`, any absolute folder) and an optional first message. A start
+without one (`prompt` absent, empty or only white space) starts the run waiting
+for the person's message: `live`, with no message and no turn, and the first
+message the person sends is an ordinary send. `trust` is the person's
 answer to "trust this folder?", `trusted` or `not_trusted`, kept for the
 folder by its real path (symlinks resolved) in the store's own `folder_trust`
 table, so removing a run keeps it. The first start in a folder with no answer
@@ -791,7 +792,8 @@ its run (`starting`, under its `request_id`) before anything runs, makes the run
 folder `runs/<uid>/` under the CodeConnect folder (0700), and runs the agent host,
 `cc-agent-host <run folder>`, through the user's login shell in a session of its
 own, so it outlives the daemon; ccd hands the host the first message as the run's
-`start` over the run's link, and the host runs that claude with it. The start's
+`start` over the run's link, and the host runs that claude with it, or with no
+message when the start has none. The start's
 answer waits for the host's outcome: a done start makes the run `live` and is
 answered started, and a refused one makes it `failed` and is answered with the
 reason; its host then ends, once claude's end is acknowledged. With no outcome within the start's 80 s, the answer is started and the run
@@ -832,7 +834,8 @@ first send, so nothing is sent twice.
 A run whose claude ended without anyone stopping it (its end reads "Stopped: its process
 ended", after a crash or a Mac restart alike) is relaunched by the person's next message,
 never at ccd's start; its summary says so (`relaunchable`, minor 42). A run End run ended, a
-start that failed, and a run claude never named a session for stay ended ("This session isn't
+start that failed, and a run claude never named a session for (one started without a first
+message whose claude ended before any, with nothing to resume) stay ended ("This session isn't
 running, so nothing was sent."). Before anything is launched, the run's old host must be gone
 and its process group empty, unless it was recorded before this Mac last started ("This
 session is still ending; nothing was sent. Try again in a moment."), and a start's own checks
@@ -1009,7 +1012,7 @@ own task then sends the first message on that connection:
   - CodeConnect's mail server (`codeconnect mcp`) with the run's uid in its `env`;
 - the thread recorded on the run's row;
 - `turn/start` with the first message under the start's own uuid as its
-  `clientUserMessageId`.
+  `clientUserMessageId`, when the start has one.
 
 The run is then `live`, and the connection is kept as the run's one link: each event
 Codex reports on it (the thread, each message once it is finished, each command or
@@ -1106,7 +1109,11 @@ the daemon listens, and its recorded process group gets the same ladder under th
 warrant. Nothing is sent again, so a first message Codex had already taken is lost with
 the run, and the person starts again. A `live` run whose app-server is still running is
 connected again: its thread is resumed with the approval and sandbox Codex last named for it
-and the same thread config. The turns
+and the same thread config. A thread that never ran a turn has no rollout, which Codex
+answers a resume of with "no rollout found"; when the run has had no message, here or on a
+relaunch, ccd starts a new thread with the same settings and thread config and records it
+as the run's, put back in Plan when the run was in Plan. Any other failed resume is as
+before. The turns
 it ran meanwhile are filed from the answer, and a turn still running then is read once more when it ends, for the items
 it finished while no daemon listened. A card still open stays open. If Codex asks for it
 again, the card answers that request; an answer that was on its way when ccd stopped is

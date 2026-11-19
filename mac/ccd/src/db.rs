@@ -205,6 +205,15 @@ impl Db {
             .await
     }
 
+    pub async fn replace_unsaid_thread(
+        &self,
+        session_uid: String,
+        thread_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| store.replace_unsaid_thread(&session_uid, &thread_id))
+            .await
+    }
+
     pub async fn hosted_run_for_request(
         &self,
         request_id: String,

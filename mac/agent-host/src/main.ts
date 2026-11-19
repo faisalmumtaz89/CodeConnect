@@ -136,7 +136,8 @@ function begin(start: Start): void {
     wake();
   };
   const input = (async function* () {
-    yield firstMessage(start);
+    // A start with an empty prompt has no first message: the run waits for the person's first say.
+    if (start.prompt !== '') yield firstMessage(start);
     for (;;) {
       while (queued.length === 0 && !inputEnded) {
         await new Promise<void>((resolve) => {

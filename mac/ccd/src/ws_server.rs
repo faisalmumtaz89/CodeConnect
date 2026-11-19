@@ -6357,11 +6357,10 @@ mod tests {
         );
     }
 
-    /// A run starts with a first message. A start without one is refused
-    /// before anything is launched, whatever else it names; with one, the same request
-    /// goes on to the ordinary checks.
+    /// A run may start without a first message: a start with none, an empty one or one of
+    /// only white space goes on to the ordinary checks, as a start with one does.
     #[tokio::test]
-    async fn a_start_without_a_first_message_is_refused_before_anything_runs() {
+    async fn a_start_without_a_first_message_goes_on_to_the_ordinary_checks() {
         let _env = crate::ProcessEnvRead::take();
         let (server, _) = live_server(protocol::config::Config::default()).await;
         let (mut phone, _) = server
@@ -6386,6 +6385,7 @@ mod tests {
             ("r-none", None),
             ("r-empty", Some("")),
             ("r-blank", Some(" \n\t")),
+            ("r-said", Some("fix the tests")),
         ] {
             phone.send(start(id, prompt)).await.unwrap();
             let reply = loop {
@@ -6395,25 +6395,8 @@ mod tests {
                 }
             };
             assert_eq!(reply["request_id"], id, "{reply}");
-            assert_eq!(result(reply.clone())["status"], "failed", "{reply}");
-            assert_eq!(result(reply.clone())["reason"], "launch_failed", "{reply}");
-            assert_eq!(
-                result(reply)["detail"],
-                "A run starts with a first message.",
-                "{id}"
-            );
+            assert_eq!(result(reply.clone())["reason"], "folder_missing", "{reply}");
         }
-        phone
-            .send(start("r-said", Some("fix the tests")))
-            .await
-            .unwrap();
-        let reply = loop {
-            let message = next_json(&mut phone).await.expect("a start_session_result");
-            if message["type"] == "start_session_result" {
-                break message;
-            }
-        };
-        assert_eq!(result(reply.clone())["reason"], "folder_missing", "{reply}");
     }
 
     /// The folders' answers to "trust this folder?" are listed, changed and
