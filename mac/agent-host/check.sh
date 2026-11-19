@@ -5,8 +5,8 @@
 #
 # The executable runs as the Bun it is built on (BUN_BE_BUN=1), so the check holds whatever src/ contains: it creates a
 # SharedArrayBuffer, which JavaScriptCore withholds when it cannot JIT (a macOS executable under the hardened runtime
-# without allow-jit), and starts a child that answers on its standard output, as the SDK starts `claude`. The answer
-# must come back unchanged.
+# without allow-jit, on a Mac with System Integrity Protection on), and starts a child that answers on its standard
+# output, as the SDK starts `claude`. The answer must come back unchanged.
 set -euo pipefail
 executable="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 work="$(mktemp -d)"
