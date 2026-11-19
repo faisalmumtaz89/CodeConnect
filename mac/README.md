@@ -929,9 +929,10 @@ no mode. A run whose Codex ccd reconnects to after its own restart is resumed wi
 approval and sandbox Codex last named for it, so the same Codex keeps Full Access; a run whose
 Codex is started again (relaunched) comes back in Read Only or Plan when it was in one of them,
 and is given Default's otherwise, as its start was: a run never gains permissions by restarting,
-and a new Codex is never given Full Access (the owner's decisions 233 and 253). A resume does not
-carry Plan, so every resume of a run in Plan, a relaunch's, a reconnect's and the follow-up
-after a turn that ran across a reconnect, sets Plan again before the run takes a message; when
+beyond the settings Codex last reported, and a new Codex is never given Full Access (the
+owner's decisions 233 and 253). A resume does not carry Plan, so every resume of a run in Plan,
+a relaunch's, a reconnect's and the follow-up after a turn that ran across a reconnect, sets Plan
+again before the run takes a message; when
 Codex does not take it, a relaunch sends nothing and the person is told, and a reconnected run
 takes no message until ccd's next start. A resume that sets Plan again keeps Codex's report of
 Plan as the run's settings, not the answer's Default, so a refusal, a crash or a restart before
@@ -1043,7 +1044,8 @@ and another process may hold its number now), ccd removes the run's `as.pid` and
 launches the codex
 a start would find, with the environment a start reads and the run's own folder answer, into
 the run's folder, its output added to the run's `host.log`, and resumes the run's thread on
-that connection at Default's approval and sandbox. The run is then `live`, its timeline gets a
+that connection, in Read Only or Plan when the run was in one of them and at Default's approval
+and sandbox otherwise. The run is then `live`, its timeline gets a
 `session_start` under the new launch ("Session resumed"), and the message is sent on the new
 link before any other. A relaunch that fails before that stops what it launched, puts the
 run back to `exited` and relaunchable, and refuses the message with "CodeConnect has no
