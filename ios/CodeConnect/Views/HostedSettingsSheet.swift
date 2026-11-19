@@ -75,7 +75,7 @@ struct HostedSettingsSheet: View {
         card {
             ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
                 choiceRow(
-                    title: entry.label, subtitle: entry.detail,
+                    title: entry.label,
                     isSelected: live.selectedModel?.value == entry.value,
                     isLast: index == live.models.count - 1, disabled: live.inFlight
                 ) { await model.setModel(for: sessionKey, modelValue: entry.value) }
@@ -87,7 +87,7 @@ struct HostedSettingsSheet: View {
             card {
                 ForEach(Array(live.efforts.enumerated()), id: \.element.value) { index, entry in
                     choiceRow(
-                        title: entry.label, subtitle: nil,
+                        title: entry.label,
                         isSelected: live.selectedEffort?.value == entry.value,
                         isLast: index == live.efforts.count - 1, disabled: live.inFlight
                     ) { await model.setEffort(for: sessionKey, effortValue: entry.value) }
@@ -98,7 +98,7 @@ struct HostedSettingsSheet: View {
         card {
             ForEach(Array(live.modes.enumerated()), id: \.element.value) { index, entry in
                 choiceRow(
-                    title: entry.confirm ? "\(entry.label)…" : entry.label, subtitle: nil,
+                    title: entry.confirm ? "\(entry.label)…" : entry.label,
                     isSelected: live.selectedMode?.value == entry.value,
                     isLast: index == live.modes.count - 1, disabled: live.inFlight
                 ) {
@@ -118,16 +118,15 @@ struct HostedSettingsSheet: View {
         CCCard(padding: 0) { VStack(spacing: 0) { content() } }
     }
 
-    /// One selectable row: its label, an optional detail line, a check when it is the current value, and
+    /// One selectable row: its label, a check when it is the current value, and
     /// its tap — disabled while any call is in flight (the menus are one unit) and on the row already in
     /// force (there is nothing to apply).
     private func choiceRow(
-        title: String, subtitle: String?, isSelected: Bool, isLast: Bool, disabled: Bool,
+        title: String, isSelected: Bool, isLast: Bool, disabled: Bool,
         apply: @escaping () async -> SettingResult?
     ) -> some View {
         CCRow(
             title,
-            subtitle: subtitle,
             showsChevron: false,
             separator: !isLast,
             action: (disabled || isSelected) ? nil : { run(apply) }

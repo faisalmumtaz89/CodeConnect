@@ -762,13 +762,11 @@ public struct RunMenus: Codable, Sendable, Hashable {
     }
 }
 
-/// One model of a run's menu: the agent's own `value` (what a `set_model` carries), the label and
-/// detail line it shows, and the efforts this model takes.
+/// One model of a run's menu: the agent's own `value` (what a `set_model` carries), the label it
+/// shows as the model's name alone, and the efforts this model takes.
 public struct MenuModel: Codable, Sendable, Hashable {
     public let value: String
     public let label: String
-    /// A line under the name — the agent's own words. Absent when it gives none.
-    public let detail: String?
     public let efforts: [String]
 }
 

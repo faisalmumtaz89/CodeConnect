@@ -66,7 +66,7 @@ public enum RunSettings: Sendable, Hashable {
 /// A live hosted run's settings, ready to draw. The menus are the daemon's own; the selection and the
 /// display strings are computed once here so both apps agree.
 public struct HostedSettings: Sendable, Hashable {
-    /// The model rows, in the daemon's order (each with its `value`, `label`, `detail` and `efforts`).
+    /// The model rows, in the daemon's order (each with its `value`, `label` and `efforts`).
     public let models: [MenuModel]
     /// The permission-mode rows, with the agent's own labels.
     public let modes: [MenuMode]

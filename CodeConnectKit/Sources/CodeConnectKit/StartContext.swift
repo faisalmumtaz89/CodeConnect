@@ -117,10 +117,10 @@ public struct StartContext {
             return .signedOut(said(agent) ?? "\(agent.displayName) on \(machineName) isn’t signed in.")
         }
         let offered = (status?.models ?? []).map {
-            StartModelChoice(agent: agent, model: $0.value, label: $0.label, detail: $0.detail)
+            StartModelChoice(agent: agent, model: $0.value, label: $0.label)
         }
         if offered.contains(where: \.isDefault) { return .choices(offered) }
-        return .choices([StartModelChoice(agent: agent, model: nil, label: "Default", detail: nil)] + offered)
+        return .choices([StartModelChoice(agent: agent, model: nil, label: "Default")] + offered)
     }
 
     /// Every entry that can be chosen here, agent by agent.
@@ -175,9 +175,8 @@ public struct StartModelChoice: Hashable, Sendable {
     public let agent: StartAgent
     /// The listed `value` sent as `start_session.model`; nil names none.
     public let model: String?
-    /// The agent's own words, shown as sent.
+    /// The agent's own name for the model, shown as sent and alone.
     public let label: String
-    public let detail: String?
 
     /// The agent's default: no model named, or Claude Code's own `default`,
     /// which the computer passes on as no model either.

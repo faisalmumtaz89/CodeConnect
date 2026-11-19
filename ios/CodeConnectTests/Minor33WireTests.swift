@@ -70,13 +70,10 @@ final class Minor33WireTests: XCTestCase {
         XCTAssertEqual(claude.signedIn, false)
         XCTAssertEqual(claude.models.map(\.value), ["default", "opus", "fable", "sonnet", "haiku"])
         XCTAssertEqual(claude.models.first?.label, "Default (recommended)")
-        XCTAssertEqual(
-            claude.models.first?.detail, "Use the default model (currently Opus 5.5) · $4/$20 per Mtok")
         let codex = try XCTUnwrap(agents.first { $0.agent == .codex })
         XCTAssertEqual(codex.signedIn, true)
         XCTAssertEqual(codex.models.count, 9)
         XCTAssertEqual(codex.models.first?.label, "GPT-6.1-Sol")
-        XCTAssertEqual(codex.models.first?.detail, "Latest workhorse model for coding and everyday work.")
     }
 
     /// The start the menu sends is the daemon's own `start_session`, byte for byte, model included.
