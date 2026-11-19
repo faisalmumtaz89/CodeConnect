@@ -1532,17 +1532,34 @@ mod tests {
     #[test]
     fn with_ccd_down_uninstall_names_the_hosts_still_running() {
         let dir = scratch("down");
-        // Each stand-in is a copy of bash waiting on its open stdin. Not a copy of sleep:
-        // where sleep is uutils coreutils, one binary for every tool, a copy runs only
-        // under a tool's own name.
+        // Each stand-in is a copy of this test binary running `a_stand_in_waits_on_stdin`.
+        // Not a copy of a system binary: macOS can kill a copy of one of its own, and a
+        // copy of uutils coreutils runs only under a tool's own name. On Linux a process
+        // another test forks in the moment the copy is written holds it open for writing
+        // until it execs, and starting the copy meanwhile fails "text file busy": tried again.
         let stand_in = |name: &str| {
             let program = dir.join(name);
-            std::fs::copy("/bin/bash", &program).unwrap();
-            Command::new(&program)
-                .args(["-c", "read -r _"])
-                .stdin(Stdio::piped())
-                .spawn()
-                .unwrap()
+            std::fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+            let mut tries = 0;
+            loop {
+                let started = Command::new(&program)
+                    .args([
+                        "--exact",
+                        "service::tests::a_stand_in_waits_on_stdin",
+                        "--ignored",
+                    ])
+                    .env("CC_STAND_IN", "1")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .spawn();
+                match started {
+                    Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                        tries += 1;
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    started => break started.unwrap(),
+                }
+            }
         };
         let mut host = stand_in("cc-agent-host");
         let mut codex = stand_in("codex");
@@ -1563,6 +1580,11 @@ mod tests {
             std::fs::write(folder.join("as.pid"), format!("{pid}\n")).unwrap();
         }
         let said = stop_hosted_runs(&dir.join("no-ccd.sock"), &dir);
+        for (name, child) in [("cc-agent-host", &mut host), ("codex", &mut codex)] {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("the {name} stand-in ended before the check was done ({status}), so the check proves nothing");
+            }
+        }
         let mut named = [host.id(), codex.id()];
         named.sort_unstable();
         for child in [&mut host, &mut codex, &mut other] {
@@ -1578,6 +1600,15 @@ mod tests {
                 named[0], named[1]
             )
         );
+    }
+
+    /// The process behind each stand-in of the test above: it waits until its stdin closes.
+    #[test]
+    #[ignore = "a stand-in process, started by with_ccd_down_uninstall_names_the_hosts_still_running"]
+    fn a_stand_in_waits_on_stdin() {
+        if std::env::var_os("CC_STAND_IN").is_some() {
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
     }
 
     #[cfg(target_os = "macos")]
