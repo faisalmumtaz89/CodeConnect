@@ -38,6 +38,8 @@ User-facing changes, newest first. Mac releases are cut per
 ## Bypass permissions, after you confirm it
 
 - Claude's Bypass permissions can be turned on for a run started from the app, once you confirm it.
+  When Claude has to be started again, a run in Ask before edits, Accept edits or Plan keeps its
+  mode, and one in Bypass permissions comes back in your own default mode.
 
 ## A run's settings name its mode
 
@@ -54,8 +56,8 @@ User-facing changes, newest first. Mac releases are cut per
 
 - A Codex run started from the app can be switched to Read Only, Plan or, once you confirm it, Full
   Access, and its model and effort changed. It keeps its model, effort and mode when only
-  CodeConnect's service restarts, and goes back to Default when Codex itself has to be started
-  again.
+  CodeConnect's service restarts. When Codex itself has to be started again, it comes back in Read
+  Only or Plan if it was in one, and in Default otherwise.
 
 ## A run that stopped on its own continues
 
