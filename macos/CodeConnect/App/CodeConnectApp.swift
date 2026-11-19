@@ -1,6 +1,5 @@
 import AppKit
 import CodeConnectKit
-import Sparkle
 import SwiftUI
 
 @main
@@ -9,12 +8,8 @@ struct CodeConnectApp: App {
     /// No push registrar: notifications on the Mac need a wire and relay change no step has built.
     @State private var machines: Machines
     @State private var setup: Setup
-    #if !DEBUG
-        /// Sparkle's standard updater, started with the app: its daily check, and its own window when a newer
-        /// CodeConnect is out. Release only, so no test launch, render or rig ever asks codeconnect.sh.
-        private let updater = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-    #endif
+    /// Sparkle's updater, with the app's own update sheet: started with the app.
+    @State private var updates: Updates?
 
     /// `machines` is made here, after a test launch has chosen its keychain and its data folder,
     /// because making it reads the one and writes the other; and after the pairing with this Mac's own
@@ -32,6 +27,7 @@ struct CodeConnectApp: App {
             _machines = State(initialValue: Machines(pairing: pairing))
         #endif
         _setup = State(initialValue: Setup(installer: installer, pairing: pairing))
+        _updates = State(initialValue: Updates.forThisLaunch())
     }
 
     var body: some Scene {
@@ -52,9 +48,9 @@ struct CodeConnectApp: App {
         .commands {
             AddCommands()
             CommandGroup(after: .appInfo) {
-                #if !DEBUG
-                    Button("Check for Updates\u{2026}") { updater.checkForUpdates(nil) }
-                #endif
+                if let updates {
+                    Button("Check for Updates\u{2026}") { updates.checkForUpdates() }
+                }
                 Button("Set Up CodeConnect\u{2026}") { setup.reopen(machines: machines) }
             }
         }
@@ -108,7 +104,9 @@ struct RootView: View {
                     RenderWindow(
                         ready: !RenderWindow.opensSettings
                             && (!RenderWindow.waitsForComputer || machines.pairingError != nil || connected)
-                            && (!Setup.runsThisLaunch || setup.settled),
+                            && (!Setup.runsThisLaunch || setup.settled)
+                            // A render of an update step photographs the update's own window.
+                            && RenderWindow.updateStep == nil,
                         showsSheet: (RenderWindow.pairing == nil ? RenderWindow.opensAddComputer : !connected)
                             || setup.shown))
                 .task { if RenderWindow.opensSettings { openSettings() } }

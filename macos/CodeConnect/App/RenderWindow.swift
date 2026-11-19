@@ -119,6 +119,13 @@
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
 
+        /// `-CC_UPDATE_FEED <url>`: the updater starts, with this feed in place of the app's, and checks at once.
+        static var updateFeed: String? { UserDefaults.standard.string(forKey: "CC_UPDATE_FEED") }
+        /// `-CC_UPDATE_STEP <name>`: the render waits for the update sheet's step of this name (`Updates.Step.name`) and
+        /// keeps it, photographing the update's own window; for `downloading`, Install is chosen, and the download is cancelled
+        /// once it starts. Without it, a launch with `-CC_UPDATE_FEED` checks only when asked (Check for Updates…).
+        static var updateStep: String? { UserDefaults.standard.string(forKey: "CC_UPDATE_STEP") }
+
         /// `-CC_HOVER <id>,<id>`: the buttons with these identifiers draw as if the pointer were on them, since a test
         /// launch has no pointer.
         static var hovered: Set<String> {
@@ -275,7 +282,7 @@
             }
 
             private func renderIfReady() {
-                guard ready, placed, !started, let window, let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW")
+                guard ready, placed, !started, let window, UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") != nil
                 else { return }
                 // The sheet an option opens at launch is attached a moment after the window shows,
                 // and the one a pairing closes takes a moment to go.
@@ -284,26 +291,52 @@
                     return
                 }
                 started = true
-                Task { @MainActor in
-                    // `-CC_RENDER_DELAY <seconds>`: what a screen shows a while after it is ready.
-                    try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))
-                    do {
-                        let rep = try await RenderWindow.photograph(window)
-                        guard let png = rep.representation(using: .png, properties: [:]) else {
-                            throw RenderFailure("could not encode the PNG")
-                        }
-                        try png.write(to: URL(fileURLWithPath: path))
-                        let active = RenderWindow.everActive || NSApp.isActive
-                        print("render: \(rep.pixelsWide)x\(rep.pixelsHigh) -> \(path) active=\(active)")
-                        RenderWindow.removeThrowawayData()
-                        exit(0)
-                    } catch {
-                        FileHandle.standardError.write(Data("render: \(error)\n".utf8))
-                        RenderWindow.removeThrowawayData()
-                        exit(1)
+                RenderWindow.renderAndQuit(window)
+            }
+        }
+
+        /// Photographs `window` into the render's PNG, then quits: 0 once written, 1 if it could not be.
+        @MainActor static func renderAndQuit(_ window: NSWindow) {
+            guard let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") else { return }
+            Task { @MainActor in
+                // `-CC_RENDER_DELAY <seconds>`: what a screen shows a while after it is ready.
+                try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))
+                do {
+                    let rep = try await RenderWindow.photograph(window)
+                    guard let png = rep.representation(using: .png, properties: [:]) else {
+                        throw RenderFailure("could not encode the PNG")
                     }
+                    try png.write(to: URL(fileURLWithPath: path))
+                    let active = RenderWindow.everActive || NSApp.isActive
+                    print("render: \(rep.pixelsWide)x\(rep.pixelsHigh) -> \(path) active=\(active)")
+                    RenderWindow.removeThrowawayData()
+                    exit(0)
+                } catch {
+                    FileHandle.standardError.write(Data("render: \(error)\n".utf8))
+                    RenderWindow.removeThrowawayData()
+                    exit(1)
                 }
             }
+        }
+
+        /// The backdrop behind a window `place` put on the screen.
+        @MainActor private static var placedBackdrop: NSWindow?
+
+        /// Puts a window of the app's own other than the main one (the update's) where a render photographs it: wholly on
+        /// the screen, at the back, over a backdrop of one colour; then runs `then` once it is drawn.
+        @MainActor static func place(_ window: NSWindow, then: @escaping @MainActor () -> Void) {
+            if let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+                window.setFrameTopLeftPoint(NSPoint(x: visible.minX, y: visible.maxY))
+            }
+            window.orderBack(nil)
+            let backdrop = NSWindow(contentRect: window.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            backdrop.isReleasedWhenClosed = false
+            backdrop.hasShadow = false
+            backdrop.ignoresMouseEvents = true
+            backdrop.backgroundColor = NSColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1)
+            backdrop.order(.below, relativeTo: window.windowNumber)
+            placedBackdrop = backdrop
+            DispatchQueue.main.async { then() }
         }
 
         private struct RenderFailure: Error, CustomStringConvertible {

@@ -9,6 +9,8 @@ User-facing changes, newest first. Mac releases are cut per
   message.
 - The start menu and a run's settings name each model by its name alone, without the description
   and pricing an agent sends beside it.
+- The Mac app's update prompt now matches the app: a dark window with the release notes and Install,
+  Later and Skip This Version, in place of Sparkle's standard window.
 
 ## Agents start from the app, and the old engine is gone
 
