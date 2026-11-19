@@ -2088,7 +2088,7 @@ async fn resume_thread(
     let answer = match client.call("thread/resume", params.clone()).await {
         Ok(answer) => answer,
         Err(CallError::Rpc { message, .. }) if message.starts_with("no rollout found") => {
-            return new_thread(daemon, client, run, params, kept).await;
+            return new_thread(daemon, client, run, params["config"].take(), kept).await;
         }
         Err(err) => return Err(format!("Codex did not resume the thread: {err}")),
     };
@@ -2118,21 +2118,26 @@ async fn resume_thread(
 }
 
 /// A new thread for the run `run`, whose thread has no rollout (it never ran a turn) and so
-/// cannot be resumed: `thread/start` with the resume's `params` but its thread, recorded as
-/// the run's only while the run has had no message, so nothing is lost; its settings filed,
-/// and the run put back in Plan when `kept` was in Plan, as a resume puts it back. Any other
-/// run's thread with no rollout stays an error, as every other failed resume is.
+/// cannot be resumed: `thread/start` as the run's first start sends it, on the model, approval
+/// policy and sandbox `kept` names (the settings Codex last named for the run, which a resume
+/// leaves to the thread) and the resume's thread `config`. It is recorded as the run's only
+/// while the run has had no message, so nothing is lost; its settings filed, and the run put
+/// back in Plan when `kept` was in Plan, as a resume puts it back. Any other run's thread with
+/// no rollout stays an error, as every other failed resume is.
 async fn new_thread(
     daemon: &Arc<Daemon>,
     client: &Client,
     run: &mut LiveCodexRun,
-    mut params: Value,
+    config: Value,
     kept: Option<Value>,
 ) -> Result<(CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
     let uid = run.host.session_uid.clone();
-    if let Some(params) = params.as_object_mut() {
-        params.remove("threadId");
+    let model = kept.as_ref().and_then(|kept| kept["model"].as_str());
+    let mut params = thread_params(&run.cwd, model);
+    if let Some(kept) = &kept {
+        keep_settings(&mut params, kept);
     }
+    params["config"] = config;
     let started = client
         .call("thread/start", params)
         .await
@@ -3373,16 +3378,26 @@ mod tests {
     /// **A Codex run started without a first message is `live` on its own thread with no
     /// turn, and a ccd restart gives it a new thread**: its start sends no `turn/start`, so
     /// its thread has no rollout and Codex answers the reconnect's `thread/resume` "no rollout
-    /// found"; the run has had no message, so ccd starts a new thread with the resume's
-    /// settings and records it as the run's, and the run is linked on it.
+    /// found"; the run has had no message, so ccd starts a new thread on the model, approval
+    /// and sandbox Codex last named for the run and the resume's thread config, records it as
+    /// the run's, and the run is linked on it. A run started on a model other than Codex's
+    /// default keeps it: the stand-in answers with the model it is asked for, or its default.
     #[tokio::test]
     async fn a_codex_run_started_without_a_message_waits_and_gets_a_new_thread_on_a_restart() {
         let rig = rig();
         let codex = stand_in(&rig, "exec sleep 30");
+        let settings = |model: &serde_json::Value| {
+            json!({"model": model, "reasoningEffort": "medium", "approvalPolicy": "on-request",
+                "sandbox": {"type": "workspaceWrite"}})
+        };
         let mut script = whole_start();
         script.retain(|(method, _)| *method != "turn/start");
+        let mut answer_start = settings(&json!("gpt-6-luna"));
+        answer_start["thread"] = json!({"id": "thr-x3"});
+        script[2].1 = json!({ "result": answer_start });
         let quiet = Run {
             prompt: "",
+            model: Some("gpt-6-luna"),
             ..run(&rig, "req-quiet", &codex)
         };
         let (result, (seen, first)) =
@@ -3395,6 +3410,20 @@ mod tests {
             methods(&seen),
             ["initialize", "initialized", "skills/list", "thread/start"]
         );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let chosen = loop {
+            let chosen = rig
+                .daemon
+                .db
+                .newest_codex_settings(uid.clone())
+                .await
+                .unwrap();
+            if chosen.is_some() || Instant::now() >= deadline {
+                break chosen;
+            }
+            tokio::time::sleep(POLL).await;
+        };
+        assert_eq!(chosen.as_ref().unwrap()["model"], "gpt-6-luna");
 
         drop(first);
         let dir = run_folder(&rig).await;
@@ -3423,20 +3452,22 @@ mod tests {
                 )
                 .await;
                 let started = asked(&mut ws, "thread/start").await;
-                answer(
-                    &mut ws,
-                    &started,
-                    json!({"thread": {"id": "thr-new"}, "model": "gpt-test"}),
-                )
-                .await;
+                let model = match &started["params"]["model"] {
+                    serde_json::Value::Null => json!("gpt-6.2-sol"),
+                    model => model.clone(),
+                };
+                let mut answered = settings(&model);
+                answered["thread"] = json!({"id": "thr-new"});
+                answer(&mut ws, &started, answered).await;
                 (resume, started, ws)
             }
         );
         let mut expected = resume["params"].clone();
         expected.as_object_mut().unwrap().remove("threadId");
+        expected["model"] = json!("gpt-6-luna");
         assert_eq!(
             started["params"], expected,
-            "the resume's settings, no thread"
+            "the resume's settings and thread config on the run's model, no thread"
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         let summary = loop {
@@ -3449,10 +3480,16 @@ mod tests {
             }
             tokio::time::sleep(POLL).await;
         };
+        let kept = restarted
+            .db
+            .newest_codex_settings(uid.clone())
+            .await
+            .unwrap();
         end_run(&rig, &uid).await;
         assert_eq!(summary.codex_thread_id.as_deref(), Some("thr-new"));
         assert_eq!(summary.codex_link, protocol::event::CodexLink::Subscribed);
         assert_eq!(summary.lifecycle, Lifecycle::Live);
+        assert_eq!(kept, chosen, "the run's settings as they were");
     }
 
     /// **A started Codex run sends its first message on a thread of its own, then is
