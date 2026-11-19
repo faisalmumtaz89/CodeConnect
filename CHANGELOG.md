@@ -3,7 +3,7 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
-## CodeConnect 0.19.2
+## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
 - On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
   forgets it and its sessions. This Mac's own computer is not offered, since the app pairs with it

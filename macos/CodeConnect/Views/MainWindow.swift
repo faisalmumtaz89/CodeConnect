@@ -206,14 +206,14 @@ private struct Sidebar: View {
                                             .accessibilityIdentifier("sidebar.computer.\(id).removeAction")
                                     }
                                 }
-                                .overlay(alignment: .trailing) {
+                                // On the name line, at the row's trailing edge, so its panel lines up with the row.
+                                .overlay(alignment: Alignment(horizontal: .trailing, vertical: .computerNameLine)) {
                                     if more {
                                         RunMore(
                                             id: "sidebar.computer.\(id).more",
                                             open: Binding(get: { moreOpen == id }, set: { moreOpen = $0 ? id : nil }),
                                             action: .remove
                                         ) { removing = computer }
-                                        .padding(.trailing, 2)
                                     }
                                 }
                                 .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
@@ -314,7 +314,7 @@ private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
     let selected: Bool
-    /// Its "…" is shown over where the count is.
+    /// Its "…" is shown at the end of the name line, the count moved over for it, as a run's row makes room.
     let roomForMore: Bool
     /// Narrows the list to this computer, or back to every run when it already is.
     let select: () -> Void
@@ -369,8 +369,9 @@ private struct ComputerRow: View {
                     .lineLimit(1)
                 Spacer()
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
-                    .opacity(roomForMore ? 0 : 1)
+                if roomForMore { Color.clear.frame(width: RunMore.width) }
             }
+            .alignmentGuide(.computerNameLine) { $0[VerticalAlignment.center] }
             if let load {
                 HStack(spacing: 10) {
                     if let cpu = load.cpu { LoadMeter(label: "CPU", used: cpu) }
@@ -388,6 +389,15 @@ private struct ComputerRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, load == nil ? 5 : 6)
     }
+}
+
+extension VerticalAlignment {
+    private enum ComputerNameLine: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[VerticalAlignment.center] }
+    }
+
+    /// A computer row's name line, where its "…" sits.
+    fileprivate static let computerNameLine = VerticalAlignment(ComputerNameLine.self)
 }
 
 /// One figure of a computer's load: its name, its share under it, and a thin bar, amber at 90% or more, when the
