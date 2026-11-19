@@ -1,33 +1,6 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The words of the folder question and of Settings › Folders.
-enum FolderWords {
-    static let title = "Do you trust the authors of the files in this folder?"
-    static func body(_ computer: String) -> String {
-        "If you do, the agent loads the folder’s own scripts, tools and instructions, and its scripts can run on "
-            + "\(computer) without asking you. If you don’t, the agent starts with nothing from the folder."
-    }
-    static let trust = "Yes, I trust the authors"
-    static let trustDetail = "Load the folder’s scripts, tools and instructions"
-    static let distrust = "No, I don’t trust the authors"
-    static let distrustDetail = "Start with nothing from the folder"
-    static let footnote = "Asked once for this folder. You can change it in Settings › Folders."
-    static func then(_ agent: String, _ folder: String) -> String { "Then \(agent) starts in \(folder)." }
-
-    static let paneTitle = "Folders"
-    static let paneIntro =
-        "Agents load the scripts, tools and instructions of folders you trust. In other folders they start with nothing from the folder."
-    static let trusted = "Trusted"
-    static let notTrusted = "Not trusted"
-    static let forgetHelp = "Ask again the next time an agent starts here."
-    static let empty = "No folders yet. CodeConnect asks the first time an agent starts in a folder."
-    static func reading(_ computer: String) -> String { "Reading \(computer)’s folders…" }
-    static func unreachable(_ computer: String) -> String {
-        "\(computer)’s CodeConnect isn’t answering, so its folders can’t be shown."
-    }
-}
-
 /// Settings › Folders: the answers to the folder question that each computer able to start an agent keeps, by path,
 /// so a row stays where it is when its answer changes, with Trust / Don't Trust and Forget. Each computer is read now
 /// and every five seconds while the pane is open, so an answer given in the start sheet meanwhile shows. A computer is

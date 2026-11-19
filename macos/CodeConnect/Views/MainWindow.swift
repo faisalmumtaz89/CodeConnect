@@ -188,7 +188,7 @@ private struct Sidebar: View {
 
                     SidebarHeading("Computers", add: .computer, adding: $adding)
                     if computers.isEmpty {
-                        Text("None yet")
+                        Text(FleetWords.noComputersYet)
                             .font(Theme.ui(12.5))
                             .foregroundStyle(Theme.text3)
                             .padding(.horizontal, 18)
@@ -290,7 +290,7 @@ private struct Sidebar: View {
 
     private func nav(_ target: FleetScope, symbol: String) -> some View {
         Button { scope = target } label: {
-            NavRow(symbol: symbol, title: target.rawValue, count: target.rows(machines.fleet).count,
+            NavRow(symbol: symbol, title: target.title, count: target.rows(machines.fleet).count,
                 selected: scope == target)
         }
         .buttonStyle(.hover(id: "sidebar.scope.\(target.rawValue.lowercased())"))
@@ -506,9 +506,9 @@ private struct EmptyFleet: View {
                     .foregroundStyle(Theme.text3)
                     .padding(.bottom, 4)
                     .accessibilityHidden(true)
-                Text("No computers yet").font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+                Text(FleetWords.noComputersYet).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
                 Text(
-                    "Add the Mac or Linux computer your agents run on. Its sessions appear here, with what needs you marked."
+                    "Add the Mac or Linux computer your agents run on. Its runs appear here, with what needs you marked."
                 )
                 .font(Theme.ui(12.5))
                 .foregroundStyle(Theme.text2)

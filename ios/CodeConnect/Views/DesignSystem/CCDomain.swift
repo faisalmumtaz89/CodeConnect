@@ -288,7 +288,7 @@ extension LinkHealth {
             return nil
         case .rejected:
             return CCBannerItem(
-                .rejected, title: "Pair again", message: detail, tone: .danger,
+                .rejected, title: word, message: detail, tone: .danger,
                 icon: "lock-open", actionTitle: "Settings", action: onSettings)
         case .blocked:
             // The pairing is still held, so this is not "Pair again" — no Settings/code

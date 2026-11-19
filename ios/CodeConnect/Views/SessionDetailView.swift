@@ -1079,11 +1079,11 @@ struct SessionDetailView: View {
         } message: {
             Text(ClearConfirmation.message)
         }
-        .alert("End this run?", isPresented: $confirmingEndRun) {
+        .alert(FleetWords.endTitle, isPresented: $confirmingEndRun) {
             Button("End run", role: .destructive) { endRun() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(summary?.agent.displayName ?? "The agent") stops, and the run moves to Ended.")
+            Text(FleetWords.endMessage(summary?.agent.displayName ?? "The agent"))
         }
         .alert(
             "End run",

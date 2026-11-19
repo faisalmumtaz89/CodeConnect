@@ -727,7 +727,7 @@ struct TrustFolderCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.lg) {
             VStack(alignment: .leading, spacing: CC.space.sm) {
-                Text("Do you trust the authors of the files in this folder?")
+                Text(FolderWords.title)
                     .ccType(CC.type.title)
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -740,9 +740,7 @@ struct TrustFolderCard: View {
             }
 
             CCProse(
-                "If you do, the agent loads the folder’s own scripts, tools and "
-                    + "instructions, and its scripts can run on \(computerName) without "
-                    + "asking you. If you don’t, the agent starts with nothing from the folder.",
+                FolderWords.body(computerName),
                 style: CC.type.body, color: CC.text.secondary
             )
             .fixedSize(horizontal: false, vertical: true)
@@ -750,18 +748,16 @@ struct TrustFolderCard: View {
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
                     answer(
-                        "Yes, I trust the authors",
-                        "Load the folder’s scripts, tools and instructions",
+                        FolderWords.trust, FolderWords.trustDetail,
                         .trusted, id: "trust-yes")
                     CCHairline().padding(.leading, CC.space.md)
                     answer(
-                        "No, I don’t trust the authors",
-                        "Start with nothing from the folder",
+                        FolderWords.distrust, FolderWords.distrustDetail,
                         .notTrusted, id: "trust-no")
                 }
             }
 
-            Text("Asked once for this folder. You can change it in Settings › Folders.")
+            Text(FolderWords.footnote)
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

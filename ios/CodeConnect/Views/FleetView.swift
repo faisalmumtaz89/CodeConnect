@@ -29,14 +29,14 @@ private struct PendingRemoval {
 
     @MainActor
     init(row: SessionSummary, model: AppModel, remove: @escaping () -> Void) {
-        title = "Remove \(model.runLabel(for: row.sessionKey).project)?"
-        message = "\(row.agent.displayName)'s own transcript stays on the computer."
+        title = FleetWords.removeTitle(model.runLabel(for: row.sessionKey).project)
+        message = FleetWords.removeKeeps(row.agent.displayName)
         self.remove = remove
     }
 
     init(count: Int, remove: @escaping () -> Void) {
-        title = "Remove \(count) sessions?"
-        message = "Their own transcripts stay on the computer."
+        title = FleetWords.removeManyTitle(count)
+        message = FleetWords.removeManyKeeps
         self.remove = remove
     }
 }
@@ -296,7 +296,7 @@ struct FleetView: View {
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
             .ccNavigationChrome()
-            .navigationTitle("Projects")
+            .navigationTitle(FleetWords.projects)
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SessionRoute.self) { route in
                 destination(route).ccBackButton(to: "Projects")
@@ -346,7 +346,7 @@ struct FleetView: View {
                 } label: {
                     HStack(spacing: CC.space.xxs) {
                         CCIcon("plus", size: 16)
-                        Text("New")
+                        Text(FleetWords.newAgent)
                             .ccType(CC.type.body)
                     }
                     .foregroundStyle(CC.text.primary)
@@ -354,7 +354,7 @@ struct FleetView: View {
                     .ccHitTarget()
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("New session")
+                .accessibilityLabel(FleetWords.newAgent)
                 .accessibilityIdentifier("start-entry")
             }
             .ccPlainToolbarItem()
@@ -363,7 +363,7 @@ struct FleetView: View {
             // The same word the scroll header carries, arriving only as
             // that header leaves. Two titles at once is the bug this
             // fade exists to prevent.
-            Text("Projects")
+            Text(FleetWords.projects)
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
                 .opacity(titleVisible ? 1 : 0)
@@ -646,7 +646,7 @@ struct FleetView: View {
     private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-                Text("Projects")
+                Text(FleetWords.projects)
                     .ccType(CC.type.display)
                     .foregroundStyle(CC.text.primary)
                     .accessibilityAddTraits(.isHeader)
@@ -1363,7 +1363,7 @@ struct FleetView: View {
         .frame(minHeight: CC.size.controlLg)
         .padding(.bottom, CC.space.xl)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(band.rows.count) ended sessions, collapsed")
+        .accessibilityLabel("\(band.rows.count) ended runs, collapsed")
     }
 
     // MARK: States
@@ -1379,10 +1379,9 @@ struct FleetView: View {
             Color.clear.containerRelativeFrame(.vertical)
             CCEmptyState(
                 glyph: "terminal-window",
-                title: "Start an agent on your computer",
-                message:
-                    "Start one with CodeConnect and its project shows up here, ready to follow and answer from this phone.",
-                actionTitle: start == nil ? nil : "Start an agent",
+                title: FleetWords.startAnAgent,
+                message: FleetWords.agentsAppearHere,
+                actionTitle: start == nil ? nil : FleetWords.startAnAgent,
                 action: start)
         }
     }
@@ -2766,17 +2765,7 @@ struct LinkHealthSheet: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var heroWord: String {
-        switch model.linkHealth.level {
-        case .live: return "Live"
-        case .lagging: return "Lagging"
-        case .stale: return "Stale"
-        case .connecting: return "Connecting"
-        case .offline: return "Offline"
-        case .rejected: return "Pair again"
-        case .blocked: return "Blocked"
-        }
-    }
+    private var heroWord: String { model.linkHealth.word }
 
     /// The product's central promise, expressed as a number, at the top of the
     /// trust screen.
