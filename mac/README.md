@@ -941,8 +941,8 @@ the thread's settings for the run's link until Codex reports them, so the follow
 turn that ran across a reconnect asks for what the person set. Only Codex's reports are filed, and
 a reconnect after ccd's own restart and a relaunch read those, so **a change Codex took while a
 turn ran and had not yet reported when ccd restarted or Codex was started again is not kept**: the
-run comes back with the settings Codex last reported. When Codex reports a change it takes while a
-turn runs is not measured; if it reports at once, this does not occur.
+run comes back with the settings Codex last reported. Measured on Codex 0.170.0, a change to
+Plan or Read Only made while a turn ran was reported and filed within 4 ms of the app sending it.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
