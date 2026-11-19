@@ -371,6 +371,9 @@ final class MachinesTests: XCTestCase {
                 machines.models[0], machines.models[1], machines.models[2]
             )
             let (ipID, nameID) = (try XCTUnwrap(byIP.machineID), try XCTUnwrap(byName.machineID))
+            // Keyed by uid, as a machine that has connected before keeps its cache: the ack's own keying
+            // adoption then has nothing to sweep.
+            await cache.machine(ipID).adopt(keying: .uid)
             await cache.machine(ipID).saveEvents([], key: "01K8N0AAAAAAAAAAAAAAAAAAAA")
             await cache.machine(nameID).saveEvents([], key: "01K8N0BBBBBBBBBBBBBBBBBBBB")
             laptopModel.connection.injectForTesting(ack(laptopDaemon))
