@@ -131,11 +131,8 @@ struct HostedSettingsSheet: View {
             separator: !isLast,
             action: (disabled || isSelected) ? nil : { run(apply) }
         ) {
-            CCIcon(
-                isSelected ? "check-circle-fill" : "circle",
-                size: 16, weight: isSelected ? .semibold : .regular, relativeTo: .body
-            )
-            .foregroundStyle(isSelected ? CCTone.success.color : CC.text.tertiary)
+            CCIcon(isSelected ? "check-circle-fill" : "circle", size: 18, relativeTo: .body)
+                .foregroundStyle(isSelected ? CC.text.primary : CC.text.tertiary)
         } trailing: {
             EmptyView()
         } meta: {
@@ -162,8 +159,8 @@ struct HostedSettingsSheet: View {
         card {
             if let modelFact, !modelFact.isEmpty {
                 CCRow(ModelDisplay.from(modelFact).line, showsChevron: false, separator: false) {
-                    CCIcon("check-circle-fill", size: 16, weight: .semibold, relativeTo: .body)
-                        .foregroundStyle(CCTone.success.color)
+                    CCIcon("check-circle-fill", size: 18, relativeTo: .body)
+                        .foregroundStyle(CC.text.primary)
                 } trailing: { EmptyView() } meta: { EmptyView() }
             } else {
                 CCRow(

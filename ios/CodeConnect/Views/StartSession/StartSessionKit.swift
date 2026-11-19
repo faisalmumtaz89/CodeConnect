@@ -70,11 +70,7 @@ struct StartSearchField: View {
         }
         .padding(.horizontal, CC.space.sm)
         .frame(minHeight: CC.size.controlMd)
-        .background(CC.color.surfaceRaised, in: RoundedRectangle(cornerRadius: CC.radius.lg))
-        .overlay {
-            RoundedRectangle(cornerRadius: CC.radius.lg)
-                .strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
-        }
+        .ccSurface(fill: CC.color.surfaceRaised, radius: CC.radius.lg, border: CC.color.border)
     }
 
     private var field: some View {

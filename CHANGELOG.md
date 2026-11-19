@@ -16,6 +16,8 @@ User-facing changes, newest first. Mac releases are cut per
   the row under the pointer is filled.
 - The Mac app's update prompt now matches the app: a dark window with the release notes and Install,
   Later and Skip This Version, in place of Sparkle's standard window.
+- On the iPhone, a run's settings mark the chosen model, effort and mode with the same check as
+  every other list you choose from.
 
 ## Agents start from the app, and the old engine is gone
 
