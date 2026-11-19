@@ -3,7 +3,8 @@ import SwiftUI
 
 /// A run's conversation as a reading column, oldest at the top, opened at the newest: your words, the agent's prose
 /// and code, each tool call folded to one line with its output under it, a decision where it was made, and the run's
-/// notices; a request still waiting on you keeps its place as one line, and is answered at the pane's foot. A table the
+/// notices, less a "Turn complete" that something on screen already ends (`TimelineBuilder.drawn`, as the iPhone draws
+/// them); a request still waiting on you keeps its place as one line, and is answered at the pane's foot. A table the
 /// app drives (`ConversationTable`): the app measures every row, keeps the reader's place through every change in the
 /// same step, and builds only the rows near the screen. It opens at the newest row and follows new rows until the
 /// reader scrolls up away from the end or opens a row to read it (`MacColumnLayout.following`); a reader who went up
@@ -15,7 +16,7 @@ struct Conversation: View {
     @State private var tail = Tail()
 
     var body: some View {
-        ConversationTable(model: model, key: key, items: model.shown(for: key)?.timeline ?? [], tail: tail)
+        ConversationTable(model: model, key: key, items: TimelineBuilder.drawn(model.shown(for: key)?.timeline ?? []), tail: tail)
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { tail.wake() }
             }
@@ -322,15 +323,16 @@ private struct NoticeLine: View {
 }
 
 #if DEBUG
-    /// `-CC_SHOWN_OUT <path>`: each time the open run's rows change, the ids Kit holds for it (`shown(for:)`), one per
-    /// line, then whether its head is cut, so a test compares the screen with them from outside the app.
+    /// `-CC_SHOWN_OUT <path>`: each time the open run's rows change, the ids of the rows the column draws
+    /// (`TimelineBuilder.drawn` of `shown(for:)`), one per line, then whether its head is cut, so a test compares the
+    /// screen with them from outside the app.
     private struct ShownOut: ViewModifier {
         let model: AppModel
         let key: String
 
         func body(content: Content) -> some View {
             let shown = model.shown(for: key)
-            let lines = (shown?.timeline.map(\.id) ?? []) + ["headTruncated=\(shown?.headTruncated ?? false)"]
+            let lines = TimelineBuilder.drawn(shown?.timeline ?? []).map(\.id) + ["headTruncated=\(shown?.headTruncated ?? false)"]
             content.task(id: lines) {
                 guard let path = UserDefaults.standard.string(forKey: "CC_SHOWN_OUT") else { return }
                 try? (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
