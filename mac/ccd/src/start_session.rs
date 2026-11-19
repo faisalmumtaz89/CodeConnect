@@ -116,25 +116,16 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             model,
             trust,
         } => {
-            // A run starts with a first message, so a start without one is
-            // refused before anything is looked at or launched.
-            if prompt
-                .as_deref()
-                .is_none_or(|prompt| prompt.trim().is_empty())
-            {
-                return ServerMessage::StartSessionResult {
-                    result: StartSessionResult::Failed {
-                        reason: StartFailure::LaunchFailed,
-                        detail: "A run starts with a first message.".into(),
-                    },
-                    request_id,
-                };
-            }
             let state_dir = protocol::root_dir();
             // One environment per start: the check and the run it starts read the
             // same login shell, since `auth status` turns on variables alone.
             let environment = phone_environment();
-            let prompt = prompt.as_deref().unwrap_or_default();
+            // A start without a first message, or with one of only white space, starts
+            // the run waiting for the person's message: its prompt is empty.
+            let prompt = prompt
+                .as_deref()
+                .filter(|prompt| !prompt.trim().is_empty())
+                .unwrap_or_default();
             let result = match agent {
                 AgentKind::Claude => {
                     let start = claude_start(

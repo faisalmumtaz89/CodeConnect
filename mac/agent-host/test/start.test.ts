@@ -81,6 +81,16 @@ test("the first message is the start's prompt, stamped with the start's uuid", a
   expect(first.message).toStrictEqual({ role: 'user', content: start.prompt });
 }, 10_000);
 
+test("a start with an empty prompt gives claude no message and is answered done; the first say is claude's first message", async () => {
+  const { ccd, outcome, stub } = await run({ ...trustedStart, prompt: '' });
+  expect(outcome.status).toBe('done');
+  ccd.send({ type: 'say', uuid: 'c-first', text: 'the first message' });
+  await ccd.line('the say taken', (line) => line.type === 'outcome' && line.uuid === 'c-first');
+  await waitFor('claude to read it', () => stdinOf(stub()).some((m) => m.type === 'user'));
+  const users = stdinOf(stub()).filter((message) => message.type === 'user');
+  expect(users.map((m) => [m.uuid, m.message.content])).toStrictEqual([['c-first', 'the first message']]);
+}, 10_000);
+
 test("claude is the host's own child, in the host's process group, and host.json names the host alone", async () => {
   const { dir, host, stub } = await run(trustedStart);
   const pid = stub().find((event) => event.argv).pid;

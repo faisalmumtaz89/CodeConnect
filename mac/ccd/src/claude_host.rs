@@ -862,14 +862,19 @@ async fn link(
                         break format!("could not keep the start's initialize answer: {err}")
                     }
                 };
-                // The person's first words, filed as the run goes live.
-                let words = vec![person_row(
-                    &uid,
-                    &start_uuid,
-                    &start_prompt,
-                    relaunched.as_deref(),
-                    None,
-                )];
+                // The person's first words, filed as the run goes live: none for a run
+                // that starts waiting for them.
+                let words = if start_prompt.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![person_row(
+                        &uid,
+                        &start_uuid,
+                        &start_prompt,
+                        relaunched.as_deref(),
+                        None,
+                    )]
+                };
                 match daemon
                     .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words, relaunched)
                     .await

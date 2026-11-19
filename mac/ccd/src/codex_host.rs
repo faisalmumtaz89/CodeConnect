@@ -17,15 +17,15 @@
 //! The run's first message is sent by the run's own task, after the answer, on the same
 //! connection ([`first_send`]): `thread/start` with the run's preset, model and thread
 //! config, the thread recorded on the row, then `turn/start` with the first message under
-//! the start's uuid, and the run is `live`. The thread config and the launch take the
-//! person's folder answer (P3 L4): each folder from the repository's top down to the run's
-//! own (or the run's folder alone outside git) is trusted or untrusted as they answered, a
-//! not-trusted run's repository skills are disabled too, and the only MCP server added is
-//! CodeConnect's mail server. The run keeps that answer for its reconnect. A start that
-//! fails once the app-server is launched, before or after the answer, marks the run
-//! `failed` and stops its process group with the ladder
-//! ([`crate::claude_host::stop_group`]): an app-server never ends by itself. A start that
-//! a restarted ccd finds still `starting` is failed the same way, whatever became of it
+//! the start's uuid when the start has one, and the run is `live`. The thread config and
+//! the launch take the person's folder answer (P3 L4): each folder from the repository's
+//! top down to the run's own (or the run's folder alone outside git) is trusted or
+//! untrusted as they answered, a not-trusted run's repository skills are disabled too, and
+//! the only MCP server added is CodeConnect's mail server. The run keeps that answer for
+//! its reconnect. A start that fails once the app-server is launched, before or after the
+//! answer, marks the run `failed` and stops its process group with the ladder
+//! ([`crate::claude_host::stop_group`]): an app-server never ends by itself. A start that a
+//! restarted ccd finds still `starting` is failed the same way, whatever became of it
 //! ([`crate::state::Daemon::recover_hosted_runs`]): a start is never sent again.
 //!
 //! The start's connection is then kept as the run's link ([`link`], P3 R1): every
@@ -89,7 +89,7 @@ pub(crate) struct Run<'a> {
     pub request_id: &'a str,
     /// The folder the run starts in.
     pub cwd: &'a str,
-    /// The run's first message.
+    /// The run's first message; empty for a run that starts waiting for one.
     pub prompt: &'a str,
     /// The app's model. Codex's own `default` is sent as none, so the thread starts with
     /// the model its settings name.
@@ -2005,13 +2005,13 @@ fn narrower_than_default(kept: Value) -> Option<Value> {
 pub(crate) async fn reconnect(
     daemon: Arc<Daemon>,
     root: PathBuf,
-    run: LiveCodexRun,
+    mut run: LiveCodexRun,
     codeconnect: PathBuf,
 ) {
     let uid = run.host.session_uid.clone();
     let resumed = tokio::time::timeout(
         crate::start_session::START_TIMEOUT,
-        resume(&daemon, &root, &run, &codeconnect),
+        resume(&daemon, &root, &mut run, &codeconnect),
     )
     .await;
     match resumed {
@@ -2029,7 +2029,7 @@ pub(crate) async fn reconnect(
 async fn resume(
     daemon: &Arc<Daemon>,
     root: &Path,
-    run: &LiveCodexRun,
+    run: &mut LiveCodexRun,
     codeconnect: &Path,
 ) -> Result<(Client, CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
     let uid = &run.host.session_uid;
@@ -2055,15 +2055,16 @@ async fn resume(
 /// names (its newest `codex_settings` fact, [`keep_settings`]), the preset Default's without
 /// one, its answer filed and the run put back in Plan when `kept` was in Plan ([`resumed`]).
 /// The adapter told what was filed, the turn the answer reports running owed its follow-up, and
-/// the run's standing cards.
+/// the run's standing cards. A run that has had no message has a thread with no rollout, which
+/// Codex cannot resume: it is given a new thread instead ([`new_thread`]), `run` naming it.
 async fn resume_thread(
     daemon: &Arc<Daemon>,
     client: &Client,
-    run: &LiveCodexRun,
+    run: &mut LiveCodexRun,
     codeconnect: &Path,
     kept: Option<Value>,
 ) -> Result<(CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
-    let uid = &run.host.session_uid;
+    let uid = &run.host.session_uid.clone();
     let folders = folders(&run.cwd, daemon.config.git_bin.as_deref()).await?;
     let skills = client
         .call(
@@ -2084,10 +2085,13 @@ async fn resume_thread(
         run.trust,
         &skills,
     );
-    let answer = client
-        .call("thread/resume", params.clone())
-        .await
-        .map_err(|err| format!("Codex did not resume the thread: {err}"))?;
+    let answer = match client.call("thread/resume", params.clone()).await {
+        Ok(answer) => answer,
+        Err(CallError::Rpc { message, .. }) if message.starts_with("no rollout found") => {
+            return new_thread(daemon, client, run, params, kept).await;
+        }
+        Err(err) => return Err(format!("Codex did not resume the thread: {err}")),
+    };
     let mut adapter = CodexAdapter::new(SessionKey::new(uid, uid));
     let running = resumed(
         daemon,
@@ -2111,6 +2115,68 @@ async fn resume_thread(
         resume: params,
     });
     Ok((adapter, owed, cards))
+}
+
+/// A new thread for the run `run`, whose thread has no rollout (it never ran a turn) and so
+/// cannot be resumed: `thread/start` with the resume's `params` but its thread, recorded as
+/// the run's only while the run has had no message, so nothing is lost; its settings filed,
+/// and the run put back in Plan when `kept` was in Plan, as a resume puts it back. Any other
+/// run's thread with no rollout stays an error, as every other failed resume is.
+async fn new_thread(
+    daemon: &Arc<Daemon>,
+    client: &Client,
+    run: &mut LiveCodexRun,
+    mut params: Value,
+    kept: Option<Value>,
+) -> Result<(CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
+    let uid = run.host.session_uid.clone();
+    if let Some(params) = params.as_object_mut() {
+        params.remove("threadId");
+    }
+    let started = client
+        .call("thread/start", params)
+        .await
+        .map_err(|err| format!("Codex did not start a thread: {err}"))?;
+    let thread = started["thread"]["id"]
+        .as_str()
+        .ok_or("Codex's thread/start named no thread")?
+        .to_string();
+    match daemon
+        .db
+        .replace_unsaid_thread(uid.clone(), thread.clone())
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "Codex has no rollout of thread {}, and the run has had a message",
+                run.thread
+            ))
+        }
+        Err(err) => return Err(format!("could not record the run's new thread: {err:#}")),
+    }
+    crate::log_info!(
+        "{uid}: thread {} had no message, so no rollout; thread {thread} started in its place",
+        run.thread
+    );
+    run.thread = thread;
+    let mut adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
+    let settings = adapter.settings_answered(&run.thread, &started);
+    let now = adapter.settings().or(kept.as_ref()).cloned();
+    if !keep_plan(
+        client,
+        &run.thread,
+        &mut adapter,
+        kept.as_ref(),
+        &started,
+        now,
+        false,
+    )
+    .await?
+    {
+        file(daemon, &uid, settings).await;
+    }
+    Ok((adapter, None, HashMap::new()))
 }
 
 /// **The person's message `ask` to the engine run `uid`, relaunching it when its app-server
@@ -2140,7 +2206,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     let Some((root, launcher)) = daemon.relaunch_from.get() else {
         return false;
     };
-    let run = match daemon.db.begin_relaunch(uid.to_string()).await {
+    let mut run = match daemon.db.begin_relaunch(uid.to_string()).await {
         Ok(Some(run)) => run,
         Ok(None) => return false,
         Err(err) => {
@@ -2151,7 +2217,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     let mut launched = None;
     let relaunched = tokio::time::timeout(
         crate::start_session::START_TIMEOUT,
-        launch_again(daemon, root, launcher, &run, &ask, &mut launched),
+        launch_again(daemon, root, launcher, &mut run, &ask, &mut launched),
     )
     .await
     .unwrap_or_else(|_| {
@@ -2231,7 +2297,7 @@ async fn launch_again(
     daemon: &Arc<Daemon>,
     root: &Path,
     launcher: &Result<PathBuf, String>,
-    run: &LiveCodexRun,
+    run: &mut LiveCodexRun,
     ask: &ComposeAsk,
     launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
 ) -> Result<(Client, CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
@@ -2353,8 +2419,8 @@ async fn standing_cards(
 }
 
 /// `skills/list`, `thread/start`, the thread recorded, then `turn/start` with the first
-/// message: each call's error, or a run ended meanwhile, stops it. The run's thread, and
-/// `thread/start`'s answer, which names the settings it runs with.
+/// message when the start has one: each call's error, or a run ended meanwhile, stops it.
+/// The run's thread, and `thread/start`'s answer, which names the settings it runs with.
 async fn send_first(
     daemon: &Daemon,
     client: &Client,
@@ -2391,17 +2457,19 @@ async fn send_first(
         Ok(false) => return Err("the run ended before its thread was recorded".into()),
         Err(err) => return Err(format!("could not record the run's thread: {err:#}")),
     }
-    client
-        .call(
-            "turn/start",
-            json!({
-                "threadId": thread,
-                "input": [{"type": "text", "text": send.prompt}],
-                "clientUserMessageId": send.start_uuid,
-            }),
-        )
-        .await
-        .map_err(|err| format!("Codex did not take the first message: {err}"))?;
+    if !send.prompt.is_empty() {
+        client
+            .call(
+                "turn/start",
+                json!({
+                    "threadId": thread,
+                    "input": [{"type": "text", "text": send.prompt}],
+                    "clientUserMessageId": send.start_uuid,
+                }),
+            )
+            .await
+            .map_err(|err| format!("Codex did not take the first message: {err}"))?;
+    }
     Ok((thread.to_string(), started))
 }
 
@@ -3300,6 +3368,91 @@ mod tests {
         end_run(&rig, &uid).await;
         assert_eq!((group, session), (pid, pid));
         assert_ne!(group, unsafe { libc::getpgid(0) });
+    }
+
+    /// **A Codex run started without a first message is `live` on its own thread with no
+    /// turn, and a ccd restart gives it a new thread**: its start sends no `turn/start`, so
+    /// its thread has no rollout and Codex answers the reconnect's `thread/resume` "no rollout
+    /// found"; the run has had no message, so ccd starts a new thread with the resume's
+    /// settings and records it as the run's, and the run is linked on it.
+    #[tokio::test]
+    async fn a_codex_run_started_without_a_message_waits_and_gets_a_new_thread_on_a_restart() {
+        let rig = rig();
+        let codex = stand_in(&rig, "exec sleep 30");
+        let mut script = whole_start();
+        script.retain(|(method, _)| *method != "turn/start");
+        let quiet = Run {
+            prompt: "",
+            ..run(&rig, "req-quiet", &codex)
+        };
+        let (result, (seen, first)) =
+            tokio::join!(start(&rig.daemon, quiet), play_app_server(&rig, script));
+        let uid = started_uid(&result);
+        let row = row_once(&rig, &uid, Lifecycle::Live).await;
+        assert_eq!(row.lifecycle, Lifecycle::Live);
+        assert_eq!(row.codex_thread_id.as_deref(), Some("thr-x3"));
+        assert_eq!(
+            methods(&seen),
+            ["initialize", "initialized", "skills/list", "thread/start"]
+        );
+
+        drop(first);
+        let dir = run_folder(&rig).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::remove_file(dir.join("as.sock")).unwrap();
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        let ((), (resume, started, _ws)) = tokio::join!(
+            restarted.recover_codex_runs(&rig.root, Ok(PathBuf::from(CODECONNECT))),
+            async {
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+                    .await
+                    .expect("ccd connected again")
+                    .unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let init = asked(&mut ws, "initialize").await;
+                answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+                let skills = asked(&mut ws, "skills/list").await;
+                answer(&mut ws, &skills, json!({"data": []})).await;
+                let resume = asked(&mut ws, "thread/resume").await;
+                tell(
+                    &mut ws,
+                    &json!({"id": resume["id"], "error": {"code": -32600,
+                            "message": "no rollout found for thread id thr-x3"}}),
+                )
+                .await;
+                let started = asked(&mut ws, "thread/start").await;
+                answer(
+                    &mut ws,
+                    &started,
+                    json!({"thread": {"id": "thr-new"}, "model": "gpt-test"}),
+                )
+                .await;
+                (resume, started, ws)
+            }
+        );
+        let mut expected = resume["params"].clone();
+        expected.as_object_mut().unwrap().remove("threadId");
+        assert_eq!(
+            started["params"], expected,
+            "the resume's settings, no thread"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let summary = loop {
+            let summary = summary_of(&restarted, &uid).await;
+            if (summary.codex_thread_id.as_deref() == Some("thr-new")
+                && summary.codex_link == protocol::event::CodexLink::Subscribed)
+                || Instant::now() >= deadline
+            {
+                break summary;
+            }
+            tokio::time::sleep(POLL).await;
+        };
+        end_run(&rig, &uid).await;
+        assert_eq!(summary.codex_thread_id.as_deref(), Some("thr-new"));
+        assert_eq!(summary.codex_link, protocol::event::CodexLink::Subscribed);
+        assert_eq!(summary.lifecycle, Lifecycle::Live);
     }
 
     /// **A started Codex run sends its first message on a thread of its own, then is
