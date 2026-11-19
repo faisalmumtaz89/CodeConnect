@@ -38,7 +38,7 @@ struct MainWindow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(adding: $adding, scope: $scope, filter: $filter, pairAgain: pairAgain)
+            Sidebar(adding: $adding, scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain)
                 .frame(width: 216)
             Rectangle().fill(Theme.hairline).frame(width: 1)
             if machines.showsFleet {
@@ -146,14 +146,25 @@ struct AddCommands: Commands {
 
 private struct Sidebar: View {
     @Environment(Machines.self) private var machines
+    @Environment(Setup.self) private var setup
     @Binding var adding: AddKind?
     @Binding var scope: FleetScope
     @Binding var filter: FleetFilter?
+    @Binding var opened: String?
     let pairAgain: (String) -> Void
+    /// The computer row under the pointer, and the one whose "…" panel is open, by the computer's id.
+    @State private var hovered: String?
+    @State private var moreOpen: String?
+    /// The computer Remove… is asking about.
+    @State private var removing: AppModel?
+    /// Where this Mac's own daemon answers. Its computer, which Setup pairs with again at every launch, is never offered
+    /// for removal.
+    @State private var address: LocalDaemon.Address?
 
     var body: some View {
         let active = FleetScope.active.rows(machines.fleet)
         let computers = machines.models.filter(\.showsFleet)
+        let thisMac = setup.thisMac(at: address)
         VStack(alignment: .leading, spacing: 0) {
             // Clear of the traffic lights.
             Color.clear.frame(height: 52)
@@ -177,16 +188,52 @@ private struct Sidebar: View {
                     } else {
                         VStack(spacing: 2) {
                             ForEach(computers, id: \.machineID) { computer in
-                                let narrowed = FleetFilter.computer(computer.machineID ?? "")
+                                let id = computer.machineID ?? ""
+                                let narrowed = FleetFilter.computer(id)
+                                let more = id != thisMac && (hovered == id || moreOpen == id)
                                 ComputerRow(
                                     computer: computer,
                                     count: active.filter { $0.machineID == computer.machineID }.count,
                                     selected: filter == narrowed,
+                                    roomForMore: more,
                                     select: { filter = filter == narrowed ? nil : narrowed },
                                     pairAgain: pairAgain)
+                                // A run's "…", as the fleet's rows have it: on hover, its panel holding Remove…; for
+                                // VoiceOver, which does not hover, that is the row's own action. Not on this Mac's own.
+                                .accessibilityActions {
+                                    if id != thisMac {
+                                        Button("Remove…") { removing = computer }
+                                            .accessibilityIdentifier("sidebar.computer.\(id).removeAction")
+                                    }
+                                }
+                                .overlay(alignment: .trailing) {
+                                    if more {
+                                        RunMore(
+                                            id: "sidebar.computer.\(id).more",
+                                            open: Binding(get: { moreOpen == id }, set: { moreOpen = $0 ? id : nil }),
+                                            action: .remove
+                                        ) { removing = computer }
+                                        .padding(.trailing, 2)
+                                    }
+                                }
+                                .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
+                                // Its panel opens below the row, over the rows after it.
+                                .zIndex(moreOpen == id ? 1 : 0)
                             }
                         }
                         .padding(.horizontal, 8)
+                        .zIndex(moreOpen == nil ? 0 : 1)
+                        .task(id: computers.map(\.machineID)) {
+                            guard let root = setup.installer?.root else { return }
+                            address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
+                            #if DEBUG
+                                if RenderWindow.opensComputerMenu, let last = computers.last?.machineID,
+                                    last != setup.thisMac(at: address)
+                                {
+                                    moreOpen = last
+                                }
+                            #endif
+                        }
                     }
 
                     let projects = FleetGroup.groups(active, by: .project)
@@ -226,6 +273,27 @@ private struct Sidebar: View {
             }
         }
         .background(Theme.sidebar)
+        // Removing a computer forgets it on this Mac and nothing else: it asks once, in the iPhone's words.
+        .alert(
+            "Remove this computer?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+            presenting: removing
+        ) { computer in
+            Button("Remove", role: .destructive) { remove(computer) }.accessibilityIdentifier("computer.remove.confirm")
+            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("computer.remove.cancel")
+        } message: { computer in
+            Text(
+                "This Mac forgets \(computer.machineName ?? "this computer"). To use it again, show a new code on it and enter it here (codeconnect.sh/support shows how)."
+            )
+        }
+    }
+
+    /// Forgets the computer, and with it the list's narrowing to it and its run open beside the list.
+    private func remove(_ computer: AppModel) {
+        guard let id = computer.machineID else { return }
+        if filter == .computer(id) { filter = nil }
+        if let opened, machines.fleet.first(where: { $0.id == opened })?.machineID == id { self.opened = nil }
+        moreOpen = nil
+        machines.unpair(computer)
     }
 
     private func nav(_ target: FleetScope, symbol: String) -> some View {
@@ -246,6 +314,8 @@ private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
     let selected: Bool
+    /// Its "…" is shown over where the count is.
+    let roomForMore: Bool
     /// Narrows the list to this computer, or back to every run when it already is.
     let select: () -> Void
     let pairAgain: (String) -> Void
@@ -299,6 +369,7 @@ private struct ComputerRow: View {
                     .lineLimit(1)
                 Spacer()
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
+                    .opacity(roomForMore ? 0 : 1)
             }
             if let load {
                 HStack(spacing: 10) {

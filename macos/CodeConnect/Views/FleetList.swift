@@ -419,9 +419,9 @@ private struct FleetLine: View {
     }
 }
 
-/// A run's "…" on its row, and the panel it opens below it, in the app's own panel style (the model panel's), holding
-/// End Run… or Remove…, each of which asks before anything is sent.
-private struct RunMore: View {
+/// A row's "…" (a run's, or a computer's in the sidebar), and the panel it opens below it, in the app's own panel style
+/// (the model panel's), holding End Run… or Remove…, each of which asks before anything is sent.
+struct RunMore: View {
     enum Action {
         case endRun, remove
 

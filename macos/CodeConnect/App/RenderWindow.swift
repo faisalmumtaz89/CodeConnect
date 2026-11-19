@@ -64,6 +64,8 @@
         /// `-CC_RUN_MENU <session uid>`: the list opens that run's "…" panel once the run is listed and can be ended or
         /// removed.
         static var openRunMenu: String? { UserDefaults.standard.string(forKey: "CC_RUN_MENU") }
+        /// `-CC_COMPUTER_MENU YES`: the sidebar opens its last computer's "…" panel, when that computer can be removed.
+        static var opensComputerMenu: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_MENU") }
 
         /// `-CC_SETTINGS YES`: the Settings window opens at launch, and it is the window photographed, once its
         /// device list has been read.

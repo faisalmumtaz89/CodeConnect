@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.2
+
+- On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
+  forgets it and its sessions. This Mac's own computer is not offered, since the app pairs with it
+  again at every launch.
+
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
 - Start a Claude or Codex run with the message box empty, and the run opens waiting for your first
