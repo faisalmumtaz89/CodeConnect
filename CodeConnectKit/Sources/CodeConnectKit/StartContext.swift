@@ -150,13 +150,6 @@ public struct StartContext {
     public static func starts(_ choice: StartModelChoice) -> String {
         "Starts \(choice.agent.displayName) with \(choice.isDefault ? "its default model" : choice.label)."
     }
-
-    /// Why a start cannot go yet, or nil when it can: a run always starts with a first message, so an empty
-    /// one is refused — ccd refuses it too (`start_session.rs`), and this keeps the Start control honest
-    /// before the person taps rather than letting the start fail. The one rule both apps' Start surfaces read.
-    public static func firstMessageReason(_ message: String) -> String? {
-        message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Write the first message." : nil
-    }
 }
 
 /// What the model menu holds for one agent on a computer.
