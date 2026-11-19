@@ -9,6 +9,8 @@ User-facing changes, newest first. Mac releases are cut per
   message.
 - The start menu and a run's settings name each model by its name alone, without the description
   and pricing an agent sends beside it.
+- On the iPhone, a run's settings mark the chosen model, effort and mode with the same check as
+  every other list you choose from.
 
 ## Agents start from the app, and the old engine is gone
 
