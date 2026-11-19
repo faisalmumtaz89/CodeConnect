@@ -1111,8 +1111,9 @@ the run, and the person starts again. A `live` run whose app-server is still run
 connected again: its thread is resumed with the approval and sandbox Codex last named for it
 and the same thread config. A thread that never ran a turn has no rollout, which Codex
 answers a resume of with "no rollout found"; when the run has had no message, here or on a
-relaunch, ccd starts a new thread with the same settings and thread config and records it
-as the run's, put back in Plan when the run was in Plan. Any other failed resume is as
+relaunch, ccd starts a new thread on the model, approval and sandbox Codex last named for
+it and the same thread config, and records it as the run's, put back in Plan when the run
+was in Plan. Any other failed resume is as
 before. The turns
 it ran meanwhile are filed from the answer, and a turn still running then is read once more when it ends, for the items
 it finished while no daemon listened. A card still open stays open. If Codex asks for it
