@@ -178,11 +178,10 @@ public struct StartAgentStatus: Hashable, Sendable {
 }
 
 /// One model an agent offers a start (minor 33): `value` is what a start
-/// names, `label` and `detail` the agent's own words, shown as sent.
+/// names, `label` the agent's own name for it, shown as sent and alone.
 public struct StartModel: Hashable, Sendable, Decodable {
     public let value: String
     public let label: String
-    public let detail: String?
 }
 
 extension StartProject: Decodable {

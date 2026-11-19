@@ -812,15 +812,17 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-hosted-settings-model",
             purpose:
-                "the hosted settings sheet at its top — the Model section with minor-39's longest detail",
+                "the hosted settings sheet at its top — the Model section, each model by its name alone",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.require(
-                    driver.element(containing: "currently Opus 5.5", in: app),
-                    "the longest model detail the menu carries")
+                try driver.require(driver.element(containing: "Sonnet", in: app), "the Sonnet model row")
+                // The menu's entries carry a description and pricing; the sheet names the model only.
+                if driver.element(containing: "per Mtok", in: app).exists {
+                    throw RenderFailure.unreachable("the model rows without their description and pricing")
+                }
             }),
         RenderScenario(
             name: "session-hosted-settings-modes",

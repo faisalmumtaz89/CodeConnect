@@ -2,8 +2,8 @@ import CodeConnectKit
 import SwiftUI
 
 /// The model button at the composer's bottom left, and its menu: a section an agent, opening upward over the form.
-/// What each section holds and every word the app adds are Kit's (`StartContext.models`); a model's label and detail
-/// are the agent's own, shown as sent.
+/// What each section holds and every word the app adds are Kit's (`StartContext.models`); a model's label is the
+/// agent's own name for it, shown as sent.
 struct ModelButton: View {
     let context: StartContext
     let pick: StartModelChoice?
@@ -85,7 +85,7 @@ struct ModelButton: View {
         Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
     }
 
-    /// The agent's label, and its detail beside it, cut short with the whole of it on hover.
+    /// The model's name.
     private func row(_ choice: StartModelChoice) -> some View {
         Button {
             choose(choice)
@@ -98,9 +98,6 @@ struct ModelButton: View {
                     .frame(width: 12)
                     .accessibilityHidden(true)
                 Text(choice.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
-                if let detail = choice.detail {
-                    Text(detail).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.tail)
-                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
@@ -110,7 +107,6 @@ struct ModelButton: View {
         }
         .buttonStyle(.hover(radius: 5, id: "start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")"))
         .padding(.horizontal, 4)
-        .help(choice.detail ?? "")
         .accessibilityIdentifier("start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")")
         .accessibilityAddTraits(choice == pick ? .isSelected : [])
     }
