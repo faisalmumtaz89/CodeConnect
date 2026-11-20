@@ -9,12 +9,17 @@ import SwiftUI
 /// that session's own.
 struct RootView: View {
     @Environment(Machines.self) private var machines
+    /// The cold launch's splash, laid over the first screen until its exit has
+    /// run. A return from the background keeps this view, so it never replays.
+    @State private var splash: SplashState? = Splash.playsAtLaunch ? SplashState() : nil
 
     var body: some View {
         Group {
             if !machines.showsFleet {
                 PairingView(isOnboarding: true)
-            } else if machines.launchSettled {
+            } else if machines.launchSettled || splash != nil {
+                // Under the splash the fleet is laid out while it catches up,
+                // so the splash leaves to a complete first screen.
                 FleetView()
             } else {
                 LaunchLoader()
@@ -24,10 +29,44 @@ struct RootView: View {
         // Every ask on the root screen is drawn over all of it; each sheet
         // that asks hosts its own.
         .ccConfirmationHost()
+        .overlay {
+            if let splash {
+                // No computer set up, as the screen under it says: read live,
+                // since the computers this phone keeps arrive after the first frame.
+                Splash(
+                    started: splash.started, settledAt: splash.settledAt, unpaired: !machines.showsFleet,
+                    onFinished: { self.splash = nil })
+            }
+        }
+        .task {
+            #if DEBUG
+                if let folder = UserDefaults.standard.string(forKey: "CC_LAUNCH_FRAMES") {
+                    // The computer's name arrives with its hello.
+                    for _ in 0..<100 where machines.models.first?.machineName == nil {
+                        try? await Task.sleep(for: .milliseconds(100))
+                    }
+                    Splash.writeFrames(to: folder, computer: machines.models.first?.machineName ?? "your computer")
+                }
+            #endif
+            guard splash != nil else { return }
+            await machines.waitOutLaunch()
+        }
+        .onChange(of: machines.launchSettled, initial: true) { _, settled in
+            guard settled, let started = splash?.started, splash?.settledAt == nil else { return }
+            // A still is drawn at the moments it is given, the catch-up's too.
+            splash?.settledAt = Splash.frozenT == nil ? Date().timeIntervalSince(started) : Splash.frozenSettledAt
+        }
     }
 }
 
-/// What the app shows until it has caught up with the Mac. How long it waits is
+/// One cold launch's splash: when it began, and when the fleet caught up.
+struct SplashState {
+    let started = Date()
+    var settledAt: Double?
+}
+
+/// What the app shows until it has caught up with the Mac when no splash
+/// covers the wait: after the first pairing. How long it waits is
 /// `AppModel.waitOutLaunch`.
 private struct LaunchLoader: View {
     @Environment(Machines.self) private var machines
