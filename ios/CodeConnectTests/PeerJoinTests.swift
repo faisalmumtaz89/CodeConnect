@@ -123,18 +123,57 @@ final class PeerJoinTests: XCTestCase {
         for (_, model) in machines.joining { model.leave() }
     }
 
-    /// A computer listed before its daemon answers joins once it does, with no
-    /// new list: it is dialled with a saved link's patience, not a pairing's.
-    func testAListedComputerJoinsOnceItsDaemonAnswers() async throws {
-        let daemon = try StubDaemon(dropping: DaemonConnection.pairingAttemptLimit + 1) { _ in
-            .admit(token: "t", machineID: "daemon-2")
-        }
+    /// A listed computer that has never answered is no evidence of a CodeConnect computer (Tailscale lists every Mac
+    /// and Linux node), so it shows in no row while it is dialled. Must-fail: show a waiting join as unjoined.
+    func testAListedComputerThatNeverAnsweredShowsNoRow() async throws {
+        let daemon = try StubDaemon(dropping: 1_000) { _ in .refuse }
         let pairing = PairingStore(ephemeral: true)
         let machines = Machines(pairing: pairing, cache: EventCache(root: temporaryCache()))
         machines.join(directory(port: daemon.port))
-        try await until(seconds: 60) { pairing.machines.first?.endpoint.token == "t" }
+        try await until {
+            machines.joining.contains { if case .waiting = $0.model.connection.phase { true } else { false } }
+        }
+        XCTAssertEqual(machines.unjoinedComputers, [])
+        for (_, model) in machines.joining { model.leave() }
+    }
+
+    /// A listed computer whose daemon has not answered yet is dialled as a pairing is, a few tries, and joins on the
+    /// next list that names it after it answers.
+    func testAListedComputerJoinsOnTheNextListAfterItAnswers() async throws {
+        let daemon = try StubDaemon(dropping: 1_000) { _ in .admit(token: "t", machineID: "daemon-2") }
+        let pairing = PairingStore(ephemeral: true)
+        let machines = Machines(pairing: pairing, cache: EventCache(root: temporaryCache()))
+        machines.join(directory(port: daemon.port))
+        try await until(seconds: 30) {
+            machines.joining.contains { if case .failed = $0.model.connection.phase { true } else { false } }
+        }
+        XCTAssertEqual(machines.unjoinedComputers, [], "no answer is no row")
+        XCTAssertTrue(pairing.machines.isEmpty)
+        daemon.answerEveryDial()
+        machines.join(directory(port: daemon.port))
+        try await until(seconds: 30) { pairing.machines.first?.endpoint.token == "t" }
         XCTAssertEqual(machines.joining.count, 0)
         for model in machines.models { model.leave() }
+    }
+
+    /// **A listed computer that never answers stops being dialled.** Tailscale lists every Mac and Linux node the
+    /// owner has; one that runs no CodeConnect must not be dialled for as long as the app runs. Its join makes a few
+    /// dials (one attempt can be more than one connection), then none, and shows in no row. Must-fail: dial a join
+    /// with a saved link's patience, and it never stops.
+    func testAListedComputerThatNeverAnswersStopsBeingDialled() async throws {
+        let daemon = try StubDaemon(dropping: 1_000) { _ in .refuse }
+        let pairing = PairingStore(ephemeral: true)
+        let machines = Machines(pairing: pairing, cache: EventCache(root: temporaryCache()))
+        machines.join(directory(port: daemon.port))
+        try await until(seconds: 30) {
+            machines.joining.contains { if case .failed = $0.model.connection.phase { true } else { false } }
+        }
+        let dials = daemon.dials
+        XCTAssertGreaterThan(dials, 0)
+        try await Task.sleep(for: .seconds(5))
+        XCTAssertEqual(daemon.dials, dials, "no dial after the join stopped")
+        XCTAssertEqual(machines.unjoinedComputers, [])
+        for (_, model) in machines.joining { model.leave() }
     }
 
     private func directory(port: Int) -> PeerDirectory {
@@ -178,9 +217,14 @@ private final class StubDaemon: @unchecked Sendable {
     private let answer: @Sendable (String) -> Answer
     private var toDrop: Int
     private var received: [String] = []
+    private var connected = 0
     private let lock = NSLock()
 
     var hellos: [String] { lock.withLock { received } }
+    /// Every connection made to this daemon, answered or dropped: the dials.
+    var dials: Int { lock.withLock { connected } }
+    /// From now on every connection is answered.
+    func answerEveryDial() { lock.withLock { toDrop = 0 } }
 
     init(dropping: Int = 0, answer: @escaping @Sendable (String) -> Answer) throws {
         self.answer = answer
@@ -204,6 +248,7 @@ private final class StubDaemon: @unchecked Sendable {
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)
         let drop = lock.withLock {
+            connected += 1
             defer { toDrop = max(0, toDrop - 1) }
             return toDrop > 0
         }

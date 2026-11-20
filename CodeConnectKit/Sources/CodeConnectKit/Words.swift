@@ -230,8 +230,6 @@ public enum PairingWords {
 
 /// A computer the owner's tailnet lists that has not joined this device's list, and why, as both apps say it.
 public enum PeerWords {
-    /// Listed, but nothing answers at its tailnet name.
-    public static let unreachable = "Can’t be reached over Tailscale"
     /// Its CodeConnect answered and would not let this device in: why, for each refusal a join can get.
     public static func refused(_ refusal: ConnectionRefusal?) -> String {
         switch refusal {

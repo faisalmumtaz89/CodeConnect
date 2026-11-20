@@ -308,10 +308,12 @@ public final class Machines {
         #endif
         return joining.compactMap { entry -> UnjoinedComputer? in
             switch entry.model.connection.phase {
-            case .failed:
+            // Only a computer whose CodeConnect answered and refused: that is the evidence it is one of his
+            // CodeConnect computers. Tailscale lists every Mac and Linux node he has, and one that never answers may
+            // run no CodeConnect at all, so it shows nowhere: a join that got no answer ends `.failed` with no refusal.
+            case .failed where entry.model.connection.refusal != nil:
                 return UnjoinedComputer(
                     computer: entry.computer, reason: PeerWords.refused(entry.model.connection.refusal))
-            case .waiting: return UnjoinedComputer(computer: entry.computer, reason: PeerWords.unreachable)
             default: return nil
             }
         }
@@ -343,8 +345,8 @@ public final class Machines {
     }
 
     #if DEBUG
-        /// `-CC_UNJOINED unreachable,refused,removed`: those rows for a render, the first two in the list of computers
-        /// and `removed` in Add a Computer.
+        /// `-CC_UNJOINED refused,removed`: those rows for a render, `refused` in the list of computers and `removed` in
+        /// Add a Computer.
         static var fixture: (unjoined: [UnjoinedComputer]?, removed: [PeerComputer]?) {
             guard let kinds = UserDefaults.standard.string(forKey: "CC_UNJOINED")?.split(separator: ",") else {
                 return (nil, nil)
@@ -354,7 +356,6 @@ public final class Machines {
             let mini = PeerComputer(name: "mac-mini", host: "mac-mini.tail0000.ts.net", port: 8787)
             let unjoined = kinds.compactMap { kind -> UnjoinedComputer? in
                 switch kind {
-                case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable)
                 case "refused":
                     return UnjoinedComputer(computer: mini, reason: PeerWords.refused(.notAdmitted))
                 default: return nil

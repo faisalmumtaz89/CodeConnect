@@ -1110,12 +1110,12 @@ enum RenderCatalog {
 
         RenderScenario(
             name: "settings-unjoined",
-            purpose: "the owner's other computers Tailscale lists that are failing to join: unreachable, refused",
-            arguments: ["-CC_FIXTURE", "deck", "-CC_UNJOINED", "unreachable,refused"],
+            purpose: "a computer of the owner's whose CodeConnect answered and refused this iPhone, with why",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_UNJOINED", "refused"],
             reach: { app, driver in
                 try driver.openSettings(app)
                 try driver.require(
-                    driver.element(containing: "Can’t be reached over Tailscale", in: app), "the unreachable row")
+                    driver.element(containing: "without a pairing code", in: app), "the refused row")
             }),
 
         RenderScenario(
