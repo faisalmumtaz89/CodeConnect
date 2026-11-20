@@ -246,7 +246,8 @@ private struct Sidebar: View {
                         }
                     }
 
-                    let projects = FleetGroup.groups(active, by: .project)
+                    // The projects of the runs the list shows, Active or Finished, with their counts.
+                    let projects = FleetGroup.groups(scope.rows(machines.fleet), by: .project)
                     if !projects.isEmpty {
                         SidebarHeading("Projects")
                         VStack(spacing: 1) {
