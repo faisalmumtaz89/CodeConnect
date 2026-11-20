@@ -8,8 +8,9 @@ import SwiftUI
 ///
 /// The launch starts from the ground alone. Intro: a whole disc grows in, its cuts appear, and the outer bands slide to
 /// their offsets: the mark making itself. Hold, looped while the fleet catches up: the outer bands breathe a few points
-/// along the cut. Exit, on a loop boundary: the outer bands slide on along the cut, off both edges, the middle band
-/// last, and the app is what is left. Nothing changes opacity; the last frame draws nothing.
+/// along the cut. Exit, the moment the intro is done and the fleet has caught up: the outer bands slide on along the
+/// cut from wherever their breath had them, off both edges, the middle band last, and the app is what is left.
+/// Nothing changes opacity; the last frame draws nothing.
 ///
 /// A frame is a pure function of `t`, seconds since the launch surface appeared, and `exitAt`, when the exit began
 /// (nil while the fleet is still catching up), so a still at any exact moment and the live surface are one drawing.
@@ -61,12 +62,9 @@ public struct LaunchMark: View {
     /// When the line under the mark appears, by a cut, if the launch is still waiting.
     public static let lineAfter = 1.0
 
-    /// When the exit begins for a launch whose fleet caught up at `settledAt`: not before the intro has assembled the
-    /// mark, and on a hold-loop boundary, so the exit always leaves from the assembled mark at rest.
-    public static func exitStart(settledAt: Double) -> Double {
-        guard settledAt > introEnd else { return introEnd }
-        return introEnd + ((settledAt - introEnd) / holdPeriod).rounded(.up) * holdPeriod
-    }
+    /// When the exit begins for a launch whose fleet caught up at `settledAt`: once the intro has assembled the mark
+    /// and the fleet has caught up, never later; the splash never holds back an app that is ready.
+    public static func exitStart(settledAt: Double) -> Double { max(introEnd, settledAt) }
 
     /// Whether the launch surface is gone at `t`: the exit has run its length.
     public static func finished(t: Double, exitAt: Double?) -> Bool {
@@ -100,8 +98,9 @@ public struct LaunchMark: View {
         if let exitAt, t >= exitAt {
             guard !finished(t: t, exitAt: exitAt) else { return Frame(drawn: false) }
             let e = (t - exitAt) / exitLength
-            // The outer bands slide on along the cut, off both edges; the middle band follows last.
-            let slide = away * CGFloat(easeIn(e))
+            // The outer bands slide on along the cut, from where their breath had them, off both edges; the middle
+            // band follows last.
+            let slide = breath(at: exitAt) + away * CGFloat(easeIn(e))
             return Frame(along: [-slide, away * CGFloat(easeIn(max(0, e - 0.3) / 0.7)), slide])
         }
         if t < introEnd {
@@ -110,10 +109,16 @@ public struct LaunchMark: View {
             return Frame(
                 whole: t < cutAt, along: offsets.map { -$0 * open }, scale: spring(t, response: 0.3, damping: 0.8))
         }
-        // The outer bands breathe along the cut, out and back, once a loop.
-        let loop = (t - introEnd) / holdPeriod
-        let breath = 18 * CGFloat(sin(2 * .pi * (loop - loop.rounded(.down))))
+        let breath = breath(at: t)
         return Frame(along: [-breath, 0, breath])
+    }
+
+    /// How far the outer bands have breathed along the cut at `t` in the hold: out and back, once a loop, 0 on a loop
+    /// boundary.
+    static func breath(at t: Double) -> CGFloat {
+        guard t > introEnd else { return 0 }
+        let loop = (t - introEnd) / holdPeriod
+        return 18 * CGFloat(sin(2 * .pi * (loop - loop.rounded(.down))))
     }
 
     // MARK: Curves

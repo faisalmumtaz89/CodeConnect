@@ -16,16 +16,21 @@ final class LaunchMarkTests: XCTestCase {
         for slide in assembled.along { XCTAssertEqual(slide, 0, accuracy: 0.5) }
     }
 
-    /// The exit leaves only from a hold-loop boundary, never mid-breath, and never before the intro is done.
-    func testTheExitStartsOnlyOnALoopBoundary() {
-        XCTAssertEqual(LaunchMark.exitStart(settledAt: 0), LaunchMark.introEnd)
-        for settled in [0.8, 1.9, 3.15, 3.16, 9.99, 15] {
+    /// The exit starts once the intro is done and the fleet has caught up, never later, from wherever the hold had
+    /// the bands.
+    func testTheExitStartsWhenTheIntroIsDoneAndTheFleetHasCaughtUp() {
+        XCTAssertEqual(LaunchMark.exitStart(settledAt: 0.2), LaunchMark.introEnd, accuracy: 1e-9)
+        XCTAssertEqual(LaunchMark.exitStart(settledAt: 1.0), 1.0, accuracy: 1e-9)
+        XCTAssertEqual(LaunchMark.exitStart(settledAt: 3.0), 3.0, accuracy: 1e-9)
+        XCTAssertEqual(LaunchMark.exitStart(settledAt: 3.2), 3.2, accuracy: 1e-9)
+        for settled in [0.2, 1.0, 1.9, 3.0, 3.2, 9.99, 15] {
             let start = LaunchMark.exitStart(settledAt: settled)
-            XCTAssertGreaterThanOrEqual(start, settled)
-            let loops = (start - LaunchMark.introEnd) / LaunchMark.holdPeriod
-            XCTAssertEqual(loops, loops.rounded(), accuracy: 1e-9, "settled at \(settled)")
-            for slide in LaunchMark.frame(t: start - 1e-6, exitAt: nil).along {
-                XCTAssertEqual(slide, 0, accuracy: 0.01, "the hold is at rest where the exit begins")
+            // The exit's first frame is the hold's frame at that moment: no jump (to a twentieth of a unit of the
+            // 1024 box, under a hundredth of a point; the intro's spring is that close to rest when it ends).
+            let before = LaunchMark.frame(t: start - 1e-6, exitAt: nil).along
+            let after = LaunchMark.frame(t: start, exitAt: start).along
+            for (held, leaving) in zip(before, after) {
+                XCTAssertEqual(held, leaving, accuracy: 0.05, "settled at \(settled)")
             }
         }
     }
