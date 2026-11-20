@@ -54,6 +54,8 @@ struct FleetList: View {
     @Binding var filter: FleetFilter?
     /// The run open beside the list, if any.
     @Binding var opened: String?
+    /// A computer whose pairing has to change: Add Computer, its address already in the code form.
+    let pairAgain: (String) -> Void
     /// Opens Start an agent.
     let newAgent: () -> Void
     @State private var folded: Set<String> = []
@@ -90,12 +92,12 @@ struct FleetList: View {
             .frame(height: 52)
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
-            // A computer refused for a different version shows why in place of its list: rows it listed before are
-            // the last it said, and none can be acted on until it is reached again.
-            if rows.isEmpty || shownComputerRefusal != nil {
+            // A computer whose link is not working shows why in place of its list, and the one thing to do: rows it
+            // listed before are the last it said, and none can be acted on until it is reached again.
+            if rows.isEmpty || shownComputerNotice != nil {
                 Group {
-                    if let refused = shownComputerRefusal {
-                        DifferentVersion(sentence: refused.linkHealth.detail) { refused.connection.retryNow() }
+                    if let (computer, notice) = shownComputerNotice {
+                        ComputerNotice(notice: notice, act: noticeAction(computer, notice))
                     } else if !machines.launchSettled {
                         Connecting()
                     } else if scope == .active {
@@ -292,14 +294,28 @@ struct FleetList: View {
         Task { removeNote = FleetWords.removalRefused(await model.removeSession(row.summary)) }
     }
 
-    /// The computer the list is narrowed to, when it was refused for running a different version of CodeConnect,
-    /// which the sidebar's "Different version" stands for.
-    private var shownComputerRefusal: AppModel? {
+    /// The computer the list is narrowed to, when its link is not working, and what it says: the sentence behind the
+    /// sidebar's word.
+    private var shownComputerNotice: (AppModel, LinkNotice)? {
         guard case .computer(let id) = filter,
             let model = machines.models.first(where: { ($0.machineID ?? "") == id }),
-            model.linkHealth.cause == .refused(.differentVersion)
+            let notice = model.linkHealth.notice
         else { return nil }
-        return model
+        return (model, notice)
+    }
+
+    /// The notice's one action on the Mac, as the computer's sidebar row offers it: Try Again where the link can be
+    /// asked again (a different version too, once cured), Pair Again where the pairing or its address has to change.
+    private func noticeAction(_ computer: AppModel, _ notice: LinkNotice) -> (title: String, run: () -> Void)? {
+        switch notice.action {
+        case .retry, .tailscale: return (PeerWords.tryAgain, { computer.connection.retryNow() })
+        case .settings where computer.linkHealth.cause == .refused(.differentVersion):
+            return (PeerWords.tryAgain, { computer.connection.retryNow() })
+        case .settings:
+            guard let address = computer.endpoint?.typedAddress else { return nil }
+            return (LinkHealth.pairAgain, { pairAgain(address) })
+        case nil: return nil
+        }
     }
 
     /// These rows as the sidebar's filter leaves them.
@@ -349,10 +365,17 @@ private struct GroupingSwitch: View {
 /// A group's name, how many runs it holds, how many decisions wait in it, and where a project is
 /// (`ProjectPlace`); a click folds it.
 private struct GroupHeader: View {
+    @Environment(Machines.self) private var machines
     let group: FleetGroup
     let grouping: FleetGroup.Kind
     let namingComputer: Bool
     let folded: Bool
+
+    /// A computer's link when it is not working, in the word the sidebar and the iPhone's cards say beside its name.
+    private var linkWord: String? {
+        guard grouping == .computer else { return nil }
+        return machines.models.first { ($0.machineID ?? "") == group.id }?.linkHealth.machineWord
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -367,6 +390,9 @@ private struct GroupHeader: View {
                 .truncationMode(.middle)
             // The counts stay whole on one line; the name before them is what gives way, in its middle.
             Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
+            if let linkWord {
+                Text(linkWord).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).fixedSize()
+            }
             if group.waiting > 0 {
                 Text(FleetCount.waitingForYou(group.waiting)).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
                     .lineLimit(1)

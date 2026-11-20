@@ -40,12 +40,11 @@ struct Connecting: View {
     }
 }
 
-/// A computer's list while that computer runs a different version of CodeConnect: what the sidebar's "Different
-/// version" means and what cures it, in the refusal's own sentence, and Try Again once it is cured: a refused
-/// connection does not dial again by itself.
-struct DifferentVersion: View {
-    let sentence: String
-    let tryAgain: () -> Void
+/// A computer's list while its link is not working: what the sidebar's word means and what to do, in the link's own
+/// title and sentence (Kit's `LinkNotice`), and its one action when it has one.
+struct ComputerNotice: View {
+    let notice: LinkNotice
+    let act: (title: String, run: () -> Void)?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -54,18 +53,22 @@ struct DifferentVersion: View {
                 .foregroundStyle(Theme.text3)
                 .padding(.bottom, 4)
                 .accessibilityHidden(true)
-            Text("Different version").font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
-            Text(sentence)
+            Text(notice.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+            // A host in the sentence is a code span, as the iPhone's banner draws it.
+            Text((try? AttributedString(markdown: notice.sentence)) ?? AttributedString(notice.sentence))
                 .font(Theme.ui(12.5))
                 .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("fleet.differentVersion.sentence")
-            ActionButton(title: "Try Again", key: nil, prominent: false, id: "fleet.differentVersion.tryAgain", action: tryAgain)
-                .padding(.top, 6)
+                .accessibilityIdentifier("fleet.notice.sentence")
+            if let act {
+                ActionButton(title: act.title, key: nil, prominent: false, id: "fleet.notice.act", action: act.run)
+                    .padding(.top, 6)
+            }
         }
+        .frame(maxWidth: 420)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("fleet.differentVersion")
+        .accessibilityIdentifier("fleet.notice")
     }
 }
