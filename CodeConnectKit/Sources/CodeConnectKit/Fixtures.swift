@@ -596,9 +596,16 @@ enum Fixtures {
         let endedRuns = (0..<variant.endedCount).map { offset in
             let index = variant.sessionCount + offset + 1
             let relaunchable = variant == .ended && offset == variant.endedCount - 1 ? #""relaunchable":true,"# : ""
+            // `-CC_ENDED_MODEL <value>`: the first ended run's model fact, as a daemon sends it.
+            var model = ""
+            #if DEBUG
+                if offset == 0, let value = UserDefaults.standard.string(forKey: "CC_ENDED_MODEL") {
+                    model = #""model":{"value":"\#(value)","seq":2},"#
+                }
+            #endif
             return """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
-                "session_id":"fx-\(index)",\(relaunchable)\
+                "session_id":"fx-\(index)",\(relaunchable)\(model)\
                 "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"exited","link":"detached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
