@@ -476,6 +476,10 @@ struct PairingView: View {
                     ForEach(listedMachines, id: \.machineID) { machine in
                         machineRow(machine)
                     }
+                    // The owner's other computers Tailscale lists that have not joined, each with why.
+                    ForEach(machines.unjoinedComputers) { unjoined in
+                        unjoinedRow(unjoined)
+                    }
 
                     CCRow(
                         "Add a computer",
@@ -519,6 +523,27 @@ struct PairingView: View {
 
     /// One machine: its link in the app's own words for that level, dimmed while
     /// it is offline.
+    /// A computer the owner's tailnet lists that has not joined: its Tailscale name, why, and the one thing to do,
+    /// which the row does when tapped.
+    private func unjoinedRow(_ unjoined: Machines.UnjoinedComputer) -> some View {
+        let action = unjoined.removed ? PeerWords.addAgain : PeerWords.tryAgain
+        return CCRow(
+            unjoined.computer.name,
+            subtitle: unjoined.reason,
+            isDimmed: true,
+            accessibilityLabelText: "\(unjoined.computer.name), \(unjoined.reason)",
+            action: { machines.tryAgain(unjoined) }
+        ) {
+            CCStatusDot(color: CC.text.tertiary, isHollow: true, pulses: false, accessibilityText: unjoined.reason)
+        } trailing: {
+            Text(action)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize()
+        }
+        .accessibilityIdentifier("unjoined-\(unjoined.computer.host)")
+    }
+
     private func machineRow(_ machine: AppModel) -> some View {
         let health = machine.linkHealth
         let offline = health.level == .offline

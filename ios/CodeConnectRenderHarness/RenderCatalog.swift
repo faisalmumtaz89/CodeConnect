@@ -1026,6 +1026,15 @@ enum RenderCatalog {
             reach: { app, driver in try driver.openSettings(app) }),
 
         RenderScenario(
+            name: "settings-unjoined",
+            purpose: "the owner's other computers Tailscale lists that have not joined: removed, unreachable, refused",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_UNJOINED", "removed,unreachable,refused"],
+            reach: { app, driver in
+                try driver.openSettings(app)
+                try driver.require(driver.element(containing: "Removed: add it again", in: app), "the removed row")
+            }),
+
+        RenderScenario(
             name: "settings-machines",
             purpose: "two machines, one offline with the longest name, and the way to add another",
             arguments: secondMachineArguments,

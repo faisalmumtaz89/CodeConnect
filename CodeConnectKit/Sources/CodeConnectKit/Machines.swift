@@ -36,6 +36,8 @@ public final class Machines {
     /// Machines joined from a list in this launch, until their daemon says which
     /// it is: one that is a removed computer under a new address leaves again.
     private var joinedFromList: Set<String> = []
+    /// What each linked daemon last listed of the owner's other computers, by the model it came over.
+    private var listedBy: [ObjectIdentifier: [PeerComputer]] = [:]
     /// Where a deep link (a `codeconnect://` URL, or a tapped notification)
     /// wants the UI to go. Cleared by whichever surface consumes it.
     public var pendingDeepLink: DeepLink?
@@ -84,7 +86,10 @@ public final class Machines {
             guard let self, let model else { return }
             self.identified(model)
         }
-        model.onPeers = { [weak self] directory in self?.join(directory) }
+        model.onPeers = { [weak self, weak model] directory in
+            guard let self, let model else { return }
+            self.join(directory, from: model)
+        }
         return model
     }
 
@@ -261,33 +266,87 @@ public final class Machines {
 
     /// The computers a daemon lists, joined without a code: each this device
     /// has no pairing for, has not removed and is not already joining.
-    func join(_ directory: PeerDirectory) {
-        for computer in directory.computers {
-            guard pairing.machine(matching: computer.endpoint) == nil,
-                !pairing.isDeclined(host: computer.host), joiningIndex(at: computer.endpoint) == nil
-            else { continue }
-            let model = makeModel(UUID().uuidString)
-            model.onPaired = { [weak self, weak model] in
-                guard let self, let model else { return }
-                self.adopt(model)
-            }
-            model.start()
-            model.join(computer)
-            joining.append((computer, model))
-        }
+    func join(_ directory: PeerDirectory, from source: AnyObject? = nil) {
+        listedBy[ObjectIdentifier(source ?? self)] = directory.computers
+        for computer in directory.computers { join(computer) }
     }
+
+    /// Join one listed computer, unless this device holds it, removed it, or is joining it now.
+    private func join(_ computer: PeerComputer) {
+        guard pairing.machine(matching: computer.endpoint) == nil,
+            !pairing.isDeclined(host: computer.host), joiningIndex(at: computer.endpoint) == nil
+        else { return }
+        let model = makeModel(UUID().uuidString)
+        model.onPaired = { [weak self, weak model] in
+            guard let self, let model else { return }
+            self.adopt(model)
+        }
+        model.start()
+        model.join(computer)
+        joining.append((computer, model))
+    }
+
+    /// A computer the owner's tailnet lists that is not in this device's list, and why: never silent.
+    public struct UnjoinedComputer: Identifiable, Hashable, Sendable {
+        public let computer: PeerComputer
+        /// What the row says under the computer's name.
+        public let reason: String
+        /// Removed from this device once: its action adds it again rather than retrying.
+        public let removed: Bool
+        public var id: String { computer.host }
+    }
+
+    /// The listed computers that have not joined: each one this device removed, and each whose join has failed
+    /// (its daemon refused it) or is waiting to dial again (nothing answered). A join still dialling its first
+    /// attempt is not here, so a computer joining as it should never flashes as a problem.
+    public var unjoinedComputers: [UnjoinedComputer] {
+        #if DEBUG
+            if let shown = Self.unjoinedFixture { return shown }
+        #endif
+        var seen = Set<String>()
+        let listed = listedBy.values.joined().filter { seen.insert($0.host.lowercased()).inserted }
+        let removed = listed.filter { pairing.isDeclined(host: $0.host) && pairing.machine(matching: $0.endpoint) == nil }
+            .map { UnjoinedComputer(computer: $0, reason: PeerWords.removed, removed: true) }
+        let failing = joining.compactMap { entry -> UnjoinedComputer? in
+            switch entry.model.connection.phase {
+            case .failed(let reason):
+                return UnjoinedComputer(computer: entry.computer, reason: PeerWords.refused(reason), removed: false)
+            case .waiting:
+                return UnjoinedComputer(computer: entry.computer, reason: PeerWords.unreachable, removed: false)
+            default:
+                return nil
+            }
+        }
+        return removed + failing
+    }
+
+    /// The row's one action: a removed computer is wanted again and joins; any other is asked again now.
+    public func tryAgain(_ unjoined: UnjoinedComputer) {
+        if unjoined.removed { pairing.undecline(host: unjoined.computer.host) }
+        if let index = joiningIndex(at: unjoined.computer.endpoint) { joining.remove(at: index).model.leave() }
+        join(unjoined.computer)
+    }
+
+    #if DEBUG
+        /// `-CC_UNJOINED removed,unreachable,refused`: those rows, for a render, in that order.
+        static var unjoinedFixture: [UnjoinedComputer]? {
+            guard let kinds = UserDefaults.standard.string(forKey: "CC_UNJOINED") else { return nil }
+            let air = PeerComputer(name: "faisals-macbook-air", host: "faisals-macbook-air.tail1234.ts.net", port: 8787)
+            return kinds.split(separator: ",").compactMap { kind in
+                switch kind {
+                case "removed": return UnjoinedComputer(computer: air, reason: PeerWords.removed, removed: true)
+                case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable, removed: false)
+                case "refused":
+                    return UnjoinedComputer(
+                        computer: air, reason: PeerWords.refused("Tailscale device was revoked"), removed: false)
+                default: return nil
+                }
+            }
+        }
+    #endif
 
     private func joiningIndex(at endpoint: DaemonEndpoint) -> Int? {
         joining.firstIndex { $0.computer.endpoint.isSameAddress(as: endpoint) }
-    }
-
-    /// The listed computers whose daemon would not let this device in without a
-    /// code.
-    public var computersNeedingCode: [PeerComputer] {
-        joining.compactMap { entry in
-            guard case .failed = entry.model.connection.phase else { return nil }
-            return entry.computer
-        }
     }
 
     public var isPairing: Bool { candidate != nil || models.contains(where: \.isPairing) }

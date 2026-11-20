@@ -216,3 +216,15 @@ public enum PairingWords {
     /// … and with Tailscale connected, while this Mac's CodeConnect moves onto it.
     public static let iPhoneReachesOnceMoved = "Your iPhone can reach this Mac once CodeConnect is on Tailscale."
 }
+
+/// A computer the owner's tailnet lists that has not joined this device's list, and why, as both apps say it.
+public enum PeerWords {
+    /// Listed, but nothing answers at its tailnet name.
+    public static let unreachable = "Can’t be reached over Tailscale"
+    /// Its CodeConnect answered and would not let this device in, in its own words.
+    public static func refused(_ reason: String) -> String { "Didn’t let this \(HostDevice.current.name) in: \(reason)" }
+    /// Removed from this device once; a person's choice, undone here.
+    public static let removed = "Removed: add it again"
+    public static let tryAgain = "Try again"
+    public static let addAgain = "Add again"
+}

@@ -95,6 +95,16 @@ final class PeerJoinTests: XCTestCase {
         XCTAssertEqual(pairing.machines, [])
         XCTAssertFalse(machines.models.contains { $0.machineID != nil })
         XCTAssertEqual(pairing.declined.count, 1)
+        // Never silent: the listed computer is shown as removed, and its one action adds it again.
+        let removed = try XCTUnwrap(machines.unjoinedComputers.first)
+        XCTAssertEqual(machines.unjoinedComputers.count, 1)
+        XCTAssertEqual(removed.reason, PeerWords.removed)
+        XCTAssertTrue(removed.removed)
+        machines.tryAgain(removed)
+        try await until { pairing.machines.first?.endpoint.token == "t" }
+        XCTAssertEqual(pairing.declined, [])
+        XCTAssertEqual(machines.unjoinedComputers, [])
+        for model in machines.models { model.leave() }
     }
 
     /// A computer listed before its daemon answers joins once it does, with no
