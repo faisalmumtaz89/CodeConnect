@@ -331,11 +331,10 @@ public enum AgentProse {
 
     // MARK: - Table summaries
 
-    /// `Table: Command, Description, Status — 4 rows` — the collapsed
+    /// `Table, 4 rows: Command, Description, Status`: the collapsed
     /// preview's stand-in for the table itself.
     static func tablePreviewLine(_ table: MarkdownTable) -> String {
-        "Table: " + table.headers.map(plainCell).joined(separator: ", ")
-            + ". " + rowCountPhrase(table.rows.count)
+        "Table, " + rowCountPhrase(table.rows.count) + ": " + table.headers.map(plainCell).joined(separator: ", ")
     }
 
     /// `Table, 3 columns, 4 rows.` — the VoiceOver container label.

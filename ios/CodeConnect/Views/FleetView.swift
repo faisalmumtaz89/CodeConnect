@@ -3057,7 +3057,7 @@ struct LinkHealthSheet: View {
             }
             switch model.relayPushState {
             case .unsupported:
-                return "This iPhone can’t use CodeConnect’s push relay: it has no App Attest support. Everything else still works; a computer with its own Apple push key can notify you directly."
+                return "This iPhone can’t use CodeConnect’s push relay, because it has no App Attest support. Everything else still works; a computer with its own Apple push key can notify you directly."
             case .enrolling:
                 return "Enrolling this iPhone with the push relay…"
             case .failed(let reason):
