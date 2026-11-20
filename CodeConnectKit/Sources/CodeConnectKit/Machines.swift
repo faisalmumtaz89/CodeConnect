@@ -310,8 +310,8 @@ public final class Machines {
             switch entry.model.connection.phase {
             // Only a computer whose CodeConnect answered and refused: that is the evidence it is one of his
             // CodeConnect computers. Tailscale lists every Mac and Linux node he has, and one that never answers may
-            // run no CodeConnect at all, so it shows nowhere.
-            case .failed:
+            // run no CodeConnect at all, so it shows nowhere: a join that got no answer ends `.failed` with no refusal.
+            case .failed where entry.model.connection.refusal != nil:
                 return UnjoinedComputer(
                     computer: entry.computer, reason: PeerWords.refused(entry.model.connection.refusal))
             default: return nil

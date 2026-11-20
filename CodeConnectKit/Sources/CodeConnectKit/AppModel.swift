@@ -1550,12 +1550,13 @@ public final class AppModel {
 
     /// Join a computer another daemon listed, with no code: its daemon lets this
     /// device in by its Tailscale identity, and the device token it answers with
-    /// is what gets saved. Dialled with a saved link's patience — a computer
-    /// listed before its daemon answers joins once it does — until the daemon
-    /// says no.
+    /// is what gets saved. Dialled as a pairing is: a few tries, then it stops.
+    /// Tailscale lists every Mac and Linux node, and one that never answers may
+    /// run no CodeConnect, so it is not dialled for ever; the next list naming it
+    /// (`Machines.join`) asks again.
     func join(_ computer: PeerComputer) {
         startPairing(computer.endpoint)
-        connection.start(endpoint: computer.endpoint)
+        connection.start(endpoint: computer.endpoint, forPairing: true)
     }
 
     /// True while a scanned code is being exchanged for a device token.

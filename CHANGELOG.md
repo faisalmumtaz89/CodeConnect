@@ -25,7 +25,9 @@ User-facing changes, newest first. Mac releases are cut per
   "CodeConnect Mac-2". A device paired before takes its name the next time it connects.
 - Every computer on your Tailscale account that runs CodeConnect joins the list by itself, or says why it didn't:
   one whose CodeConnect refused shows why, with Try Again, and is asked again when the list of your computers next
-  changes. A computer you removed stays out of the list and is offered again with no code under "On your Tailscale
+  changes. A computer that doesn't answer, as any Mac or Linux computer without CodeConnect, is asked a few times
+  and then left alone until that list changes, where the apps used to try it every half minute for as long as they
+  ran. A computer you removed stays out of the list and is offered again with no code under "On your Tailscale
   account", in Settings on the iPhone and in Add a Computer on the Mac, and removing a computer says where. A
   computer bound to your local network also listens on its Tailscale address when Tailscale is connected as its
   daemon starts, so your other computers still reach it, and a Mac linked by its local address is never listed as
