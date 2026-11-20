@@ -410,10 +410,14 @@ const TAILSCALE_LOCATIONS: &[&str] = &[
 
 impl Config {
     /// Where `tailscale` may be, in the order to try: the configured `tailscale_bin`
-    /// alone when it is set, whether or not it exists, else the known locations.
+    /// alone when it is set, whether or not it exists, else the known locations. A rig
+    /// build (`test-launchd-label`) has no known locations: it reads only a tailscale its
+    /// config names, so a rig that forgets to name a stand-in sees no tailnet rather than
+    /// the owner's, whose computers it would list to its app and the app would join.
     pub fn tailscale_candidates(&self) -> Vec<std::path::PathBuf> {
         match &self.tailscale_bin {
             Some(path) => vec![std::path::PathBuf::from(path)],
+            None if cfg!(feature = "test-launchd-label") => Vec::new(),
             None => TAILSCALE_LOCATIONS
                 .iter()
                 .map(std::path::PathBuf::from)
@@ -596,6 +600,7 @@ mod tests {
             missing.tailscale_candidates(),
             vec![std::path::PathBuf::from("/nonexistent/tailscale")]
         );
+        #[cfg(not(feature = "test-launchd-label"))]
         assert_eq!(
             Config::default().tailscale_candidates(),
             TAILSCALE_LOCATIONS
@@ -603,6 +608,24 @@ mod tests {
                 .map(std::path::PathBuf::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// **A rig build reads no tailscale it was not given.** With `tailscale_bin` unset it
+    /// has no candidates at all, so its daemon finds no tailnet, lists no computers to its
+    /// app and its Mail reaches none: the owner's real Tailscale, at a known location on
+    /// this computer, is never asked. Named, a stand-in is still the one it reads.
+    /// Must-fail: give the rig build the known locations again.
+    #[cfg(feature = "test-launchd-label")]
+    #[test]
+    fn a_rig_build_reads_no_tailscale_it_was_not_given() {
+        assert_eq!(Config::default().tailscale_candidates(), Vec::<std::path::PathBuf>::new());
+        assert_eq!(Config::default().tailscale_bin(), None);
+        let present = std::env::current_exe().unwrap();
+        let named = Config {
+            tailscale_bin: Some(present.to_str().unwrap().into()),
+            ..Config::default()
+        };
+        assert_eq!(named.tailscale_bin(), Some(present));
     }
 
     /// The WebSocket listeners, each with its own `ws_max_connections`: the
