@@ -32,6 +32,8 @@ struct MainWindow: View {
     @Environment(ConfirmationQueue.self) private var asks
     /// The window's width, from which the list's share beside an open run is worked out.
     @State private var width: CGFloat = 0
+    /// The window's height, from which the room for a sheet is worked out.
+    @State private var height: CGFloat = 0
     @AppStorage(Panes.sidebarHidden) private var sidebarHidden = false
     @AppStorage(Panes.listHidden) private var listHidden = false
     @AppStorage(Panes.runHidden) private var runHidden = false
@@ -119,7 +121,12 @@ struct MainWindow: View {
         .focusedSceneValue(\.runIsOpen, runIsOpen)
         .background(Theme.window)
         .ignoresSafeArea()
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .onGeometryChange(for: CGSize.self) {
+            CGSize(width: $0.size.width, height: $0.size.height + $0.safeAreaInsets.top + $0.safeAreaInsets.bottom)
+        } action: {
+            width = $0.width
+            height = $0.height
+        }
         .toolbar(removing: .title)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
@@ -175,6 +182,9 @@ struct MainWindow: View {
                 filter = nil
                 opened = run
             }
+            // A sheet stands in the middle of the window: clear of the 52-point header above it, so as far from the
+            // bottom edge.
+            .environment(\.sheetRoom, height - 2 * 52)
                 #if DEBUG
                     .renderLook()
                 #endif

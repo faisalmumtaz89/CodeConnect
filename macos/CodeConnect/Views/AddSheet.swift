@@ -78,10 +78,28 @@ struct AddSheet: View {
             case .iPhone: IPhoneSide()
             }
         }
-        // As tall as the chosen side's content, so the sheet changes height with its tab, its top edge and tabs staying.
+        // As tall as the chosen side's content, so the sheet changes height with its tab, its top edge and tabs staying;
+        // never taller than the window has room for, where the side gives way.
         .frame(width: 640)
+        .frame(maxHeight: room)
+        .coordinateSpace(.named(AddSheet.space))
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .environment(\.sheetHeight, height)
         .background(Theme.sheet)
     }
+
+    @Environment(\.sheetRoom) private var room
+    @State private var height: CGFloat = 0
+
+    /// The sheet's own coordinates, top-left origin, in which a panel inside it finds the room it has.
+    static let space = "add.sheet"
+}
+
+extension EnvironmentValues {
+    /// How tall a sheet over the window may be.
+    @Entry var sheetRoom: CGFloat = .infinity
+    /// How tall the sheet a view is in stands, in `AddSheet.space`.
+    @Entry var sheetHeight: CGFloat = 0
 }
 
 /// The bottom bar every side shares: a note on the left, the answer on the right.

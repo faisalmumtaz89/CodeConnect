@@ -39,6 +39,7 @@ struct StartForm: View {
     @State private var place = StartPlace.folder
     @State private var newName: String?
     @State private var branchMenuOpen = false
+    @Environment(\.sheetRoom) private var room
     @State private var message = ""
     @State private var requestID: String?
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
@@ -117,6 +118,10 @@ struct StartForm: View {
             }
         }
     #endif
+
+    /// The window has less room than the tallest form needs (a new worktree being named in a folder with changes, under
+    /// a notice): after the folder list, the heading goes, the first message starts at one line and the rows stand closer.
+    private var short: Bool { room < 600 }
 
     /// The place Start sends: a new worktree by the name typed, else the one chosen.
     private var startPlace: StartPlace {
@@ -197,8 +202,9 @@ struct StartForm: View {
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Start an agent").font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
+            VStack(alignment: .leading, spacing: short ? 6 : 10) {
+                // The tab above names the sheet: in a short window the heading gives way, after the folder list.
+                if !short { Text("Start an agent").font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text) }
                 if let context {
                     computerRow(context)
                         // Its panel opens below it, over what follows.
@@ -222,7 +228,7 @@ struct StartForm: View {
                             context: context, folder: folder, agent: pick?.agent, place: $place, newName: $newName,
                             open: $branchMenuOpen
                         )
-                        // Its menu opens above it, over the folders.
+                        // Its menu opens over what is above or below it.
                         .zIndex(branchMenuOpen ? 1 : 0)
                     }
                     AgentNotice(context: context, elsewhere: !isThisMac(context))
@@ -238,8 +244,8 @@ struct StartForm: View {
                 }
             }
             .padding(.horizontal, 18)
-            .padding(.top, 18)
-            Spacer(minLength: 18)
+            .padding(.top, short ? 12 : 18)
+            Spacer(minLength: short ? 12 : 18)
             SheetBar(
                 action: "Start", actionID: "start.start", blocked: blocked != nil, perform: start, cancel: { dismiss() },
                 cancelID: "start.cancel"
@@ -481,7 +487,7 @@ struct StartForm: View {
                 .accessibilityIdentifier("start.message")
                 .textFieldStyle(.plain)
                 .font(Theme.ui(12.5))
-                .lineLimit(2...5)
+                .lineLimit(short ? 1...5 : 2...5)
             HStack(spacing: 4) {
                 ModelButton(context: context, pick: pick, open: $menuOpen) { chosen = $0 }
                 #if DEBUG
