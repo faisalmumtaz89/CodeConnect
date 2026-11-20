@@ -1,3 +1,5 @@
+import Foundation
+
 /// The words both apps show for the same thing, said once.
 ///
 /// A sentence the Mac and the iPhone both draw lives here, so the two cannot
@@ -114,5 +116,25 @@ public enum QuestionWords {
     public static let submit = "Submit"
     public static func submitNeeds(questions: Int) -> String {
         questions == 1 ? "Choose an answer to submit." : "Answer every question to submit."
+    }
+}
+
+/// A run's Changes: when they were read, how they are asked for again, and
+/// what is said when there are none or they could not be read.
+public enum ChangesWords {
+    public static func checked(since date: Date?, now: Date) -> String { "Checked \(Format.ago(since: date, now: now))" }
+    public static let checkAgain = "Check again"
+    public static let reading = "Reading this run’s changes on its computer…"
+    public static let stillReading = "Still reading this run’s changes…"
+    public static let couldNotRead = "Your computer could not read the changes"
+    public static let itsReason = "Its reason, word for word:"
+    public static let noUncommitted = "No uncommitted changes"
+    public static let clean = "This run’s folder was clean when it was read."
+    public static let noDiff = "No diff to show"
+    public static let computersReason = "Your computer’s reason, word for word:"
+    public static func files(_ count: Int) -> String { count == 1 ? "1 file" : "\(count) files" }
+    public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
+    public static func unchangedLines(_ count: Int) -> String {
+        count == 1 ? "1 unchanged line" : "\(count) unchanged lines"
     }
 }

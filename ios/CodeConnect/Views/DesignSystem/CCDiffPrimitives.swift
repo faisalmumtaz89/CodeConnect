@@ -894,7 +894,7 @@ struct CCFoldRow: View {
     }
 
     private var label: String {
-        count == 1 ? "⋯ 1 unchanged line" : "⋯ \(count) unchanged lines"
+        "⋯ \(ChangesWords.unchangedLines(count))"
     }
 }
 

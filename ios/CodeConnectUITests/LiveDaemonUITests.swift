@@ -85,7 +85,7 @@ final class LiveDaemonUITests: XCTestCase {
                         "label CONTAINS 'No diff' OR label CONTAINS 'not a git'"
                         + " OR label CONTAINS 'No uncommitted changes'"
                         + " OR label CONTAINS 'could not read the diff'"
-                        + " OR label CONTAINS 'No answer from the computer'")
+                        + " OR label CONTAINS 'No answer from your computer'")
             ).firstMatch
 
             let settled = XCTNSPredicateExpectation(
@@ -240,7 +240,7 @@ final class LiveDaemonUITests: XCTestCase {
                 format:
                     "label CONTAINS 'Captured on the computer' OR label CONTAINS 'Not connected'"
                     + " OR label CONTAINS 'No uncommitted changes' OR label CONTAINS 'No diff to show'"
-                    + " OR label CONTAINS 'No answer from the computer'")
+                    + " OR label CONTAINS 'No answer from your computer'")
         ).firstMatch
         XCTAssertTrue(
             settled.waitForExistence(timeout: 30),

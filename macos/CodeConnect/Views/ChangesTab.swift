@@ -18,14 +18,14 @@ struct ChangesTab: View {
                 if case .loaded(let raw, let parsed, let fetchedAt) = state {
                     if !parsed.isEmpty { Summary(diff: parsed) }
                     let read = raw.capturedDate ?? fetchedAt
-                    AgeText(since: read) { "Checked \(Format.ago(since: read, now: $0))" }
+                    AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
                         .font(Theme.ui(12))
                         .foregroundStyle(Theme.text3)
                         .monospacedDigit()
                         .accessibilityIdentifier("changes.age")
                 }
                 Spacer(minLength: 0)
-                ActionButton(title: "Check again", key: nil, prominent: false, id: "changes.refresh") {
+                ActionButton(title: ChangesWords.checkAgain, key: nil, prominent: false, id: "changes.refresh") {
                     model.loadDiff(key: key, force: true)
                 }
                 .disabled(state.isLoading)
@@ -35,21 +35,21 @@ struct ChangesTab: View {
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             switch state {
             case .idle, .loading:
-                Message(id: "changes.loading", title: "Reading this run's changes on its computer…")
+                Message(id: "changes.loading", title: ChangesWords.reading)
             case .failed(.app(let reason)):
                 Message(id: "changes.offline", title: "The changes could not be read", sentence: reason)
             case .failed(.daemon(let reason)):
                 Message(
-                    id: "changes.failed", title: "Your computer could not read the changes",
-                    sentence: "Its reason, word for word:", quote: (reason, "changes.failed.reason"))
+                    id: "changes.failed", title: ChangesWords.couldNotRead,
+                    sentence: ChangesWords.itsReason, quote: (reason, "changes.failed.reason"))
             case .loaded(let raw, let parsed, _) where parsed.isEmpty && raw.note == nil:
                 Message(
-                    id: "changes.clean", title: "No uncommitted changes",
-                    sentence: "This run's folder was clean when it was read.")
+                    id: "changes.clean", title: ChangesWords.noUncommitted,
+                    sentence: ChangesWords.clean)
             case .loaded(let raw, let parsed, _) where parsed.isEmpty:
                 Message(
-                    id: "changes.empty", title: "No diff to show",
-                    sentence: "Your computer's reason, word for word:", quote: (raw.note ?? "", "changes.note"))
+                    id: "changes.empty", title: ChangesWords.noDiff,
+                    sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
             case .loaded(let raw, let parsed, _):
                 Document(raw: raw, diff: parsed)
             }
@@ -87,10 +87,10 @@ private struct Summary: View {
     let diff: UnifiedDiff
 
     var body: some View {
-        let files = diff.files.count == 1 ? "1 file" : "\(diff.files.count) files"
+        let files = ChangesWords.files(diff.files.count)
         let added = Text(verbatim: "+\(diff.additions)").foregroundStyle(Theme.green)
         let removed = Text(verbatim: "−\(diff.deletions)").foregroundStyle(Theme.red)
-        Text("\(added) \(removed)  ·  \(files)")
+        Text("\(added) \(removed) · \(files)")
         .font(Theme.mono(11.5))
         .foregroundStyle(Theme.text2)
         .accessibilityIdentifier("changes.summary")
@@ -206,7 +206,7 @@ private struct FileBlock: View {
         VStack(alignment: .leading, spacing: 6) {
             FileDiffView(file: file, lineLimit: limit)
             if total > limit {
-                Button("Show \(min(total - limit, Self.step)) more lines") { limit += Self.step }
+                Button(ChangesWords.showMoreLines(min(total - limit, Self.step))) { limit += Self.step }
                     .buttonStyle(.hover(bare: true, id: "changes.file.\(file.id).more"))
                     .font(Theme.ui(12))
                     .foregroundStyle(Theme.text2)

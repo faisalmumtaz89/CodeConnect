@@ -3023,7 +3023,7 @@ struct LinkHealthSheet: View {
         case .unknown(let status):
             return "The computer answered “\(status)”, which this build does not know."
         case .none:
-            return "No answer from the computer."
+            return "No answer from your computer."
         }
     }
 

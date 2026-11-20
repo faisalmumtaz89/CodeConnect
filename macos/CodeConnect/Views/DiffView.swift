@@ -63,7 +63,7 @@ struct FileDiffView: View {
                     switch row {
                     case .header(let text, _): quiet(text, mono: true)
                     case .line(let line, _): DiffLine(line: line)
-                    case .folded(let count, _): quiet("\(count) unchanged lines", mono: false)
+                    case .folded(let count, _): quiet(ChangesWords.unchangedLines(count), mono: false)
                     case .note(let text, _): quiet(text, mono: false)
                     }
                 }
