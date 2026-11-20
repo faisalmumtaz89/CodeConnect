@@ -80,11 +80,12 @@ struct HoverButtonStyle: ButtonStyle {
         @Environment(\.isEnabled) private var enabled
 
         var body: some View {
-            let lit = (hovering || forced) && enabled
+            let lit = (hovering || forced) && enabled && !forcedState("disabled")
             configuration.label
+                .disabled(forcedState("disabled"))
                 .background(lit && !over ? Theme.hover : .clear, in: plate)
                 .brightness(lit && over ? Theme.hoverLift : 0)
-                .opacity(configuration.isPressed ? 0.7 : 1)
+                .opacity(configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
                 // What lights is what a click takes, the label's clear gaps included.
                 .contentShape(plate)
                 .onHover { hovering = $0 }
@@ -95,6 +96,15 @@ struct HoverButtonStyle: ButtonStyle {
         private var forced: Bool {
             #if DEBUG
                 id.map(RenderWindow.hovered.contains) ?? false
+            #else
+                false
+            #endif
+        }
+
+        /// A test launch's `-CC_FORCE` names this button in `state`.
+        private func forcedState(_ state: String) -> Bool {
+            #if DEBUG
+                id.flatMap { RenderWindow.forced[$0] } == state
             #else
                 false
             #endif
