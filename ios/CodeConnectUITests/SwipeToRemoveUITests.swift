@@ -231,11 +231,11 @@ final class SwipeToRemoveUITests: XCTestCase {
         }
 
         button.tap()
-        let confirm = app.buttons["Remove"]
+        let confirm = app.buttons["remove.confirm"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 5), "Remove must ask first")
         XCTAssertTrue(
-            app.alerts["Remove app-6?"].exists, "the question names what is being removed")
-        app.buttons["Cancel"].tap()
+            app.staticTexts["Remove app-6?"].exists, "the question names what is being removed")
+        app.buttons["remove.cancel"].tap()
         XCTAssertFalse(confirm.waitForExistence(timeout: 2), "Cancel dismisses the question")
         XCTAssertEqual(
             row(app, middle).frame.minX, open.minX, accuracy: 2,
@@ -243,9 +243,9 @@ final class SwipeToRemoveUITests: XCTestCase {
         wait(for: [redrawn(false)], timeout: 5)
 
         button.tap()
-        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5))
-        app.buttons["Remove"].tap()
-        XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 2), "confirming answers it")
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        XCTAssertFalse(confirm.waitForExistence(timeout: 2), "confirming answers it")
         wait(for: [redrawn(true)], timeout: 5)
         XCTAssertEqual(
             row(app, middle).frame.minX, open.minX, accuracy: 2,

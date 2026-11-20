@@ -41,6 +41,9 @@ struct CCField: View {
     /// document with no gutter — a question sheet, where every line starts at
     /// the margin and a label stepped out to the column was a third edge.
     var labelOnContentColumn: Bool = true
+    /// Takes the keyboard when it appears, as a field that is the one thing to
+    /// fill in does.
+    var focusOnAppear = false
     var onSubmit: (() -> Void)?
 
     @FocusState private var focused: Bool
@@ -89,6 +92,7 @@ struct CCField: View {
                 // Tapping the field's padding focuses it, not just the 17pt
                 // strip of text in the middle.
                 .onTapGesture { focused = true }
+                .onAppear { if focusOnAppear { focused = true } }
 
             if let error {
                 footnote(error, tone: .danger, glyph: "warning-circle-fill")

@@ -21,6 +21,9 @@ struct RootView: View {
             }
         }
         .environment(machines.linkModel)
+        // Every ask on the root screen is drawn over all of it; each sheet
+        // that asks hosts its own.
+        .ccConfirmationHost()
     }
 }
 

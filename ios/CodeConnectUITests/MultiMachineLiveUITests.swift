@@ -83,7 +83,7 @@ final class MultiMachineLiveUITests: XCTestCase {
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
         attachScreenshot(app, name: "selected")
         remove.tap()
-        app.alerts.buttons["Remove"].tap()
+        app.buttons["remove.confirm"].tap()
         XCTAssertTrue(
             app.buttons["Show"].waitForNonExistence(timeout: 30), "no ended run is left on either")
         attachScreenshot(app, name: "removed")

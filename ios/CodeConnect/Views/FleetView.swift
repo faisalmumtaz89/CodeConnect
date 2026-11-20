@@ -410,6 +410,7 @@ struct FleetView: View {
         list
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
                 StartStepsSheet(contexts: startContexts, seed: startSeed, onStarted: started, onClose: { startOpen = false })
+                .ccConfirmationHost()
                 .ccTallSheet()
             }
             .onChange(of: startContexts.map(\.id), initial: true) { _, _ in loadStart() }
@@ -433,7 +434,7 @@ struct FleetView: View {
             // whatever the user comes back to.
             .onChange(of: overlayFingerprint) { swipeCloses.closeAll() }
             .sheet(isPresented: $showSettings, onDismiss: applyHeld) {
-                PairingView().environment(machines.current)
+                PairingView().environment(machines.current).ccConfirmationHost()
             }
             .sheet(item: $capabilityReason) { CapabilitySheet(reason: $0.text) }
             .fullScreenCover(isPresented: $showDeck) {
@@ -449,15 +450,13 @@ struct FleetView: View {
             }
             // An alert, not a confirmation dialog: on iOS 26 a dialog pops out of
             // whatever it is attached to, and this one is attached to the screen.
-            .alert(
-                pendingRemoval?.title ?? "",
-                isPresented: Binding(
-                    get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
-                presenting: pendingRemoval
-            ) { removal in
-                Button("Remove", role: .destructive, action: removal.remove)
-            } message: { removal in
-                Text(removal.message)
+            .ccConfirmation($pendingRemoval) { removal in
+                CCConfirmation(
+                    title: removal.title, message: removal.message,
+                    answers: [
+                        .init(title: "Cancel", kind: .cancel, id: "remove.cancel"),
+                        .init(title: "Remove", kind: .destructive, id: "remove.confirm", perform: removal.remove),
+                    ])
             }
     }
 

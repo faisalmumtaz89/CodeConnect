@@ -50,19 +50,16 @@ struct HostedSettingsSheet: View {
                 .scrollBounceBehavior(.basedOnSize)
                 outcomeBar
             }
-            .alert(
-                ModeConfirmation.words(for: agent).title,
-                isPresented: Binding(
-                    get: { confirmingMode != nil },
-                    set: { if !$0 { confirmingMode = nil } }),
-                presenting: confirmingMode
-            ) { mode in
-                Button(ModeConfirmation.words(for: agent).confirm, role: .destructive) {
-                    run { await model.setMode(for: sessionKey, modeValue: mode.value, confirmed: true) }
-                }
-                Button(ModeConfirmation.words(for: agent).cancel, role: .cancel) {}
-            } message: { _ in
-                Text(ModeConfirmation.words(for: agent).message)
+            .ccConfirmation($confirmingMode) { mode in
+                let words = ModeConfirmation.words(for: agent)
+                return CCConfirmation(
+                    title: words.title, message: words.message,
+                    answers: [
+                        .init(title: words.cancel, kind: .cancel, id: "settings.mode.cancel"),
+                        .init(title: words.confirm, kind: .destructive, id: "settings.mode.confirm") {
+                            run { await model.setMode(for: sessionKey, modeValue: mode.value, confirmed: true) }
+                        },
+                    ])
             }
         }
     }
