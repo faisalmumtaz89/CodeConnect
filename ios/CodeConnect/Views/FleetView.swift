@@ -2438,9 +2438,10 @@ struct FleetRowView: View {
                             }
                         }
                         .padding(CC.space.md)
+                        .ccSheetHeightPart()
                     }
                 }
-                .ccResizableSheet()
+                .ccFittedSheet()
             }
         } else if onStop != nil, let stopBlockedReason {
             // Greyed for the refusal's bounded window, its reason on the
@@ -2798,7 +2799,7 @@ struct LinkHealthSheet: View {
     private var linkSection: some View {
         section("Link") {
             CCFactRow(
-                "State", value: model.linkHealth.detail,
+                "State", value: model.linkHealth.word,
                 tone: model.linkHealth.level.ccTone, separator: true)
             CCFactRow(
                 "Computer last answered",

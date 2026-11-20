@@ -42,6 +42,7 @@ struct PairingLinkSheet: View {
                 }
                 .padding(CC.space.md)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .ccSheetHeightPart()
             }
             .background(CC.color.bg)
         }
@@ -50,6 +51,7 @@ struct PairingLinkSheet: View {
         .onChange(of: machines.isPairing) { _, pairing in
             if started, !pairing { dismiss() }
         }
+        .ccFittedSheet()
     }
 
     @ViewBuilder

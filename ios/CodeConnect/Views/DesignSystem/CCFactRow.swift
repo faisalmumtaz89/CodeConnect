@@ -85,11 +85,32 @@ struct CCFactRow<Value: View, Detail: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: CC.space.xs) {
-                CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
-                    labelText
-                    CCAdaptiveSpacer(minLength: CC.space.xs)
-                    value()
-                    ageText
+                if typeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: CC.space.xxs) {
+                        labelText
+                        value()
+                        ageText
+                    }
+                } else {
+                    // Side by side when the label and the value both fit on
+                    // one line; when they do not, the value goes whole onto
+                    // its own line under the label. Never a label wrapped
+                    // beside a value, never a value broken inside a token.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: CC.space.sm) {
+                            labelText.fixedSize()
+                            Spacer(minLength: CC.space.xs)
+                            value().fixedSize()
+                            ageText
+                        }
+                        VStack(alignment: .leading, spacing: CC.space.xxs) {
+                            labelText
+                            HStack(spacing: CC.space.sm) {
+                                value()
+                                ageText
+                            }
+                        }
+                    }
                 }
                 detail()
                     // Where this row's own text edge ended up, so a nested
