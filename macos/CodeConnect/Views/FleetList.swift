@@ -85,9 +85,10 @@ struct FleetList: View {
         let namingComputer = machines.models.filter(\.showsFleet).count > 1
         VStack(spacing: 0) {
             let selectable = selectableKeys(rows)
+            let picked = selectable.filter(chosen.contains)
             HStack(spacing: 10) {
                 if selecting {
-                    Text(verbatim: "\(chosen.count) selected").font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
+                    Text(verbatim: "\(picked.count) selected").font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
                     Spacer()
                     let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
                     ActionButton(title: all ? "Deselect All" : "Select All", key: nil, prominent: false, id: "fleet.selectAll") {
@@ -274,10 +275,10 @@ struct FleetList: View {
                 if selecting {
                     Spacer()
                     ActionButton(
-                        title: batchRunning ? "Removing…" : "Remove \(chosen.count)…", key: nil, prominent: false,
+                        title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
-                    ) { removingMany = selectable.filter(chosen.contains) }
-                    .disabled(chosen.isEmpty || batchRunning)
+                    ) { removingMany = picked }
+                    .disabled(picked.isEmpty || batchRunning)
                 } else {
                     KeyHint(.agent)
                     KeyHint(.computer)
@@ -378,10 +379,12 @@ struct FleetList: View {
         Task { removeNote = FleetWords.removalRefused(await model.removeSession(row.summary)) }
     }
 
-    /// The runs a choice can hold, in the list's order: ended, on a computer that removes runs. Only the Ended runs.
+    /// The runs a choice can hold, in the list's order: ended, on a computer that removes runs, and shown, so a run the
+    /// filter or a folded group hides is neither counted nor removed. Only the Ended runs.
     private func selectableKeys(_ rows: [FleetRow]) -> [String] {
         guard scope == .finished else { return [] }
-        return rows.filter {
+        let shown = FleetGroup.groups(rows, by: grouping).filter { !folded.contains($0.id) }.flatMap(\.rows)
+        return shown.filter {
             $0.status == .ended && $0.summary.isRemovable
                 && machines.model(for: $0.machineID)?.daemonProfile.removesSessions == true
         }.map(\.id)
