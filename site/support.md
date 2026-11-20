@@ -55,6 +55,7 @@ The iPhone app updates from the App Store. When the app and a computer cannot un
 - **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. To type it instead, tap "Enter the address and code instead" under "Scan pairing code" ("Pair by hand" on a device with no camera) and type the address and code it prints.
 - **Notifications not arriving** — they start at your own daemon (sent to Apple directly, or through CodeConnect's push relay), so it must be running, and the app must be allowed notifications in iOS Settings.
 - **`codeconnect update` says another update or installation is already running** — an update and the installer hold the same lock, and two can't run at once; rerun after a moment.
+- **A computer is missing from the app** — install CodeConnect on it and sign it in to Tailscale with the same account as your iPhone: while the app is connected to another of your computers, it appears by itself, with no code. One that can't join is listed with why and Try again. One you removed is offered again under "On your Tailscale account": in Settings on the iPhone, in Add a Computer on the Mac. Any other computer pairs with a code: `codeconnect pair` prints one on it.
 - **Revoke a lost device** — on the Mac: `codeconnect devices` to list, `codeconnect revoke <device>` to cut it off immediately, including open connections.
 
 ## Frequently asked
@@ -74,7 +75,7 @@ No, but it is the default: out of the box the daemon listens on your Mac's Tails
 
 3. Run `codeconnect daemon restart` — or `codeconnect daemon install` if the daemon is not running yet; on Linux without systemd, start or restart it as "On Linux" says — then `codeconnect pair`.
 
-For encryption, use Tailscale.
+For encryption, use Tailscale. A computer bound to your local network this way also listens on its Tailscale address when Tailscale is connected as the daemon starts, so your other computers on the same Tailscale account still reach it.
 
 Every key is described in the [configuration reference](https://github.com/faisalmumtaz89/CodeConnect/blob/main/mac/README.md#configuration--codeconnectconfigjson).
 

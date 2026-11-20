@@ -22,15 +22,28 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, Help › CodeConnect Support opens the support page, and Settings stays above the Dock.
 - Settings › Devices lists each device under its own name, a Mac's computer name or "iPhone", in place of
   "CodeConnect Mac-2". A device paired before takes its name the next time it connects.
+- Every computer on your Tailscale account is in the list or says why it isn't. One that hasn't joined shows
+  "Can’t be reached over Tailscale", or why it refused, with Try Again; one that can't be reached keeps trying,
+  and one that refused is asked again with Try Again or when the list of your computers next changes. A computer
+  you removed stays out of the list and is offered again with no code under "On your Tailscale account", in
+  Settings on the iPhone and in Add a Computer on the Mac, and removing a computer says where. A computer bound to
+  your local network also listens on its Tailscale address when Tailscale is connected as its daemon starts, so
+  your other computers still reach it, and a Mac linked by its local address is never listed as a second computer
+  of its own.
+- When ending or removing a run doesn't happen, the notice says so, "Couldn’t end the run" or "Couldn’t remove
+  the run", and why, in a sentence, never quoting the computer's status word.
+- On the iPhone, a Claude Code run's ⋯ offers Compact… and Clear…, each with its icon, and the app's red is the
+  Mac's.
+- On the Mac, the window behind a question dims further, so nothing under the card reads as an answer.
 - On the iPhone, a computer that refused the link says "Different version" or "Pair again" on its card, in
   place of "Not paired". Typing /model, /effort, /diff or /compact where it can't be typed says what to do
   instead, and every sentence either app shows uses the typographic apostrophe and no long dash.
 - On the Mac, the list says "Connecting to your computer…" until your computers have answered, rather than
   offering to start an agent.
 - A card answered just after its agent's host re-attaches, after the daemon restarts, is no longer refused.
-- On the Mac, a run row shows its status whole or not at all, a long command keeps its start and its end, a
-  request's answers line up with the card above them, a run's settings panels stay inside its pane, and Add an
-  iPhone's intro says what the Tailscale note under it says.
+- On the Mac, a run row shows its status and its command whole or not at all, a long command keeps its start
+  and its end, a request's answers line up with the card above them, a run's settings panels stay inside its
+  pane, and Add an iPhone's intro says what the Tailscale note under it says.
 - On the iPhone, New agent stays and says why when no computer can start one, a signed-out agent says so at
   start with how to sign in, short sheets are as tall as their content, a fact too long for its line moves under
   its label whole, and Link health's State reads one word.
