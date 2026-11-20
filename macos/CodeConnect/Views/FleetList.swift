@@ -72,25 +72,66 @@ struct FleetList: View {
     /// The run Remove… is asking about, and what its computer said when it was not removed.
     @State private var removing: FleetRow?
     @State private var removeNote: String?
+    /// Choosing ended runs to remove together (the iPhone's Select): what is chosen, the batch asked about, whether it
+    /// is on its way, and what the last batch did not remove, by run, with the computer's reason.
+    @State private var selecting = false
+    @State private var chosen: Set<String> = []
+    @State private var removingMany: [String]?
+    @State private var batchRunning = false
+    @State private var batchRefused: [String: String] = [:]
 
     var body: some View {
         let rows = narrowed(scope.rows(machines.fleet))
         let namingComputer = machines.models.filter(\.showsFleet).count > 1
         VStack(spacing: 0) {
+            let selectable = selectableKeys(rows)
             HStack(spacing: 10) {
-                Text(scope.title).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
-                Text(verbatim: "\(rows.count)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                if let filter {
-                    FilterChip(name: filter.name(in: machines)) { self.filter = nil }
+                if selecting {
+                    Text(verbatim: "\(chosen.count) selected").font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
+                    Spacer()
+                    let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
+                    ActionButton(title: all ? "Deselect All" : "Select All", key: nil, prominent: false, id: "fleet.selectAll") {
+                        chosen = all ? [] : Set(selectable)
+                    }
+                    .keyboardShortcut("a", modifiers: .command)
+                    .disabled(batchRunning)
+                    // No Done while a batch runs: the batch holds the choice until it has answered.
+                    if !batchRunning {
+                        ActionButton(title: "Done", key: nil, prominent: false, id: "fleet.selectDone") { endSelection() }
+                            .keyboardShortcut(.cancelAction)
+                            .disabled(removingMany != nil)
+                    }
+                } else {
+                    Text(scope.title).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
+                    Text(verbatim: "\(rows.count)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    if let filter {
+                        FilterChip(name: filter.name(in: machines)) { self.filter = nil }
+                    }
+                    Spacer()
+                    if !selectable.isEmpty {
+                        ActionButton(title: "Select", key: nil, prominent: false, id: "fleet.select") { startSelection() }
+                    }
+                    GroupingSwitch(selection: $grouping)
                 }
-                Spacer()
-                GroupingSwitch(selection: $grouping)
             }
             .padding(.horizontal, 16)
             .padding(.leading, max(0, headerClearance.leading - 16))
             .padding(.trailing, max(0, headerClearance.trailing - 16))
             .frame(height: 52)
             Rectangle().fill(Theme.hairline).frame(height: 1)
+            // What the last batch did not remove, and why, under the header.
+            if let note = batchNote(rows) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(note.title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.amber)
+                    Text(note.reasons).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("fleet.batchNote")
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+            }
 
             // A computer whose link is not working shows why in place of its list, and the one thing to do: rows it
             // listed before are the last it said, and none can be acted on until it is reached again.
@@ -137,11 +178,22 @@ struct FleetList: View {
                                     let more = (endable || removable)
                                         && (hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
                                             || HoverButtonStyle.forced("fleet.row.\(row.id)"))
+                                    let choosable = selectable.contains(row.id)
                                     Button {
+                                        if selecting || (choosable && NSEvent.modifierFlags.contains(.command)) {
+                                            // Choosing: a click chooses or lets go; ⌘-click starts choosing with it.
+                                            guard choosable, !batchRunning else { return }
+                                            if !selecting { startSelection() }
+                                            if chosen.contains(row.id) { chosen.remove(row.id) } else { chosen.insert(row.id) }
+                                            return
+                                        }
                                         opened = selected ? nil : row.id
                                         keepListFocus()
                                     } label: {
-                                        FleetLine(row: row, selected: selected, roomForMore: more)
+                                        FleetLine(
+                                            row: row, selected: selected, roomForMore: more && !selecting,
+                                            chosen: selecting && choosable ? chosen.contains(row.id) : nil,
+                                            refusal: batchRefused[row.id])
                                     }
                                     .buttonStyle(.hover(radius: 0, id: "fleet.row.\(row.id)"))
                                     .focusable(false)
@@ -162,10 +214,12 @@ struct FleetList: View {
                                                 .accessibilityIdentifier("fleet.row.\(row.id).removeAction")
                                         }
                                     }
-                                    .overlay(alignment: .trailing) { moreButton(row, endable: endable, shown: more) }
-                                    // The same menu, at the pointer.
+                                    .overlay(alignment: .trailing) {
+                                        moreButton(row, endable: endable, shown: more && !selecting)
+                                    }
+                                    // The same menu, at the pointer; none while choosing.
                                     .onRightClick { point in
-                                        guard endable || removable else { return }
+                                        guard endable || removable, !selecting else { return }
                                         RunMore.show(
                                             menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
                                             action: endable ? .endRun : .remove
@@ -217,14 +271,25 @@ struct FleetList: View {
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
             HStack(spacing: 14) {
-                KeyHint(.agent)
-                KeyHint(.computer)
-                Spacer()
+                if selecting {
+                    Spacer()
+                    ActionButton(
+                        title: batchRunning ? "Removing…" : "Remove \(chosen.count)…", key: nil, prominent: false,
+                        destructive: true, id: "fleet.removeChosen"
+                    ) { removingMany = selectable.filter(chosen.contains) }
+                    .disabled(chosen.isEmpty || batchRunning)
+                } else {
+                    KeyHint(.agent)
+                    KeyHint(.computer)
+                    Spacer()
+                }
             }
             .padding(.horizontal, 16)
             .frame(height: 34)
         }
         .background(Theme.window)
+        // Leaving the Ended runs leaves the choosing.
+        .onChange(of: scope) { endSelection() }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
@@ -234,6 +299,16 @@ struct FleetList: View {
                 case "remove": removing = row
                 case "removeNote": removeNote = FleetWords.removalRefused(.stillRunning)
                 default: break
+                }
+                if let count = RenderWindow.select {
+                    let selectable = selectableKeys(rows)
+                    startSelection()
+                    chosen = Set(selectable.prefix(count ?? selectable.count))
+                    switch RenderWindow.confirm {
+                    case "batch": removingMany = selectable.filter(chosen.contains)
+                    case "batchRun": removeChosen(selectable.filter(chosen.contains))
+                    default: break
+                    }
                 }
             }
         #endif
@@ -257,6 +332,17 @@ struct FleetList: View {
                 answers: [
                     .init(title: "Cancel", kind: .cancel, id: "remove.cancel"),
                     .init(title: "Remove", kind: .destructive, id: "remove.confirm") { remove(row) },
+                ])
+        }
+        // One ask for the whole choice: for one run, its own words; for several, the iPhone's.
+        .confirmation($removingMany) { keys in
+            let one = keys.count == 1 ? rows.first { $0.id == keys[0] } : nil
+            return Confirmation(
+                title: one.map { FleetWords.removeTitle($0.label.project) } ?? FleetWords.removeManyTitle(keys.count),
+                message: one.map { FleetWords.removeKeeps($0.summary.agent.displayName) } ?? FleetWords.removeManyKeeps,
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "removeMany.cancel"),
+                    .init(title: "Remove", kind: .destructive, id: "removeMany.confirm") { removeChosen(keys) },
                 ])
         }
         .confirmation($removeNote) { note in
@@ -290,6 +376,51 @@ struct FleetList: View {
     private func remove(_ row: FleetRow) {
         guard let model = machines.model(for: row.machineID) else { return }
         Task { removeNote = FleetWords.removalRefused(await model.removeSession(row.summary)) }
+    }
+
+    /// The runs a choice can hold, in the list's order: ended, on a computer that removes runs. Only the Ended runs.
+    private func selectableKeys(_ rows: [FleetRow]) -> [String] {
+        guard scope == .finished else { return [] }
+        return rows.filter {
+            $0.status == .ended && $0.summary.isRemovable
+                && machines.model(for: $0.machineID)?.daemonProfile.removesSessions == true
+        }.map(\.id)
+    }
+
+    private func startSelection() {
+        menu.close()
+        batchRefused = [:]
+        selecting = true
+    }
+
+    private func endSelection() {
+        selecting = false
+        chosen = []
+        batchRefused = [:]
+    }
+
+    /// Removes each chosen run in turn; whatever was not removed stays chosen, with its reason on its row.
+    private func removeChosen(_ keys: [String]) {
+        batchRunning = true
+        batchRefused = [:]
+        Task {
+            let refused = await machines.removeSessions(keys: keys)
+            batchRunning = false
+            batchRefused = refused
+            if selecting { chosen = Set(refused.keys) }
+            if let note = batchNote(scope.rows(machines.fleet)) {
+                NSAccessibility.post(
+                    element: NSApp.mainWindow as Any, notification: .announcementRequested,
+                    userInfo: [.announcement: "\(note.title). \(note.reasons)", .priority: NSAccessibilityPriorityLevel.high])
+            }
+        }
+    }
+
+    /// What the last batch did not remove, among these rows, as the iPhone says it.
+    private func batchNote(_ rows: [FleetRow]) -> (title: String, reasons: String)? {
+        let kept = rows.compactMap { batchRefused[$0.id] }
+        guard !kept.isEmpty else { return nil }
+        return ("\(kept.count) not removed", Set(kept).sorted().joined(separator: " · "))
     }
 
     /// The computer the list is narrowed to, when its link is not working, and what it says: the sentence behind the
@@ -468,14 +599,22 @@ private struct FleetLine: View {
     let selected: Bool
     /// The run's "…" stands in its age's place, which hides while it shows: nothing else in the row moves.
     let roomForMore: Bool
+    /// While choosing runs to remove: whether this one is chosen; its box takes the status mark's place.
+    var chosen: Bool? = nil
+    /// Why the last batch did not remove it, in place of what it last did.
+    var refusal: String? = nil
     @State private var lastTick = Date()
 
     private var since: Date { row.lastActive }
 
     var body: some View {
         HStack(spacing: 10) {
-            StateIcon(status: row.status)
-                .accessibilityIdentifier("fleet.row.\(row.id).status")
+            if let chosen {
+                ChooseBox(on: chosen).accessibilityIdentifier("fleet.row.\(row.id).chosen")
+            } else {
+                StateIcon(status: row.status)
+                    .accessibilityIdentifier("fleet.row.\(row.id).status")
+            }
             Text(row.label.inline)
                 .font(Theme.ui(12.5, row.status == .blocked ? .medium : .regular))
                 .foregroundStyle(Theme.text)
@@ -484,7 +623,9 @@ private struct FleetLine: View {
                 .layoutPriority(1)
             // What it is on: the tool call in prose and its argument as code, or else the
             // daemon's own sentence; asked to end, that it is stopping, until it has.
-            if row.status == .stopping {
+            if let refusal {
+                Text(refusal).font(Theme.ui(12)).foregroundStyle(Theme.amber).lineLimit(1).modifier(DropsWhenNarrow())
+            } else if row.status == .stopping {
                 Text("Stopping…").font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
             } else if let activity = row.activity {
                 Text(activity.tool).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(1).modifier(DropsWhenNarrow())
@@ -601,6 +742,24 @@ private struct DropsWhenNarrow: ViewModifier {
 }
 
 /// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you.
+/// A run's box while choosing runs to remove, in the status mark's 13-point place.
+private struct ChooseBox: View {
+    let on: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 3.5).fill(on ? Theme.text : .clear)
+            RoundedRectangle(cornerRadius: 3.5).strokeBorder(on ? Theme.text : Theme.text3, lineWidth: 1.5)
+            if on {
+                Image(systemName: "checkmark").font(.system(size: 7.5, weight: .heavy)).foregroundStyle(Theme.window)
+            }
+        }
+        .frame(width: 13, height: 13)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(on ? "Chosen" : "Not chosen")
+    }
+}
+
 struct StateIcon: View {
     let status: FleetStatus
 
