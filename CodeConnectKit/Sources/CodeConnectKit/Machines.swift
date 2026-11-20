@@ -347,12 +347,14 @@ public final class Machines {
             guard let kinds = UserDefaults.standard.string(forKey: "CC_UNJOINED")?.split(separator: ",") else {
                 return (nil, nil)
             }
+            // One computer per row: a row's id is its computer's host, so one computer cannot show two reasons.
             let air = PeerComputer(name: "macbook-air", host: "macbook-air.tail0000.ts.net", port: 8787)
+            let mini = PeerComputer(name: "mac-mini", host: "mac-mini.tail0000.ts.net", port: 8787)
             let unjoined = kinds.compactMap { kind -> UnjoinedComputer? in
                 switch kind {
                 case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable)
                 case "refused":
-                    return UnjoinedComputer(computer: air, reason: PeerWords.refused("Tailscale device was revoked"))
+                    return UnjoinedComputer(computer: mini, reason: PeerWords.refused("Tailscale device was revoked"))
                 default: return nil
                 }
             }
