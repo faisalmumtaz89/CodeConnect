@@ -29,12 +29,35 @@ public struct UnifiedDiff: Sendable, Hashable {
     /// How many lines of context to keep visible on each side of a change.
     static let contextLines = 3
 
-    /// A line of `preamble` or `trailing` as a person reads it: an untracked name, which the daemon appends as git's
-    /// status prints it (`?? <path>`), is its path with the word a file header gives its kind; any other line stays
-    /// as it is, with no word.
-    public static func reported(_ line: String) -> (text: String, label: String?) {
-        line.hasPrefix("?? ") ? (String(line.dropFirst(3)), "untracked") : (line, nil)
+    /// The lines of `preamble` and `trailing` as a person reads them. ccd appends the untracked files after the diff
+    /// as a header, `# 2 untracked file(s), not shown as a diff:`, then one `#   <path>` line per file
+    /// (`mac/ccd/src/git.rs`). The header is not drawn, since the rows it announces say it; each name under it is its
+    /// path with the word a file header gives its kind. Any other line stays as it is, with no word.
+    public static func reported(_ lines: [String]) -> [(text: String, label: String?)] {
+        var underHeader = false
+        var rows: [(text: String, label: String?)] = []
+        for line in lines {
+            if isUntrackedHeader(line) {
+                underHeader = true
+            } else if underHeader, line.hasPrefix(untrackedIndent) {
+                rows.append((String(line.dropFirst(untrackedIndent.count)), "untracked"))
+            } else {
+                underHeader = false
+                rows.append((line, nil))
+            }
+        }
+        return rows
     }
+
+    /// `# <n> untracked file(s), not shown as a diff:`, as ccd writes it.
+    private static func isUntrackedHeader(_ line: String) -> Bool {
+        guard line.hasPrefix("# "), line.hasSuffix(" untracked file(s), not shown as a diff:") else { return false }
+        let count = line.dropFirst(2).prefix { $0 != " " }
+        return !count.isEmpty && count.allSatisfy(\.isNumber)
+    }
+
+    /// What ccd puts before each untracked name.
+    private static let untrackedIndent = "#   "
 
     // MARK: - Model
 

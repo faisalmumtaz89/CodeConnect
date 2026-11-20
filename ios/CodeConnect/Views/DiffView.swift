@@ -1201,7 +1201,8 @@ struct DiffDocumentView: View {
     @ViewBuilder
     private func extraLines(title: String, lines: [String], metrics: CCDiffMetrics) -> some View {
         let meaningful = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        if !meaningful.isEmpty {
+        let rows = UnifiedDiff.reported(meaningful)
+        if !rows.isEmpty {
             // **The header goes in flush.** `CCSectionHeader` owns the content
             // column now and steps its own label out to 52 from whatever inset
             // it finds itself in; a leading padding added here would step it out
@@ -1209,11 +1210,11 @@ struct DiffDocumentView: View {
             // the document's own 16, where every hunk container starts — they
             // are grid content, and the grid has its own columns.
             VStack(alignment: .leading, spacing: CC.space.xs) {
-                CCSectionHeader(title, note: meaningful.count == 1 ? nil : "\(meaningful.count) lines")
-                // Each as the Kit reads it: a "?? <path>" line is the path and
-                // the word for what it is, as the Mac draws it.
-                ForEach(Array(meaningful.enumerated()), id: \.offset) { _, line in
-                    let reported = UnifiedDiff.reported(line)
+                CCSectionHeader(title, note: rows.count == 1 ? nil : "\(rows.count) lines")
+                // As the Kit reads them: ccd's untracked header goes, and each
+                // name under it is the path and the word for what it is, as the
+                // Mac draws it.
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, reported in
                     HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
                         Text(reported.text)
                             .font(.system(size: metrics.fontSize, design: .monospaced))

@@ -169,8 +169,7 @@ private struct Document: View {
                         // Not selectable: a selectable text is dropped from the combined element, so the names would
                         // be drawn but never read.
                         // Each as a file header names its file: the path, then its kind in a word.
-                        ForEach(Array(extra.enumerated()), id: \.offset) { _, line in
-                            let reported = UnifiedDiff.reported(line)
+                        ForEach(Array(UnifiedDiff.reported(extra).enumerated()), id: \.offset) { _, reported in
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text(verbatim: reported.text.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
                                     .fixedSize(horizontal: false, vertical: true)

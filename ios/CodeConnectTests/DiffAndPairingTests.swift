@@ -31,7 +31,9 @@ final class DiffAndPairingTests: XCTestCase {
         @@ -0,0 +1,2 @@
         +enum New {}
         +// end
-        ?? Sources/Untracked.swift
+
+        # 1 untracked file(s), not shown as a diff:
+        #   Sources/Untracked.swift
         """
 
     func testParsesFilesHunksAndCounts() {
@@ -59,7 +61,7 @@ final class DiffAndPairingTests: XCTestCase {
     /// them would make the diff claim a completeness it does not have.
     func testTrailingUntrackedNamesAreKept() {
         let diff = UnifiedDiff.parse(sample)
-        XCTAssertTrue(diff.trailing.contains("?? Sources/Untracked.swift"))
+        XCTAssertTrue(diff.trailing.contains("#   Sources/Untracked.swift"))
     }
 
     /// Line numbers have to be right on both sides or the diff is worse than
