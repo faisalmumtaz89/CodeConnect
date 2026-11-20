@@ -21,7 +21,8 @@ extension FleetStatus {
         case .failed: return .danger
         case .doneUnreviewed: return .success
         case .running, .stopping: return .neutral
-        case .idle: return .neutral
+        // Seen: as quiet as a run with nothing to show yet.
+        case .done, .idle: return .neutral
         case .ended: return .neutral
         }
     }
@@ -38,7 +39,7 @@ extension FleetStatus {
         case .running: return CC.text.primary
         // On its way to ended: the row's line says Stopping…
         case .stopping: return CC.text.tertiary
-        case .idle: return CC.text.tertiary
+        case .done, .idle: return CC.text.tertiary
         case .ended: return CC.text.disabled
         }
     }

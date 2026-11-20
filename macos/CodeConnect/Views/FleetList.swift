@@ -496,6 +496,9 @@ struct StateIcon: View {
             case .doneUnreviewed:
                 Circle().fill(Theme.text2)
                 Image(systemName: "checkmark").font(.system(size: 6.5, weight: .heavy)).foregroundStyle(Theme.window)
+            case .done:
+                Circle().strokeBorder(Theme.text3, lineWidth: 1.5)
+                Image(systemName: "checkmark").font(.system(size: 6.5, weight: .heavy)).foregroundStyle(Theme.text3)
             case .idle:
                 Circle().strokeBorder(Theme.text3, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
             case .ended:

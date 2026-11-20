@@ -234,7 +234,7 @@ struct DeckView: View {
     }
 
     private var runningCount: Int {
-        machines.fleet.filter { $0.status == .running || $0.status == .idle }.count
+        machines.fleet.filter { [.running, .done, .idle].contains($0.status) }.count
     }
 
     /// Then **120ms of nothing.** Pure `bg`. The pause is what makes the clear

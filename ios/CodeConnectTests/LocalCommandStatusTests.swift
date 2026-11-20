@@ -43,7 +43,7 @@ final class LocalCommandStatusTests: XCTestCase {
             switched.timeline.contains {
                 $0.seq == 22 && $0.content == .userMessage("/model sonnet", isCommand: true)
             }, "the command still draws its row")
-        XCTAssertEqual(try status(switched, reviewedSeq: 9), .idle)
+        XCTAssertEqual(try status(switched, reviewedSeq: 9), .done)
         XCTAssertEqual(try status(switched), .doneUnreviewed, "the turn before it is still new")
     }
 
@@ -53,19 +53,19 @@ final class LocalCommandStatusTests: XCTestCase {
         XCTAssertEqual(try status(prompted, reviewedSeq: 9), .running)
         let answered = await state(try recorded("model-after-turn", through: 30))
         XCTAssertEqual(try status(answered, reviewedSeq: 9), .doneUnreviewed)
-        XCTAssertEqual(try status(answered, reviewedSeq: 30), .idle)
+        XCTAssertEqual(try status(answered, reviewedSeq: 30), .done)
     }
 
     /// `/plan <description>` asks the model: Claude replies to it as to a
     /// prompt, and the session is working from the command's output line on.
     func testAPlanCommandStartsATurn() async throws {
         let before = await state(try recorded("plan-goal", through: 19))
-        XCTAssertEqual(try status(before, reviewedSeq: 19), .idle)
+        XCTAssertEqual(try status(before, reviewedSeq: 19), .done)
         let planned = await state(try recorded("plan-goal", through: 23))
         XCTAssertEqual(try status(planned, reviewedSeq: 19), .running)
         let answered = await state(try recorded("plan-goal", through: 27))
         XCTAssertEqual(try status(answered, reviewedSeq: 19), .doneUnreviewed)
-        XCTAssertEqual(try status(answered, reviewedSeq: 27), .idle)
+        XCTAssertEqual(try status(answered, reviewedSeq: 27), .done)
     }
 
     /// `/goal <condition>` does too, and its turn holds through the line
@@ -77,7 +77,7 @@ final class LocalCommandStatusTests: XCTestCase {
         XCTAssertEqual(try status(told, reviewedSeq: 27), .running)
         let answered = await state(try recorded("plan-goal", through: 35))
         XCTAssertEqual(try status(answered, reviewedSeq: 27), .doneUnreviewed)
-        XCTAssertEqual(try status(answered, reviewedSeq: 35), .idle)
+        XCTAssertEqual(try status(answered, reviewedSeq: 35), .done)
     }
 
     /// Commands typed while a turn runs leave it running to its end:

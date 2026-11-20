@@ -54,6 +54,6 @@ final class BigImagePromptTests: XCTestCase {
     func testItsTurnEndsLikeAnyOther() async throws {
         let answered = await state(try recorded(through: 17))
         XCTAssertEqual(try status(answered, reviewedSeq: 11), .doneUnreviewed)
-        XCTAssertEqual(try status(answered, reviewedSeq: 17), .idle)
+        XCTAssertEqual(try status(answered, reviewedSeq: 17), .done)
     }
 }

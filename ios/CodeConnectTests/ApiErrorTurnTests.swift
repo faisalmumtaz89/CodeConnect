@@ -67,6 +67,6 @@ final class ApiErrorTurnTests: XCTestCase {
         }
         let ended = await state(try recorded(through: 62))
         XCTAssertEqual(try status(ended, reviewedSeq: 54), .doneUnreviewed)
-        XCTAssertEqual(try status(ended, reviewedSeq: 62), .idle)
+        XCTAssertEqual(try status(ended, reviewedSeq: 62), .done)
     }
 }
