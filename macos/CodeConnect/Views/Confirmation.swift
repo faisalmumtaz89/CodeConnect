@@ -78,8 +78,9 @@ private struct ConfirmationHost: ViewModifier {
             .overlay {
                 if let shown = queue.shown.last {
                     ZStack {
-                        // The window under the ask takes no clicks while it is up.
-                        Color.black.opacity(0.45).contentShape(Rectangle()).onTapGesture {}
+                        // The window under the ask takes no clicks while it is up, and is dimmed until no control in it
+                        // reads as live: at 0.6 a row's red-edged button falls below the card's own hairline in contrast.
+                        Color.black.opacity(0.6).contentShape(Rectangle()).onTapGesture {}
                         ConfirmationCard(confirmation: shown.confirmation) { answer in
                             queue.shown.removeAll { $0.owner == shown.owner }
                             shown.close()
