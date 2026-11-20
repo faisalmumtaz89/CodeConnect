@@ -298,14 +298,22 @@ is enforced.
   count the cards a catch-up brings as arrivals. The clock every age reads
   (`AppModel.now`) is set on the change to active or inactive, so no age is a
   second stale on the way back.
-* **A cold open waits to be caught up.** The loader ("Connecting to your computer…")
-  shows until the first link's catch-up ends, then the fleet in one step. The
-  Mac is dialled once the saved fleet is loaded and on screen, so the saved
-  fleet is what the loader holds. A Mac that has not answered gets three seconds
-  of loader, then the saved fleet under the link banner; one that has answered
+* **A cold open waits to be caught up, under the splash.** The system's launch
+  screen is the app's ground alone; the mark's slice (`LaunchMark`, the Mac's
+  too) assembles from it, then breathes until the first link's catch-up ends,
+  and leaves on a loop boundary with the fleet already laid out under it.
+  Nothing fades. Past a second the line under the mark says
+  "Connecting to <computer>…", and when the wait ran out, which computers never
+  answered. The Mac is dialled once the saved fleet is loaded, so the saved
+  fleet is what the splash leaves to. A Mac that has not answered gets three
+  seconds, then the saved fleet under the link banner; one that has answered
   gets until it has caught up, fifteen seconds at most, after which the saved
   fleet shows and the catch-up, still open, updates it once. A refused token
-  ends the wait at once, so its banner shows (`AppModel.waitOutLaunch`).
+  ends the wait at once, so its banner shows (`AppModel.waitOutLaunch`). With
+  no computer set up the intro plays and onboarding is cut to; with Reduce
+  Motion the mark stands still and is cut away. Only a cold launch plays it.
+  After a first pairing the loader ("Connecting to your computer…") covers the
+  same wait.
 * **Cold opens are stamped.** Anything read from disk carries its age until live
   data replaces it, on the fleet and per session.
 * **No optimistic approvals.** A tap shows a spinner; the card only changes when
