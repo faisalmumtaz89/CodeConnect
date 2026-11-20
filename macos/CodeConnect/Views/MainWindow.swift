@@ -185,6 +185,9 @@ private struct Sidebar: View {
     /// Where this Mac's own daemon answers. Its computer, which Setup pairs with again at every launch, is never offered
     /// for removal.
     @State private var address: LocalDaemon.Address?
+    /// The row the arrow keys are on, while the sidebar has the keyboard; Return chooses it.
+    @State private var highlighted: SidebarChoice?
+    @FocusState private var sidebarFocused: Bool
 
     var body: some View {
         let active = FleetScope.active.rows(machines.fleet)
@@ -222,8 +225,9 @@ private struct Sidebar: View {
                                     count: active.filter { $0.machineID == computer.machineID }.count,
                                     selected: filter == narrowed,
                                     roomForMore: more,
-                                    select: { filter = filter == narrowed ? nil : narrowed },
+                                    select: { choose(.filter(narrowed)) },
                                     pairAgain: pairAgain)
+                                .background(lit(.filter(narrowed)), in: RoundedRectangle(cornerRadius: 6))
                                 // A run's "…", as the fleet's rows have it: on hover, its panel holding Remove…; for
                                 // VoiceOver, which does not hover, that is the row's own action. Not on this Mac's own.
                                 .accessibilityActions {
@@ -271,7 +275,7 @@ private struct Sidebar: View {
                             ForEach(projects) { project in
                                 let narrowed = FleetFilter.project(project.id)
                                 let selected = filter == narrowed
-                                Button { filter = selected ? nil : narrowed } label: {
+                                Button { choose(.filter(narrowed)) } label: {
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack(spacing: 8) {
                                             Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text3)
@@ -287,9 +291,10 @@ private struct Sidebar: View {
                                     }
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 5)
-                                    .background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                    .background(selected ? Theme.selected : lit(.filter(narrowed)), in: RoundedRectangle(cornerRadius: 6))
                                 }
                                 .buttonStyle(.hover(id: "sidebar.project.\(project.axID)"))
+                                .focusable(false)
                                 .accessibilityIdentifier("sidebar.project.\(project.axID)")
                                 .accessibilityAddTraits(selected ? .isSelected : [])
                             }
@@ -299,22 +304,20 @@ private struct Sidebar: View {
                 }
                 .padding(.bottom, 12)
             }
-            // ↑ and ↓ walk the sidebar's choices as shown: the scopes, then the computers and projects it narrows to.
+            // One stop for the keyboard: ↑ and ↓ move a highlight through the sidebar's rows as drawn (the scopes, the
+            // computers, the projects) and change nothing; Return chooses the highlighted row.
             .focusable()
+            .focused($sidebarFocused)
             .focusEffectDisabled()
             .onMoveCommand { direction in
                 guard direction == .up || direction == .down else { return }
-                let entries: [SidebarChoice] = [.scope(.active), .scope(.finished)]
-                    + machines.models.filter(\.showsFleet).map { .filter(.computer($0.machineID ?? "")) }
-                    + FleetGroup.groups(scope.rows(machines.fleet), by: .project).map { .filter(.project($0.id)) }
-                let current: SidebarChoice = filter.map { .filter($0) } ?? .scope(scope)
-                switch ListStep.step(from: current, in: entries, down: direction == .down) {
-                case .scope(let chosen)?:
-                    scope = chosen
-                    filter = nil
-                case .filter(let chosen)?: filter = chosen
-                case nil: break
-                }
+                let current = highlighted ?? filter.map { .filter($0) } ?? .scope(scope)
+                highlighted = ListStep.step(from: current, in: choices, down: direction == .down)
+            }
+            .onKeyPress(.return) {
+                guard let highlighted else { return .ignored }
+                choose(highlighted)
+                return .handled
             }
         }
         .background(Theme.sidebar)
@@ -322,12 +325,38 @@ private struct Sidebar: View {
     }
 
 
+    /// The sidebar's rows as drawn, the ones the arrow keys walk.
+    private var choices: [SidebarChoice] {
+        [.scope(.active), .scope(.finished)]
+            + machines.models.filter(\.showsFleet).map { .filter(.computer($0.machineID ?? "")) }
+            + FleetGroup.groups(scope.rows(machines.fleet), by: .project).map { .filter(.project($0.id)) }
+    }
+
+    /// A row chosen, by a click or by Return on its highlight: the sidebar takes the keyboard from it.
+    private func choose(_ choice: SidebarChoice) {
+        switch choice {
+        case .scope(let chosen):
+            scope = chosen
+            filter = nil
+        case .filter(let chosen): filter = filter == chosen ? nil : chosen
+        }
+        highlighted = choice
+        sidebarFocused = true
+    }
+
+    /// The arrow keys' highlight on a row, drawn as the pointer's: only while the sidebar has the keyboard.
+    private func lit(_ choice: SidebarChoice) -> Color {
+        sidebarFocused && highlighted == choice ? Theme.hover : .clear
+    }
+
     private func nav(_ target: FleetScope, symbol: String) -> some View {
-        Button { scope = target } label: {
+        Button { choose(.scope(target)) } label: {
             NavRow(symbol: symbol, title: target.title, count: target.rows(machines.fleet).count,
                 selected: scope == target)
+                .background(lit(.scope(target)), in: RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.hover(id: "sidebar.scope.\(target.rawValue.lowercased())"))
+        .focusable(false)
         .accessibilityIdentifier("sidebar.scope.\(target.rawValue.lowercased())")
         .accessibilityAddTraits(scope == target ? .isSelected : [])
     }
@@ -369,6 +398,7 @@ private struct ComputerRow: View {
             if computer.linkHealth.pairingCures, let address {
                 Button { pairAgain(address) } label: { row(load).contentShape(Rectangle()) }
                     .buttonStyle(.hover(id: "\(id).pairAgain"))
+                    .focusable(false)
                     .accessibilityIdentifier("\(id).pairAgain")
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier(id)
@@ -377,6 +407,7 @@ private struct ComputerRow: View {
                     row(load).background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.hover(id: id))
+                .focusable(false)
                 .accessibilityIdentifier(id)
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
@@ -480,6 +511,8 @@ private struct SidebarHeading: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.hover(radius: 4, id: id))
+                // The sidebar is one stop for the keyboard; ⌘N and ⇧⌘N reach what this adds.
+                .focusable(false)
                 .foregroundStyle(Theme.text2)
                 .help(add.shortcut.map { "\(add.title) (\($0))" } ?? add.title)
                 // Its symbol alone reads "Add", the same in both sections.
