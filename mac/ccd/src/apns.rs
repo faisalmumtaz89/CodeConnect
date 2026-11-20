@@ -450,7 +450,7 @@ pub fn alert(hint: &PushHint) -> (String, String) {
     let title = if hint.project_label.is_empty() {
         "CodeConnect".to_string()
     } else {
-        hint.project_label.clone()
+        title_of(&hint.project_label)
     };
     // **The count is the whole fleet's**, Claude and Codex runs alike: the
     // phone keeps one notification, so it says what everything waiting needs,
@@ -460,6 +460,24 @@ pub fn alert(hint: &PushHint) -> (String, String) {
         n => format!("{n} waiting for you"),
     };
     (title, body)
+}
+
+/// Longest push title, in characters.
+///
+/// A folder name is normally a word. This exists for the one that is not — a
+/// timestamped export directory, a generated worktree — so it cannot run off the
+/// end of a notification title.
+const TITLE_MAX_CHARS: usize = 40;
+
+/// The project's name as a push title: whole up to [`TITLE_MAX_CHARS`], else cut
+/// with "…". Counted in `char`s rather than sliced by byte, so a multi-byte name
+/// is cut between characters instead of through one.
+fn title_of(label: &str) -> String {
+    if label.chars().count() <= TITLE_MAX_CHARS {
+        return label.to_string();
+    }
+    let kept: String = label.chars().take(TITLE_MAX_CHARS - 1).collect();
+    format!("{kept}…")
 }
 
 #[cfg(test)]
@@ -477,6 +495,28 @@ mod tests {
             decisions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
         }
+    }
+
+    /// A folder name too long for a lock screen is cut in the title, and only
+    /// there: the label itself reaches the apps whole.
+    #[test]
+    fn an_overlong_project_is_cut_between_characters_in_the_title() {
+        let mut long = hint(1);
+        long.project_label = "é".repeat(60);
+        let (title, _) = alert(&long);
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
+        assert!(title.ends_with('…'));
+        // The point of counting chars: a byte slice at 39 would have split a
+        // two-byte character and produced invalid UTF-8.
+        assert!(title.chars().take(TITLE_MAX_CHARS - 1).all(|c| c == 'é'));
+        assert_eq!(long.project_label.chars().count(), 60);
+    }
+
+    #[test]
+    fn a_title_exactly_at_the_bound_is_left_alone() {
+        let mut exact = hint(1);
+        exact.project_label = "a".repeat(TITLE_MAX_CHARS);
+        assert_eq!(alert(&exact).0, exact.project_label);
     }
 
     #[test]

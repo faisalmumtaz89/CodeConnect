@@ -1592,10 +1592,10 @@ mod tests {
 
     /// Apple rejects anything over 4KB with `413`.
     ///
-    /// **Through the real resolver, not a hand-picked string.** Hard-coding a
-    /// 40-character label would keep passing if the resolver's own cap were
-    /// raised, while production quietly outgrew the limit. This feeds it a
-    /// pathological directory name and lets it decide how long a label can be.
+    /// **Through the real resolver and title, not a hand-picked string.** Hard-coding
+    /// a 40-character label would keep passing if the title's own cap were raised,
+    /// while production quietly outgrew the limit. This feeds a pathological
+    /// directory name through the label and the payload, which decide its length.
     #[test]
     fn the_payload_stays_well_inside_the_apns_limit() {
         let absurd = "𝔞".repeat(4000);
