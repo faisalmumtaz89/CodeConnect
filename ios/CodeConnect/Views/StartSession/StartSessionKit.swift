@@ -27,10 +27,18 @@ struct StartProjectRow: View {
                     .foregroundStyle(CC.text.tertiary)
                     .lineLimit(1)
                     .truncationMode(.head)
-                Text(startProjectMeta(project))
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // One line: a long branch gives way in its middle, and when
+                // and by which agent it was last used stays whole.
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    if let branch = project.gitBranch {
+                        Text(verbatim: branch).truncationMode(.middle)
+                        Text(verbatim: " · ").fixedSize()
+                    }
+                    Text(startProjectLastUsed(project)).fixedSize()
+                }
+                .lineLimit(1)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             CCIcon("caret-right", size: 16).foregroundStyle(CC.text.tertiary)
