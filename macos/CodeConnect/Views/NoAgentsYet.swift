@@ -27,6 +27,19 @@ struct NoAgentsYet: View {
     }
 }
 
+/// The list before its computers have caught up, or been waited out (the Kit's `waitOutLaunch`, as the iPhone's
+/// loader waits): what is there is still on its way, so it never says there is nothing.
+struct Connecting: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(FleetWords.connecting).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("fleet.connecting")
+    }
+}
+
 /// A computer's list while that computer runs a different version of CodeConnect: what the sidebar's "Different
 /// version" means and what cures it, in the refusal's own sentence, and Try Again once it is cured: a refused
 /// connection does not dial again by itself.
