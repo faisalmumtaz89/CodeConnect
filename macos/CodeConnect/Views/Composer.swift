@@ -44,7 +44,7 @@ private struct EndedLine: View {
 }
 
 /// Over an ended run's foot band, on the conversation's column: the command that picks the conversation up at the
-/// computer (Kit's `resumeCommand`), selectable and copied whole by its button, as the iPhone offers it.
+/// computer (Kit's `resumeCommand`), drawn whole, selectable and copied whole by its button, as the iPhone offers it.
 private struct ResumeCommand: View {
     let command: String
     @State private var copied = false
@@ -53,8 +53,9 @@ private struct ResumeCommand: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text2)
             HStack(spacing: 8) {
+                // Whole, wrapping where it must: a cut would hide what runs.
                 Text(command).font(Theme.mono(12)).foregroundStyle(Theme.text)
-                    .lineLimit(1).truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
