@@ -572,11 +572,8 @@ public enum TimelineBuilder {
                                 kind: .sessionStart,
                                 symbol: "play-circle",
                                 title: title,
-                                // Through the one model mapper, so no two
-                                // places disagree about the same id; one this
-                                // build does not recognise passes through
-                                // verbatim.
-                                detail: event.modelName.map { ModelDisplay.from($0).line },
+                                // The model as the agent reported it.
+                                detail: event.modelName,
                                 severity: .info))))
 
             case .linkState:

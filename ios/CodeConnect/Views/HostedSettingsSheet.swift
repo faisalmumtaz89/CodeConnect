@@ -158,7 +158,7 @@ struct HostedSettingsSheet: View {
         CCSectionHeader("Model")
         card {
             if let modelFact, !modelFact.isEmpty {
-                CCRow(ModelDisplay.from(modelFact).line, showsChevron: false, separator: false) {
+                CCRow(modelFact, showsChevron: false, separator: false) {
                     CCIcon("check-circle-fill", size: 18, relativeTo: .body)
                         .foregroundStyle(CC.text.primary)
                 } trailing: { EmptyView() } meta: { EmptyView() }

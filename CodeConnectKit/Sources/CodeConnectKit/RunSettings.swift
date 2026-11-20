@@ -11,8 +11,8 @@ public enum RunSettings: Sendable, Hashable {
     /// nothing.
     case deferToOtherPath
     /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
-    /// No picker: the model fact, carried as it arrived, shows read-only by `ModelDisplay`'s name (no label
-    /// lookup without a menu to match against), and no effort or mode line at all.
+    /// No picker: the model fact shows read-only, exactly as it arrived (no label lookup without a menu to
+    /// match against), and no effort or mode line at all.
     case hostedReadOnly(model: String?)
     /// A live hosted Claude run offering its menus.
     case hostedLive(HostedSettings)
@@ -45,26 +45,38 @@ public enum RunSettings: Sendable, Hashable {
         let selectedEffort = summary.effort
             .flatMap { fact in efforts.first { $0.value == fact.value } }
         // The one string drawn for the run's model — the button, the header: the model the run is on once
-        // it has said so, by `modelName`; before that the selected entry's label, and the raw fact only when
+        // it has said so, by `modelName`; before that the selected entry's label, and the fact as sent only when
         // the daemon named no selection. "Default" is a row of the menu, never the run's model.
         let modelDisplay = confirmed.map { modelName(confirmed: $0, menus: menus) }
-            ?? selectedModel?.label ?? summary.model?.value ?? ""
+            ?? selectedModel.map { RunModelName(text: $0.label, reported: false) }
+            ?? RunModelName(text: summary.model?.value ?? "", reported: summary.model != nil)
 
         return .hostedLive(
             HostedSettings(
                 models: models, modes: menus.modes,
                 selectedModel: selectedModel, selectedMode: selectedMode,
                 efforts: efforts, selectedEffort: selectedEffort,
-                modelDisplay: modelDisplay, inFlight: inFlight, lastOutcome: lastOutcome))
+                modelDisplay: modelDisplay.text, modelDisplayReported: modelDisplay.reported, inFlight: inFlight,
+                lastOutcome: lastOutcome))
     }
 
-    /// The model a run is on, as a line names it: the label of the run's menu entry whose `value` is
-    /// that model, so the line and the settings button spell one model alike, and `ModelDisplay` for
-    /// a model no entry carries (a Claude run's full id, or its receipt's `alias (full-id)` until the
-    /// next turn's init) or a run with no menus.
-    public static func modelName(confirmed: String, menus: RunMenus?) -> String {
-        menus?.models.first { $0.value == confirmed }?.shown.label ?? ModelDisplay.from(confirmed).name
+    /// The model a run is on, as a line names it: the label of the run's menu entry whose `value` is that
+    /// model (a Codex run's), so the line and the settings button spell one model alike; else the model
+    /// exactly as the agent reported it (a Claude run's id at its init, or its receipt until the next init),
+    /// which nothing here rewrites.
+    public static func modelName(confirmed: String, menus: RunMenus?) -> RunModelName {
+        if let row = menus?.models.first(where: { $0.value == confirmed }) {
+            return RunModelName(text: row.shown.label, reported: false)
+        }
+        return RunModelName(text: confirmed, reported: true)
     }
+}
+
+/// The model a run is on, as a single line names it.
+public struct RunModelName: Sendable, Hashable {
+    public let text: String
+    /// `text` is the agent's own report of the model, not a menu row's label: drawn in code type.
+    public let reported: Bool
 }
 
 /// A live hosted run's settings, ready to draw. The menus are the daemon's own; the selection and the
@@ -82,9 +94,11 @@ public struct HostedSettings: Sendable, Hashable {
     public let efforts: [EffortChoice]
     public let selectedEffort: EffortChoice?
     /// The model string for a single-line surface (the button, the header): the model the run has
-    /// confirmed, by `RunSettings.modelName`; before it has, the selected row's label, or the raw fact
+    /// confirmed, by `RunSettings.modelName`; before it has, the selected row's label, or the fact as sent
     /// when nothing matched.
     public let modelDisplay: String
+    /// `modelDisplay` is the agent's own report of the model, not a row's label: drawn in code type.
+    public let modelDisplayReported: Bool
     /// A set call is in flight: the menus are disabled, and the selection stays on the current fact.
     public let inFlight: Bool
     /// The last answer still worth showing — retained until that setting's fact moves past it (an answer

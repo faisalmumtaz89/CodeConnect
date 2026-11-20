@@ -270,7 +270,7 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(
             shape(items), ["you", "reply:Done.", "notice:Turn complete", "notice:Run resumed"])
         guard case .notice(let notice)? = items.last?.content else { return XCTFail("\(shape(items))") }
-        XCTAssertEqual(notice.detail, "Opus 5 · 1M context")
+        XCTAssertEqual(notice.detail, "claude-opus-5[1m]")
         let result = await status(events)
         XCTAssertEqual(result, .done, "a start is not work: the turn before it ended")
     }

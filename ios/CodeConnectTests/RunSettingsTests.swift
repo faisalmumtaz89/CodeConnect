@@ -189,36 +189,62 @@ final class RunSettingsTests: XCTestCase {
     func testARunsModelMatchingAMenuEntryReadsByItsLabel() throws {
         let run = try summary("session_codex_live", in: "codex-settings-wire")
         XCTAssertEqual(run.model?.value, "gpt-6.1-sol")
-        XCTAssertEqual(RunSettings.modelName(confirmed: "gpt-6.1-sol", menus: run.menus), "GPT-6.1-Sol")
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "gpt-6.1-sol", menus: run.menus),
+            RunModelName(text: "GPT-6.1-Sol", reported: false))
     }
 
-    /// A Claude run's model fact is claude's full id, which no menu entry carries: it reads as the id's
-    /// own name, while the button names the setting.
-    func testARunsModelMatchingNoEntryReadsByItsOwnName() throws {
+    /// A Claude run's model fact is claude's full id, which no menu entry carries: it reads as the id,
+    /// exactly as reported, while the button names the setting.
+    func testARunsModelMatchingNoEntryReadsAsReported() throws {
         let run = try summary("session_hosted_live_init")
         XCTAssertNotNil(run.menus)
-        XCTAssertEqual(RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus), "Sonnet 5.5")
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus),
+            RunModelName(text: "claude-sonnet-5-5", reported: true))
+        // A model this build has never heard of reads the same way: nothing here names models.
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "claude-opus-6", menus: run.menus),
+            RunModelName(text: "claude-opus-6", reported: true))
     }
 
-    /// A run with no menus has nothing to match: its model reads as the id's own name.
-    func testARunsModelWithNoMenusReadsByItsOwnName() throws {
+    /// A run with no menus has nothing to match: its model reads as reported.
+    func testARunsModelWithNoMenusReadsAsReported() throws {
         let run = try summary("session_hosted_live_minor_38")
         XCTAssertNil(run.menus)
-        XCTAssertEqual(RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus), "Sonnet 5.5")
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus),
+            RunModelName(text: "claude-sonnet-5-5", reported: true))
     }
 
     /// After an app's model change a Claude run's fact is claude's receipt, which no entry carries: it
-    /// reads by the id the receipt names, as the next turn's init will.
-    func testARunsModelAfterAChangeReadsByTheIDItsReceiptNames() throws {
+    /// reads as sent, until the next turn's init reports the id.
+    func testARunsModelAfterAChangeReadsAsItsReceipt() throws {
         let run = try summary("session_hosted_live")
         XCTAssertEqual(run.model?.value, "sonnet (claude-sonnet-5-5)")
         XCTAssertEqual(
-            RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus), "Sonnet 5.5")
+            RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus),
+            RunModelName(text: "sonnet (claude-sonnet-5-5)", reported: true))
     }
 
-    /// A row the agent labels with its id alone reads as that id.
-    func testARunsModelOnAnIDOnlyRowReadsAsTheID() throws {
+    /// A row the agent labels with its id alone reads by that row's label.
+    func testARunsModelOnAnIDOnlyRowReadsByItsLabel() throws {
         let run = try summary("session_codex_unlisted_default", in: "codex-settings-wire")
-        XCTAssertEqual(RunSettings.modelName(confirmed: "stub-model", menus: run.menus), "stub-model")
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "stub-model", menus: run.menus),
+            RunModelName(text: "stub-model", reported: false))
+    }
+
+    /// Each menu row carries the agent's own description, exactly as the daemon sent it from the agent:
+    /// Claude Code 2.1.319's (its version inside), and Codex 0.167.0's.
+    func testAMenuRowKeepsTheAgentsDescriptionAsSent() throws {
+        let claude = try summary("session_hosted_live")
+        let sonnet = try XCTUnwrap(claude.menus?.models.first { $0.value == "sonnet" })
+        XCTAssertEqual(sonnet.detail, "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok")
+        let codex = try summary("session_codex_live", in: "codex-settings-wire")
+        let sol = try XCTUnwrap(codex.menus?.models.first { $0.value == "gpt-6.1-sol" })
+        XCTAssertEqual(sol.detail, "Latest workhorse model for coding and everyday work.")
+        guard case .hostedLive(let s) = RunSettings.of(summary: claude) else { return XCTFail("hostedLive") }
+        XCTAssertEqual(s.models.first { $0.value == "sonnet" }?.detail, sonnet.detail)
     }
 }

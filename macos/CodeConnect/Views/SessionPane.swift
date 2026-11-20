@@ -130,7 +130,7 @@ private struct Heading: View {
                 .accessibilityIdentifier(row.status == .ended ? "session.ended" : "session.state")
                 HStack(spacing: 6) {
                     AgentMark(agent: row.summary.agent)
-                    Text(agentLine)
+                    agentLine
                 }
                 if let diff = row.summary.diffStat {
                     LineDelta(added: diff.added, removed: diff.removed).accessibilityIdentifier("session.diffStat")
@@ -158,14 +158,13 @@ private struct Heading: View {
     }
 
     /// The agent, and the model it says it runs when it has said: by the label of the run's menu entry for that
-    /// model when there is one, so the line and the settings list spell it alike (Kit's `modelName`).
-    private var agentLine: String {
-        [
-            row.summary.agent.productName,
-            model.confirmedModel(for: row.id).map { RunSettings.modelName(confirmed: $0.name, menus: row.summary.menus) },
-        ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
+    /// model when there is one, so the line and the settings list spell it alike, else as the agent reported it, in
+    /// code type (Kit's `modelName`).
+    private var agentLine: Text {
+        let agent = Text(row.summary.agent.productName)
+        guard let confirmed = model.confirmedModel(for: row.id) else { return agent }
+        let name = RunSettings.modelName(confirmed: confirmed.name, menus: row.summary.menus)
+        return agent + Text(" · ") + (name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))
     }
 }
 
