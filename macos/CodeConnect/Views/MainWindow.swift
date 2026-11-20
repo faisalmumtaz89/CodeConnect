@@ -63,7 +63,9 @@ struct MainWindow: View {
                 // The list hides only beside a run that shows: the window is never left empty.
                 let showsList = !listHidden || !showsRun
                 if showsList {
-                    FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
+                    FleetList(
+                        scope: $scope, grouping: $grouping, filter: $filter, opened: $opened, pairAgain: pairAgain
+                    ) { adding = .agent }
                         // Kept when the person changes it, never at launch.
                         .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
                         // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
@@ -475,23 +477,45 @@ private struct UnjoinedComputerRow: View {
                 Text(unjoined.computer.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button(PeerWords.tryAgain.titleStyle, action: act)
-                    .buttonStyle(.hover(bare: true, id: "\(id).act"))
-                    .font(Theme.ui(11.5))
-                    .foregroundStyle(Theme.text2)
-                    .accessibilityIdentifier("\(id).act")
             }
-            Text(unjoined.reason)
-                .font(Theme.ui(10.5))
-                .foregroundStyle(Theme.text3)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 24)
+            NotConnectedLine(text: unjoined.reason, action: (PeerWords.tryAgain, "\(id).act", act))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)
+    }
+}
+
+/// A computer row's second line while it is not connected, one shape for both kinds of row (a paired computer whose
+/// link is not working, a computer that has not joined): why, quiet, under the name, and the one thing to do at its
+/// trailing edge, beside the first line of why; where why says what the action says, the action alone, where why would
+/// start. The name line above keeps its whole width.
+private struct NotConnectedLine: View {
+    let text: String
+    let action: (title: String, id: String, run: () -> Void)?
+
+    var body: some View {
+        let words = LinkNotice.words(text, beside: action?.title)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let words {
+                Text(words)
+                    .font(Theme.ui(10.5))
+                    .foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let action {
+                Button(action.title.titleStyle, action: action.run)
+                    .buttonStyle(.hover(bare: true, id: action.id))
+                    .font(Theme.ui(11))
+                    .foregroundStyle(Theme.text2)
+                    .fixedSize()
+                    .accessibilityIdentifier(action.id)
+            }
+            if words == nil { Spacer(minLength: 0) }
+        }
+        .padding(.leading, 24)
     }
 }
 
@@ -522,27 +546,37 @@ private struct ComputerRow: View {
             diskUsed: stats.diskUsed, diskTotal: stats.diskTotal)
     }
 
+    /// What the row does about a link that is not working, where the iPhone's banner offers it: Try Again where the
+    /// link can be asked again (a different version too, once it is cured, since a refusal does not dial again by
+    /// itself), Pair Again where the pairing or its address has to change.
+    private var act: (title: String, id: String, run: () -> Void)? {
+        let health = computer.linkHealth
+        switch health.notice?.action {
+        case .retry, .tailscale:
+            return (PeerWords.tryAgain, "\(id).tryAgain", { computer.connection.retryNow() })
+        case .settings where health.cause == .refused(.differentVersion):
+            return (PeerWords.tryAgain, "\(id).tryAgain", { computer.connection.retryNow() })
+        case .settings:
+            guard let address else { return nil }
+            return (LinkHealth.pairAgain, "\(id).pairAgain", { pairAgain(address) })
+        case nil:
+            return nil
+        }
+    }
+
     var body: some View {
         let load = load
-        Group {
-            if computer.linkHealth.pairingCures, let address {
-                Button { pairAgain(address) } label: { row(load).contentShape(Rectangle()) }
-                    .buttonStyle(.hover(id: "\(id).pairAgain"))
-                    .focusable(false)
-                    .accessibilityIdentifier("\(id).pairAgain")
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier(id)
-            } else {
-                Button(action: select) {
-                    row(load).background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.hover(id: id))
-                .focusable(false)
-                .accessibilityIdentifier(id)
-                .accessibilityAddTraits(selected ? .isSelected : [])
-            }
+        Button(action: select) {
+            row(load).background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
         }
-        .help([computer.machineSystem, computer.linkHealth.word, load?.line].compactMap { $0 }.joined(separator: " · "))
+        .buttonStyle(.hover(id: id))
+        .focusable(false)
+        .accessibilityIdentifier(id)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        // The whole sentence, as the list says it when narrowed to this computer.
+        .help(
+            [computer.machineSystem, computer.linkHealth.notice?.sentence ?? computer.linkHealth.word, load?.line]
+                .compactMap { $0 }.joined(separator: " · "))
         .task { await computer.keepMachineStatsFresh() }
     }
 
@@ -569,10 +603,9 @@ private struct ComputerRow: View {
                 }
                 .padding(.leading, 24)
             } else {
-                Text(computer.linkHealth.word)
-                    .font(Theme.ui(10.5))
-                    .foregroundStyle(Theme.text3)
-                    .padding(.leading, 24)
+                // A link that is not working says its notice's title, whole, and beside it its one action: the
+                // sentence is the list's, when narrowed to this computer, and the tooltip's.
+                NotConnectedLine(text: computer.linkHealth.notice?.title ?? computer.linkHealth.word, action: act)
             }
         }
         .padding(.horizontal, 8)
