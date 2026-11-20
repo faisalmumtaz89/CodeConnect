@@ -61,6 +61,8 @@
         static var pickedFolder: String? { UserDefaults.standard.string(forKey: "CC_PICK_FOLDER") }
         /// `-CC_MODEL_MENU YES`: Start an agent opens with its model menu open.
         static var opensModelMenu: Bool { UserDefaults.standard.bool(forKey: "CC_MODEL_MENU") }
+        /// `-CC_TOOL_INPUT YES`: a Claude card opens its "Full tool input".
+        static var opensToolInput: Bool { UserDefaults.standard.bool(forKey: "CC_TOOL_INPUT") }
         /// `-CC_RUN_MENU <session uid>`: the list opens that run's "…" panel once the run is listed and can be ended or
         /// removed.
         static var openRunMenu: String? { UserDefaults.standard.string(forKey: "CC_RUN_MENU") }

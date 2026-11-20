@@ -6,6 +6,7 @@ User-facing changes, newest first. Mac releases are cut per
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
 - On the Mac, a button you can't use right now is dimmed, everywhere in the app, in one way.
+- On the Mac, a request's full tool input lists its ids and risk as labelled lines, one each, and "Allow for this session" says what it grants, above its buttons.
 - On the Mac, the update window opens centred over the main window, as wide as the setup checklist,
   and ends at its own padding: no empty band under its buttons, and no footer on a step that has none.
 - On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
