@@ -188,6 +188,24 @@ async fn main() -> Result<()> {
             }
         });
     }
+    // A listener on this node's tailnet address beside a LAN `ws_bind`, so the owner's other computers, which
+    // find this one by its tailnet name, reach it (`BindPlan::tailnet_listener`). Plaintext, as on any tailnet
+    // bind without a certificate: WireGuard carries it, so it is private on that path, and the LAN listener's
+    // certificate, issued for a LAN name, would not match the tailnet name a peer dials. Who gets in is
+    // unchanged: a pairing code, a token, or Tailscale's word that the sender is the owner's own untagged,
+    // unblocked device (`admit_tailnet_device`). Nothing is opened to the LAN. A failure to bind is logged and
+    // survived: the main listener is the daemon's.
+    if let Some(tailnet) = plan.tailnet_listener {
+        let daemon = Arc::clone(&daemon);
+        let token = Arc::clone(&token);
+        tokio::spawn(async move {
+            let trust = ws_server::PlaintextTrust::TrustedPath;
+            crate::log_info!("also listening on the tailnet at {tailnet}, for the owner's other computers");
+            if let Err(err) = ws_server::serve(daemon, tailnet, token, None, trust).await {
+                crate::log_warn!("tailnet listener unavailable ({err:#}); other computers reach this one only by its LAN address");
+            }
+        });
+    }
     // The backstop for every way a hosted run can end without anybody being left
     // to say so: the daemon down at the moment its host died, a Mac that slept
     // through it. Every run this process inherited was last seen by a *previous*
@@ -579,6 +597,10 @@ struct BindPlan {
     bind_is_tailnet: bool,
     /// What this start does about a tailnet address that is not there yet.
     watch_tailnet: TailnetWatch,
+    /// A second listener on this node's tailnet IPv4, when the operator bound the main one to an address that is
+    /// not on the tailnet (a LAN `ws_bind`): the owner's other computers find this one by its tailnet name, and
+    /// without it a computer bound to its LAN is listed to them and unreachable by them.
+    tailnet_listener: Option<SocketAddr>,
 }
 
 /// How the bind address was arrived at.
@@ -930,6 +952,12 @@ impl Drop for LaunchdLabelEnv {
 fn plan_bind(config: &Config, tailnet: &[IpAddr], managed_by_codeconnect_job: bool) -> BindPlan {
     if let Some(ip) = explicit_bind_ip(config) {
         let (trust, opt_in) = plaintext_admission(config, ip, tailnet);
+        // Not beside a loopback bind, which asks for a daemon nothing else reaches, nor a wildcard one, which
+        // already listens on the tailnet address.
+        let tailnet_listener = (!tailnet.contains(&ip) && !ip.is_loopback() && !ip.is_unspecified())
+            .then(|| preferred_tailnet_ip(tailnet))
+            .flatten()
+            .map(|tailnet_ip| SocketAddr::new(tailnet_ip, config.ws_port));
         return BindPlan {
             bind: SocketAddr::new(ip, config.ws_port),
             trust,
@@ -940,6 +968,7 @@ fn plan_bind(config: &Config, tailnet: &[IpAddr], managed_by_codeconnect_job: bo
             // An operator who named an address is not waiting for a different
             // one, and exiting on them would be a daemon that will not stay up.
             watch_tailnet: TailnetWatch::Idle,
+            tailnet_listener,
         };
     }
 
@@ -952,6 +981,7 @@ fn plan_bind(config: &Config, tailnet: &[IpAddr], managed_by_codeconnect_job: bo
             tailnet_confirmed: true,
             bind_is_tailnet: true,
             watch_tailnet: TailnetWatch::Idle,
+            tailnet_listener: None,
         };
     }
 
@@ -971,6 +1001,7 @@ fn plan_bind(config: &Config, tailnet: &[IpAddr], managed_by_codeconnect_job: bo
         } else {
             TailnetWatch::Report
         },
+        tailnet_listener: None,
     }
 }
 
@@ -2362,6 +2393,26 @@ mod tests {
                 "advising a key that does nothing here: {advice}"
             );
         }
+    }
+
+    /// **A LAN `ws_bind` also listens on this node's tailnet IPv4**, where the owner's other computers dial it by
+    /// its tailnet name; no other plan adds a listener. Must-fail: leave `tailnet_listener` `None` on the explicit
+    /// branch and the first assertion fails.
+    #[test]
+    fn a_lan_bind_also_listens_on_the_tailnet_and_nothing_else_does() {
+        let lan = plan_bind(&config_with(Some("192.168.1.20")), &tailnet(), false);
+        assert_eq!(lan.tailnet_listener, Some("100.64.12.34:8787".parse().unwrap()), "{lan:?}");
+
+        // Bound on the tailnet already, on loopback, or on every address: nothing to add.
+        for bind in ["100.64.12.34", "127.0.0.1", "0.0.0.0"] {
+            let plan = plan_bind(&config_with(Some(bind)), &tailnet(), false);
+            assert_eq!(plan.tailnet_listener, None, "{bind}");
+        }
+        // No tailnet address known: nothing to listen on.
+        assert_eq!(plan_bind(&config_with(Some("192.168.1.20")), &[], false).tailnet_listener, None);
+        // The tailnet plan and the loopback fallback bind what they bind.
+        assert_eq!(plan_bind(&config_with(None), &tailnet(), false).tailnet_listener, None);
+        assert_eq!(plan_bind(&config_with(None), &[], false).tailnet_listener, None);
     }
 
     #[test]
