@@ -879,16 +879,22 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-hosted-settings-model",
             purpose:
-                "the hosted settings sheet at its top — the Model section, each model by its name alone",
+                "the hosted settings sheet at its top — the Model section, each model by its name with the agent's own "
+                + "description beside it, on one line",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                try driver.require(driver.element(containing: "Sonnet", in: app), "the Sonnet model row")
-                // The menu's entries carry a description and pricing; the sheet names the model only.
-                if driver.element(containing: "per Mtok", in: app).exists {
-                    throw RenderFailure.unreachable("the model rows without their description and pricing")
+                // One row holds the name and, beside it, the description as the agent sends it, price included.
+                let sonnet = driver.element(
+                    containing: "Sonnet, Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app)
+                try driver.require(sonnet, "the Sonnet row with its description beside its name")
+                // On one line: the row is no taller than a row with no description, as an effort's.
+                let effort = driver.element(containing: "Extra high", in: app)
+                try driver.require(effort, "an effort row to measure the Sonnet row against")
+                if sonnet.frame.height > effort.frame.height + 1 {
+                    throw RenderFailure.unreachable("the Sonnet row on one line")
                 }
             }),
         RenderScenario(
