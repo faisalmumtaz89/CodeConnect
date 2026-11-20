@@ -104,14 +104,11 @@ struct SheetBar<Leading: View>: View {
             HStack(spacing: 8) {
                 leading
                 Spacer()
+                // The secondary answer in the app's one footer style, Set Up's and the update window's: a bordered
+                // button beside the filled one, the same height and corners.
                 if let cancel {
-                    Button(cancelTitle, action: cancel)
-                        // Beside the action it lightens, so nothing of it reaches that button; alone, a bare word's plate.
-                        .buttonStyle(.hover(over: action != nil, bare: action == nil, flush: .trailing, id: cancelID))
-                        .font(Theme.ui(12.5))
-                        .foregroundStyle(Theme.text2)
+                    ActionButton(title: cancelTitle, key: nil, prominent: false, id: cancelID, action: cancel)
                         .keyboardShortcut(.cancelAction)
-                        .accessibilityIdentifier(cancelID)
                 }
                 if let action {
                     ActionButton(title: action, key: "⌘↩", prominent: true, id: actionID, action: perform)
