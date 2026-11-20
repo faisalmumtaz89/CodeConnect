@@ -707,7 +707,7 @@ struct StartStepsSheet: View {
         return offered.first(where: \.isDefault)
     }
 
-    /// Reached only from Ready's Model row: each model by its name alone, the
+    /// Reached only from Ready's Model row: each model by its name, its description beside it, the
     /// one a start would name checked. A tap chooses it and goes back.
     @ViewBuilder
     private var modelStep: some View {
@@ -720,11 +720,21 @@ struct StartStepsSheet: View {
                             modelValue = choice.model
                             withAnimation(CC.motion.medium) { _ = trail.popLast() }
                         } label: {
-                            HStack(spacing: CC.space.sm) {
+                            HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
                                 Text(choice.isDefault ? "Default" : choice.label)
                                     .ccType(CC.type.body)
                                     .foregroundStyle(CC.text.primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .layoutPriority(1)
+                                // The agent's own description, as sent, beside the name: quieter, one line, cut at
+                                // its end.
+                                if let detail = choice.detail {
+                                    Text(detail)
+                                        .ccType(CC.type.footnote)
+                                        .foregroundStyle(CC.text.tertiary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                }
+                                Spacer(minLength: 0)
                                 if choice == current {
                                     CCIcon("check-circle-fill", size: 18, relativeTo: .body)
                                         .foregroundStyle(CC.text.primary)

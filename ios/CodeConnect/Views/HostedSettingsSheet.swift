@@ -72,7 +72,7 @@ struct HostedSettingsSheet: View {
         card {
             ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
                 choiceRow(
-                    title: entry.label,
+                    title: entry.label, detail: entry.detail,
                     isSelected: live.selectedModel?.value == entry.value,
                     isLast: index == live.models.count - 1, disabled: live.inFlight
                 ) { await model.setModel(for: sessionKey, modelValue: entry.value) }
@@ -119,11 +119,12 @@ struct HostedSettingsSheet: View {
     /// its tap — disabled while any call is in flight (the menus are one unit) and on the row already in
     /// force (there is nothing to apply).
     private func choiceRow(
-        title: String, isSelected: Bool, isLast: Bool, disabled: Bool,
+        title: String, detail: String? = nil, isSelected: Bool, isLast: Bool, disabled: Bool,
         apply: @escaping () async -> SettingResult?
     ) -> some View {
         CCRow(
             title,
+            titleDetail: detail,
             showsChevron: false,
             separator: !isLast,
             action: (disabled || isSelected) ? nil : { run(apply) }
@@ -155,7 +156,8 @@ struct HostedSettingsSheet: View {
         CCSectionHeader("Model")
         card {
             if let modelFact, !modelFact.isEmpty {
-                CCRow(modelFact, showsChevron: false, separator: false) {
+                // The model as the run reported it: an id, in code type.
+                CCRow(modelFact, titleIsMono: true, showsChevron: false, separator: false) {
                     CCIcon("check-circle-fill", size: 18, relativeTo: .body)
                         .foregroundStyle(CC.text.primary)
                 } trailing: { EmptyView() } meta: { EmptyView() }

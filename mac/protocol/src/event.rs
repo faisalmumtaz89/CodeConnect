@@ -566,8 +566,8 @@ pub struct RunMenus {
     pub selected_model: Option<String>,
 }
 
-/// One model of a run's menu: claude's own `value`, its name, what claude says of it, and
-/// the efforts it takes.
+/// One model of a run's menu: claude's own `value`, its name, what claude says of it, the
+/// efforts it takes, and (minor 45) the model id it stands for now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuModel {
     pub value: String,
@@ -575,6 +575,11 @@ pub struct MenuModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub efforts: Vec<String>,
+    /// The model id the agent says this entry runs (Claude Code's `resolvedModel`:
+    /// `default` and `opus` both `claude-opus-5-5`), so an app names the model a run is on
+    /// by a structured field rather than a sentence. Absent when the agent gives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
 }
 
 /// One permission mode of a run's menu. `confirm` (minor 40) marks the mode that asks nothing

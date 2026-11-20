@@ -32,7 +32,7 @@ struct HostedSettingsBar: View {
             // still-starting run has no model fact yet; it shows nothing rather than a "Model" placeholder.
             if let fact, !fact.isEmpty {
                 row {
-                    label(modelName: fact, mode: nil)
+                    label(modelName: fact, mono: true, mode: nil)
                         .foregroundStyle(CC.text.secondary)
                         .accessibilityIdentifier("session.composer.model")
                 }
@@ -43,6 +43,7 @@ struct HostedSettingsBar: View {
             row {
                 Button(action: onOpen) {
                     label(modelName: settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
+                          mono: settings.modelDisplayReported && !settings.modelDisplay.isEmpty,
                           mode: settings.standingMode)
                         .frame(minHeight: 44)
                         .contentShape(Rectangle())
@@ -68,18 +69,20 @@ struct HostedSettingsBar: View {
     }
 
     @ViewBuilder
-    private func label(modelName: String, mode: MenuMode?) -> some View {
+    /// `mono`: the name is the agent's own report of the model (an id), drawn in code type.
+    private func label(modelName: String, mono: Bool, mode: MenuMode?) -> some View {
         let icon = Image(systemName: "slider.horizontal.3").accessibilityHidden(true)
+        let name = Text(modelName).fontDesign(mono ? .monospaced : nil)
         Group {
             if typeSize.isAccessibilitySize, let mode {
                 VStack(alignment: .trailing, spacing: 1) {
-                    HStack(spacing: 4) { icon; Text(modelName).lineLimit(1).truncationMode(.tail) }
+                    HStack(spacing: 4) { icon; name.lineLimit(1).truncationMode(.tail) }
                     Text(mode.label).lineLimit(1).foregroundStyle(modeStyle(mode))
                 }
             } else {
                 HStack(spacing: 4) {
                     icon
-                    Text(modelName).lineLimit(1).truncationMode(.tail)
+                    name.lineLimit(1).truncationMode(.tail)
                     if let mode {
                         Text("·")
                         // The model yields first (no priority, truncates) so the mode — the one thing this

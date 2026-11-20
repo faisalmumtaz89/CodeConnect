@@ -60,13 +60,18 @@ public enum RunSettings: Sendable, Hashable {
                 lastOutcome: lastOutcome))
     }
 
-    /// The model a run is on, as a line names it: the label of the run's menu entry whose `value` is that
-    /// model (a Codex run's), so the line and the settings button spell one model alike; else the model
-    /// exactly as the agent reported it (a Claude run's id at its init, or its receipt until the next init),
-    /// which nothing here rewrites.
+    /// The model a run is on, as a line names it, from structured fields only: the label of the run's menu entry
+    /// whose `value` is that model (a Codex run's), so the line and the settings button spell one model alike; else
+    /// the model id of the entry the daemon says is chosen (its `resolvedModel`, or its `value` when the agent gives
+    /// none), which is the id a Claude run's init reports, and after a change the id of the entry the app set: never
+    /// the text of claude's receipt, whose one job is to confirm the change. With no chosen entry, the model as the
+    /// agent reported it.
     public static func modelName(confirmed: String, menus: RunMenus?) -> RunModelName {
         if let row = menus?.models.first(where: { $0.value == confirmed }) {
             return RunModelName(text: row.shown.label, reported: false)
+        }
+        if let chosen = menus?.models.first(where: { $0.value == menus?.selectedModel }) {
+            return RunModelName(text: chosen.resolvedModel ?? chosen.value, reported: true)
         }
         return RunModelName(text: confirmed, reported: true)
     }

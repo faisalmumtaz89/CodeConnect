@@ -118,6 +118,7 @@
             "max"
           ],
           "label": "Default (recommended)",
+          "resolved_model": "claude-opus-5-5",
           "value": "default"
         },
         {
@@ -130,6 +131,7 @@
             "max"
           ],
           "label": "Sonnet",
+          "resolved_model": "claude-sonnet-5-5",
           "value": "sonnet"
         }
       ],
@@ -280,6 +282,7 @@
             "max"
           ],
           "label": "Default (recommended)",
+          "resolved_model": "claude-opus-5-5",
           "value": "default"
         },
         {
@@ -292,6 +295,7 @@
             "max"
           ],
           "label": "Sonnet",
+          "resolved_model": "claude-sonnet-5-5",
           "value": "sonnet"
         }
       ],

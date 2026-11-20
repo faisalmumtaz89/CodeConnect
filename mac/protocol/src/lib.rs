@@ -840,7 +840,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     name, an iPhone's "iPhone"). The daemon lists a new device under it, made unique, and renames a paired
 ///     device to it on its next hello when it differs. A client below 44 sends none and is listed under its
 ///     `client_name` as before; a daemon below 44 ignores the field.
-pub const PROTOCOL_MINOR: u32 = 44;
+///   * `45` — **A run's menu names the model each entry runs.**
+///
+///     No message changes shape. Each [`event::MenuModel`] of a Claude run's `menus` may carry
+///     `resolved_model`, the model id Claude Code's own list gives the entry (`resolvedModel`), so an
+///     app names the model a run is on by that id, never by the text of claude's receipt of a change.
+///     A Codex entry carries none: its `value` is the model. A daemon below 45 sends none.
+pub const PROTOCOL_MINOR: u32 = 45;
 
 #[cfg(test)]
 mod ledger_tests {

@@ -58,6 +58,9 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// `headline` everywhere but the fleet, whose session names are
     /// `rowTitle`.
     var titleStyle: CCTextStyle = CC.type.headline
+    /// Words beside the title on its own line, quieter and cut at their end: a model's description as its
+    /// agent sends it, beside the model's name.
+    var titleDetail: String?
     var subtitle: String?
     /// **Which end of the title identifies it.** `.tail` on the fleet, whose
     /// title is a project: a directory somebody named is recognised by how it
@@ -104,6 +107,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         _ title: String,
         titleIsMono: Bool = false,
         titleStyle: CCTextStyle = CC.type.headline,
+        titleDetail: String? = nil,
         subtitle: String? = nil,
         titleTruncation: Text.TruncationMode = .tail,
         subtitleLineLimit: Int? = 2,
@@ -121,6 +125,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         self.title = title
         self.titleIsMono = titleIsMono
         self.titleStyle = titleStyle
+        self.titleDetail = titleDetail
         self.subtitle = subtitle
         self.titleTruncation = titleTruncation
         self.subtitleLineLimit = subtitleLineLimit
@@ -290,12 +295,22 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// accessory.
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            Text(title)
-                .ccType(titleText)
-                .foregroundStyle(isDimmed ? CC.text.tertiary : CC.text.primary)
-                .lineLimit(titleLineLimit)
-                .truncationMode(titleTruncation)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
+                Text(title)
+                    .ccType(titleText)
+                    .foregroundStyle(isDimmed ? CC.text.tertiary : CC.text.primary)
+                    .lineLimit(titleLineLimit)
+                    .truncationMode(titleTruncation)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
+                if let titleDetail {
+                    Text(titleDetail)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
 
             if let subtitle {
                 // `footnote` — the token for row subtitles and helper text.
@@ -357,7 +372,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
 
     private var accessibilityLabel: String {
         if let accessibilityLabelText { return accessibilityLabelText }
-        return [title, subtitle].compactMap { $0 }.joined(separator: ", ")
+        return [title, titleDetail, subtitle].compactMap { $0 }.joined(separator: ", ")
     }
 }
 

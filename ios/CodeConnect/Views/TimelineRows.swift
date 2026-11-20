@@ -1030,6 +1030,8 @@ struct NoticeRow: View {
                         // builder, so the boundary is a boundary.)
                         Text(AgentProse.inline(detail))
                             .ccType(CC.type.reading)
+                            // A run's start names its model as the agent reported it: an id, in code type.
+                            .fontDesign(notice.kind == .sessionStart ? .monospaced : nil)
                             .foregroundStyle(CC.text.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

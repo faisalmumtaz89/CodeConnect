@@ -112,6 +112,7 @@
             "max"
           ],
           "label": "Default (recommended)",
+          "resolved_model": "claude-opus-5-5",
           "value": "default"
         },
         {
@@ -124,6 +125,7 @@
             "max"
           ],
           "label": "Sonnet",
+          "resolved_model": "claude-sonnet-5-5",
           "value": "sonnet"
         }
       ],
@@ -150,7 +152,7 @@
     },
     "model": {
       "seq": 3,
-      "value": "sonnet (claude-sonnet-5-5)"
+      "value": "claude-sonnet-5-5"
     },
     "permission_mode": {
       "seq": 5,
@@ -187,6 +189,7 @@
             "max"
           ],
           "label": "Default (recommended)",
+          "resolved_model": "claude-opus-5-5",
           "value": "default"
         },
         {
@@ -199,6 +202,7 @@
             "max"
           ],
           "label": "Sonnet",
+          "resolved_model": "claude-sonnet-5-5",
           "value": "sonnet"
         }
       ],
@@ -248,7 +252,7 @@
     "link": "attached",
     "model": {
       "seq": 3,
-      "value": "sonnet (claude-sonnet-5-5)"
+      "value": "claude-sonnet-5-5"
     },
     "permission_mode": {
       "seq": 5,
