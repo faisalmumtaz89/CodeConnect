@@ -86,7 +86,7 @@ struct ModelButton: View {
         Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
     }
 
-    /// The model's name.
+    /// The model's name, and its description beside it.
     private func row(_ choice: StartModelChoice) -> some View {
         Button {
             choose(choice)
@@ -99,6 +99,9 @@ struct ModelButton: View {
                     .frame(width: 12)
                     .accessibilityHidden(true)
                 Text(choice.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
+                if let detail = choice.detail {
+                    ModelDetail(text: detail)
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)

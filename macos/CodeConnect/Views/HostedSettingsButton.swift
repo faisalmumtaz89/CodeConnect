@@ -69,7 +69,9 @@ struct HostedSettingsButton: View {
         control(.model, id: "session.composer.commands", label: name, help: "Model and effort") {
             HStack(spacing: 5) {
                 AgentMark(agent: agent)
-                Text(name).foregroundStyle(Theme.text)
+                // The agent's own report of the model (an id) in code type; a menu row's label in the app's.
+                Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : Theme.ui(12))
+                    .foregroundStyle(Theme.text)
                 if settings.inFlight {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
                 } else {
@@ -146,7 +148,7 @@ struct HostedSettingsButton: View {
             ForEach(settings.models, id: \.value) { entry in
                 let marked = entry == settings.selectedModel
                 let id = "session.composer.model.\(entry.value)"
-                row(entry.label, marked: marked, id: id) {
+                row(entry.label, detail: entry.detail, marked: marked, id: id) {
                     _ = await model.setModel(for: key, modelValue: entry.value)
                 }
             }
@@ -246,13 +248,13 @@ struct HostedSettingsButton: View {
 
     /// One choice. The checked one is the run's fact already.
     private func row(
-        _ title: String, marked: Bool, id: String, asksFirst: Bool = false,
+        _ title: String, detail: String? = nil, marked: Bool, id: String, asksFirst: Bool = false,
         set: @escaping () async -> Void
     ) -> some View {
         Button {
             choose(asksFirst: asksFirst, set)
         } label: {
-            rowLabel(title, marked: marked)
+            rowLabel(title, detail: detail, marked: marked)
         }
         .buttonStyle(.hover(radius: 4, id: id))
         .padding(.horizontal, 4)
@@ -262,7 +264,8 @@ struct HostedSettingsButton: View {
         .accessibilityAddTraits(marked ? .isSelected : [])
     }
 
-    private func rowLabel(_ title: String, marked: Bool) -> some View {
+    /// A row's label, and beside it, quieter, the agent's own description as sent, cut at its end.
+    private func rowLabel(_ title: String, detail: String? = nil, marked: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "checkmark")
                 .font(.system(size: 9.5, weight: .bold))
@@ -271,6 +274,10 @@ struct HostedSettingsButton: View {
                 .accessibilityHidden(true)
             Text(title).font(Theme.ui(12.5)).foregroundStyle(settings.inFlight ? Theme.text3 : Theme.text)
                 .lineLimit(1)
+                .layoutPriority(1)
+            if let detail {
+                ModelDetail(text: detail)
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
@@ -324,7 +331,8 @@ struct ModelFactLabel: View {
     var body: some View {
         HStack(spacing: 5) {
             AgentMark(agent: agent)
-            Text(fact.map { ModelDisplay.from($0).line } ?? "Model").foregroundStyle(Theme.text)
+            // The model as the run reported it, in code type; "Model" while it has reported none.
+            Text(fact ?? "Model").font(fact == nil ? Theme.ui(12) : Theme.mono(11.5)).foregroundStyle(Theme.text)
         }
         .font(Theme.ui(12))
         .padding(.horizontal, 6)
@@ -343,5 +351,15 @@ extension SettingOutcome.Tone {
         case .neutral: .info
         case .warning: .warning
         }
+    }
+}
+
+/// A model's description beside its label in a model menu (the reply box's and Start's): the agent's own words as
+/// sent, quieter, on the label's line, cut at the end.
+struct ModelDetail: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.tail)
     }
 }
