@@ -298,7 +298,9 @@ struct FleetView: View {
             .ccNavigationChrome()
             .navigationTitle("Projects")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: SessionRoute.self) { route in destination(route) }
+            .navigationDestination(for: SessionRoute.self) { route in
+                destination(route).ccBackButton(to: "Projects")
+            }
             .toolbar { toolbarItems }
             // The bar prints the header's own number, not its own count of the
             // cards it happens to hold — see `FleetCount`.

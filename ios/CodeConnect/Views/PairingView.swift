@@ -420,10 +420,10 @@ struct PairingView: View {
             // screen shows — and removes — that machine, whatever the others do.
             .navigationDestination(item: $openMachineID) { id in
                 if let machine = machines.model(for: id) {
-                    MachineScreen().environment(machine)
+                    MachineScreen().environment(machine).ccBackButton(to: "Settings")
                 }
             }
-            .navigationDestination(isPresented: $showFolders) { FoldersView() }
+            .navigationDestination(isPresented: $showFolders) { FoldersView().ccBackButton(to: "Settings") }
             .sheet(isPresented: $showManualEntry) {
                 repairSheet
             }
