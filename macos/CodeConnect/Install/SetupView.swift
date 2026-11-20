@@ -79,12 +79,22 @@ struct SetupView: View {
 
     /// CodeConnect in a new Terminal window: set up only when the person chooses Set up.
     @ViewBuilder private var commandLine: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 mark(setup.commandLine, id: "setup.commandLine")
                 Text("Use CodeConnect from Terminal").font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
                 Spacer(minLength: 12)
-                Text(detail(setup.commandLine)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                if !setup.commandLine.isMissing {
+                    Text(detail(setup.commandLine)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                }
+            }
+            // A row that needs the person says why under its name, as every row above does.
+            if setup.commandLine.isMissing {
+                Text(detail(setup.commandLine))
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 24)
             }
             if case .missing = setup.commandLine, let installer = setup.installer {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {

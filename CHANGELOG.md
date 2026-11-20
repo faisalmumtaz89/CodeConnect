@@ -6,6 +6,7 @@ User-facing changes, newest first. Mac releases are cut per
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
 - Set Up CodeConnect on the Mac ends below its last row, with no empty band above its buttons.
+- In Set Up, every row that needs you says why under its name, the Terminal row included.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
