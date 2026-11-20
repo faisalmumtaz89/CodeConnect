@@ -357,9 +357,10 @@ private struct ComputerRow: View {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).foregroundStyle(Theme.text2)
                     .frame(width: 16)
                     .accessibilityHidden(true)
+                // The name takes all the line up to the count's column, less one gap.
                 Text(computer.machineName ?? "Unknown computer").font(Theme.ui(12.5)).foregroundStyle(Theme.text)
                     .lineLimit(1)
-                Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
                     .frame(minWidth: RunMore.width, alignment: .trailing)
                     .opacity(roomForMore ? 0 : 1)
