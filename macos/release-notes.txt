@@ -1,1 +1,1 @@
-The Mac app is more consistent: sheets, lists and Settings fit what they show, buttons you can’t use look it, and the update window matches the app. You can remove a computer from its row in the sidebar, as on the iPhone. A request shows what “Allow for this session” grants before you choose.
+The Mac and iPhone apps now use the same words for the same things, from a run’s status to its cards and buttons. A Codex request says what Codex asks to do and numbers its options. A conversation’s notices and tool lines line up on one edge.

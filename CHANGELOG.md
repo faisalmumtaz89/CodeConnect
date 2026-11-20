@@ -8,10 +8,14 @@ User-facing changes, newest first. Mac releases are cut per
 - The Mac and the iPhone word the same things the same way: an ended run is "Ended" and a run waiting on an
   answer "Waiting for you" in both, a refused link says "Different version" when that is why, the reply box says
   "Reply to <agent>…", cards, Changes, starting and pairing read alike, each agent is named one way, the default
-  model is "Default" for both agents, and Mac buttons are in title case.
-- On the Mac, a conversation's notices and tool lines start their words on one edge.
-- On the Mac, a tool line's and "Show more lines"'s hover fill stays inside the conversation's and the
-  diff's column.
+  model is "Default" for both agents, and Mac buttons are in title case. The fleet counts runs, not agents.
+- A Codex card says what Codex asks to do ("Codex asks to run a command", "… to change files") and, on the Mac,
+  numbers its options as the iPhone does.
+- On the Mac, a conversation's notices and tool lines start their words on one edge, their hover fills stay
+  inside the column, and a group's waiting count stays on one line.
+- On the iPhone, "New agent" sits inside the screen's margin, a card that offers "Allow for this session" says
+  what it grants, as the Mac does, a card's command box stands on its headings' edge, and Changes names a file
+  git doesn't track yet as its path and "untracked", as the Mac does.
 
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
