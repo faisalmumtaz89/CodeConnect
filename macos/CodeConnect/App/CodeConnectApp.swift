@@ -18,6 +18,7 @@ struct CodeConnectApp: App {
     @State private var filter: FleetFilter?
     @State private var opened: String?
     @State private var pendingAdd: AddKind?
+    @State private var started = false
 
     /// `machines` is made here, after a test launch has chosen its keychain and its data folder,
     /// because making it reads the one and writes the other; and after the pairing with this Mac's own
@@ -49,7 +50,10 @@ struct CodeConnectApp: App {
                 .environment(setup)
                 .preferredColorScheme(.dark)
                 .tint(CC.color.accent)
+                // Once a launch, not once a window: the window opened again keeps the computers as they are.
                 .task {
+                    guard !started else { return }
+                    started = true
                     machines.bootstrap()
                     if Setup.runsThisLaunch { await setup.run(machines: machines) }
                 }
