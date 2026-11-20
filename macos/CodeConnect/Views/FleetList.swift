@@ -328,9 +328,12 @@ private struct GroupHeader: View {
                 .font(.system(size: 11))
                 .foregroundStyle(grouping == .computer ? Theme.text2 : Theme.text3)
             Text(group.name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-            Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+            // The counts stay whole on one line; the name before them is what gives way.
+            Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
             if group.waiting > 0 {
                 Text(FleetCount.waitingForYou(group.waiting)).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
+                    .lineLimit(1)
+                    .fixedSize()
             }
             Spacer(minLength: 16)
             if grouping == .project {
