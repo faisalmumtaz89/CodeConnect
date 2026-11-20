@@ -28,7 +28,7 @@ struct SetupView: View {
             .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
             .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             .padding(.horizontal, 24)
-            Spacer(minLength: 16)
+            .padding(.bottom, 24)
             VStack(spacing: 0) {
                 Rectangle().fill(Theme.hairline).frame(height: 1)
                 HStack(spacing: 8) {
@@ -45,7 +45,7 @@ struct SetupView: View {
                 .frame(height: 52)
             }
         }
-        .frame(width: 560, height: 470)
+        .frame(width: 560)
         .background(Theme.sheet)
         // The agents' rows are this Mac's service's answer: asked for once its link is up, while the checklist is open.
         .task(id: machines.startContexts.map(\.id)) { setup.thisMacContext(in: machines)?.load() }

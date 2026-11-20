@@ -3,6 +3,10 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.2, with the iPhone app 1.1.19
+
+- Set Up CodeConnect on the Mac ends below its last row, with no empty band above its buttons.
+
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
 - Start a Claude or Codex run with the message box empty, and the run opens waiting for your first
