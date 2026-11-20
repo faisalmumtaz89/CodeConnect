@@ -62,6 +62,7 @@ struct CodeConnectApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             AddCommands(pending: $pendingAdd)
+            PaneCommands()
             CommandGroup(after: .appInfo) {
                 if let updates {
                     Button("Check for Updates\u{2026}") { updates.checkForUpdates() }

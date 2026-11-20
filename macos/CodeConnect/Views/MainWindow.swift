@@ -32,6 +32,9 @@ struct MainWindow: View {
     @Environment(ConfirmationQueue.self) private var asks
     /// The window's width, from which the list's share beside an open run is worked out.
     @State private var width: CGFloat = 0
+    @AppStorage(Panes.sidebarHidden) private var sidebarHidden = false
+    @AppStorage(Panes.listHidden) private var listHidden = false
+    @AppStorage(Panes.runHidden) private var runHidden = false
 
     init(scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>) {
         _scope = scope
@@ -48,34 +51,70 @@ struct MainWindow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(adding: $adding, scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain)
-                .frame(width: 216)
-            Rectangle().fill(Theme.hairline).frame(width: 1)
+            if !sidebarHidden {
+                Sidebar(adding: $adding, scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain)
+                    .frame(width: 216)
+                Rectangle().fill(Theme.hairline).frame(width: 1)
+            }
             if machines.showsFleet {
                 let open = opened.flatMap { key in machines.fleet.first { $0.id == key } }
                 let model = open.flatMap { machines.model(forSession: $0.id) }
-                FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
-                    // Kept when the person changes it, never at launch.
-                    .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
-                    // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
-                    // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
-                    .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
-                    // The arrows open a run; Return then puts the cursor in its reply box.
-                    .onKeyPress(.return) {
-                        guard opened != nil else { return .ignored }
-                        replyFocus += 1
-                        return .handled
-                    }
-                if let open, let model {
-                    Rectangle().fill(Theme.hairline).frame(width: 1)
+                let showsRun = model != nil && !runHidden
+                // The list hides only beside a run that shows: the window is never left empty.
+                let showsList = !listHidden || !showsRun
+                if showsList {
+                    FleetList(scope: $scope, grouping: $grouping, filter: $filter, opened: $opened) { adding = .agent }
+                        // Kept when the person changes it, never at launch.
+                        .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
+                        // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
+                        // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
+                        .frame(width: showsRun ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
+                        .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun))
+                        // The arrows open a run; Return then puts the cursor in its reply box.
+                        .onKeyPress(.return) {
+                            guard opened != nil else { return .ignored }
+                            replyFocus += 1
+                            return .handled
+                        }
+                }
+                if let open, let model, showsRun {
+                    if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
                     SessionPane(row: open, model: model, tab: tab(of: open.id))
                         .id(open.id)
                         .environment(\.replyFocusRequest, replyFocus)
+                        .environment(\.headerClearance, clearance(first: sidebarHidden && !showsList, last: true))
                 }
             } else {
                 EmptyFleet(adding: $adding)
             }
         }
+        // The panes' toggles at the window's top edge: the sidebar's and the list's beside the window's buttons, the
+        // run's at the right. The list and the run hide only while a run is open.
+        .overlay(alignment: .topLeading) {
+            HStack(spacing: 2) {
+                PaneToggle(symbol: "sidebar.left", shown: !sidebarHidden, title: sidebarHidden ? "Show Sidebar" : "Hide Sidebar",
+                    id: "pane.toggle.sidebar") { sidebarHidden.toggle() }
+                PaneToggle(symbol: "list.bullet", shown: !listHidden || !runIsOpen,
+                    title: listHidden ? "Show List" : "Hide List", id: "pane.toggle.list") {
+                    listHidden.toggle()
+                    if listHidden { runHidden = false }
+                }
+                .disabled(!runIsOpen)
+            }
+            .padding(.leading, 84)
+            .padding(.top, 13)
+        }
+        .overlay(alignment: .topTrailing) {
+            PaneToggle(symbol: "sidebar.right", shown: runIsOpen && !runHidden,
+                title: runHidden ? "Show Run" : "Hide Run", id: "pane.toggle.run") {
+                runHidden.toggle()
+                if runHidden { listHidden = false }
+            }
+            .disabled(!runIsOpen)
+            .padding(.trailing, 12)
+            .padding(.top, 13)
+        }
+        .focusedSceneValue(\.runIsOpen, runIsOpen)
         .background(Theme.window)
         .ignoresSafeArea()
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
@@ -91,7 +130,11 @@ struct MainWindow: View {
         }
         // Until every computer has caught up, or been waited out, the list says it is connecting.
         .task { await machines.waitOutLaunch() }
-        .onChange(of: opened) { chosen = nil }
+        .onChange(of: opened) {
+            chosen = nil
+            // A run opened shows, even with its pane hidden; with none open, the list shows again.
+            if opened != nil { runHidden = false } else { listHidden = false }
+        }
         // A computer removed, here or from Settings: the list lets go of its narrowing to it and of its run, which
         // has left the list with it.
         .onChange(of: machines.models.compactMap(\.machineID)) { before, after in
@@ -148,6 +191,21 @@ struct MainWindow: View {
     private func pairAgain(_ address: String) {
         repairing = address
         adding = .computer
+    }
+}
+
+extension MainWindow {
+    /// A run is open beside the list, whether or not its pane shows.
+    fileprivate var runIsOpen: Bool {
+        opened.flatMap { key in machines.fleet.first { $0.id == key } }.flatMap { machines.model(forSession: $0.id) } != nil
+    }
+
+    /// Where a pane's header keeps clear of the window's own controls, one gap on both sides: its text and controls
+    /// start 16 pt after the two toggles beside the window's buttons (which end 142 pt in) when the pane comes first, and
+    /// end 16 pt before the run's toggle (which starts 40 pt in) when it comes last. Only the header band moves; the
+    /// pane's content keeps its own inset, under the hairline that closes the band.
+    fileprivate func clearance(first: Bool, last: Bool) -> EdgeInsets {
+        EdgeInsets(top: 0, leading: first ? 158 : 0, bottom: 0, trailing: last ? 56 : 0)
     }
 }
 
