@@ -822,7 +822,7 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     Claude run while a turn runs is answered `applied {applies: now}`, as claude takes it
 ///     from its next request, the running turn's next step included; an effort set while a
 ///     turn runs is still answered `next_turn`. `/model` or `/effort` sent alone, or as its
-///     screen's confirmation, is refused with "/model's screen isn't available in this
+///     screen's confirmation, is refused with "/model’s screen isn’t available in this
 ///     session; nothing was changed." (or `/effort`'s).
 ///   * `43` — **A Codex run's settings from the apps.**
 ///

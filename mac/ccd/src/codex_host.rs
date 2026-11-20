@@ -2625,10 +2625,10 @@ async fn change_settings(
             }
         }
         Ok(Err(CallError::Rpc { message, .. })) => SettingResult::Refused {
-            reason: format!("Codex didn't take the change ({message}); nothing was changed."),
+            reason: format!("Codex didn’t take the change ({message}); nothing was changed."),
         },
         Ok(Err(CallError::Closed)) | Err(_) => SettingResult::Indeterminate {
-            reason: "Codex didn't answer, so the change may or may not have been made.".into(),
+            reason: "Codex didn’t answer, so the change may or may not have been made.".into(),
         },
     }
 }
@@ -2658,7 +2658,7 @@ pub(crate) async fn set_setting(
             match MODES.iter().find(|(value, _, _)| value == mode) {
                 None => {
                     return refused(
-                        "That permission mode isn't offered in this session; nothing was changed.",
+                        "That permission mode isn’t offered in this session; nothing was changed.",
                     )
                 }
                 Some((_, label, true)) if !confirmed => {
@@ -2673,7 +2673,7 @@ pub(crate) async fn set_setting(
     }
     match daemon.db.hosted_link(uid.to_string()).await {
         Ok(Some(linked)) if linked.lifecycle == Lifecycle::Live => {}
-        Ok(Some(_)) => return refused("This session isn't running, so nothing was changed."),
+        Ok(Some(_)) => return refused("This session isn’t running, so nothing was changed."),
         Ok(None) => return refused(crate::claude_host::NOT_FROM_THE_APP),
         Err(err) => {
             crate::log_error!("{uid}: could not read its host: {err:#}");
@@ -2692,7 +2692,7 @@ pub(crate) async fn set_setting(
             .as_ref()
             .is_some_and(|model| !menus.models.iter().any(|offered| &offered.value == model))
         {
-            return refused("Codex doesn't offer that model in this session; nothing was changed.");
+            return refused("Codex doesn’t offer that model in this session; nothing was changed.");
         }
         if effort.as_ref().is_some_and(|effort| {
             !menus
@@ -2701,7 +2701,7 @@ pub(crate) async fn set_setting(
                 .any(|offered| offered.efforts.contains(effort))
         }) {
             return refused(
-                "Codex doesn't offer that effort in this session; nothing was changed.",
+                "Codex doesn’t offer that effort in this session; nothing was changed.",
             );
         }
     }
@@ -2720,7 +2720,7 @@ pub(crate) async fn set_setting(
     answer
         .await
         .unwrap_or_else(|_| SettingResult::Indeterminate {
-            reason: "Codex didn't answer, so the change may or may not have been made.".into(),
+            reason: "Codex didn’t answer, so the change may or may not have been made.".into(),
         })
 }
 

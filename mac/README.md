@@ -865,9 +865,9 @@ indeterminate and the relaunch goes on. The effort chosen for the old process is
 over: the run's effort reads unset from its end until one is set again. A ccd restart in the
 seconds of a relaunch files the resumed start with no `source`.
 For such a run the Model and Effort screens are refused, as a sheet's typed confirmation or
-typed alone (`/model`, `/effort`) ("/model's screen isn't available in this session;
+typed alone (`/model`, `/effort`) ("/model’s screen isn’t available in this session;
 nothing was changed.", the same for the effort: the sheets set them with `set_model`), and so is `/status`, which claude does not offer such a run ("Claude
-doesn't offer /status in this session."); `/usage`, `/cost` and `/clear` are messages. A
+doesn’t offer /status in this session."); `/usage`, `/cost` and `/clear` are messages. A
 clear goes on in the same run, as at claude's keyboard: claude starts its new session, the
 run's events carry a "Conversation cleared" notice with the earlier history above it, and a
 later resume continues the cleared conversation. Each init's `session_start` says why a session
