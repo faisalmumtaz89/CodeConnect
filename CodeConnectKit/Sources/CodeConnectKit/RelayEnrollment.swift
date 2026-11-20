@@ -308,7 +308,7 @@ private struct ErrorBody: Decodable {
 /// without a lock; the caller is `AppModel` on the main actor.
 public actor RelayEnrollment {
     /// What the register path should do with the result.
-    public enum Outcome: Equatable {
+    public enum Outcome: Equatable, Sendable {
         /// Register the token with this credential. Its `token` is the binding it
         /// was minted for — the caller rechecks it against the live token before
         /// sending, so a result that arrived for a superseded token is dropped.
