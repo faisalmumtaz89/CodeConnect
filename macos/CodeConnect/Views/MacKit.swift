@@ -477,3 +477,32 @@ private struct ControlRect: ViewModifier {
             #endif
     }
 }
+
+/// One tab: its word, and a count beside it when it has one, underlined while it is the one shown: a run's
+/// Conversation and Changes, and Settings' panes. Every tab is a button; only the shown one reads selected, and each
+/// keeps the header trait the single Conversation tab had.
+struct UnderlineTab: View {
+    let title: String
+    /// What a driver finds the tab by.
+    let id: String
+    let selected: Bool
+    let count: Int?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                HStack(spacing: 5) {
+                    Text(title).foregroundStyle(selected ? Theme.text : Theme.text3)
+                    if let count { Text(verbatim: "\(count)").foregroundStyle(Theme.text3) }
+                }
+                .font(Theme.ui(12.5, .medium))
+                Rectangle().fill(selected ? Theme.text : Color.clear).frame(height: 1.5)
+            }
+            .fixedSize()
+        }
+        .buttonStyle(.hover(over: true, id: id))
+        .accessibilityAddTraits(selected ? [.isHeader, .isSelected] : [.isHeader])
+        .accessibilityIdentifier(id)
+    }
+}

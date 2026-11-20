@@ -91,6 +91,8 @@ public struct DeviceGroup: Hashable, Sendable, Identifiable {
     // MARK: Words
 
     public static let title = "This computer’s devices"
+    /// The Mac Settings tab that shows this list.
+    public static let tabTitle = "Devices"
     public static let intro = "The phones and other computers that can reach this computer."
     public static let blockedTitle = "Blocked"
     public static let empty = "No phone or other computer has been added yet."

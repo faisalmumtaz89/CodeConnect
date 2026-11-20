@@ -143,8 +143,8 @@ private struct Heading: View {
             .foregroundStyle(Theme.text2)
             HStack(spacing: 20) {
                 ForEach(SessionTab.allCases, id: \.self) { each in
-                    TabButton(
-                        tab: each, selected: tab == each,
+                    UnderlineTab(
+                        title: each.title, id: each.id, selected: tab == each,
                         count: each == .changes ? ChangesTab.fileCount(model: model, key: row.id) : nil
                     ) { tab = each }
                 }
@@ -186,32 +186,6 @@ enum SessionTab: CaseIterable {
         case .conversation: return "session.tab.conversation"
         case .changes: return "session.tab.changes"
         }
-    }
-}
-
-/// One tab: its word, and a count beside it when it has one, underlined while it is the one shown. Every tab is a
-/// button; only the shown one reads selected, and each keeps the header trait the single Conversation tab had.
-private struct TabButton: View {
-    let tab: SessionTab
-    let selected: Bool
-    let count: Int?
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 7) {
-                HStack(spacing: 5) {
-                    Text(tab.title).foregroundStyle(selected ? Theme.text : Theme.text3)
-                    if let count { Text(verbatim: "\(count)").foregroundStyle(Theme.text3) }
-                }
-                .font(Theme.ui(12.5, .medium))
-                Rectangle().fill(selected ? Theme.text : Color.clear).frame(height: 1.5)
-            }
-            .fixedSize()
-        }
-        .buttonStyle(.hover(over: true, id: tab.id))
-        .accessibilityAddTraits(selected ? [.isHeader, .isSelected] : [.isHeader])
-        .accessibilityIdentifier(tab.id)
     }
 }
 
