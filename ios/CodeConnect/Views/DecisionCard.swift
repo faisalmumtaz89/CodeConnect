@@ -1405,13 +1405,14 @@ struct DecisionCardView: View {
             // one-time Allow.
             if offersAllowForSession {
                 if let caption = DecisionCard.sessionRuleCaption(card: approval.card) {
-                    Text(caption)
+                    // The whole sentence on screen, as the Mac shows it: the
+                    // bare rule above the button did not say it is a grant.
+                    Text(CardWords.allowingGrants(caption))
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.secondary)
                         .lineLimit(DecisionCard.sessionCaptionLineLimit)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel(CardWords.allowingGrants(caption))
                 }
                 switch DecisionCard.affirmativeControl(at: risk) {
                 case .hold:

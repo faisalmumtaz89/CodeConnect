@@ -33,6 +33,9 @@ enum Fixtures {
         var riskClass: String?
         var matchedPattern: String?
         var ageSeconds: TimeInterval
+        /// The card's `permission_suggestions`, in ccd's shape; set, the card
+        /// also offers "Allow for this session" (`allow_for_session`).
+        var permissionSuggestions: JSONValue? = nil
     }
 
     /// Which shape of fleet to replay.
@@ -106,6 +109,11 @@ enum Fixtures {
         /// (`HostedSettingsSheet`) can be photographed at the smallest phone and the largest type. One
         /// run, no cards.
         case hostedSettings
+        /// `single`, with the force-push card offering "Allow for this
+        /// session": the suggestions and `allow_for_session` ccd sends for a
+        /// card whose rule it would grant (fixtures/claude/minor-36-wire.json).
+        /// The one fixture that shows what that grant covers.
+        case sessionGrant
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -119,6 +127,7 @@ enum Fixtures {
             case .spoofedCommand: return [spoofedCard]
             case .empty, .timeline, .timelineLongName, .hostedSettings: return []
             case .single: return deckCards.filter { $0.sessionID == "fx-1" }
+            case .sessionGrant: return [sessionGrantCard]
             }
         }
 
@@ -133,7 +142,7 @@ enum Fixtures {
             case .ended: return 8
             case .ended45: return 45
             case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand, .empty,
-                .single, .timeline, .timelineLongName, .hostedSettings:
+                .single, .timeline, .timelineLongName, .hostedSettings, .sessionGrant:
                 return 0
             }
         }
@@ -145,7 +154,7 @@ enum Fixtures {
         /// either.
         var sessionCount: Int {
             switch self {
-            case .deck, .ended, .ended45, .spoofedCommand, .single: return 4
+            case .deck, .ended, .ended45, .spoofedCommand, .single, .sessionGrant: return 4
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             case .empty: return 0
             case .hostedSettings: return 5
@@ -182,6 +191,22 @@ enum Fixtures {
             ]),
             riskClass: "high", matchedPattern: "git push --force", ageSeconds: 60),
     ]
+
+    /// The force-push card with the grant ccd offers for it: one `addRules`
+    /// allow rule, in the shape of the recorded minor-36 card.
+    static let sessionGrantCard: Card = {
+        var card = deckCards.first { $0.sessionID == "fx-1" }!
+        card.permissionSuggestions = .array([
+            .object([
+                "type": .string("addRules"), "behavior": .string("allow"),
+                "destination": .string("localSettings"),
+                "rules": .array([
+                    .object(["toolName": .string("Bash"), "ruleContent": .string("git push:*")])
+                ]),
+            ])
+        ])
+        return card
+    }()
 
     /// **A second decision on an agent that already has one.**
     ///
@@ -604,12 +629,15 @@ enum Fixtures {
         let pattern = card.matchedPattern.map { ",\"matched_pattern\":\(quoted($0))" } ?? ""
         let risk = card.riskClass.map { ",\"risk\":{\"class\":\"\($0)\"\(pattern)}" } ?? ""
         let stamp = rfc3339(now.addingTimeInterval(-card.ageSeconds))
+        let grant = card.permissionSuggestions.map {
+            ",\"permission_suggestions\":\($0.canonicalJSONString),\"allow_for_session\":true"
+        } ?? ""
         return """
             {"type":"event","event":{"seq":\(seq),"session_id":"\(card.sessionID)",\
             "ts":"\(stamp)","kind":"approval_request","source":"hook",\
             "payload":{"card":{"request_id":"\(card.requestID)","payload_hash":"\(hash)",\
             "tool_name":"\(card.tool)","tool_input":\(inputJSON),\
-            "display_text":\(quoted(displayText))\(risk),"question_hold":"held"}}}}
+            "display_text":\(quoted(displayText))\(risk)\(grant),"question_hold":"held"}}}}
             """
     }
 
