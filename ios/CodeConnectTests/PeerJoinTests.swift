@@ -123,6 +123,20 @@ final class PeerJoinTests: XCTestCase {
         for (_, model) in machines.joining { model.leave() }
     }
 
+    /// A listed computer that has never answered is no evidence of a CodeConnect computer (Tailscale lists every Mac
+    /// and Linux node), so it shows in no row while it is dialled. Must-fail: show a waiting join as unjoined.
+    func testAListedComputerThatNeverAnsweredShowsNoRow() async throws {
+        let daemon = try StubDaemon(dropping: 1_000) { _ in .refuse }
+        let pairing = PairingStore(ephemeral: true)
+        let machines = Machines(pairing: pairing, cache: EventCache(root: temporaryCache()))
+        machines.join(directory(port: daemon.port))
+        try await until {
+            machines.joining.contains { if case .waiting = $0.model.connection.phase { true } else { false } }
+        }
+        XCTAssertEqual(machines.unjoinedComputers, [])
+        for (_, model) in machines.joining { model.leave() }
+    }
+
     /// A computer listed before its daemon answers joins once it does, with no
     /// new list: it is dialled with a saved link's patience, not a pairing's.
     func testAListedComputerJoinsOnceItsDaemonAnswers() async throws {
