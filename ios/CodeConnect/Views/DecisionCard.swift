@@ -306,7 +306,7 @@ struct DecisionCardView: View {
             ) {
                 // Its own accessibility element, deliberately: "Bash" is the
                 // first thing a reader — human or automated — looks for.
-                Text(approval.card.toolName)
+                Text(CardWords.asks(sessionAgent?.displayName ?? "The agent", approval.card.toolName))
                     .ccType(CC.type.title)
                     .foregroundStyle(CC.text.primary)
                 CCAdaptiveSpacer(minLength: CC.space.xs)
@@ -586,7 +586,7 @@ struct DecisionCardView: View {
     private var ifYouDenyBlock: some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader("If you deny")
-            Text("This call does not run, and Claude is told you said no.")
+            Text(CardWords.denyTells(sessionAgent?.displayName ?? "the agent"))
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -653,7 +653,7 @@ struct DecisionCardView: View {
     /// that is the one misreading this card cannot afford. There is no "show
     /// more": the card is bounded on purpose, and the whole patch is at the Mac.
     private func heldBackLine(_ rows: Int) -> some View {
-        Text("\(rows) more line\(rows == 1 ? "" : "s") of this patch are not drawn here.")
+        Text(CardWords.linesNotDrawn(rows))
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -665,7 +665,7 @@ struct DecisionCardView: View {
     /// changes what is on screen, never what the gate requires to have been.
     private var foldedChangesControl: some View {
         CCButton(
-            "Show \(foldedChangeCount) more file\(foldedChangeCount == 1 ? "" : "s")",
+            CardWords.showMoreFiles(foldedChangeCount),
             icon: "caret-down", variant: .ghost, size: .sm, fullWidth: true
         ) {
             withAnimation(CC.motion.small) { showAllChanges = true }
@@ -775,13 +775,12 @@ struct DecisionCardView: View {
     private func omittedLine(_ omitted: CodexCard.ChangesOmitted) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             Text(
-                "\(omitted.count) more file\(omitted.count == 1 ? "" : "s") "
-                    + "would change and are not shown here."
+                CardWords.filesNotShown(omitted.count)
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.color.warning)
             .fixedSize(horizontal: false, vertical: true)
-            Text("Approving this approves those too. Review them at the computer.")
+            Text(CardWords.approvesThoseToo)
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -799,7 +798,7 @@ struct DecisionCardView: View {
     /// answers the Mac will take.
     private var codexOptionsBlock: some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
-            CCSectionHeader("Choose one")
+            CCSectionHeader(CardWords.chooseOne)
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
                     ForEach(Array(codexOptions.enumerated()), id: \.element.id) { index, option in
@@ -1049,7 +1048,7 @@ struct DecisionCardView: View {
         switch banner {
         case .hashMismatch:
             CCBanner(
-                "Hash mismatch",
+                CardWords.cantBeVerified,
                 message: DecisionCard.hashMismatchSentence,
                 tone: .danger, icon: "shield-warning-fill")
         case .resolution(let attempt):
@@ -1412,7 +1411,7 @@ struct DecisionCardView: View {
                         .lineLimit(DecisionCard.sessionCaptionLineLimit)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel("Allowing for this session grants \(caption)")
+                        .accessibilityLabel(CardWords.allowingGrants(caption))
                 }
                 switch DecisionCard.affirmativeControl(at: risk) {
                 case .hold:
@@ -1426,7 +1425,7 @@ struct DecisionCardView: View {
                     .accessibilityIdentifier("allow-for-session")
                 case .tap:
                     CCButton(
-                        "Allow for this session", icon: "clock", variant: .ghost, size: .md,
+                        CardWords.allowForSession, icon: "clock", variant: .ghost, size: .md,
                         fullWidth: true,
                         isLoading: inFlight == "acceptForSession",
                         disabledReason: CCDisabledReason(blockedReason)
@@ -1501,7 +1500,7 @@ struct DecisionCardView: View {
     @ViewBuilder
     private var denyButton: some View {
         CCButton(
-            "Deny",
+            CardWords.deny,
             variant: .secondary,
             size: .lg,
             fullWidth: true,
@@ -1533,7 +1532,7 @@ struct DecisionCardView: View {
             }
         case .tap:
             CCButton(
-                "Allow",
+                CardWords.allow,
                 variant: .primary,
                 size: .lg,
                 fullWidth: true,
@@ -1556,7 +1555,7 @@ struct DecisionCardView: View {
             CCField(
                 label: "Reason for denying",
                 text: $denyReason,
-                placeholder: "Tell Claude what to do instead",
+                placeholder: CardWords.denyPrompt(sessionAgent?.displayName ?? "the agent"),
                 axis: .vertical,
                 lineLimit: 1...4)
 
@@ -1569,7 +1568,7 @@ struct DecisionCardView: View {
                 }
                 CCAdaptiveSpacer(minLength: CC.space.xs)
                 CCButton(
-                    "Deny and send",
+                    CardWords.denyAndSend,
                     // Denying is the safe direction. It was drawn `destructive`,
                     // which said the opposite in the loudest colour available.
                     variant: .secondary,
@@ -1586,7 +1585,7 @@ struct DecisionCardView: View {
                 .disabled(denyReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
-            Text("Denies the call, and Claude gets your reason with the denial.")
+            Text(CardWords.denyWithReasonTells(sessionAgent?.displayName ?? "the agent"))
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

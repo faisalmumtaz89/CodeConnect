@@ -149,7 +149,7 @@ final class DeckUITests: XCTestCase {
         let app = launch()
         openDeck(app)
         XCTAssertTrue(
-            app.staticTexts["Bash"].firstMatch.waitForExistence(timeout: 20),
+            app.staticTexts["Claude asks to use Bash"].firstMatch.waitForExistence(timeout: 20),
             "a force-push must not sit behind a Read because the Read is older")
         // The badge's label spells the class out; "HIGH" alone is decoration.
         XCTAssertTrue(
@@ -163,13 +163,13 @@ final class DeckUITests: XCTestCase {
     func testSwipingTheCardDecidesNothing() {
         let app = launch()
         openDeck(app)
-        XCTAssertTrue(app.staticTexts["Bash"].firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Claude asks to use Bash"].firstMatch.waitForExistence(timeout: 20))
 
-        app.staticTexts["Bash"].firstMatch.swipeLeft()
-        app.staticTexts["Bash"].firstMatch.swipeRight()
+        app.staticTexts["Claude asks to use Bash"].firstMatch.swipeLeft()
+        app.staticTexts["Claude asks to use Bash"].firstMatch.swipeRight()
 
         XCTAssertTrue(
-            app.staticTexts["Bash"].firstMatch.exists,
+            app.staticTexts["Claude asks to use Bash"].firstMatch.exists,
             "an accidental swipe approving a command is the one bug that ends this product")
         XCTAssertFalse(app.staticTexts["Fleet clear"].firstMatch.exists)
     }
@@ -582,7 +582,7 @@ final class DeckUITests: XCTestCase {
     func testPostponingKeepsTheCountAndTheCard() {
         let app = launch()
         openDeck(app)
-        XCTAssertTrue(app.staticTexts["Bash"].firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Claude asks to use Bash"].firstMatch.waitForExistence(timeout: 20))
 
         postponeTopCard(app)
         XCTAssertTrue(

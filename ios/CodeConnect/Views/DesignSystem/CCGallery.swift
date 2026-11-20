@@ -956,7 +956,7 @@ import SwiftUI
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCField(
                         label: "Reason", text: $fieldText,
-                        placeholder: "Tell Claude what to do instead",
+                        placeholder: CardWords.denyPrompt("Claude"),
                         hint: "Denies the call, and Claude gets this with the denial.")
                     CCField(
                         label: "Daemon address", text: $monoField,

@@ -73,8 +73,46 @@ public enum SessionWords {
 
 /// A run's settings, as both apps name them.
 public enum RunSettingWords {
-    public static let model = "Model"
-    public static let effort = "Effort"
     public static let permissionMode = "Permission mode"
     public static let compactOrClear = "Compact or clear the context"
+}
+
+/// An approval card: who asks for what, its answers, and what a Codex edit
+/// leaves off the card.
+public enum CardWords {
+    public static func asks(_ agent: String, _ tool: String) -> String { "\(agent) asks to use \(tool)" }
+    public static let cantBeVerified = "Can’t be verified"
+    public static let allow = "Allow"
+    public static let allowForSession = "Allow for this session"
+    public static let deny = "Deny"
+    public static let denyAndSend = "Deny and send"
+    public static func denyPrompt(_ agent: String) -> String { "What should \(agent) do instead?" }
+    public static func denyTells(_ agent: String) -> String { "This call does not run, and \(agent) is told you said no." }
+    public static func denyWithReasonTells(_ agent: String) -> String {
+        "Denies the call, and \(agent) gets your reason with the denial."
+    }
+    public static func allowingGrants(_ rule: String) -> String { "Allowing for this session grants \(rule)" }
+    public static let chooseOne = "Choose one"
+    public static func showMoreFiles(_ count: Int) -> String { "Show \(count) more file\(count == 1 ? "" : "s")" }
+    public static func linesNotDrawn(_ count: Int) -> String {
+        count == 1 ? "1 more line of this patch is not drawn here." : "\(count) more lines of this patch are not drawn here."
+    }
+    public static func filesNotShown(_ count: Int) -> String {
+        count == 1 ? "1 more file would change and is not shown here."
+            : "\(count) more files would change and are not shown here."
+    }
+    public static let approvesThoseToo = "Approving this approves those too. Review them at the computer."
+}
+
+/// A question card's answers, as both apps word them.
+public enum QuestionWords {
+    public static let other = "Other"
+    public static let typeYourAnswer = "Type your answer"
+    public static let notes = "Notes"
+    public static func notesPrompt(_ agent: String) -> String { "Optional notes for \(agent)" }
+    public static let decline = "Decline"
+    public static let submit = "Submit"
+    public static func submitNeeds(questions: Int) -> String {
+        questions == 1 ? "Choose an answer to submit." : "Answer every question to submit."
+    }
 }
