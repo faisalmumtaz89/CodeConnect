@@ -154,6 +154,12 @@ struct AddCommands: Commands {
 
 // MARK: - Sidebar
 
+/// What the sidebar's arrow keys walk: a scope, or a computer or project the list narrows to.
+private enum SidebarChoice: Equatable {
+    case scope(FleetScope)
+    case filter(FleetFilter)
+}
+
 private struct Sidebar: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
@@ -283,6 +289,23 @@ private struct Sidebar: View {
                     }
                 }
                 .padding(.bottom, 12)
+            }
+            // ↑ and ↓ walk the sidebar's choices as shown: the scopes, then the computers and projects it narrows to.
+            .focusable()
+            .focusEffectDisabled()
+            .onMoveCommand { direction in
+                guard direction == .up || direction == .down else { return }
+                let entries: [SidebarChoice] = [.scope(.active), .scope(.finished)]
+                    + machines.models.filter(\.showsFleet).map { .filter(.computer($0.machineID ?? "")) }
+                    + FleetGroup.groups(scope.rows(machines.fleet), by: .project).map { .filter(.project($0.id)) }
+                let current: SidebarChoice = filter.map { .filter($0) } ?? .scope(scope)
+                switch ListStep.step(from: current, in: entries, down: direction == .down) {
+                case .scope(let chosen)?:
+                    scope = chosen
+                    filter = nil
+                case .filter(let chosen)?: filter = chosen
+                case nil: break
+                }
             }
         }
         .background(Theme.sidebar)

@@ -181,6 +181,15 @@ struct FleetList: View {
                     // Room below the last row for its "…" panel, which opens downward and a scroll view clips.
                     .padding(.bottom, 40)
                 }
+                // ↑ and ↓ move the open run through the runs as the list shows them, a folded group's skipped.
+                .focusable()
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    guard direction == .up || direction == .down else { return }
+                    let shown = FleetGroup.groups(rows, by: grouping).filter { !folded.contains($0.id) }
+                        .flatMap { $0.rows.map(\.id) }
+                    opened = ListStep.step(from: opened, in: shown, down: direction == .down)
+                }
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)

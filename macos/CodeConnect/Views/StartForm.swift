@@ -258,6 +258,14 @@ struct StartForm: View {
                         }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                     }
+                    // ↑ and ↓ move the chosen folder through the folders as shown.
+                    .focusable()
+                    .focusEffectDisabled()
+                    .onMoveCommand { direction in
+                        guard direction == .up || direction == .down else { return }
+                        let shown = (picked(context).map { [$0.path] } ?? []) + startFilter(context.projects, query).map(\.path)
+                        folderPath = ListStep.step(from: folderPath, in: shown, down: direction == .down)
+                    }
                     // The chosen folder is always in view: scrolled to, the least that shows it, when the sheet
                     // opens or the choice or the list changes, so a click on a row in view moves nothing.
                     .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
