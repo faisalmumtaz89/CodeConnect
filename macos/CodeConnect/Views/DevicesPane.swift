@@ -106,7 +106,7 @@ struct DevicesPane: View {
                 row(group)
             }
         }
-        .background(Theme.window, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+        .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
         .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
     }
 
@@ -141,7 +141,7 @@ struct DevicesPane: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Theme.rowInset)
         .padding(.vertical, 10)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)

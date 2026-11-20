@@ -96,7 +96,7 @@ struct FoldersPane: View {
                             row(answer, context)
                         }
                     }
-                    .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+                    .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
                     .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
                     .disabled(busy.contains(context.id))
                 }
@@ -139,7 +139,7 @@ struct FoldersPane: View {
             .accessibilityLabel("Forget \(name)")
             .accessibilityIdentifier("\(id).forget")
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, Theme.rowInset)
         .padding(.vertical, 7)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)
