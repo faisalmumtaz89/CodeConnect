@@ -1210,12 +1210,22 @@ struct DiffDocumentView: View {
             // are grid content, and the grid has its own columns.
             VStack(alignment: .leading, spacing: CC.space.xs) {
                 CCSectionHeader(title, note: meaningful.count == 1 ? nil : "\(meaningful.count) lines")
+                // Each as the Kit reads it: a "?? <path>" line is the path and
+                // the word for what it is, as the Mac draws it.
                 ForEach(Array(meaningful.enumerated()), id: \.offset) { _, line in
-                    Text(line)
-                        .font(.system(size: metrics.fontSize, design: .monospaced))
-                        .foregroundStyle(CC.text.primary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    let reported = UnifiedDiff.reported(line)
+                    HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
+                        Text(reported.text)
+                            .font(.system(size: metrics.fontSize, design: .monospaced))
+                            .foregroundStyle(CC.text.primary)
+                            .textSelection(.enabled)
+                        if let label = reported.label {
+                            Text(label)
+                                .ccType(CC.type.footnote)
+                                .foregroundStyle(CC.text.tertiary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(.horizontal, horizontalPadding)
