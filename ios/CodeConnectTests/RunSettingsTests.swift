@@ -152,7 +152,7 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(
             SettingOutcome.of(setting: .mode, label: "Plan", result: try result("indeterminate")),
             SettingOutcome(
-                text: "Claude didn't answer, so the change may or may not have been made.",
+                text: "Claude didn’t answer, so the change may or may not have been made.",
                 tone: .warning))
     }
 
