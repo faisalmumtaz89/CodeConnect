@@ -311,6 +311,8 @@ private struct NoticeLine: View {
             Image(systemName: notice.severity == .failure || notice.severity == .warning ? "exclamationmark.circle" : "info.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(notice.severity == .failure ? Theme.red : notice.severity == .warning ? Theme.amber : Theme.text3)
+                // The tool line's mark width: a notice's words and a tool's name start on one edge.
+                .frame(width: 14)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(notice.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)

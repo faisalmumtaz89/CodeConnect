@@ -3,6 +3,10 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.3, with the iPhone app 1.1.20
+
+- On the Mac, a conversation's notices and tool lines start their words on one edge.
+
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
 - The Mac's update window matches the app: it opens centred over the main window, is as tall as its
