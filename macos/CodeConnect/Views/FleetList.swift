@@ -218,9 +218,9 @@ struct FleetList: View {
                 guard let row = rows.first else { return }
                 switch RenderWindow.confirm {
                 case "endRun": ending = row
-                case "endNote": endNote = "\(HostDevice.current.computer("The computer")) answered “refused”."
+                case "endNote": endNote = "It is still starting; end it once it has started."
                 case "remove": removing = row
-                case "removeNote": removeNote = Optional(DeleteSessionResult.stillRunning).refusal
+                case "removeNote": removeNote = FleetWords.removalRefused(.stillRunning)
                 default: break
                 }
             }
@@ -233,7 +233,8 @@ struct FleetList: View {
             ])
         }
         .confirmation($endNote) { note in
-            Confirmation(title: "End Run", message: note, answers: [.init(title: "OK", kind: .ok, id: "endRun.ok")])
+            Confirmation(
+                title: FleetWords.endFailedTitle, message: note, answers: [.init(title: "OK", kind: .ok, id: "endRun.ok")])
         }
         // Removing forgets CodeConnect's own record of a run, never the agent's transcript: it asks once, in the
         // iPhone's words, then says only what went wrong.
@@ -247,7 +248,8 @@ struct FleetList: View {
                 ])
         }
         .confirmation($removeNote) { note in
-            Confirmation(title: "Not removed", message: note, answers: [.init(title: "OK", kind: .ok, id: "remove.ok")])
+            Confirmation(
+                title: FleetWords.removeFailedTitle, message: note, answers: [.init(title: "OK", kind: .ok, id: "remove.ok")])
         }
     }
 
@@ -277,7 +279,7 @@ struct FleetList: View {
 
     private func remove(_ row: FleetRow) {
         guard let model = machines.model(for: row.machineID) else { return }
-        Task { removeNote = await model.removeSession(row.summary).refusal }
+        Task { removeNote = FleetWords.removalRefused(await model.removeSession(row.summary)) }
     }
 
     /// The computer the list is narrowed to, when it was refused for running a different version of CodeConnect,

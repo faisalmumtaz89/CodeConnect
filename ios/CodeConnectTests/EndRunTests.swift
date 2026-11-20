@@ -11,6 +11,25 @@ import XCTest
 @MainActor
 final class EndRunTests: XCTestCase {
 
+    /// The notice after an end or a removal that did not happen says why in a whole sentence of its own, one for
+    /// each answer ccd can give, and quotes no wire word: an answer this build does not know is "refused", plainly.
+    func testAFailedEndOrRemovalSaysWhyInASentenceAndQuotesNoWireWord() {
+        XCTAssertEqual(FleetWords.endFailedTitle, "Couldn’t end the run")
+        XCTAssertEqual(FleetWords.removeFailedTitle, "Couldn’t remove the run")
+        XCTAssertEqual(FleetWords.removalRefused(.stillRunning), "It’s still running. End it first, then remove it.")
+        XCTAssertEqual(
+            FleetWords.removalRefused(.notExited(lifecycle: "unknown")),
+            "The computer doesn’t know whether it has stopped, so it keeps the run.")
+        XCTAssertEqual(
+            FleetWords.removalRefused(.failed(message: "the daemon could not remove that session")),
+            "The computer couldn’t remove it.")
+        XCTAssertEqual(FleetWords.removalRefused(.unknown(status: "busy")), "The computer refused.")
+        XCTAssertEqual(FleetWords.removalRefused(nil), "The computer didn’t answer.")
+        XCTAssertNil(FleetWords.removalRefused(.deleted(events: 3)))
+        XCTAssertNil(FleetWords.removalRefused(.notFound))
+        XCTAssertEqual(FleetWords.refusedPlainly, "The computer refused.")
+    }
+
     private func wire(_ minor: Int) throws -> [String: JSONValue] {
         let url = try XCTUnwrap(
             Bundle(for: type(of: self)).url(forResource: "minor-\(minor)-wire", withExtension: "json"))

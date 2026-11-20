@@ -1425,8 +1425,8 @@ public final class AppModel {
             return nil
         case .refused(let reason):
             return reason
-        case .unknown(let status):
-            return "\(HostDevice.current.computer("The computer")) answered “\(status)”."
+        case .unknown:
+            return FleetWords.refusedPlainly
         }
     }
 
