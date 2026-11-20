@@ -174,6 +174,16 @@
             Set((UserDefaults.standard.string(forKey: "CC_HOVER") ?? "").split(separator: ",").map(String.init))
         }
 
+        /// `-CC_FORCE <id>=pressed,<id>=disabled`: the buttons with these identifiers draw pressed, or disabled, since a
+        /// test launch can neither hold a click nor reach every state that disables a control.
+        static var forced: [String: String] {
+            Dictionary(
+                (UserDefaults.standard.string(forKey: "CC_FORCE") ?? "").split(separator: ",").compactMap { pair in
+                    let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+                    return parts.count == 2 ? (parts[0], parts[1]) : nil
+                }, uniquingKeysWith: { $1 })
+        }
+
         /// The address and code `-CC_RENDER_PAIR` asks the pairing form to submit.
         static var pairing: (address: String, code: String)? {
             guard let words = UserDefaults.standard.string(forKey: "CC_RENDER_PAIR")?.split(separator: " "),
