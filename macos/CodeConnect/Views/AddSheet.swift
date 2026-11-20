@@ -261,7 +261,7 @@ private struct ComputerForm: View {
                 }
             }
             .padding(.horizontal, 18)
-            .padding(.top, 22)
+            .padding(.top, 18)
 
             Spacer(minLength: 18)
 
