@@ -34,6 +34,11 @@ private struct Composer: View {
     @State private var quiet: Task<Void, Never>?
     /// The settings panel open above the reply row, if any.
     @State private var panel: SettingsPanel?
+    /// The reply row's width, the box's content width: no panel is wider.
+    @State private var rowWidth: CGFloat = 0
+    /// The reply row's spacing and the send button's side: an open panel's trailing edge is the send button's.
+    private static let rowSpacing: CGFloat = 10
+    private static let sendSize: CGFloat = 24
     @State private var compacting = false
     @State private var instructions = ""
     @State private var clearing = false
@@ -164,7 +169,7 @@ private struct Composer: View {
                 .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
                 .accessibilityLabel(SessionWords.replyPrompt(agent))
                 .accessibilityIdentifier("session.composer.field")
-            HStack(spacing: 10) {
+            HStack(spacing: Self.rowSpacing) {
                 if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
                     Text(counter)
                         .font(Theme.mono(11))
@@ -187,11 +192,12 @@ private struct Composer: View {
                             opener = nil
                             clearing = true
                         },
-                        confirmMode: { confirmingMode = $0 })
+                        confirmMode: { confirmingMode = $0 }, reach: Self.rowSpacing + Self.sendSize, room: rowWidth)
                     .disabled(blocked != nil || busy)
                 }
                 sendButton
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
         }
         .padding(12)
         // The outline is drawn under the box's contents, not over them: a settings panel opens out of the box and
@@ -207,7 +213,7 @@ private struct Composer: View {
             Image(systemName: "arrow.up")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(canSend ? Color.black : Theme.text3)
-                .frame(width: 24, height: 24)
+                .frame(width: Self.sendSize, height: Self.sendSize)
                 .background(Circle().fill(canSend ? Theme.text : Theme.window))
         }
         .buttonStyle(.hover(radius: 12, over: true, id: "session.composer.send"))

@@ -13,10 +13,11 @@ enum SettingsPanel {
 /// line each, and the selected model's efforts as one row of segments. The mode button names the run's mode at all
 /// times, a mode the menu marks `confirm` (one that lets the agent work without asking) in red; its list ends such a
 /// mode in "…", which asks first in the reply box's confirmation. On a Claude run "⋯" holds Compact… and Clear…, which
-/// type Claude Code's commands; a Codex run takes neither and has no "⋯". One panel is open at a time, above its
-/// button; Esc or a click anywhere else closes it. The checks follow the run's facts, never a guess between a click and
-/// its answer; while one of its calls is in flight every control is disabled and a small spinner stands in the model
-/// button's chevron, and what became of the call is the reply box's note line.
+/// type Claude Code's commands; a Codex run takes neither and has no "⋯". One panel is open at a time, above the
+/// controls, its trailing edge on the reply box's content edge (the send button's) whichever button opened it, and no
+/// wider than that content; Esc or a click anywhere else closes it. The checks follow the run's facts, never a guess
+/// between a click and its answer; while one of its calls is in flight every control is disabled and a small spinner
+/// stands in the model button's chevron, and what became of the call is the reply box's note line.
 struct HostedSettingsButton: View {
     let model: AppModel
     let key: String
@@ -31,6 +32,11 @@ struct HostedSettingsButton: View {
     let clear: () -> Void
     /// A mode the menu marks `confirm` was chosen: nothing is sent until the reply box's confirmation is.
     let confirmMode: (MenuMode) -> Void
+    /// How far past these controls' trailing edge the reply box's content ends, where an open panel's trailing edge
+    /// stands.
+    let reach: CGFloat
+    /// The reply box's content width, which no panel is wider than; 0 until measured.
+    let room: CGFloat
 
     /// Where the controls and the open panel are in the window, for the click that closes it.
     @State private var frames = PanelFrames()
@@ -44,6 +50,14 @@ struct HostedSettingsButton: View {
             if agent == .claude { moreButton }
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.controls = $0 }
+        .overlay(alignment: .bottomTrailing) {
+            if let open {
+                panel(open)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.panel = $0 }
+                    // Clear of the 24 pt controls by the panels' one gap.
+                    .offset(x: reach, y: -(24 + Theme.panelGap))
+            }
+        }
         .modifier(ClosesOnClickElsewhere(open: $open, frames: frames))
         // The run's menus went away (it ended, or its link is down): nothing of them stays open.
         .onDisappear { open = nil }
@@ -62,8 +76,6 @@ struct HostedSettingsButton: View {
                     chevron
                 }
             }
-        } panel: {
-            modelPanel
         }
     }
 
@@ -75,8 +87,6 @@ struct HostedSettingsButton: View {
                 Text(label).foregroundStyle(settings.selectedMode?.confirm == true ? Theme.red : Theme.text)
                 chevron
             }
-        } panel: {
-            card(width: 240) { modeRows }
         }
     }
 
@@ -84,11 +94,6 @@ struct HostedSettingsButton: View {
         control(.more, id: "session.composer.more", label: "More", help: RunSettingWords.compactOrClear) {
             Image(systemName: "ellipsis").font(.system(size: 11, weight: .semibold))
                 .frame(width: 12)
-        } panel: {
-            card(width: 180) {
-                commandRow("Compact…", id: "session.composer.compact", run: compact)
-                commandRow("Clear…", id: "session.composer.clear", run: clear)
-            }
         }
     }
 
@@ -96,10 +101,9 @@ struct HostedSettingsButton: View {
         Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
     }
 
-    /// One control of the reply row and the panel it opens above itself, its trailing edge on the control's.
-    private func control<Label: View, Panel: View>(
-        _ which: SettingsPanel, id: String, label: String, help: String,
-        @ViewBuilder content: () -> Label, @ViewBuilder panel: () -> Panel
+    /// One control of the reply row, which opens its panel.
+    private func control<Label: View>(
+        _ which: SettingsPanel, id: String, label: String, help: String, @ViewBuilder content: () -> Label
     ) -> some View {
         let isOpen = open == which
         return Button {
@@ -118,17 +122,22 @@ struct HostedSettingsButton: View {
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
         .accessibilityValue(isOpen ? "open" : "closed")
-        .overlay(alignment: .bottomTrailing) {
-            if isOpen {
-                panel()
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.panel = $0 }
-                    // Clear of the 24 pt control by the panels' one gap.
-                    .offset(y: -(24 + Theme.panelGap))
-            }
-        }
     }
 
     // MARK: The panels
+
+    @ViewBuilder
+    private func panel(_ which: SettingsPanel) -> some View {
+        switch which {
+        case .model: modelPanel
+        case .mode: card(width: 240) { modeRows }
+        case .more:
+            card(width: 180) {
+                commandRow("Compact…", id: "session.composer.compact", run: compact)
+                commandRow("Clear…", id: "session.composer.clear", run: clear)
+            }
+        }
+    }
 
     /// The models, one line each, then the selected model's efforts.
     private var modelPanel: some View {
@@ -196,7 +205,7 @@ struct HostedSettingsButton: View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
             .padding(.vertical, 5)
-            .frame(width: width)
+            .frame(width: room > 0 ? min(width, room) : width)
             .fixedSize(horizontal: false, vertical: true)
             // The card takes every click inside it: one on its checked or disabled rows, a header or a gap does
             // nothing, rather than reaching the reply box or the conversation under it.
