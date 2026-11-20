@@ -128,6 +128,10 @@
             return try? JSONDecoder().decode(PeerDirectory.self, from: Data(arguments[flag + 1].utf8))
         }
 
+        /// `-CC_LOOPBACK YES`: this Mac's daemon is taken to answer devices only at loopback, as before Tailscale:
+        /// the Tailscale note reads it so, and Add an iPhone has no code an iPhone could reach.
+        static var onLoopback: Bool { UserDefaults.standard.bool(forKey: "CC_LOOPBACK") }
+
         /// `-CC_MACHINE_STATS <frame>`: the `machine_stats` frame every computer is taken to have answered last (one
         /// serialised by ccd), in place of its own; a row still shows it only while its link is live. Read from the
         /// arguments as given.
