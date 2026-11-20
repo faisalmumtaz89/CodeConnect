@@ -925,7 +925,7 @@ struct FleetView: View {
         }
         startSeed = StartSeed(
             context: context, project: start.project, place: start.place, agent: start.agent,
-            message: start.prompt ?? "", trustPath: folderPath)
+            model: start.model, message: start.prompt ?? "", trustPath: folderPath)
         path = []
         Task {
             try? await Task.sleep(for: .milliseconds(450))

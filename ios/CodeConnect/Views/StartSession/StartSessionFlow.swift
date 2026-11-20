@@ -14,6 +14,8 @@ struct StartSeed {
     let project: StartProject
     let place: StartPlace
     let agent: StartAgent
+    /// The model the start named, nil for the agent's Default.
+    let model: String?
     let message: String
     /// The folder the question is about.
     let trustPath: String
@@ -34,13 +36,16 @@ struct StartStepsSheet: View {
     /// back retraces the way in; nil is the home folder, which the computer
     /// names.
     enum Screen: Hashable {
-        case computer, folder, browse(String?), agent, branch, newWorktree, start, trust
+        case computer, folder, browse(String?), agent, branch, newWorktree, start, model, trust
     }
 
     @State private var trail: [Screen] = [.computer]
     @State private var query = ""
     @State private var project: StartProject?
     @State private var agent: StartAgent?
+    /// The model chosen on the Model step, as the start names it; nil until
+    /// one is chosen, which is the agent's Default (`pick`).
+    @State private var modelValue: String?
     @State private var place = StartPlace.folder
     @State private var message = ""
     @State private var worktreeName = ""
@@ -79,6 +84,7 @@ struct StartStepsSheet: View {
         _chosen = State(initialValue: seed.context)
         _project = State(initialValue: seed.project)
         _agent = State(initialValue: seed.agent)
+        _modelValue = State(initialValue: seed.model)
         _place = State(initialValue: seed.place)
         _message = State(initialValue: seed.message)
         _trustPath = State(initialValue: seed.trustPath)
@@ -143,6 +149,7 @@ struct StartStepsSheet: View {
         case .branch: return "Which branch?"
         case .newWorktree: return "New worktree"
         case .start: return "Ready to start"
+        case .model: return "Which model?"
         case .trust: return FleetWords.startAnAgent
         }
     }
@@ -153,7 +160,7 @@ struct StartStepsSheet: View {
         switch screen {
         case .computer, .start: return nil
         case .folder, .browse, .trust: return chosen?.machineName
-        case .agent, .branch, .newWorktree: return project?.name
+        case .agent, .branch, .newWorktree, .model: return project?.name
         }
     }
 
@@ -168,6 +175,7 @@ struct StartStepsSheet: View {
         case .branch: branchStep
         case .newWorktree: newWorktreeStep
         case .start: startStep
+        case .model: modelStep
         case .trust: trustStep
         }
     }
@@ -429,6 +437,7 @@ struct StartStepsSheet: View {
                     ForEach(StartAgent.allCases) { candidate in
                         let missing = context.missingReason(candidate) ?? signedOut(candidate)
                         Button {
+                            if agent != candidate { modelValue = nil }
                             agent = candidate
                             go(branchAhead ? .branch : .start)
                         } label: {
@@ -643,6 +652,9 @@ struct StartStepsSheet: View {
                     summary("Computer", context.machineName, .computer)
                     summary("Folder", project.shownPath, .folder, mono: true, oneLine: true)
                     summary("Agent", agent.displayName, .agent)
+                    if let pick = pick(agent) {
+                        summary("Model", pick.isDefault ? "Default" : pick.label, .model)
+                    }
                     if git != nil {
                         summary(
                             "Branch", startPlaceSummary(place, agent: agent, project: project, git: git), .branch,
@@ -676,7 +688,63 @@ struct StartStepsSheet: View {
     }
 
     private func start(_ project: StartProject, _ agent: StartAgent) {
-        onStarted(context.start(project, place: place, agent: agent, prompt: message))
+        onStarted(context.start(project, place: place, agent: agent, model: pick(agent)?.model, prompt: message))
+    }
+
+    // MARK: Model
+
+    /// The models this agent offers here, in its order and words.
+    private func models(_ agent: StartAgent) -> [StartModelChoice] {
+        if case .choices(let choices) = context.models(agent) { return choices }
+        return []
+    }
+
+    /// The model a start names: the one chosen while the agent still offers
+    /// it, else the agent's Default, as the Mac's start form picks
+    /// (`StartContext.defaultChoice`).
+    private func pick(_ agent: StartAgent) -> StartModelChoice? {
+        let offered = models(agent)
+        if let modelValue, let chosen = offered.first(where: { $0.model == modelValue }) { return chosen }
+        return offered.first(where: \.isDefault)
+    }
+
+    /// Reached only from Ready's Model row: each model by its name alone, the
+    /// one a start would name checked. A tap chooses it and goes back.
+    @ViewBuilder
+    private var modelStep: some View {
+        if let agent {
+            let current = pick(agent)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(models(agent), id: \.self) { choice in
+                        Button {
+                            modelValue = choice.model
+                            withAnimation(CC.motion.medium) { _ = trail.popLast() }
+                        } label: {
+                            HStack(spacing: CC.space.sm) {
+                                Text(choice.isDefault ? "Default" : choice.label)
+                                    .ccType(CC.type.body)
+                                    .foregroundStyle(CC.text.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                if choice == current {
+                                    CCIcon("check-circle-fill", size: 18, relativeTo: .body)
+                                        .foregroundStyle(CC.text.primary)
+                                }
+                            }
+                            .padding(.horizontal, CC.space.md)
+                            .padding(.vertical, CC.space.sm)
+                            .frame(minHeight: CC.size.rowMin)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(StartRowStyle())
+                        .accessibilityAddTraits(choice == current ? .isSelected : [])
+                        .accessibilityIdentifier("start-model-\(choice.isDefault ? "default" : choice.label)")
+                        CCHairline().padding(.leading, CC.space.md)
+                    }
+                }
+            }
+            .accessibilityIdentifier("start-list")
+        }
     }
 
     // MARK: Trust
@@ -691,7 +759,10 @@ struct StartStepsSheet: View {
         if let project, let agent, let trustPath {
             ScrollView {
                 TrustFolderCard(path: trustPath, computerName: context.machineName) { trust in
-                    onStarted(context.start(project, place: place, agent: agent, prompt: message, trust: trust))
+                    onStarted(
+                        context.start(
+                            project, place: place, agent: agent, model: pick(agent)?.model, prompt: message,
+                            trust: trust))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(CC.space.md)
@@ -707,7 +778,9 @@ struct StartStepsSheet: View {
     ) -> some View {
         VStack(spacing: 0) {
             Button {
-                revisit(step)
+                // Back to the screen that made the choice; the Model step is
+                // reached only from here, so it is a step forward.
+                if trail.contains(step) { revisit(step) } else { go(step) }
             } label: {
                 HStack(spacing: CC.space.sm) {
                     VStack(alignment: .leading, spacing: CC.space.xxs) {
