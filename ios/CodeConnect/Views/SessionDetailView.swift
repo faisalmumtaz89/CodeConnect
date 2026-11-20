@@ -1198,6 +1198,21 @@ struct SessionDetailView: View {
             } label: {
                 Label("Changes", image: "plus-minus")
             }
+            // A Claude run started from the app takes Claude Code's own
+            // Compact and Clear, as the Mac's reply box offers them.
+            if case .hostedLive = model.runSettings(for: key), summary?.agent == .claude {
+                Button {
+                    compactSheetPrefill = ""
+                    showCompactSheet = true
+                } label: {
+                    Label("Compact…", image: "arrows-in")
+                }
+                Button {
+                    showClearConfirm = true
+                } label: {
+                    Label("Clear…", image: "eraser")
+                }
+            }
             if !model.sampleFleetActive {
                 Section(model.machineName.map { "On \($0)" } ?? "") {
                     Button {
@@ -1209,6 +1224,8 @@ struct SessionDetailView: View {
             }
             // Ending a run cannot be undone, so it is last, and asks first.
             if let summary, model.canEndRun(summary) {
+                // iOS draws a menu's destructive item in its own red and draws
+                // a coloured label in plain white, so this red is the system's.
                 Button(role: .destructive) {
                     confirmingEndRun = true
                 } label: {

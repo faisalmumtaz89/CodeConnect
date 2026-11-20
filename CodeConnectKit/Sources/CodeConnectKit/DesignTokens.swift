@@ -72,7 +72,7 @@ private enum Hex {
     static let success: UInt32 = 0x3ECF8E
     static let info: UInt32 = 0x3B82F6
     static let warning: UInt32 = 0xF5A623
-    static let danger: UInt32 = 0xFF4D4F
+    static let danger: UInt32 = 0xE5636A
 
     // Diff tints, composited once and pinned here as literals so a row tint
     // cannot drift with an opacity change somewhere.
