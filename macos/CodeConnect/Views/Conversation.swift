@@ -17,6 +17,9 @@ struct Conversation: View {
 
     var body: some View {
         ConversationTable(model: model, key: key, items: TimelineBuilder.drawn(model.shown(for: key)?.timeline ?? []), tail: tail)
+            .overlay {
+                if model.shown(for: key)?.timeline.isEmpty ?? true { NothingRecorded(model: model, key: key) }
+            }
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { tail.wake() }
             }
@@ -27,6 +30,32 @@ struct Conversation: View {
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
         #endif
+    }
+}
+
+/// An empty conversation, as the iPhone says it: nothing recorded yet, and, while the run can still record something,
+/// that its events appear here. A run that takes no reply says only the first.
+private struct NothingRecorded: View {
+    let model: AppModel
+    let key: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "clock")
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(Theme.text3)
+                .padding(.bottom, 4)
+                .accessibilityHidden(true)
+            Text(SessionWords.nothingRecorded).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+            if model.shownSummary(for: key)?.takesNoReply != true {
+                Text(SessionWords.eventsAppearHere).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 28)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("session.nothingRecorded")
     }
 }
 
