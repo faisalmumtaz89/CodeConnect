@@ -86,6 +86,8 @@ public enum SessionWords {
         "Cut short by \(HostDevice.current.computer("your computer")). This is not the whole output."
     }
     public static let nothingLiveYet = "Nothing live has arrived for this run yet."
+    /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
+    public static let runEnded = "This run has ended. Its conversation stays here to read."
 }
 
 /// A run's settings, as both apps name them.

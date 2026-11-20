@@ -3,15 +3,41 @@ import SwiftUI
 
 /// The reply box at the foot of a run's conversation: what became of the last thing sent, or why sending cannot work,
 /// over the words and what answers them. Where the words go is Kit's to say (`AppModel.submission`): a Codex run's own
-/// message, Claude's typed text, or a slash command this box answers with its own control.
+/// message, Claude's typed text, or a slash command this box answers with its own control. A run that takes no reply
+/// (Kit's `takesNoReply`) has no box: one quiet line in its place says it has ended.
 struct ComposerBar: View {
     let key: String
     @Environment(Machines.self) private var machines
 
     var body: some View {
-        if let model = machines.model(forSession: key), let kept = model.drafts(for: key) {
-            Composer(model: model, key: key, kept: kept)
+        if let model = machines.model(forSession: key) {
+            if model.shownSummary(for: key)?.takesNoReply == true {
+                EndedLine()
+            } else if let kept = model.drafts(for: key) {
+                Composer(model: model, key: key, kept: kept)
+            }
         }
+    }
+}
+
+/// In an ended run's reply box's place: the pane's foot band, its hairline and height the run list's footer's, so the
+/// panes end on one line; the mark and words on the conversation's notice columns.
+private struct EndedLine: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: "checkmark.circle").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+                Text(SessionWords.runEnded).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 28)
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("session.endedLine")
     }
 }
 

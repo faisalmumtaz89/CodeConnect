@@ -590,12 +590,15 @@ enum Fixtures {
         }
         // Exited runs carry a `session_uid`, because that is what a daemon new
         // enough to have ended one this way sends, and it is the only id a
-        // removal is allowed to name.
+        // removal is allowed to name. Under `ended` the last one is one the
+        // next message relaunches (decision 210), so a render reaches a run
+        // that has ended and still takes a reply.
         let endedRuns = (0..<variant.endedCount).map { offset in
             let index = variant.sessionCount + offset + 1
+            let relaunchable = variant == .ended && offset == variant.endedCount - 1 ? #""relaunchable":true,"# : ""
             return """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
-                "session_id":"fx-\(index)",\
+                "session_id":"fx-\(index)",\(relaunchable)\
                 "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"exited","link":"detached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
