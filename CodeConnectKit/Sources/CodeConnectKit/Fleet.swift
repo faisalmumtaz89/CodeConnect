@@ -447,7 +447,7 @@ public enum FleetStatusRule {
     public static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
             return .unknown(
-                reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn't said what it can do yet.")
+                reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn’t said what it can do yet.")
         }
         // Before any link reason: an ended run has no agent host because it has
         // ended, and nothing can answer it anywhere, the Mac included. A failed

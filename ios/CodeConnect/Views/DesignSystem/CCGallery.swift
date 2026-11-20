@@ -583,7 +583,7 @@ import SwiftUI
                             // announced on every row whether or not the badge is
                             // drawn.
                             accessibilityLabelText:
-                                "codeconnect, Claude Code session, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
+                                "codeconnect, Claude Code session, Waiting for you, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
                             action: { lastAction = "fleet row" }
                         ) {
                             // **No dot, and no column.** A blocked row draws
