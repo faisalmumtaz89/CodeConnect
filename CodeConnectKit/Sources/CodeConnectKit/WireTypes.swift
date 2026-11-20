@@ -787,12 +787,21 @@ public struct MenuModel: Codable, Sendable, Hashable {
     /// The agent's own description of the model, as sent (Claude Code's carries the model's version); absent
     /// when it gives none.
     public let detail: String?
+    /// The model id the agent says this entry runs now (minor 45; Claude Code's `resolvedModel`), absent from a
+    /// Codex entry, whose `value` is the model, and from a daemon below 45.
+    public let resolvedModel: String?
 
-    public init(value: String, label: String, efforts: [String], detail: String? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case value, label, efforts, detail
+        case resolvedModel = "resolved_model"
+    }
+
+    public init(value: String, label: String, efforts: [String], detail: String? = nil, resolvedModel: String? = nil) {
         self.value = value
         self.label = label
         self.efforts = efforts
         self.detail = detail
+        self.resolvedModel = resolvedModel
     }
 
     /// The name an app shows for a model: the agent's own label, except its default entry, which is "Default" for
@@ -801,7 +810,9 @@ public struct MenuModel: Codable, Sendable, Hashable {
 
     /// This model with the label an app shows.
     var shown: MenuModel {
-        MenuModel(value: value, label: Self.shownLabel(value: value, label: label), efforts: efforts, detail: detail)
+        MenuModel(
+            value: value, label: Self.shownLabel(value: value, label: label), efforts: efforts, detail: detail,
+            resolvedModel: resolvedModel)
     }
 }
 

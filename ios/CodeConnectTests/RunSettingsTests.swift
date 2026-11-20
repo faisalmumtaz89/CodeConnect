@@ -202,7 +202,12 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus),
             RunModelName(text: "claude-sonnet-5-5", reported: true))
-        // A model this build has never heard of reads the same way: nothing here names models.
+    }
+
+    /// A model this build has never heard of, on a run whose menus name no entry for it, reads as the agent
+    /// reported it: nothing here names models.
+    func testAnUnlistedModelReadsAsReported() throws {
+        let run = try summary("session_hosted_live_minor_38")
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "claude-opus-6", menus: run.menus),
             RunModelName(text: "claude-opus-6", reported: true))
@@ -217,14 +222,30 @@ final class RunSettingsTests: XCTestCase {
             RunModelName(text: "claude-sonnet-5-5", reported: true))
     }
 
-    /// After an app's model change a Claude run's fact is claude's receipt, which no entry carries: it
-    /// reads as sent, until the next turn's init reports the id.
-    func testARunsModelAfterAChangeReadsAsItsReceipt() throws {
+    /// After an app's model change a Claude run's fact is claude's receipt, which no entry carries: the run's
+    /// model reads as the id of the entry the daemon says is chosen (minor 45's `resolved_model`, from Claude
+    /// Code 2.1.319's own list), never as the receipt's text.
+    func testARunsModelAfterAChangeReadsAsTheChosenEntrysID() throws {
         let run = try summary("session_hosted_live")
         XCTAssertEqual(run.model?.value, "sonnet (claude-sonnet-5-5)")
+        XCTAssertEqual(run.menus?.selectedModel, "sonnet")
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus),
-            RunModelName(text: "sonnet (claude-sonnet-5-5)", reported: true))
+            RunModelName(text: "claude-sonnet-5-5", reported: true))
+        guard case .hostedLive(let s) = RunSettings.of(
+            summary: run, confirmed: "sonnet (claude-sonnet-5-5)") else { return XCTFail("hostedLive") }
+        XCTAssertEqual(s.modelDisplay, "claude-sonnet-5-5")
+        XCTAssertTrue(s.modelDisplayReported)
+    }
+
+    /// Each Claude entry carries the model id claude's own list gives it, as the daemon sent it (minor 45); a
+    /// Codex entry carries none, its value being the model.
+    func testAMenuRowCarriesTheModelIDItRuns() throws {
+        let claude = try summary("session_hosted_live")
+        XCTAssertEqual(
+            claude.menus?.models.map(\.resolvedModel), ["claude-opus-5-5", "claude-sonnet-5-5"])
+        let codex = try summary("session_codex_live", in: "codex-settings-wire")
+        XCTAssertTrue(codex.menus?.models.allSatisfy { $0.resolvedModel == nil } ?? false)
     }
 
     /// A row the agent labels with its id alone reads by that row's label.
