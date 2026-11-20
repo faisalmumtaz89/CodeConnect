@@ -195,6 +195,11 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
 private let trackRadius: CGFloat = 7
 private let trackInset: CGFloat = 2
 
+extension EnvironmentValues {
+    /// Raised each time Return in the run list asks for the open run's reply box.
+    @Entry var replyFocusRequest = 0
+}
+
 extension FocusedValues {
     /// The composer is using Esc itself: its commands list is open or its field has focus.
     @Entry var composerHoldsEscape: Bool?

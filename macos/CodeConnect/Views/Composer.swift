@@ -55,6 +55,7 @@ private struct Composer: View {
     @State private var askingAgain = false
     /// The field has the keyboard: Esc leaves it before it closes the run.
     @FocusState private var fieldFocused: Bool
+    @Environment(\.replyFocusRequest) private var replyFocusRequest
     /// The Compact command typed last, and where it stands.
     @State private var running: Running?
     @State private var quiet: Task<Void, Never>?
@@ -126,6 +127,8 @@ private struct Composer: View {
         // A run nothing has been said to yet, as one started with no first message, has the cursor in its box once its
         // conversation is in. Not "an empty conversation": a Codex run files its session start before any message.
         .task(id: awaitsFirstMessage) { if awaitsFirstMessage { fieldFocused = true } }
+        // Return in the run list asks for the reply box.
+        .onChange(of: replyFocusRequest) { fieldFocused = true }
         // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
         // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)

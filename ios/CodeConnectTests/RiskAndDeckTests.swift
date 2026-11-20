@@ -980,3 +980,18 @@ final class CardHeadingTests: XCTestCase {
         XCTAssertEqual(CardWords.asks("Codex", "MCP tool"), "Codex asks to use MCP tool")
     }
 }
+
+/// The arrow keys' one step through a list.
+final class ListStepTests: XCTestCase {
+    func testAStepMovesOneAndStopsAtTheEnds() {
+        let ids = ["a", "b", "c"]
+        XCTAssertEqual(ListStep.step(from: nil, in: ids, down: true), "a")
+        XCTAssertEqual(ListStep.step(from: nil, in: ids, down: false), "c")
+        XCTAssertEqual(ListStep.step(from: "a", in: ids, down: true), "b")
+        XCTAssertEqual(ListStep.step(from: "b", in: ids, down: false), "a")
+        XCTAssertEqual(ListStep.step(from: "c", in: ids, down: true), "c")
+        XCTAssertEqual(ListStep.step(from: "a", in: ids, down: false), "a")
+        XCTAssertEqual(ListStep.step(from: "gone", in: ids, down: true), "a", "a selection no longer shown starts over")
+        XCTAssertEqual(ListStep.step(from: "x", in: [String](), down: true), "x", "an empty list moves nothing")
+    }
+}

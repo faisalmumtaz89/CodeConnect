@@ -40,6 +40,8 @@ struct StartForm: View {
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
+    /// The search field has the keyboard, and with it the folders under it.
+    @FocusState private var searchFocused: Bool
     /// The folder list's rows, measured: the box is as tall as they are, up to its most.
     @State private var listHeight: CGFloat = 0
 
@@ -243,6 +245,13 @@ struct StartForm: View {
                 TextField("", text: $query, prompt: Text("Search recent folders").foregroundStyle(Theme.text3))
                     .accessibilityLabel("Search recent folders")
                     .accessibilityIdentifier("start.search")
+                    // The field and the folders under it are one stop for the keyboard: ↑ and ↓ move the chosen
+                    // folder through the folders as shown while the cursor stays here, so typing goes on.
+                    .focused($searchFocused)
+                    // Start opens with the keyboard here, so the first keys typed search and the arrows choose.
+                    .onAppear { searchFocused = true }
+                    .onKeyPress(.downArrow) { moveFolder(context, down: true) }
+                    .onKeyPress(.upArrow) { moveFolder(context, down: false) }
                     .textFieldStyle(.plain)
                     .font(Theme.ui(12.5))
                     .padding(.horizontal, 10)
@@ -272,9 +281,17 @@ struct StartForm: View {
         }
     }
 
+    /// One arrow-key step through the folders as shown, the picked one first.
+    private func moveFolder(_ context: StartContext, down: Bool) -> KeyPress.Result {
+        let shown = (picked(context).map { [$0.path] } ?? []) + startFilter(context.projects, query).map(\.path)
+        folderPath = ListStep.step(from: folderPath, in: shown, down: down)
+        return .handled
+    }
+
     private func folderRow(_ project: StartProject) -> some View {
         Button {
             folderPath = project.path
+            searchFocused = true
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -296,6 +313,7 @@ struct StartForm: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
+        .focusable(false)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
         .id(project.path)

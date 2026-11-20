@@ -60,6 +60,8 @@ struct FleetList: View {
     /// The row under the pointer, and the row whose "…" panel is open.
     @State private var hovered: String?
     @State private var moreOpen: String?
+    /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
+    @FocusState private var listFocused: Bool
     /// The run End Run… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
@@ -114,6 +116,8 @@ struct FleetList: View {
                                     folded: isFolded)
                             }
                             .buttonStyle(.hover(radius: 0, id: "fleet.group.\(group.axID)"))
+                            // The list is one stop for the keyboard; its rows are not stops of their own.
+                            .focusable(false)
                             .accessibilityIdentifier("fleet.group.\(group.axID)")
                             .accessibilityValue(isFolded ? "folded" : "open")
                             if !isFolded {
@@ -131,10 +135,12 @@ struct FleetList: View {
                                     Button {
                                         moreOpen = nil
                                         opened = selected ? nil : row.id
+                                        keepListFocus()
                                     } label: {
                                         FleetLine(row: row, selected: selected, roomForMore: more)
                                     }
                                     .buttonStyle(.hover(radius: 0, id: "fleet.row.\(row.id)"))
+                                    .focusable(false)
                                     .accessibilityElement(children: .contain)
                                     .accessibilityAction { opened = selected ? nil : row.id }
                                     .accessibilityIdentifier("fleet.row.\(row.id)")
@@ -175,11 +181,24 @@ struct FleetList: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.hover(radius: 0, id: "fleet.showFinished"))
+                            .focusable(false)
                             .accessibilityIdentifier("fleet.showFinished")
                         }
                     }
                     // Room below the last row for its "…" panel, which opens downward and a scroll view clips.
                     .padding(.bottom, 40)
+                }
+                // One stop for the keyboard: ↑ and ↓ move the open run through the runs as the list shows them, a
+                // folded group's skipped, and the list keeps the keyboard as the run opens beside it.
+                .focusable()
+                .focused($listFocused)
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    guard direction == .up || direction == .down else { return }
+                    let shown = FleetGroup.groups(rows, by: grouping).filter { !folded.contains($0.id) }
+                        .flatMap { $0.rows.map(\.id) }
+                    opened = ListStep.step(from: opened, in: shown, down: direction == .down)
+                    keepListFocus()
                 }
             }
 
@@ -234,6 +253,13 @@ struct FleetList: View {
         } message: { note in
             Text(note)
         }
+    }
+
+    /// Gives the list the keyboard, and gives it again once the window has laid out the run that opened: the new pane
+    /// beside the list otherwise hands the keyboard to the first control left in the window.
+    private func keepListFocus() {
+        listFocused = true
+        DispatchQueue.main.async { listFocused = true }
     }
 
     /// The row's "…" while it is shown: on hover, or while its panel is open.
@@ -487,6 +513,8 @@ struct RunMore: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.hover(radius: 5, id: id))
+        // Inside a list that is one stop for the keyboard: reached by the pointer and by VoiceOver's action.
+        .focusable(false)
         .help("More")
         .accessibilityLabel("More")
         .accessibilityIdentifier(id)
