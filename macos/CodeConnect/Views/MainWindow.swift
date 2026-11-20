@@ -38,7 +38,7 @@ struct MainWindow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(adding: $adding, scope: $scope, filter: $filter, pairAgain: pairAgain)
+            Sidebar(adding: $adding, scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain)
                 .frame(width: 216)
             Rectangle().fill(Theme.hairline).frame(width: 1)
             if machines.showsFleet {
@@ -67,6 +67,14 @@ struct MainWindow: View {
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
         .onChange(of: opened) { chosen = nil }
+        // A computer removed, here or from Settings: the list lets go of its narrowing to it and of its run, which
+        // has left the list with it.
+        .onChange(of: machines.models.compactMap(\.machineID)) { before, after in
+            let removed = Set(before).subtracting(after)
+            guard !removed.isEmpty else { return }
+            if case .computer(let id) = filter, removed.contains(id) { filter = nil }
+            if let opened, !machines.fleet.contains(where: { $0.id == opened }) { self.opened = nil }
+        }
         // Esc closes the open run; a sheet's own Esc is its Cancel. Not while the composer is using it: Esc closes its
         // list, or leaves its field, first.
         .background {
@@ -146,14 +154,25 @@ struct AddCommands: Commands {
 
 private struct Sidebar: View {
     @Environment(Machines.self) private var machines
+    @Environment(Setup.self) private var setup
     @Binding var adding: AddKind?
     @Binding var scope: FleetScope
     @Binding var filter: FleetFilter?
+    @Binding var opened: String?
     let pairAgain: (String) -> Void
+    /// The computer row under the pointer, and the one whose "…" panel is open, by the computer's id.
+    @State private var hovered: String?
+    @State private var moreOpen: String?
+    /// The computer Remove… is asking about.
+    @State private var removing: AppModel?
+    /// Where this Mac's own daemon answers. Its computer, which Setup pairs with again at every launch, is never offered
+    /// for removal.
+    @State private var address: LocalDaemon.Address?
 
     var body: some View {
         let active = FleetScope.active.rows(machines.fleet)
         let computers = machines.models.filter(\.showsFleet)
+        let thisMac = setup.thisMac(at: address)
         VStack(alignment: .leading, spacing: 0) {
             // Clear of the traffic lights.
             Color.clear.frame(height: 52)
@@ -177,16 +196,52 @@ private struct Sidebar: View {
                     } else {
                         VStack(spacing: 2) {
                             ForEach(computers, id: \.machineID) { computer in
-                                let narrowed = FleetFilter.computer(computer.machineID ?? "")
+                                let id = computer.machineID ?? ""
+                                let narrowed = FleetFilter.computer(id)
+                                let more = id != thisMac && (hovered == id || moreOpen == id)
                                 ComputerRow(
                                     computer: computer,
                                     count: active.filter { $0.machineID == computer.machineID }.count,
                                     selected: filter == narrowed,
+                                    roomForMore: more,
                                     select: { filter = filter == narrowed ? nil : narrowed },
                                     pairAgain: pairAgain)
+                                // A run's "…", as the fleet's rows have it: on hover, its panel holding Remove…; for
+                                // VoiceOver, which does not hover, that is the row's own action. Not on this Mac's own.
+                                .accessibilityActions {
+                                    if id != thisMac {
+                                        Button("Remove…") { removing = computer }
+                                            .accessibilityIdentifier("sidebar.computer.\(id).removeAction")
+                                    }
+                                }
+                                // On the name line, at the row's trailing edge, so its panel lines up with the row.
+                                .overlay(alignment: Alignment(horizontal: .trailing, vertical: .computerNameLine)) {
+                                    if more {
+                                        RunMore(
+                                            id: "sidebar.computer.\(id).more",
+                                            open: Binding(get: { moreOpen == id }, set: { moreOpen = $0 ? id : nil }),
+                                            action: .remove
+                                        ) { removing = computer }
+                                    }
+                                }
+                                .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
+                                // Its panel opens below the row, over the rows after it.
+                                .zIndex(moreOpen == id ? 1 : 0)
                             }
                         }
                         .padding(.horizontal, 8)
+                        .zIndex(moreOpen == nil ? 0 : 1)
+                        .task(id: computers.map(\.machineID)) {
+                            guard let root = setup.installer?.root else { return }
+                            address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
+                            #if DEBUG
+                                if RenderWindow.opensComputerMenu, let last = computers.last?.machineID,
+                                    last != setup.thisMac(at: address)
+                                {
+                                    moreOpen = last
+                                }
+                            #endif
+                        }
                     }
 
                     let projects = FleetGroup.groups(active, by: .project)
@@ -226,7 +281,9 @@ private struct Sidebar: View {
             }
         }
         .background(Theme.sidebar)
+        .removesComputer($removing)
     }
+
 
     private func nav(_ target: FleetScope, symbol: String) -> some View {
         Button { scope = target } label: {
@@ -246,6 +303,8 @@ private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
     let selected: Bool
+    /// Its "…" is shown at the end of the name line, the count moved over for it, as a run's row makes room.
+    let roomForMore: Bool
     /// Narrows the list to this computer, or back to every run when it already is.
     let select: () -> Void
     let pairAgain: (String) -> Void
@@ -299,7 +358,9 @@ private struct ComputerRow: View {
                     .lineLimit(1)
                 Spacer()
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
+                if roomForMore { Color.clear.frame(width: RunMore.width) }
             }
+            .alignmentGuide(.computerNameLine) { $0[VerticalAlignment.center] }
             if let load {
                 HStack(spacing: 10) {
                     if let cpu = load.cpu { LoadMeter(label: "CPU", used: cpu) }
@@ -317,6 +378,15 @@ private struct ComputerRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, load == nil ? 5 : 6)
     }
+}
+
+extension VerticalAlignment {
+    private enum ComputerNameLine: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[VerticalAlignment.center] }
+    }
+
+    /// A computer row's name line, where its "…" sits.
+    fileprivate static let computerNameLine = VerticalAlignment(ComputerNameLine.self)
 }
 
 /// One figure of a computer's load: its name, its share under it, and a thin bar, amber at 90% or more, when the

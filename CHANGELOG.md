@@ -7,6 +7,9 @@ User-facing changes, newest first. Mac releases are cut per
 
 - On the Mac, the update window opens centred over the main window, as wide as the setup checklist,
   and ends at its own padding: no empty band under its buttons, and no footer on a step that has none.
+- On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
+  forgets it and its sessions. This Mac's own computer is not offered, since the app pairs with it
+  again at every launch.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
