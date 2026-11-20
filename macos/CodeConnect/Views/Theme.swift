@@ -19,6 +19,9 @@ enum Theme {
     static let hover = Color.white.opacity(0.04)
     /// The same step for a surface with its own fill (a raised chip, a filled button): a lift in brightness.
     static let hoverLift = 0.04
+    /// How far a panel stands off the button that opens it: close enough that, under a two-line row, it covers the
+    /// row's second line whole rather than cutting through its text.
+    static let panelGap: CGFloat = 1
 
     static let text = Color(themeHex: 0xE4E4E7)
     static let text2 = Color(themeHex: 0x9C9CA3)
