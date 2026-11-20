@@ -53,14 +53,17 @@ struct BranchRow: View {
 
     /// The menu, as tall as its rows up to `BranchMenu.mostRows` and no wider than the row. It opens above the row,
     /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
-    /// with more room, as many whole rows as fit there, the rest scrolled to.
+    /// with more room, as many whole rows as fit there, the rest scrolled to. Cut short above, it hangs from `top`, so
+    /// its edge never lands inside a line there.
     private func menu(_ git: StartGit) -> some View {
         let rows = BranchMenu.rows(git: git, folder: folder)
         let gap = Theme.panelGap
-        let above = frame.minY - gap - max(top, Self.margin)
+        let highest = max(top, Self.margin)
+        let above = frame.minY - gap - highest
         let below = sheetHeight - frame.minY - buttonBottom - gap - Self.margin
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
+        let cut = shown < min(rows, BranchMenu.mostRows)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
             shownRows: shown, width: min(BranchMenu.width, frame.width)
@@ -74,7 +77,8 @@ struct BranchRow: View {
             open = false
         }
         .openPanel()
-        .offset(y: opensAbove ? -(BranchMenu.height(rows: shown) + gap) : buttonBottom + gap)
+        .offset(
+            y: !opensAbove ? buttonBottom + gap : cut ? highest - frame.minY : -(BranchMenu.height(rows: shown) + gap))
     }
 
     /// The chosen place, a button that opens the menu.
@@ -162,7 +166,8 @@ private func fact(_ label: String, @ViewBuilder value: () -> some View) -> some 
 /// checkout has, then a new one by name. Drawn as the model menu is. `choose` gets nil for a new one by name.
 ///
 /// Every line, a section's heading included, is one `rowHeight` tall, so a menu cut to `shownRows` ends on a whole
-/// line and scrolls to the rest.
+/// line and scrolls to the rest. Its foot, "New branch…" and the note on older branches above it, stays in sight under
+/// the lines that scroll: naming a new worktree is never scrolled away.
 struct BranchMenu: View {
     let git: StartGit
     let folder: StartProject
@@ -189,42 +194,48 @@ struct BranchMenu: View {
     /// The menu's height showing `rows` lines.
     static func height(rows: Int) -> CGFloat { CGFloat(rows) * rowHeight + 2 * inset }
 
-    /// The most whole lines of `rows`, up to `mostRows`, that fit in `room`; at least one.
+    /// The most whole lines of `rows`, up to `mostRows`, that fit in `room`; at least the foot and one line over it.
     static func rows(fitting room: CGFloat, of rows: Int) -> Int {
-        max(1, min(rows, mostRows, Int(((room - 2 * inset) / rowHeight).rounded(.down))))
+        max(3, min(rows, mostRows, Int(((room - 2 * inset) / rowHeight).rounded(.down))))
     }
 
+    /// The lines that never scroll.
+    private var foot: Int { git.branchesTruncated ? 2 : 1 }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                if let here = git.checkout(at: folder.path) {
-                    header(StartWords.thisFolder, divided: false)
-                    row(.folder, title: here.title, detail: here.notes(running: running))
-                }
-                let others = git.others(than: folder.path)
-                if !others.isEmpty {
-                    header(StartWords.worktrees, divided: true)
-                    ForEach(others, id: \.path) { checkout in
-                        row(
-                            .existing(checkout), title: checkout.title, detail: checkout.notes(running: running),
-                            disabled: checkout.missing)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let here = git.checkout(at: folder.path) {
+                        header(StartWords.thisFolder, divided: false)
+                        row(.folder, title: here.title, detail: here.notes(running: running))
                     }
-                }
-                header(StartWords.newWorktree, divided: git.checkout(at: folder.path) != nil || !others.isEmpty)
-                ForEach(git.branches, id: \.self) { branch in row(.branch(branch), title: branch, detail: nil) }
-                if git.branchesTruncated {
-                    Text(StartWords.olderBranches).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                        .padding(.horizontal, 12)
-                        .frame(height: Self.rowHeight)
-                }
-                item(id: "start.branch.new", name: StartWords.newBranch, checked: place == nil, choose: { choose(nil) }) {
-                    Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
-                    ModelDetail(text: StartWords.newBranchDetail)
+                    let others = git.others(than: folder.path)
+                    if !others.isEmpty {
+                        header(StartWords.worktrees, divided: true)
+                        ForEach(others, id: \.path) { checkout in
+                            row(
+                                .existing(checkout), title: checkout.title, detail: checkout.notes(running: running),
+                                disabled: checkout.missing)
+                        }
+                    }
+                    header(StartWords.newWorktree, divided: git.checkout(at: folder.path) != nil || !others.isEmpty)
+                    ForEach(git.branches, id: \.self) { branch in row(.branch(branch), title: branch, detail: nil) }
                 }
             }
-            .padding(.vertical, Self.inset)
+            .frame(height: CGFloat(shownRows - foot) * Self.rowHeight)
+            if git.branchesTruncated {
+                Text(StartWords.olderBranches).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .padding(.horizontal, 12)
+                    .frame(height: Self.rowHeight)
+            }
+            item(id: "start.branch.new", name: StartWords.newBranch, checked: place == nil, choose: { choose(nil) }) {
+                Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
+                ModelDetail(text: StartWords.newBranchDetail)
+            }
         }
-        .frame(width: width, height: Self.height(rows: shownRows))
+        .padding(.vertical, Self.inset)
+        .frame(width: width, alignment: .leading)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
