@@ -11,6 +11,8 @@ struct CodeConnectApp: App {
     /// Sparkle's updater, with the app's own update sheet: started with the app.
     @State private var updates: Updates?
     @State private var settingsTab = SettingsTab.devices
+    /// Help › CodeConnect Support.
+    private static let support = URL(string: "https://codeconnect.sh/support")!
 
     /// `machines` is made here, after a test launch has chosen its keychain and its data folder,
     /// because making it reads the one and writes the other; and after the pairing with this Mac's own
@@ -54,6 +56,11 @@ struct CodeConnectApp: App {
                     Button("Check for Updates\u{2026}") { updates.checkForUpdates() }
                 }
                 Button("Set Up CodeConnect\u{2026}") { setup.reopen(machines: machines) }
+            }
+            // The app ships no Help book, so Help › CodeConnect Help would only say help isn't available: Help holds
+            // the support page instead.
+            CommandGroup(replacing: .help) {
+                Button("CodeConnect Support") { NSWorkspace.shared.open(Self.support) }
             }
         }
         // CodeConnect > Settings… (⌘,): this computer's devices, and the folders' answers to the folder question.
