@@ -100,6 +100,12 @@ private struct Composer: View {
         // A request that arrives is answered above the box: no settings panel may cover its answers.
         .onChange(of: model.shown(for: key)?.pendingApprovals.first?.id) { _, now in if now != nil { panel = nil } }
         .onChange(of: model.receipts(for: key)?.compactSeq) { _, _ in settle() }
+        #if DEBUG
+            .task {
+                if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
+                if let shown = RenderWindow.panel { panel = shown }
+            }
+        #endif
         .onDisappear {
             retire?.cancel()
             quiet?.cancel()
