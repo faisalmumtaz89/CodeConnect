@@ -347,7 +347,7 @@ public final class Machines {
             guard let kinds = UserDefaults.standard.string(forKey: "CC_UNJOINED")?.split(separator: ",") else {
                 return (nil, nil)
             }
-            let air = PeerComputer(name: "faisals-macbook-air", host: "faisals-macbook-air.tail1234.ts.net", port: 8787)
+            let air = PeerComputer(name: "macbook-air", host: "macbook-air.tail0000.ts.net", port: 8787)
             let unjoined = kinds.compactMap { kind -> UnjoinedComputer? in
                 switch kind {
                 case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable)
