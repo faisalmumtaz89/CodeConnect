@@ -107,7 +107,7 @@ struct SheetBar<Leading: View>: View {
                 if let cancel {
                     Button(cancelTitle, action: cancel)
                         // Beside the action it lightens, so nothing of it reaches that button; alone, a bare word's plate.
-                        .buttonStyle(.hover(over: action != nil, bare: action == nil, id: cancelID))
+                        .buttonStyle(.hover(over: action != nil, bare: action == nil, flush: .trailing, id: cancelID))
                         .font(Theme.ui(12.5))
                         .foregroundStyle(Theme.text2)
                         .keyboardShortcut(.cancelAction)
@@ -236,7 +236,7 @@ private struct ComputerForm: View {
                     .foregroundStyle(Theme.text2)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.hover(bare: true, id: "computer.useCode"))
+                .buttonStyle(.hover(bare: true, flush: .leading, id: "computer.useCode"))
                 .accessibilityIdentifier("computer.useCode")
                 .accessibilityValue(usesCode ? "open" : "closed")
                 .padding(.top, 4)

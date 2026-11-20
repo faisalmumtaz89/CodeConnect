@@ -318,7 +318,7 @@ struct StartForm: View {
         Button(action: chooseFolder) {
             Text("Choose a folder\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
         }
-        .buttonStyle(.hover(bare: true, id: "start.choose"))
+        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.choose"))
         .accessibilityIdentifier("start.choose")
     }
 
@@ -459,7 +459,7 @@ private struct StartProgress: View {
                 if start.outcome == nil, !start.retryStopped {
                     VStack(alignment: .leading, spacing: 4) {
                         Button("Stop retrying", action: stopRetrying)
-                            .buttonStyle(.hover(bare: true, id: "start.stopRetrying"))
+                            .buttonStyle(.hover(bare: true, flush: .leading, id: "start.stopRetrying"))
                             .font(Theme.ui(12.5))
                             .foregroundStyle(Theme.text2)
                             .accessibilityIdentifier("start.stopRetrying")
@@ -534,7 +534,7 @@ private struct StartProgress: View {
                         .foregroundStyle(Theme.text2)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.hover(bare: true, id: "start.failed.details"))
+                    .buttonStyle(.hover(bare: true, flush: .leading, id: "start.failed.details"))
                     .accessibilityIdentifier("start.failed.details")
                     .accessibilityValue(details ? "open" : "closed")
                     if details {

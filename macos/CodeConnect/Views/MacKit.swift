@@ -62,6 +62,9 @@ struct HoverButtonStyle: ButtonStyle {
     var lift = Theme.hoverLift
     /// A label with no padding of its own, such as a word alone: the fill stands `bareBleed` off it.
     var bare = false
+    /// The sides of a bare label that sit on its column's edge: there its fill ends on the label, bleeding only
+    /// inward, so no fill crosses the edge the column's fields and text keep.
+    var flush: Edge.Set = []
     var id: String?
 
     /// A test launch's `-CC_HOVER` names `id`: what has it draws as if the pointer were on it, a row's "…" included.
@@ -78,7 +81,7 @@ struct HoverButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         Hovered(configuration: configuration, radius: radius, over: over, lift: lift,
-                bleed: bare ? Self.bareBleed : .zero, id: id)
+                bleed: bare ? Self.bareBleed : .zero, flush: flush, id: id)
     }
 
     private struct Hovered: View {
@@ -87,6 +90,7 @@ struct HoverButtonStyle: ButtonStyle {
         let over: Bool
         let lift: Double
         let bleed: CGSize
+        let flush: Edge.Set
         let id: String?
         @State private var hovering = false
         @Environment(\.isEnabled) private var enabled
@@ -106,7 +110,7 @@ struct HoverButtonStyle: ButtonStyle {
                 .onHover { hovering = $0 }
         }
 
-        private var plate: Plate { Plate(radius: radius, bleed: bleed) }
+        private var plate: Plate { Plate(radius: radius, bleed: bleed, flush: flush) }
 
         private var forced: Bool { id.map(HoverButtonStyle.forced) ?? false }
 
@@ -121,22 +125,29 @@ struct HoverButtonStyle: ButtonStyle {
     }
 }
 
-/// A hover fill: the label's frame grown by `bleed`, its corners rounded by `radius`.
+/// A hover fill: the label's frame grown by `bleed`, but not past a `flush` side, its corners rounded by `radius`.
 private struct Plate: Shape {
     let radius: CGFloat
     let bleed: CGSize
+    let flush: Edge.Set
 
     func path(in rect: CGRect) -> Path {
-        RoundedRectangle(cornerRadius: radius).path(in: rect.insetBy(dx: -bleed.width, dy: -bleed.height))
+        let leading = flush.contains(.leading) ? 0 : bleed.width
+        let trailing = flush.contains(.trailing) ? 0 : bleed.width
+        return RoundedRectangle(cornerRadius: radius).path(
+            in: CGRect(
+                x: rect.minX - leading, y: rect.minY - bleed.height,
+                width: rect.width + leading + trailing, height: rect.height + 2 * bleed.height))
     }
 }
 
 extension ButtonStyle where Self == HoverButtonStyle {
     /// `HoverButtonStyle`.
     static func hover(
-        radius: CGFloat = 6, over: Bool = false, lift: Double = Theme.hoverLift, bare: Bool = false, id: String? = nil
+        radius: CGFloat = 6, over: Bool = false, lift: Double = Theme.hoverLift, bare: Bool = false,
+        flush: Edge.Set = [], id: String? = nil
     ) -> HoverButtonStyle {
-        HoverButtonStyle(radius: radius, over: over, lift: lift, bare: bare, id: id)
+        HoverButtonStyle(radius: radius, over: over, lift: lift, bare: bare, flush: flush, id: id)
     }
 }
 
