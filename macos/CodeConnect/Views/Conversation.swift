@@ -230,7 +230,8 @@ private struct ToolLine: View {
         VStack(alignment: .leading, spacing: 8) {
             if opens {
                 Button { toggle() } label: { line(opens: true) }
-                    .buttonStyle(.hover(bare: true, id: "session.tool.\(id)"))
+                    // The row spans the column: its fill ends on both of its edges.
+                    .buttonStyle(.hover(bare: true, flush: [.leading, .trailing], id: "session.tool.\(id)"))
                     .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")
@@ -311,6 +312,8 @@ private struct NoticeLine: View {
             Image(systemName: notice.severity == .failure || notice.severity == .warning ? "exclamationmark.circle" : "info.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(notice.severity == .failure ? Theme.red : notice.severity == .warning ? Theme.amber : Theme.text3)
+                // The tool line's mark width: a notice's words and a tool's name start on one edge.
+                .frame(width: 14)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(notice.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
