@@ -9,14 +9,19 @@ User-facing changes, newest first. Mac releases are cut per
   card, centred under the app's dimming, never a system alert, on the Mac and on the iPhone. The safe answer comes
   first, Esc on the Mac and a tap outside the card on the iPhone give it, and a destructive answer is drawn in
   red; on the Mac it never takes Return.
-- A model is named in the agent's own words. The Mac's model menus show the agent's description beside each
-  model's name, and a run's model reads as the agent reports it.
+- A model is named in the agent's own words. Both apps' model lists show the agent's description beside each
+  model's name, and a Claude Code run's model reads as the model's id, such as claude-sonnet-5-5, rather than
+  Claude Code's whole receipt of a change; a Codex run's reads as its menu names it.
 - On the iPhone, an open run shows its branch and its uncommitted +N −M under the session bar, and a start can
   name its model, as on the Mac.
 - An ended run shows one quiet line, "This run has ended. Its conversation stays here to read.", where its reply
   box was, on the Mac and on the iPhone. A run the next message would relaunch keeps its box.
-- On the Mac, every panel closes on a click outside it or on Esc, and each act in a "…" panel has an icon, End
-  Run…, Remove… and Clear… in red.
+- On the Mac, as on the iPhone, an ended Claude Code run shows the command that picks its conversation up at the
+  computer, with a Copy button, a folded stretch of unchanged lines in a diff opens on a click, and a conversation
+  with nothing in it says "Nothing recorded yet".
+- On the Mac, every panel closes on a click outside it, on Esc or when the window is resized, each act in a "…"
+  panel has an icon, End Run…, Remove… and Clear… in red, and a row's "…" menu opens over every row, at its dots
+  or wherever a right-click on the row lands.
 - On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list is one Tab
   stop, Return in the run list puts the cursor in the open run's reply box, and Start opens with the keyboard in
   its folder search.
