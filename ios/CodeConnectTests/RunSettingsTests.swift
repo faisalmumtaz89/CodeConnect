@@ -239,6 +239,27 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertTrue(s.modelDisplayReported)
     }
 
+    /// A chosen entry the agent gives no model id for (a Claude Code that lists no `resolvedModel`) reads by its
+    /// label, never by its value: "default" is an alias, not a model.
+    func testAChosenEntryWithNoModelIDReadsByItsLabel() throws {
+        var frame = try XCTUnwrap(try wire()["session_hosted_live"]?.objectValue)
+        var menus = try XCTUnwrap(frame["menus"]?.objectValue)
+        menus["models"] = .array(
+            try XCTUnwrap(menus["models"]?.arrayValue).map { model in
+                var entry = try XCTUnwrap(model.objectValue)
+                entry["resolved_model"] = nil
+                return .object(entry)
+            })
+        menus["selected_model"] = .string("default")
+        frame["menus"] = .object(menus)
+        let run = try JSONDecoder().decode(
+            SessionSummary.self, from: Data(JSONValue.object(frame).canonicalJSONString.utf8))
+        XCTAssertNil(run.menus?.models.first?.resolvedModel)
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "claude-opus-5-5", menus: run.menus),
+            RunModelName(text: "Default", reported: false))
+    }
+
     /// Each Claude entry carries the model id claude's own list gives it, as the daemon sent it (minor 45); a
     /// Codex entry carries none, its value being the model.
     func testAMenuRowCarriesTheModelIDItRuns() throws {
