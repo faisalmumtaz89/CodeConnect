@@ -86,13 +86,22 @@ struct FoldersPane: View {
                 Text(answer.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
             }
             Spacer(minLength: 8)
-            Text(trusted ? FolderWords.trusted : FolderWords.notTrusted)
-                .font(Theme.ui(11.5))
-                .foregroundStyle(trusted ? Theme.text2 : Theme.amber)
-                .fixedSize()
-                .accessibilityIdentifier("\(id).state")
+            // The word, the button and Forget stand in fixed columns, whichever the answer: the word right-aligned in a
+            // column as wide as either word, the button as wide as either of its titles.
+            ZStack(alignment: .trailing) {
+                Text(FolderWords.trusted).hidden()
+                Text(FolderWords.notTrusted).hidden()
+                Text(trusted ? FolderWords.trusted : FolderWords.notTrusted)
+                    .foregroundStyle(trusted ? Theme.text2 : Theme.amber)
+                    .accessibilityIdentifier("\(id).state")
+            }
+            .font(Theme.ui(11.5))
+            .fixedSize()
             // Each control names its folder, so a list of the window's buttons reads "Trust demo", never "Trust, Trust".
-            ActionButton(title: trusted ? "Don’t Trust" : "Trust", key: nil, prominent: false, id: "\(id).change") {
+            ActionButton(
+                title: trusted ? "Don’t Trust" : "Trust", key: nil, prominent: false,
+                sizedFor: trusted ? "Trust" : "Don’t Trust", id: "\(id).change"
+            ) {
                 Task {
                     await send(context) { try await $0.setFolderTrust(path: answer.path, trust: trusted ? .notTrusted : .trusted) }
                 }

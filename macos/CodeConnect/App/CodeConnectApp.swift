@@ -77,10 +77,7 @@ struct CodeConnectApp: App {
         }
         // CodeConnect > Settings… (⌘,): this computer's devices, and the folders' answers to the folder question.
         Settings {
-            TabView(selection: $settingsTab) {
-                DevicesPane().tabItem { Label("Devices", systemImage: "iphone") }.tag(SettingsTab.devices)
-                FoldersPane().tabItem { Label(FolderWords.paneTitle, systemImage: "folder") }.tag(SettingsTab.folders)
-            }
+            SettingsWindow(tab: $settingsTab)
             .confirmationHost()
             .environment(machines)
             .environment(setup)
@@ -94,8 +91,18 @@ struct CodeConnectApp: App {
 }
 
 /// The Settings window's panes.
-enum SettingsTab: String {
+enum SettingsTab: String, CaseIterable {
     case devices, folders
+
+    var title: String {
+        switch self {
+        case .devices: DeviceGroup.tabTitle
+        case .folders: FolderWords.paneTitle
+        }
+    }
+
+    /// What a driver finds the tab by.
+    var id: String { "settings.tab.\(rawValue)" }
 }
 
 /// Dark only, as the iPhone app is: pinned for the whole app, so menus, alerts and sheets the

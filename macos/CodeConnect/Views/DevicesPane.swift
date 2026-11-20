@@ -40,7 +40,11 @@ struct DevicesPane: View {
 
     /// The app's own pairing with this computer, by the device id its daemon gave it.
     private var thisDevice: String? {
-        machines.model(for: setup.thisMac(at: address))?.connection.helloAck?.deviceID
+        #if DEBUG
+            // `-CC_THIS_DEVICE <device id>`: the app's own entry in a render's list.
+            if let forced = UserDefaults.standard.string(forKey: "CC_THIS_DEVICE") { return forced }
+        #endif
+        return machines.model(for: setup.thisMac(at: address))?.connection.helloAck?.deviceID
     }
 
     /// The pane knows which entry is the app's own: its link has said the device id, or the app has no pairing with
@@ -73,7 +77,7 @@ struct DevicesPane: View {
             }
         }
         #if DEBUG
-            .background(RenderWindow(ready: devices != nil || !answers, showsSheet: asking != nil))
+            .background(RenderWindow(ready: devices != nil || !answers))
         #endif
         .confirmation($asking) { ask in
             let acts: Confirmation.Answer = switch ask {
@@ -164,7 +168,9 @@ struct DevicesPane: View {
                 devices = shown
                 asking = RenderWindow.devicesAsk.flatMap { ask in
                     let (allowed, blocked) = DeviceGroup.groups(shown)
-                    return ask == "allow" ? blocked.first.map(Ask.allow) : allowed.first.map(Ask.block)
+                    // Never the app's own entry, which has no Block.
+                    let blockable = allowed.first { group in !group.devices.contains { $0.deviceID == thisDevice } }
+                    return ask == "allow" ? blocked.first.map(Ask.allow) : blockable.map(Ask.block)
                 }
                 return
             }

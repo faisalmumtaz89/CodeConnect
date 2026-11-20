@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// A Settings pane's page, as a Mac Settings window sizes one: as tall as its content, up to `maxHeight` and to what the
-/// screen's visible frame leaves under the window's own chrome, past which it scrolls. So the window takes each pane's
+/// screen's visible frame leaves under what stands above the pane (the window's title line and tabs), past which it
+/// scrolls. So the window takes each pane's
 /// own height, and switching panes resizes it, without ever reaching under the Dock or the menu bar.
 struct SettingsScroll<Content: View>: View {
     static var maxHeight: CGFloat { 640 }
@@ -25,7 +26,7 @@ struct SettingsScroll<Content: View>: View {
 
 /// Keeps its window inside its screen's visible frame. A window grows from its top-left as its pane fills in, so one
 /// placed for a short pane runs under the Dock once the pane is taller: on every resize it is moved up until its bottom
-/// is on the visible frame. It reports the pane height the visible frame leaves under the window's chrome.
+/// is on the visible frame. It reports the pane height the visible frame leaves under what stands above the pane.
 private struct OnScreen: NSViewRepresentable {
     let room: (CGFloat) -> Void
 
@@ -56,8 +57,9 @@ private struct OnScreen: NSViewRepresentable {
 
         private func fit() {
             guard let window, let visible = window.screen?.visibleFrame else { return }
-            let chrome = window.frame.height - window.contentLayoutRect.height
-            room(max(0, visible.height - chrome))
+            // From the window's top to the pane's: the title bar, and the title line and tabs the app draws in it.
+            let above = window.frame.height - convert(bounds, to: nil).maxY
+            room(max(0, visible.height - above))
             if window.frame.minY < visible.minY {
                 window.setFrameOrigin(NSPoint(x: window.frame.minX, y: visible.minY))
             }
