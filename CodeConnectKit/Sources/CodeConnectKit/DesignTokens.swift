@@ -409,7 +409,7 @@ extension CC {
 /// Tracking and line height are stored at *nominal* size and scaled by the same
 /// ratio Dynamic Type applies to the size, so the proportions of the scale
 /// survive from `xSmall` all the way to `AX5`.
-public struct CCTextStyle: Equatable {
+public struct CCTextStyle: Equatable, Sendable {
     public var size: CGFloat
     public var lineHeight: CGFloat
     public var weight: Font.Weight
