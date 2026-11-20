@@ -449,9 +449,10 @@ struct StartStepsSheet: View {
                         .buttonStyle(StartRowStyle())
                         .disabled(missing != nil)
                         .accessibilityIdentifier("start-agent-\(candidate.rawValue)")
+                        // How to sign in, under the row it is about.
+                        if candidate == .claude, signedOut(.claude) != nil { signInHelp }
                         CCHairline().padding(.leading, CC.space.md)
                     }
-                    if signedOut(.claude) != nil { signInHelp }
                 }
             }
             .accessibilityIdentifier("start-list")
@@ -825,12 +826,14 @@ struct StartStepRow: View {
             VStack(alignment: .leading, spacing: CC.space.xxs) {
                 Text(verbatim: title)
                     .ccType(mono ? CC.type.mono : CC.type.rowTitle)
-                    .foregroundStyle(disabled ? CC.text.disabled : CC.text.primary)
+                    .foregroundStyle(disabled ? CC.text.secondary : CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail {
+                    // Disabled, the name and its reason dim together, the
+                    // reason still a step under the name.
                     Text(detail)
                         .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
+                        .foregroundStyle(disabled ? CC.text.tertiary : CC.text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
