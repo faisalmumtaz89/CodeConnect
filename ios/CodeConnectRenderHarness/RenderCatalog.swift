@@ -828,6 +828,27 @@ enum RenderCatalog {
                 try driver.require(app.buttons["Remove this computer"], "Remove this computer").tap()
                 try driver.requireExists(app.buttons["computer.remove.confirm"], "the card's Remove")
             }),
+        // **An ended run takes no reply**: no reply box, one quiet line in its
+        // place, as on the Mac. A run the next message relaunches keeps its box.
+        RenderScenario(
+            name: "session-ended-line",
+            purpose: "an ended run: the quiet line where the reply box was",
+            arguments: ["-CC_FIXTURE", "ended", "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNP00"],
+            reach: { app, driver in
+                try driver.requireExists(
+                    app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch,
+                    "the ended line")
+            }),
+        RenderScenario(
+            name: "session-ended-relaunchable",
+            purpose: "an ended run the next message relaunches keeps its reply box",
+            arguments: ["-CC_FIXTURE", "ended", "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNP07"],
+            reach: { app, driver in
+                try driver.require(app.buttons["session-more"], "the session detail")
+                if app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch.exists {
+                    throw RenderFailure.unreachable("the reply box, not the ended line")
+                }
+            }),
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",
