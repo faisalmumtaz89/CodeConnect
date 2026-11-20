@@ -492,8 +492,9 @@ struct RunMore: View {
         .accessibilityIdentifier(id)
         .accessibilityValue(open ? "open" : "closed")
         .overlay(alignment: .topTrailing) {
-            if open { panel.offset(y: 22 + Theme.panelGap) }
+            if open { panel.openPanel().offset(y: 22 + Theme.panelGap) }
         }
+        .closesPanel($open)
     }
 
     private var panel: some View {

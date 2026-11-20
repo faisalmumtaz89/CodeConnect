@@ -33,8 +33,9 @@ struct ModelButton: View {
         // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's: the button
         // stands 3 pt in from that edge (the box's 10 pt inset, less the button's own 7).
         .overlay(alignment: .bottomLeading) {
-            if open { menu.offset(x: -3, y: -(22 + Theme.panelGap)) }
+            if open { menu.openPanel().offset(x: -3, y: -(22 + Theme.panelGap)) }
         }
+        .closesPanel($open)
     }
 
     private var label: String {

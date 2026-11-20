@@ -1,3 +1,4 @@
+import AppKit
 import CodeConnectKit
 import SwiftUI
 
@@ -197,4 +198,72 @@ private let trackInset: CGFloat = 2
 extension FocusedValues {
     /// The composer is using Esc itself: its commands list is open or its field has focus.
     @Entry var composerHoldsEscape: Bool?
+}
+
+extension View {
+    /// A control that opens a panel, and toggles it itself. While the panel is open, a click anywhere in the window
+    /// outside the control and the panel closes it, and the click still does what it does there (another control's
+    /// opens that control's panel); Esc closes it and goes no further, so a second Esc does what Esc did before.
+    func closesPanel(_ open: Binding<Bool>) -> some View { modifier(ClosesPanel(open: open)) }
+
+    /// The panel a `closesPanel` control opens: a click on it keeps it open.
+    func openPanel() -> some View { modifier(OpenPanel()) }
+}
+
+/// Where a control and its open panel are, in the window's coordinates (top-left origin).
+final class PanelFrames {
+    var control: CGRect = .zero
+    var panel: CGRect = .zero
+}
+
+extension EnvironmentValues {
+    @Entry var panelFrames: PanelFrames?
+}
+
+private struct ClosesPanel: ViewModifier {
+    @Binding var open: Bool
+    @State private var frames = PanelFrames()
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.panelFrames, frames)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.control = $0 }
+            .onChange(of: open, initial: true) { _, isOpen in
+                stop()
+                if isOpen { start() }
+            }
+            .onDisappear(perform: stop)
+    }
+
+    private func start() {
+        let frames = frames
+        let close = $open
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { event in
+            if event.type == .keyDown {
+                guard event.keyCode == 53 else { return event }  // Esc
+                close.wrappedValue = false
+                return nil
+            }
+            if let view = event.window?.contentView {
+                let point = view.convert(event.locationInWindow, from: nil)
+                let top = CGPoint(x: point.x, y: view.isFlipped ? point.y : view.bounds.height - point.y)
+                if !frames.control.contains(top), !frames.panel.contains(top) { close.wrappedValue = false }
+            }
+            return event
+        }
+    }
+
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
+private struct OpenPanel: ViewModifier {
+    @Environment(\.panelFrames) private var frames
+
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames?.panel = $0 }
+    }
 }
