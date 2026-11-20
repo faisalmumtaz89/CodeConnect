@@ -39,6 +39,24 @@ public enum FleetWords {
     public static func removeKeeps(_ agent: String) -> String { "\(agent)’s own transcript stays on the computer." }
     public static func removeManyTitle(_ count: Int) -> String { "Remove \(count) runs?" }
     public static let removeManyKeeps = "Their own transcripts stay on the computer."
+
+    /// The notices after an end or a removal that did not happen: what happened, then why, in a sentence.
+    public static let endFailedTitle = "Couldn’t end the run"
+    public static let removeFailedTitle = "Couldn’t remove the run"
+    /// An answer this build does not know: refused, with nothing quoted.
+    public static var refusedPlainly: String { "\(HostDevice.current.computer("The computer")) refused." }
+    /// Why a removal did not happen, for each answer ccd gives, or nil when it did (or the run was already gone).
+    public static func removalRefused(_ result: DeleteSessionResult?) -> String? {
+        let computer = HostDevice.current.computer("The computer")
+        switch result {
+        case .deleted, .notFound: return nil
+        case .stillRunning: return "It’s still running. End it first, then remove it."
+        case .notExited: return "\(computer) doesn’t know whether it has stopped, so it keeps the run."
+        case .failed: return "\(computer) couldn’t remove it."
+        case .unknown: return refusedPlainly
+        case .none: return "\(computer) didn’t answer."
+        }
+    }
 }
 
 /// The folder question asked before an agent first starts in a folder, and

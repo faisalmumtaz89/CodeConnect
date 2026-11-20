@@ -1218,7 +1218,7 @@ const SEND_WAIT: Duration = Duration::from_secs(10);
 const SETTING_WAIT: Duration = Duration::from_secs(10);
 
 /// Why a run other than a Claude run CodeConnect started takes no settings from an app.
-pub(crate) const NOT_FROM_THE_APP: &str = "This session's settings can't be changed from the app.";
+pub(crate) const NOT_FROM_THE_APP: &str = "This session’s settings can’t be changed from the app.";
 
 /// The permission modes an app may choose for such a run, with the names it shows, and
 /// whether the mode asks nothing and so needs the person's confirmation in the app
@@ -1389,7 +1389,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             Setting::Mode { mode, confirmed } => {
                 match MODES.iter().find(|(value, _, _)| *value == mode) {
                     None => return refused(
-                        "That permission mode isn't offered in this session; nothing was changed.",
+                        "That permission mode isn’t offered in this session; nothing was changed.",
                     ),
                     Some((_, label, true)) if !confirmed => {
                         return refused(&format!(
@@ -1404,7 +1404,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
         };
     match daemon.db.hosted_link(uid.to_string()).await {
         Ok(Some(linked)) if linked.lifecycle == Lifecycle::Live => {}
-        Ok(Some(_)) => return refused("This session isn't running, so nothing was changed."),
+        Ok(Some(_)) => return refused("This session isn’t running, so nothing was changed."),
         Ok(None) => return refused(NOT_FROM_THE_APP),
         Err(err) => {
             crate::log_error!("{uid}: could not read its host: {err:#}");
@@ -1413,7 +1413,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
     }
     let menus = match daemon.db.hosted_models(uid.to_string()).await {
         Ok(Some(models)) => menus(&models),
-        Ok(None) => return refused("This session isn't running, so nothing was changed."),
+        Ok(None) => return refused("This session isn’t running, so nothing was changed."),
         Err(err) => {
             crate::log_error!("{uid}: could not read its models: {err:#}");
             return refused("This computer could not read the session.");
@@ -1425,7 +1425,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             .is_some_and(|model| !menus.models.iter().any(|offered| &offered.value == model))
         {
             return refused(
-                "Claude doesn't offer that model in this session; nothing was changed.",
+                "Claude doesn’t offer that model in this session; nothing was changed.",
             );
         }
         if effort.as_ref().is_some_and(|effort| {
@@ -1435,7 +1435,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
                 .any(|offered| offered.efforts.contains(effort))
         }) {
             return refused(
-                "Claude doesn't offer that effort in this session; nothing was changed.",
+                "Claude doesn’t offer that effort in this session; nothing was changed.",
             );
         }
     }
@@ -1462,7 +1462,7 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             Told::NoAnswer => {
                 return SettingResult::Indeterminate {
                     reason: before(
-                        "Claude didn't answer, so the change may or may not have been made.",
+                        "Claude didn’t answer, so the change may or may not have been made.",
                     ),
                 }
             }
@@ -1518,7 +1518,7 @@ async fn apply_setting(
     match tokio::time::timeout(SETTING_WAIT, told).await {
         Ok(Ok((true, _))) => Told::Done,
         Ok(Ok((false, detail))) => {
-            Told::Refused(detail.unwrap_or_else(|| "Claude didn't take the change.".into()))
+            Told::Refused(detail.unwrap_or_else(|| "Claude didn’t take the change.".into()))
         }
         Ok(Err(_)) | Err(_) => Told::NoAnswer,
     }
@@ -1582,11 +1582,11 @@ async fn apply_setting_outcome(
 const REFUSED_SCREENS: [(&str, &str); 2] = [
     (
         "model",
-        "/model's screen isn't available in this session; nothing was changed.",
+        "/model’s screen isn’t available in this session; nothing was changed.",
     ),
     (
         "effort",
-        "/effort's screen isn't available in this session; nothing was changed.",
+        "/effort’s screen isn’t available in this session; nothing was changed.",
     ),
 ];
 
@@ -1608,7 +1608,7 @@ fn refused_screen(text: &str) -> Option<&'static str> {
 pub(crate) fn catalog(kept: HostedCommands) -> CommandCatalogResult {
     let (Some(commands), Some(screen_only)) = (kept.commands, kept.screen_only) else {
         return CommandCatalogResult::Unavailable {
-            reason: "Claude hasn't listed its commands for this session yet.".into(),
+            reason: "Claude hasn’t listed its commands for this session yet.".into(),
         };
     };
     let text = |command: &serde_json::Value, key: &str| {
@@ -1674,7 +1674,7 @@ pub(crate) async fn send_text(
         return refuse(reason);
     }
     if text.split_whitespace().next() == Some("/status") {
-        return refuse("Claude doesn't offer /status in this session.");
+        return refuse("Claude doesn’t offer /status in this session.");
     }
     if !submit {
         return refuse("A message to this session is sent whole; nothing was sent.");
@@ -1730,7 +1730,7 @@ pub(crate) async fn send_text(
     }
     if lifecycle != Lifecycle::Live {
         release_send(daemon, uid, &request_id).await;
-        return refuse("This session isn't running, so nothing was sent.");
+        return refuse("This session isn’t running, so nothing was sent.");
     }
     let uuid = send_uuid(uid, &request_id);
     let taken = daemon.await_host_send(uid, &uuid).await;
@@ -1792,7 +1792,7 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 /// `Indeterminate`, left to the link and the watch as a start's is.
 async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str) -> SendTextResult {
     let deadline = Instant::now() + RELAUNCH_WAIT;
-    let not_running = "This session isn't running, so nothing was sent.";
+    let not_running = "This session isn’t running, so nothing was sent.";
     let ended = match daemon.db.claude_relaunch(uid.to_string()).await {
         Ok(Some(ended)) => ended,
         Ok(None) => return refuse_relaunch(daemon, uid, request_id, not_running).await,
@@ -6451,15 +6451,15 @@ mod tests {
         };
         assert_eq!(
             refused(send_as_app(&rig.daemon, &uid, "m", "/model").await),
-            "/model's screen isn't available in this session; nothing was changed."
+            "/model’s screen isn’t available in this session; nothing was changed."
         );
         assert_eq!(
             refused(send_as_app(&rig.daemon, &uid, "f", "/effort").await),
-            "/effort's screen isn't available in this session; nothing was changed."
+            "/effort’s screen isn’t available in this session; nothing was changed."
         );
         assert_eq!(
             refused(send_as_app(&rig.daemon, &uid, "st", "/status").await),
-            "Claude doesn't offer /status in this session."
+            "Claude doesn’t offer /status in this session."
         );
         let staged = protocol::hash::send_text_hash(&uid, "half", false);
         refused(
@@ -6492,7 +6492,7 @@ mod tests {
             force_lifecycle(&rig, &uid, lifecycle);
             assert_eq!(
                 refused(send_as_app(&rig.daemon, &uid, request_id, "late").await),
-                "This session isn't running, so nothing was sent."
+                "This session isn’t running, so nothing was sent."
             );
             assert!(
                 matches!(
@@ -8665,7 +8665,7 @@ mod tests {
         assert_eq!(
             rig.daemon.command_catalog(&uid).await,
             CommandCatalogResult::Unavailable {
-                reason: "Claude hasn't listed its commands for this session yet.".into()
+                reason: "Claude hasn’t listed its commands for this session yet.".into()
             }
         );
         init_with_screen_only(&mut played, 3, "9d1f0000-0000-4000-8000-000000000020").await;
@@ -8983,11 +8983,11 @@ mod tests {
             ),
             (
                 set_model(Some("gpt-9"), None),
-                "Claude doesn't offer that model in this session; nothing was changed.",
+                "Claude doesn’t offer that model in this session; nothing was changed.",
             ),
             (
                 set_model(Some("sonnet"), Some("turbo")),
-                "Claude doesn't offer that effort in this session; nothing was changed.",
+                "Claude doesn’t offer that effort in this session; nothing was changed.",
             ),
             (
                 Setting::Mode { mode: "bypassPermissions".into(), confirmed: false },
@@ -8995,7 +8995,7 @@ mod tests {
             ),
             (
                 Setting::Mode { mode: "dontAsk".into(), confirmed: false },
-                "That permission mode isn't offered in this session; nothing was changed.",
+                "That permission mode isn’t offered in this session; nothing was changed.",
             ),
         ] {
             assert_eq!(refusal(rig.daemon.set_setting(&uid, setting).await), reason);
@@ -9014,7 +9014,7 @@ mod tests {
                     )
                     .await
             ),
-            "This session isn't running, so nothing was changed."
+            "This session isn’t running, so nothing was changed."
         );
         stop(&played.dir);
     }
@@ -11721,7 +11721,7 @@ mod tests {
         let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let not_running = SendTextResult::Refused {
-            reason: "This session isn't running, so nothing was sent.".into(),
+            reason: "This session isn’t running, so nothing was sent.".into(),
         };
         let mut stopped = live_run_on(&rig, &rig.root.join("stub-host")).await;
         sdk(&mut stopped.write, 3, init_in(&rig.root)).await;
@@ -11868,7 +11868,7 @@ mod tests {
         assert_eq!(
             second,
             SendTextResult::Refused {
-                reason: "This session isn't running, so nothing was sent.".into()
+                reason: "This session isn’t running, so nothing was sent.".into()
             }
         );
     }

@@ -64,7 +64,7 @@ final class Minor39WireTests: XCTestCase {
             ("applied_mode_during_a_turn", "mode-1", .applied(applies: .now)),
             ("applied_effort", "effort-1", .applied(applies: .nextTurn)),
             ("indeterminate", "mode-3",
-                .indeterminate(reason: "Claude didn't answer, so the change may or may not have been made.")),
+                .indeterminate(reason: "Claude didn’t answer, so the change may or may not have been made.")),
             ("refused_bypass", "mode-2",
                 .refused(reason: "Turning on Bypass permissions needs your confirmation in the app; nothing was changed.")),
             ("refused_partial", "model-2",

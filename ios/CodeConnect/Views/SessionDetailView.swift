@@ -1087,7 +1087,7 @@ struct SessionDetailView: View {
             Text(FleetWords.endMessage(summary?.agent.displayName ?? "The agent"))
         }
         .alert(
-            "End run",
+            FleetWords.endFailedTitle,
             isPresented: Binding(get: { endRunNote != nil }, set: { if !$0 { endRunNote = nil } }),
             presenting: endRunNote
         ) { _ in
