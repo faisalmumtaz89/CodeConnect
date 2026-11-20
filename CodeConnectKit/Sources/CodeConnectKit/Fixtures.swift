@@ -370,8 +370,9 @@ enum Fixtures {
         "captured_at":"2026-07-31T09:14:02.104Z","unified":\
         "diff --git a/Sources/Feature.swift b/Sources/Feature.swift\\nindex 1a2b3c4..5d6e7f8 100644\\n\
         --- a/Sources/Feature.swift\\n+++ b/Sources/Feature.swift\\n\
-        @@ -1,14 +1,15 @@\\n import Foundation\\n \\n struct Feature {\\n     let id: String\\n\
+        @@ -1,17 +1,18 @@\\n import Foundation\\n \\n struct Feature {\\n     let id: String\\n\
         -    let title: String\\n+    let title: String?\\n+    let subtitle: String?\\n     let createdAt: Date\\n \\n\
+             var isPinned = false\\n     var isArchived = false\\n \\n\
              init(id: String) {\\n         self.id = id\\n         self.title = nil\\n\
         +        self.subtitle = nil\\n         self.createdAt = .now\\n     }\\n }\\n\
         diff --git a/Sources/New.swift b/Sources/New.swift\\nnew file mode 100644\\nindex 0000000..abcdefg\\n\
