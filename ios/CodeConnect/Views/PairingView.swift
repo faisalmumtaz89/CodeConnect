@@ -563,6 +563,7 @@ struct PairingView: View {
         CCRow(
             unjoined.computer.name,
             subtitle: unjoined.reason,
+            showsChevron: false,
             isDimmed: true,
             accessibilityLabelText: "\(unjoined.computer.name), \(unjoined.reason)",
             action: { machines.tryAgain(unjoined) }
