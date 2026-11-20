@@ -248,6 +248,8 @@ struct StartForm: View {
                     // The field and the folders under it are one stop for the keyboard: ↑ and ↓ move the chosen
                     // folder through the folders as shown while the cursor stays here, so typing goes on.
                     .focused($searchFocused)
+                    // Start opens with the keyboard here, so the first keys typed search and the arrows choose.
+                    .onAppear { searchFocused = true }
                     .onKeyPress(.downArrow) { moveFolder(context, down: true) }
                     .onKeyPress(.upArrow) { moveFolder(context, down: false) }
                     .textFieldStyle(.plain)
