@@ -5,6 +5,10 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.4, with the iPhone app 1.1.21
 
+- A cold launch opens on CodeConnect's mark assembling itself on the app's ground, on the Mac and the iPhone, and
+  it slides away the moment the app has caught up with its computers, or after three seconds for one that isn't
+  answering. While it waits it says which computer it is connecting to. With Reduce Motion the mark stands still,
+  then gives way.
 - Every question and notice, such as ending or removing a run, Clear, or removing a computer, is the app's own
   card, centred under the app's dimming, never a system alert, on the Mac and on the iPhone. The safe answer comes
   first, Esc on the Mac and a tap outside the card on the iPhone give it, and a destructive answer is drawn in
@@ -53,8 +57,6 @@ User-facing changes, newest first. Mac releases are cut per
 - On the iPhone, a computer that refused the link says "Different version" or "Pair again" on its card, in
   place of "Not paired". Typing /model, /effort, /diff or /compact where it can't be typed says what to do
   instead, and every sentence either app shows uses the typographic apostrophe and no long dash.
-- On the Mac, the list says "Connecting to your computer…" until your computers have answered, rather than
-  offering to start an agent.
 - A card answered just after its agent's host re-attaches, after the daemon restarts, is no longer refused.
 - On the Mac, a run row shows its status and its command whole or not at all, a long command keeps its start
   and its end, a request's answers line up with the card above them, a run's settings panels stay inside its
