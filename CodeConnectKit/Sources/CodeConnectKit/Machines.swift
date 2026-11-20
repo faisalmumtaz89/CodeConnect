@@ -271,8 +271,12 @@ public final class Machines {
         for computer in directory.computers { join(computer) }
     }
 
-    /// Join one listed computer, unless this device holds it, removed it, or is joining it now.
+    /// Join one listed computer, unless this device holds it, removed it, or is joining it now. A join its daemon
+    /// refused is started again: what refused it may have changed, and the list naming it again is the moment to ask.
     private func join(_ computer: PeerComputer) {
+        if let index = joiningIndex(at: computer.endpoint), case .failed = joining[index].model.connection.phase {
+            joining.remove(at: index).model.leave()
+        }
         guard pairing.machine(matching: computer.endpoint) == nil,
             !pairing.isDeclined(host: computer.host), joiningIndex(at: computer.endpoint) == nil
         else { return }
