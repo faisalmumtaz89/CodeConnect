@@ -927,17 +927,15 @@ struct MachineScreen: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .confirmationDialog(
-            "Remove this computer?", isPresented: $confirmingRemove, titleVisibility: .visible
+            ComputerRemoval.question, isPresented: $confirmingRemove, titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) {
+            Button(ComputerRemoval.action, role: .destructive) {
                 machines.unpair(model)
                 dismiss()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(
-                "This iPhone forgets \(model.machineName ?? "this computer"). To use it again, show a new code on it and scan it (codeconnect.sh/support shows how)."
-            )
+            Text(ComputerRemoval.sentence(name: model.machineName))
         }
     }
 }
