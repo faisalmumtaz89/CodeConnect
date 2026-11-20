@@ -209,7 +209,7 @@ extension View {
     /// A control that opens a panel, and toggles it itself. While the panel is open, a click anywhere in the window
     /// outside the control and the panel closes it, and the click still does what it does there (another control's
     /// opens that control's panel); Esc closes it and goes no further, so a second Esc does what Esc did before; a
-    /// scroll closes it too.
+    /// scroll or a window's resize closes it too.
     func closesPanel(_ open: Binding<Bool>) -> some View { modifier(ClosesPanel(open: open, measuresControl: true)) }
 
     /// The panel a `closesPanel` control opens: a click on it keeps it open.
@@ -232,6 +232,7 @@ private struct ClosesPanel: ViewModifier {
     let measuresControl: Bool
     @State private var frames = PanelFrames()
     @State private var monitor: Any?
+    @State private var resizing: NSObjectProtocol?
 
     func body(content: Content) -> some View {
         content
@@ -268,11 +269,17 @@ private struct ClosesPanel: ViewModifier {
             }
             return event
         }
+        // A resize closes it too: a panel never outlives the geometry it was placed from.
+        resizing = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { close.wrappedValue = false } }
     }
 
     private func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        resizing.map(NotificationCenter.default.removeObserver)
+        resizing = nil
     }
 }
 
