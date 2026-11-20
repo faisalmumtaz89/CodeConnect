@@ -266,15 +266,17 @@ private struct Sidebar: View {
                         }
                         .padding(.horizontal, 8)
                         .task(id: computers.map(\.machineID)) {
-                            guard let root = setup.installer?.root else { return }
-                            address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
                             #if DEBUG
+                                // A render's ask about the last computer, reached by a fixture too, which has no
+                                // install to read this Mac's address from; this Mac's own is told apart as its row does.
                                 if RenderWindow.confirm == "computer", let last = computers.last,
-                                    last.machineID != setup.thisMac(at: address)
+                                    (last.machineID ?? "") != setup.thisMac(at: address)
                                 {
                                     removing = last
                                 }
                             #endif
+                            guard let root = setup.installer?.root else { return }
+                            address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
                         }
                     }
 
