@@ -543,8 +543,8 @@ private struct DeckClearState: View {
     private var runningLine: String {
         guard stillRunning > 0 else { return "Nothing is waiting for you." }
         return stillRunning == 1
-            ? "1 agent still running · nothing waiting for you"
-            : "\(stillRunning) agents still running · nothing waiting for you"
+            ? "1 still running · nothing waiting for you"
+            : "\(stillRunning) still running · nothing waiting for you"
     }
 
     private func play() {
