@@ -19,11 +19,13 @@ import UIKit
 //  command and a diff line break the same way.
 // =============================================================================
 
-/// The one thing `CCMonoBlock` is allowed to shorten, and the two ways it may.
+/// The one thing `CCMonoBlock` is allowed to shorten, and the three ways it may.
 ///
 /// **There is deliberately no `.tail`.** Tail truncation cuts a command's
 /// arguments — the half that says what it will do — and that is the exact byte
-/// a hostile suffix hides behind. Removing the case removes the bug.
+/// a hostile suffix hides behind. Removing the case removes the bug. A
+/// command's one-line preview is `.command`: its start and its end, cut only
+/// between tokens, and the end is never the part that goes.
 ///
 /// Reach for this *only* for a genuinely unbounded identifier: a public key, a
 /// base64 blob, a hash — a string with no natural end, whose ends are what
@@ -37,6 +39,10 @@ enum CCMonoTruncation: Hashable {
     /// prefix says what made it and its suffix says which run, so cutting
     /// either end leaves two of them indistinguishable.
     case middle
+    /// `git push … origin main`. A command's preview line: as much of its
+    /// start and of its end as fits, cut between tokens (`commandPreview`).
+    /// Only the inline run's one line takes it.
+    case command
 }
 
 /// Commands, paths, diffs, snapshots, tool output.
@@ -249,6 +255,19 @@ struct CCMonoBlock: View {
             .background { widthProbe }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(text)
+        } else if truncation == .command {
+            // Cut by the Kit between tokens, at the width measured here; until
+            // it is measured, the whole command, held to one line.
+            Text(columns > 0 ? commandPreview(text, columns: columns) : text)
+                .ccType(style)
+                .foregroundStyle(foreground)
+                .allowsTightening(false)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background { widthProbe }
+                .accessibilityLabel(text)
         } else {
             Text(text)
                 .ccType(style)

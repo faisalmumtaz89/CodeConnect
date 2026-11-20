@@ -694,7 +694,10 @@ struct ApprovalRow: View {
                 // at accessibility sizes: measured at AX5, cut to one line this
                 // read `git…main`, which is two halves of a command and not a
                 // fact — on the row whose whole job is to say what is waiting.
-                CCMonoBlock(inline: argument.firstLine, style: CC.type.readingMono)
+                CCMonoBlock(
+                    inline: argument.firstLine,
+                    truncation: isCommandTool(approval.card.toolName) ? .command : .head,
+                    style: CC.type.readingMono)
             }
         }
     }

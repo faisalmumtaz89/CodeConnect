@@ -1549,14 +1549,12 @@ struct BlockedCard: Equatable {
     /// **Which end of the argument identifies it**, for the case where even a
     /// wrapped line runs out.
     ///
-    /// `.head` on both, and for the same reason: what a preview carries is the
-    /// *object*, because the prose label beside it already names the verb.
-    /// `…/Sources/Feature.swift` identifies a file and `/Users/dev/…` does not;
-    /// `…--force origin main` says which branch is about to be overwritten and
-    /// `git push --force …` — the version that shipped — does not, which is how
-    /// a row spent 90pt of empty space hiding the difference between `main` and
-    /// `master`. `.middle` stays available for a string whose two ends identify
-    /// it together.
+    /// `.head` for a path: `…/Sources/Feature.swift` identifies a file and
+    /// `/Users/dev/…` does not. A command is cut by `.command` instead
+    /// (`activityLine`): `git push … origin main` keeps what runs and what it
+    /// runs on, between tokens, and never drops the end, which says which branch
+    /// is about to be overwritten. `.middle` stays available for a string whose
+    /// two ends identify it together.
     let truncation: CCMonoTruncation
 }
 
@@ -2371,7 +2369,7 @@ struct FleetRowView: View {
                 .lineLimit(1)
                 .ccToolLabelColumn(disabled: typeSize.isAccessibilitySize)
             if let argument = card.argument {
-                CCMonoBlock(inline: argument, truncation: truncation)
+                CCMonoBlock(inline: argument, truncation: isCommandTool(card.tool) ? .command : truncation)
             }
         }
     }
