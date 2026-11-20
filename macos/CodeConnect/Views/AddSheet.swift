@@ -69,7 +69,7 @@ struct AddSheet: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 18)
             .frame(height: 50)
             Rectangle().fill(Theme.hairline).frame(height: 1)
             switch kind {
@@ -120,7 +120,7 @@ struct SheetBar<Leading: View>: View {
                         .opacity(blocked ? 0.45 : 1)
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 18)
             .frame(height: 50)
         }
     }
