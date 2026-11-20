@@ -168,10 +168,17 @@ private struct Document: View {
                         Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
                         // Not selectable: a selectable text is dropped from the combined element, so the names would
                         // be drawn but never read.
-                        Text(verbatim: extra.joined(separator: "\n").displaySafe)
-                            .font(Theme.mono(11.5))
-                            .foregroundStyle(Theme.text3)
-                            .fixedSize(horizontal: false, vertical: true)
+                        // Each as a file header names its file: the path, then its kind in a word.
+                        ForEach(Array(extra.enumerated()), id: \.offset) { _, line in
+                            let reported = UnifiedDiff.reported(line)
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(verbatim: reported.text.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if let label = reported.label {
+                                    Text(label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+                                }
+                            }
+                        }
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("changes.extra")

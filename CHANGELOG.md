@@ -18,6 +18,8 @@ User-facing changes, newest first. Mac releases are cut per
 - A run's model control names the model the run is on, as its header does ("Opus 5.5"), not the menu
   row it was started with; "Default" is only a row of the menu.
 - On the Mac, a run's reply box stands on the same column as its conversation and heading.
+- In a run's Changes, a file git doesn't track yet reads as its path and "untracked", as the file
+  headers name a file's kind, in place of git's "??".
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
