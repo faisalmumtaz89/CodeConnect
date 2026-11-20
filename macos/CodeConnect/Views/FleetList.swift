@@ -195,44 +195,40 @@ struct FleetList: View {
         .background(Theme.window)
         #if DEBUG
             .onAppear { moreOpen = RenderWindow.openRunMenu }
+            .task(id: rows.first?.id) {
+                guard let row = rows.first else { return }
+                switch RenderWindow.confirm {
+                case "endRun": ending = row
+                case "endNote": endNote = "\(HostDevice.current.computer("The computer")) answered “refused”."
+                case "remove": removing = row
+                case "removeNote": removeNote = Optional(DeleteSessionResult.stillRunning).refusal
+                default: break
+                }
+            }
         #endif
         // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
-        .alert(
-            FleetWords.endTitle, isPresented: Binding(get: { ending != nil }, set: { if !$0 { ending = nil } }),
-            presenting: ending
-        ) { row in
-            Button("End Run", role: .destructive) { endRun(row) }.accessibilityIdentifier("endRun.confirm")
-            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("endRun.cancel")
-        } message: { row in
-            Text(FleetWords.endMessage(row.summary.agent.displayName))
+        .confirmation($ending) { row in
+            Confirmation(title: FleetWords.endTitle, message: FleetWords.endMessage(row.summary.agent.displayName), answers: [
+                .init(title: "Cancel", kind: .cancel, id: "endRun.cancel"),
+                .init(title: "End Run", kind: .destructive, id: "endRun.confirm") { endRun(row) },
+            ])
         }
-        .alert(
-            "End Run", isPresented: Binding(get: { endNote != nil }, set: { if !$0 { endNote = nil } }),
-            presenting: endNote
-        ) { _ in
-            Button("OK", role: .cancel) {}.accessibilityIdentifier("endRun.ok")
-        } message: { note in
-            Text(note)
+        .confirmation($endNote) { note in
+            Confirmation(title: "End Run", message: note, answers: [.init(title: "OK", kind: .ok, id: "endRun.ok")])
         }
         // Removing forgets CodeConnect's own record of a run, never the agent's transcript: it asks once, in the
         // iPhone's words, then says only what went wrong.
-        .alert(
-            removing.map { FleetWords.removeTitle($0.label.project) } ?? "",
-            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-            presenting: removing
-        ) { row in
-            Button("Remove", role: .destructive) { remove(row) }.accessibilityIdentifier("remove.confirm")
-            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("remove.cancel")
-        } message: { row in
-            Text(FleetWords.removeKeeps(row.summary.agent.displayName))
+        .confirmation($removing) { row in
+            Confirmation(
+                title: FleetWords.removeTitle(row.label.project),
+                message: FleetWords.removeKeeps(row.summary.agent.displayName),
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "remove.cancel"),
+                    .init(title: "Remove", kind: .destructive, id: "remove.confirm") { remove(row) },
+                ])
         }
-        .alert(
-            "Not removed", isPresented: Binding(get: { removeNote != nil }, set: { if !$0 { removeNote = nil } }),
-            presenting: removeNote
-        ) { _ in
-            Button("OK", role: .cancel) {}.accessibilityIdentifier("remove.ok")
-        } message: { note in
-            Text(note)
+        .confirmation($removeNote) { note in
+            Confirmation(title: "Not removed", message: note, answers: [.init(title: "OK", kind: .ok, id: "remove.ok")])
         }
     }
 

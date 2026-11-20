@@ -22,6 +22,7 @@ struct MainWindow: View {
     @State private var chosen: (run: String, tab: SessionTab)?
     /// Whether the open run's composer is using Esc: its commands list is open or its field has focus.
     @FocusedValue(\.composerHoldsEscape) private var composerHoldsEscape
+    @Environment(ConfirmationQueue.self) private var asks
     /// The window's width, from which the list's share beside an open run is worked out.
     @State private var width: CGFloat = 0
 
@@ -77,10 +78,10 @@ struct MainWindow: View {
             if case .computer(let id) = filter, removed.contains(id) { filter = nil }
             if let opened, !machines.fleet.contains(where: { $0.id == opened }) { self.opened = nil }
         }
-        // Esc closes the open run; a sheet's own Esc is its Cancel. Not while the composer is using it: Esc closes its
-        // list, or leaves its field, first.
+        // Esc closes the open run; a sheet's own Esc is its Cancel, and an ask's its safe answer. Not while the composer
+        // is using it: Esc closes its list, or leaves its field, first.
         .background {
-            if opened != nil, adding == nil, composerHoldsEscape != true {
+            if opened != nil, adding == nil, composerHoldsEscape != true, !asks.isAsking {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -243,6 +244,11 @@ private struct Sidebar: View {
                                     last != setup.thisMac(at: address)
                                 {
                                     moreOpen = last
+                                }
+                                if RenderWindow.confirm == "computer", let last = computers.last,
+                                    last.machineID != setup.thisMac(at: address)
+                                {
+                                    removing = last
                                 }
                             #endif
                         }
@@ -543,6 +549,9 @@ struct ActionButton: View {
     let title: String
     let key: String?
     let prominent: Bool
+    /// Acts and cannot be taken back: the plain face in red, as every destructive button on the Mac is drawn. Never
+    /// prominent, never Return.
+    var destructive = false
     /// What a driver finds it by.
     let id: String
     let action: () -> Void
@@ -553,11 +562,13 @@ struct ActionButton: View {
                 Text(title.titleStyle).font(Theme.ui(12, .medium))
                 if let key { Text(key).font(Theme.ui(11)).opacity(0.6) }
             }
-            .foregroundStyle(prominent ? Color.black : Theme.text)
+            .foregroundStyle(prominent ? Color.black : destructive ? Theme.red : Theme.text)
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(prominent ? Theme.text : Theme.raised, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(prominent ? Color.clear : Theme.hairline))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(prominent ? Color.clear : destructive ? Theme.red.opacity(0.45) : Theme.hairline))
         }
         .buttonStyle(.hover(over: true, id: id))
         .accessibilityIdentifier(id)

@@ -150,29 +150,23 @@ private struct Composer: View {
                 compacting = false
             }
         }
-        .alert(ClearConfirmation.title, isPresented: $clearing) {
-            Button(ClearConfirmation.clear.titleStyle, role: .destructive) { performClear() }
-                .accessibilityIdentifier("session.composer.clear.confirm")
-            Button(ClearConfirmation.keep.titleStyle, role: .cancel) {}
-                .accessibilityIdentifier("session.composer.clear.cancel")
-        } message: {
-            Text(ClearConfirmation.message)
+        .confirmation(Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false })) { _ in
+            Confirmation(title: ClearConfirmation.title, message: ClearConfirmation.message, answers: [
+                .init(title: ClearConfirmation.keep, kind: .cancel, id: "session.composer.clear.cancel"),
+                .init(title: ClearConfirmation.clear, kind: .destructive, id: "session.composer.clear.confirm") {
+                    performClear()
+                },
+            ])
         }
         // Kit's words for the run's agent; Keep Asking and Esc send nothing, and the mode stays as it was.
-        .alert(
-            modeWords.title,
-            isPresented: Binding(get: { confirmingMode != nil }, set: { if !$0 { confirmingMode = nil } }),
-            presenting: confirmingMode
-        ) { mode in
-            Button(modeWords.confirm, role: .destructive) {
-                takeOpener()
-                Task { _ = await model.setMode(for: key, modeValue: mode.value, confirmed: true) }
-            }
-            .accessibilityIdentifier("session.composer.mode.confirm")
-            Button(modeWords.cancel, role: .cancel) {}
-                .accessibilityIdentifier("session.composer.mode.cancel")
-        } message: { _ in
-            Text(modeWords.message)
+        .confirmation($confirmingMode) { mode in
+            Confirmation(title: modeWords.title, message: modeWords.message, answers: [
+                .init(title: modeWords.cancel, kind: .cancel, id: "session.composer.mode.cancel"),
+                .init(title: modeWords.confirm, kind: .destructive, id: "session.composer.mode.confirm") {
+                    takeOpener()
+                    Task { _ = await model.setMode(for: key, modeValue: mode.value, confirmed: true) }
+                },
+            ])
         }
     }
 
@@ -220,6 +214,15 @@ private struct Composer: View {
                         },
                         confirmMode: { confirmingMode = $0 }, reach: Self.rowSpacing + Self.sendSize, room: rowWidth)
                     .disabled(blocked != nil || busy)
+                    #if DEBUG
+                        .task {
+                            switch RenderWindow.confirm {
+                            case "clear": clearing = true
+                            case "mode": confirmingMode = settings.modes.first(where: \.confirm)
+                            default: break
+                            }
+                        }
+                    #endif
                 }
                 sendButton
             }
