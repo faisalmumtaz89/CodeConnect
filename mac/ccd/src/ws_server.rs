@@ -2764,7 +2764,9 @@ mod tests {
     /// LAN address would be. Must-fail: pass `None` for the viewer's node, and the laptop is listed to itself.
     #[tokio::test]
     async fn a_device_linked_by_a_lan_address_is_not_listed_to_itself() {
-        let (server, device) = live_server(protocol::config::Config::default()).await;
+        // The device `live_server` pairs, by its token (its id is what `live_server` returns).
+        let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        let device = "device-token-for-tests";
         let mut status: serde_json::Value = serde_json::from_str(include_str!(
             "../../../fixtures/tailscale/status-six-nodes.json"
         ))
