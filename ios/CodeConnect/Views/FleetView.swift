@@ -1618,6 +1618,7 @@ private struct MachineLabel: View {
     var body: some View {
         if let name, let model = machines.model(for: machineID) {
             let level = model.linkHealth.level
+            let word = model.linkHealth.machineWord
             // At reading sizes one line, as wide as it is with its widest
             // word, so the word coming and going takes no width from the
             // project's name and the card's header keeps its height.
@@ -1626,16 +1627,18 @@ private struct MachineLabel: View {
                     ForEach(Self.worded.indices, id: \.self) { index in
                         CCMachineLabel(name: name, level: Self.worded[index], lineLimit: 1).hidden()
                     }
+                    // A refusal's words are its cause's; the longer of the two holds the width.
+                    CCMachineLabel(name: name, level: .rejected, word: "Different version", lineLimit: 1).hidden()
                 }
-                CCMachineLabel(name: name, level: level, lineLimit: typeSize.isAccessibilitySize ? nil : 1)
+                CCMachineLabel(name: name, level: level, word: word, lineLimit: typeSize.isAccessibilitySize ? nil : 1)
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("On \(name), \(level.machineMark.word ?? "connected")")
+            .accessibilityLabel("On \(name), \(word ?? "connected")")
         }
     }
 
     /// Every level that says a word beside the computer's name.
-    private static let worded: [LinkHealth.Level] = [.stale, .connecting, .offline, .rejected]
+    private static let worded: [LinkHealth.Level] = [.stale, .connecting, .offline]
 }
 
 /// **The banner, clocked by itself.**
