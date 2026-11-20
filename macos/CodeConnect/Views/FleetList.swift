@@ -462,13 +462,14 @@ private struct FleetLine: View {
 }
 
 /// A row's "…" (a run's, or a computer's in the sidebar), and the panel it opens below it, in the app's own panel style
-/// (the model panel's), holding End Run… or Remove…, each of which asks before anything is sent.
+/// (the model panel's), holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent.
 struct RunMore: View {
     enum Action {
         case endRun, remove
 
         var title: String { self == .endRun ? "End Run…" : "Remove…" }
         var id: String { self == .endRun ? "endRun" : "remove" }
+        var symbol: String { self == .endRun ? PanelSymbol.endRun : PanelSymbol.remove }
     }
 
     static let width: CGFloat = 26
@@ -498,22 +499,15 @@ struct RunMore: View {
     }
 
     private var panel: some View {
-        Button {
+        PanelItem(title: action.title, symbol: action.symbol, destructive: true, id: "\(id).\(action.id)") {
             open = false
             perform()
-        } label: {
-            Text(action.title).font(Theme.ui(12.5)).foregroundStyle(Theme.red).lineLimit(1)
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 4, id: "\(id).\(action.id)"))
-        .padding(4)
+        .padding(.vertical, 5)
         .frame(width: 180)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
-        .accessibilityIdentifier("\(id).\(action.id)")
     }
 }
 

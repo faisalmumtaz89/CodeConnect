@@ -129,8 +129,14 @@ struct HostedSettingsButton: View {
         case .mode: card(width: 240) { modeRows }
         case .more:
             card(width: 180) {
-                commandRow("Compact…", id: "session.composer.compact", run: compact)
-                commandRow("Clear…", id: "session.composer.clear", run: clear)
+                PanelItem(title: "Compact…", symbol: PanelSymbol.compact, id: "session.composer.compact") {
+                    open = nil
+                    compact()
+                }
+                PanelItem(title: "Clear…", symbol: PanelSymbol.clear, destructive: true, id: "session.composer.clear") {
+                    open = nil
+                    clear()
+                }
             }
         }
     }
@@ -182,18 +188,6 @@ struct HostedSettingsButton: View {
                 }
             }
         }
-    }
-
-    private func commandRow(_ title: String, id: String, run: @escaping () -> Void) -> some View {
-        Button {
-            open = nil
-            run()
-        } label: {
-            rowLabel(title, marked: false)
-        }
-        .buttonStyle(.hover(radius: 4, id: id))
-        .padding(.horizontal, 4)
-        .accessibilityIdentifier(id)
     }
 
     /// A panel: the app's raised card.

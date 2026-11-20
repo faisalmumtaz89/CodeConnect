@@ -267,3 +267,45 @@ private struct OpenPanel: ViewModifier {
         content.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames?.panel = $0 }
     }
 }
+
+/// Each "…" panel act's one symbol, chosen once for both apps: the iPhone's menus draw the same act with the Phosphor
+/// icon named beside it.
+enum PanelSymbol {
+    /// iPhone: `power`.
+    static let endRun = "power"
+    /// iPhone: `trash`.
+    static let remove = "trash"
+    /// iPhone: `arrows-in`.
+    static let compact = "arrow.down.right.and.arrow.up.left"
+    /// iPhone: `eraser`.
+    static let clear = "eraser"
+}
+
+/// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon, the 12.5 pt label 8 pt in, 4 pt above and
+/// below, a 4-pt-radius hover plate 4 pt in from the panel's edge. A destructive act's icon and label are red.
+struct PanelItem: View {
+    let title: String
+    let symbol: String
+    var destructive = false
+    let id: String
+    let perform: () -> Void
+
+    var body: some View {
+        Button(action: perform) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: symbol).font(.system(size: 11))
+                    .foregroundStyle(destructive ? Theme.red : Theme.text3)
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+                Text(title).font(Theme.ui(12.5)).foregroundStyle(destructive ? Theme.red : Theme.text).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 4, id: id))
+        .padding(.horizontal, 4)
+        .accessibilityIdentifier(id)
+    }
+}
