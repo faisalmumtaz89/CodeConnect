@@ -192,7 +192,7 @@ struct CompactSheet: View {
                         }
                         CCButton(
                             CompactPrompt.action,
-                            variant: .primary,
+                            variant: .primary, size: .lg, fullWidth: true,
                             isLoading: busy
                         ) { apply() }
                     }

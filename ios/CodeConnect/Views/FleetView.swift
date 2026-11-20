@@ -2422,7 +2422,7 @@ struct FleetRowView: View {
                                 icon: stopOutcome.icon)
                             if let onStop {
                                 CCButton(
-                                    "Stop", icon: "stop-fill", variant: .secondary,
+                                    "Stop", icon: "stop-fill", variant: .secondary, fullWidth: true,
                                     disabledReason: CCDisabledReason(stopBlockedReason)
                                 ) {
                                     showsStopOutcome = false

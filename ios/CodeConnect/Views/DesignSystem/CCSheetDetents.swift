@@ -27,8 +27,15 @@ import SwiftUI
 /// opens two different sheets should not be shown two different sizes of the
 /// same design system.
 enum CCSheetDetents {
-    /// A sheet's full height — the largest fraction measured to stay floating.
-    static let expanded: PresentationDetent = .fraction(0.97)
+    /// A sheet's full height: the whole height less a fixed gap. A fraction
+    /// gives a gap that shrinks with the screen, and `.fraction(0.97)`, which
+    /// floats on an iPhone 17 Pro, falls into `.large`'s class on an iPhone SE
+    /// and rescales there.
+    static let expanded: PresentationDetent = .custom(Expanded.self)
+
+    private struct Expanded: CustomPresentationDetent {
+        static func height(in context: Context) -> CGFloat? { context.maxDetentValue - 24 }
+    }
 }
 
 extension View {

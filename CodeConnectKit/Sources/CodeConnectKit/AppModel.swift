@@ -1159,7 +1159,9 @@ public final class AppModel {
     public func listProjects() {
         #if DEBUG
             if fixturesActive {
-                if starter.projects == nil { starter.listFixtureProjects(linux: machineSystem == "Linux") }
+                if starter.projects == nil {
+                    starter.listFixtureProjects(linux: machineSystem == "Linux", computer: machineName ?? "this computer")
+                }
                 return
             }
         #endif
