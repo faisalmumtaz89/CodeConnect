@@ -114,7 +114,7 @@ public enum CardWords {
     public static func denyWithReasonTells(_ agent: String) -> String {
         "Denies the call, and \(agent) gets your reason with the denial."
     }
-    public static func allowingGrants(_ rule: String) -> String { "Allowing for this session grants \(rule)" }
+    public static func allowingGrants(_ rule: String) -> String { "\(DecisionCard.sessionGrantLead) \(rule)" }
     public static let chooseOne = "Choose one"
     public static func showMoreFiles(_ count: Int) -> String { "Show \(count) more file\(count == 1 ? "" : "s")" }
     public static func linesNotDrawn(_ count: Int) -> String {

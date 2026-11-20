@@ -76,6 +76,10 @@ struct CCMonoBlock: View {
     /// path — wraps. See `CCMonoTruncation` before reaching for anything else.
     var truncation: CCMonoTruncation?
     var isSmall: Bool = false
+    /// The border on the container's own edge rather than hung from the
+    /// content column: for a document with no gutter, a decision card, whose
+    /// every heading starts at its margin (`onContainerEdge()`).
+    private var isOnContainerEdge: Bool = false
     /// The container-less form — see `init(inline:)`.
     private var isInline: Bool = false
     /// How many lines the inline form may take at accessibility sizes.
@@ -370,7 +374,16 @@ struct CCMonoBlock: View {
     ///    gutter exists, so nothing moves: a 12pt step on one side of a centred
     ///    280pt block is a 6pt error in the middle of it.
     private var columnHang: CGFloat {
-        isCentred ? 0 : CCColumn.hang(from: columnInset)
+        isCentred || isOnContainerEdge ? 0 : CCColumn.hang(from: columnInset)
+    }
+
+    /// The block with its border on the container's edge, as a document with no
+    /// gutter wants it: the decision card's headings, `COMMAND` among them, start
+    /// at its margin, and a block hung from the content column started 24pt in.
+    func onContainerEdge() -> CCMonoBlock {
+        var block = self
+        block.isOnContainerEdge = true
+        return block
     }
 
     private var style: CCTextStyle { isInline ? inlineStyle : (isSmall ? CC.type.monoSmall : CC.type.mono) }

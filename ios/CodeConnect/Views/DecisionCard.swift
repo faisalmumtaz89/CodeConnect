@@ -399,7 +399,7 @@ struct DecisionCardView: View {
         // read as a command jammed against its own explanation.
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader(commandHeader)
-            CCMonoBlock(command)
+            CCMonoBlock(command).onContainerEdge()
                 // The gate's first half, measured on the block that carries the
                 // command itself rather than on a marker somewhere beneath it.
                 .background { bottomProbe(CommandBottomKey.self) }
@@ -869,7 +869,7 @@ struct DecisionCardView: View {
             if isClaudeCard {
                 CCDisclosure("Full tool input", labelOnContentColumn: false) {
                     VStack(alignment: .leading, spacing: CC.space.sm) {
-                        CCMonoBlock(approval.card.shownToolInput)
+                        CCMonoBlock(approval.card.shownToolInput).onContainerEdge()
                         VStack(alignment: .leading, spacing: 2) {
                             Text("request_id     \(approval.card.requestID)")
                             Text("payload_hash   \(approval.card.payloadHash)")
@@ -1405,13 +1405,14 @@ struct DecisionCardView: View {
             // one-time Allow.
             if offersAllowForSession {
                 if let caption = DecisionCard.sessionRuleCaption(card: approval.card) {
-                    Text(caption)
+                    // The whole sentence on screen, as the Mac shows it: the
+                    // bare rule above the button did not say it is a grant.
+                    Text(CardWords.allowingGrants(caption))
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.secondary)
                         .lineLimit(DecisionCard.sessionCaptionLineLimit)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel(CardWords.allowingGrants(caption))
                 }
                 switch DecisionCard.affirmativeControl(at: risk) {
                 case .hold:
