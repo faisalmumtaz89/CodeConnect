@@ -95,6 +95,32 @@ final class PeerJoinTests: XCTestCase {
         XCTAssertEqual(pairing.machines, [])
         XCTAssertFalse(machines.models.contains { $0.machineID != nil })
         XCTAssertEqual(pairing.declined.count, 1)
+        // Out of the list, as removed, and offered where a computer is added; adding it there joins it, no code.
+        XCTAssertEqual(machines.unjoinedComputers, [])
+        let removed = try XCTUnwrap(machines.removedComputers.first)
+        XCTAssertEqual(machines.removedComputers.count, 1)
+        machines.addAgain(removed)
+        try await until { pairing.machines.first?.endpoint.token == "t" }
+        XCTAssertEqual(pairing.declined, [])
+        XCTAssertEqual(machines.removedComputers, [])
+        for model in machines.models { model.leave() }
+    }
+
+    /// A listed computer whose daemon refuses this device is shown with the daemon's reason, and the next list
+    /// naming it asks again, rather than leaving the refused join to sit unseen for the life of the app.
+    func testARefusedJoinIsShownWithItsReasonAndAskedAgainOnTheNextList() async throws {
+        let daemon = try StubDaemon { _ in .refuse }
+        let pairing = PairingStore(ephemeral: true)
+        let machines = Machines(pairing: pairing, cache: EventCache(root: temporaryCache()))
+        machines.join(directory(port: daemon.port))
+        try await until { !machines.unjoinedComputers.isEmpty }
+        let refused = try XCTUnwrap(machines.unjoinedComputers.first)
+        XCTAssertEqual(refused.reason, "Won’t let this iPhone in without a pairing code")
+        XCTAssertEqual(machines.removedComputers, [], "refused is not removed")
+        let asked = daemon.hellos.count
+        machines.join(directory(port: daemon.port))
+        try await until { daemon.hellos.count > asked }
+        for (_, model) in machines.joining { model.leave() }
     }
 
     /// A computer listed before its daemon answers joins once it does, with no

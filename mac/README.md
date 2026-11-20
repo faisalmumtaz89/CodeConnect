@@ -164,7 +164,10 @@ Three things behave differently on a Mac that has been running for a while.
   or the code while pairing. A fix is planned for the next update. A pairing over
   Tailscale is not affected, because the tailnet carries the encryption. A daemon
   with no `ws_bind` set is unaffected — it binds this node's tailnet address,
-  where WireGuard has already encrypted the path.
+  where WireGuard has already encrypted the path. A Mac with a LAN `ws_bind` also
+  listens on its tailnet IPv4, plaintext under WireGuard, so the owner's other
+  computers, which find it by its tailnet name, reach it; who may connect there is
+  the same as anywhere: a code, a token, or the owner's own Tailscale device.
 * **SSH is retired.** CodeConnect never installs a key. Taking one back is what
   it does do: the daemon sweeps `~/.ssh/authorized_keys` before it serves
   anything. It sweeps again on every `codeconnect revoke <device>`,

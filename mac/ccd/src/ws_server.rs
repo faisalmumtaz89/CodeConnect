@@ -402,6 +402,9 @@ where
     // keep answering approvals and typing into the session's TTY, which is the
     // opposite of what the operator just asked for.
     let mut device_id: Option<String> = None;
+    // The Tailscale device this connection's peer is, when it is known: Tailscale's word for the address it came
+    // from, else the node its device was last seen from. It is left out of the `peers` frame this connection gets.
+    let mut viewer_node: Option<String> = None;
     // Which kind of device it is, as its hello named it: what its answers are
     // recorded as coming from.
     let mut answered_on = AnsweredOn::Iphone;
@@ -562,6 +565,10 @@ where
                                 }
                             }
                             authed = true;
+                            viewer_node = vouched.as_ref().ok().cloned().or_else(|| match &ack {
+                                AuthOutcome::Device(device) => device.tailnet_node.clone(),
+                                _ => None,
+                            });
                             device_id = match &ack {
                                 AuthOutcome::Device(device) => Some(device.device_id.clone()),
                                 AuthOutcome::Paired { device_id, .. } => Some(device_id.clone()),
@@ -598,7 +605,7 @@ where
                                 }
                             }
                             if device_id.is_some() {
-                                let frame = peers_frame(&daemon, tailnet.as_ref(), peer);
+                                let frame = peers_frame(&daemon, tailnet.as_ref(), peer, viewer_node.as_deref());
                                 peers_sent = Some(serde_json::to_string(&frame)?);
                                 send(&mut sink, &frame).await?;
                             }
@@ -866,9 +873,10 @@ where
             _ = peers_refresh.tick(), if device_id.is_some() => {
                 let daemon = Arc::clone(&daemon);
                 let peers_reader = peers_reader.clone();
+                let viewer_node = viewer_node.clone();
                 tokio::spawn(async move {
                     let tailnet = daemon.read_tailnet().await;
-                    let _ = peers_reader.send(peers_frame(&daemon, tailnet.as_ref(), peer));
+                    let _ = peers_reader.send(peers_frame(&daemon, tailnet.as_ref(), peer, viewer_node.as_deref()));
                 });
             }
 
@@ -1534,17 +1542,19 @@ async fn hello_ack(
 /// the same database, so a genuinely broken store denies access either way
 /// rather than quietly grandfathering whoever was already inside.
 /// The `peers` frame for one reading of this computer's tailnet, told to the
-/// connection from `viewer`.
+/// connection from `viewer`, whose own Tailscale device is `viewer_node` when known.
 fn peers_frame(
     daemon: &Daemon,
     tailnet: Option<&protocol::tailnet::Tailnet>,
     viewer: IpAddr,
+    viewer_node: Option<&str>,
 ) -> ServerMessage {
     protocol::tailnet::peers_frame(
         tailnet,
         daemon.config.tailscale_bin().is_some(),
         daemon.config.ws_port,
         viewer,
+        viewer_node,
     )
 }
 
@@ -2745,6 +2755,66 @@ mod tests {
             device_name(&server, &id).await,
             "Air",
             "a hello naming nothing keeps the name"
+        );
+    }
+
+    /// **A device linked by an address that is not its tailnet address is not told about itself**, over the real
+    /// listener: its token carries the Tailscale device it was seen from, and that node is left out of its `peers`
+    /// frame. Here the device comes from loopback and the tailnet puts the laptop elsewhere, as a Mac paired by its
+    /// LAN address would be. Must-fail: pass `None` for the viewer's node, and the laptop is listed to itself.
+    #[tokio::test]
+    async fn a_device_linked_by_a_lan_address_is_not_listed_to_itself() {
+        // The device `live_server` pairs, by its token (its id is what `live_server` returns).
+        let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        let device = "device-token-for-tests";
+        let mut status: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        for node in status["Peer"].as_object_mut().unwrap().values_mut() {
+            if node["HostName"] == "linux-box" {
+                node["Online"] = true.into();
+            }
+        }
+        let laptop = status["Peer"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|node| node["HostName"] == "laptop")
+            .and_then(|node| node["ID"].as_str())
+            .expect("the laptop's node id")
+            .to_string();
+        set_tailnet(
+            &server,
+            Some(protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap()),
+        );
+        server
+            .daemon
+            .db
+            .stamp_tailnet_node(protocol::hash::sha256_hex(device.as_bytes()), laptop)
+            .await
+            .unwrap();
+
+        let stream = TcpStream::connect(server.addr).await.unwrap();
+        let url = format!("ws://{}/", server.addr);
+        let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
+        let hello = serde_json::json!({
+            "type": "hello", "protocol_version": protocol::PROTOCOL_VERSION, "token": device, "client_name": "CodeConnect Mac",
+        });
+        socket.send(Message::Text(hello.to_string())).await.unwrap();
+        let peers = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("a peers frame after the ack");
+        let names: Vec<&str> = peers["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"laptop"), "listed to itself: {names:?}");
+        assert!(
+            names.contains(&"linux-box"),
+            "the other computer is still listed: {names:?}"
         );
     }
 

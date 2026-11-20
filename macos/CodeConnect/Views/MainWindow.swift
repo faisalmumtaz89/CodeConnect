@@ -252,6 +252,10 @@ private struct Sidebar: View {
                                 // Its panel opens below the row, over the rows after it.
                                 .zIndex(moreOpen == id ? 1 : 0)
                             }
+                            // The owner's other computers Tailscale lists that have not joined, each with why.
+                            ForEach(machines.unjoinedComputers) { unjoined in
+                                UnjoinedComputerRow(unjoined: unjoined) { machines.tryAgain(unjoined) }
+                            }
                         }
                         .padding(.horizontal, 8)
                         .zIndex(moreOpen == nil ? 0 : 1)
@@ -371,6 +375,43 @@ private struct Sidebar: View {
 /// A paired computer: its name, how many runs are active on it, and how its link is. A live one shows its CPU, memory
 /// and disk as three quiet meters in place of the link's word, while the row is shown. One whose daemon refused its
 /// token is a button: a click pairs it again, with its address already in the code form.
+/// A computer the owner's tailnet lists that has not joined this Mac's list: its Tailscale name, why in the line where
+/// a computer's load sits, and the one thing to do in the place of its count.
+private struct UnjoinedComputerRow: View {
+    let unjoined: Machines.UnjoinedComputer
+    let act: () -> Void
+
+    private var id: String { "sidebar.unjoined.\(unjoined.computer.host)" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Image(systemName: "desktopcomputer").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                Text(unjoined.computer.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(PeerWords.tryAgain.titleStyle, action: act)
+                    .buttonStyle(.hover(bare: true, id: "\(id).act"))
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text2)
+                    .accessibilityIdentifier("\(id).act")
+            }
+            Text(unjoined.reason)
+                .font(Theme.ui(10.5))
+                .foregroundStyle(Theme.text3)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 24)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(id)
+    }
+}
+
 private struct ComputerRow: View {
     let computer: AppModel
     let count: Int

@@ -1026,6 +1026,25 @@ enum RenderCatalog {
             reach: { app, driver in try driver.openSettings(app) }),
 
         RenderScenario(
+            name: "settings-unjoined",
+            purpose: "the owner's other computers Tailscale lists that are failing to join: unreachable, refused",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_UNJOINED", "unreachable,refused"],
+            reach: { app, driver in
+                try driver.openSettings(app)
+                try driver.require(
+                    driver.element(containing: "Can’t be reached over Tailscale", in: app), "the unreachable row")
+            }),
+
+        RenderScenario(
+            name: "settings-removed-on-tailnet",
+            purpose: "a computer the owner removed that his Tailscale account still lists, offered to add again",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_UNJOINED", "removed"],
+            reach: { app, driver in
+                try driver.openSettings(app)
+                try driver.require(driver.element(containing: "On your Tailscale account", in: app), "the section")
+            }),
+
+        RenderScenario(
             name: "settings-machines",
             purpose: "two machines, one offline with the longest name, and the way to add another",
             arguments: secondMachineArguments,

@@ -216,3 +216,28 @@ public enum PairingWords {
     /// … and with Tailscale connected, while this Mac's CodeConnect moves onto it.
     public static let iPhoneReachesOnceMoved = "Your iPhone can reach this Mac once CodeConnect is on Tailscale."
 }
+
+/// A computer the owner's tailnet lists that has not joined this device's list, and why, as both apps say it.
+public enum PeerWords {
+    /// Listed, but nothing answers at its tailnet name.
+    public static let unreachable = "Can’t be reached over Tailscale"
+    /// Its CodeConnect answered and would not let this device in: why, for each refusal a join can get.
+    public static func refused(_ refusal: ConnectionRefusal?) -> String {
+        switch refusal {
+        case .notAdmitted: "Won’t let this \(HostDevice.current.name) in without a pairing code"
+        case .differentVersion: "Runs a different version of CodeConnect"
+        case .credential, .pairingCode, nil: "Didn’t let this \(HostDevice.current.name) in"
+        }
+    }
+    public static let tryAgain = "Try again"
+    /// Add a Computer's section of the computers his Tailscale account lists that he removed, each added by one
+    /// action with no code.
+    public static let onYourTailscale = "On your Tailscale account"
+    /// Add a Computer's opening sentence, true beside that section: a computer on the account joins by itself
+    /// unless he removed it, and a removed one is then listed below.
+    public static func addIntro(removedListed: Bool) -> String {
+        "Install CodeConnect on it and sign in to the same Tailscale account. "
+            + (removedListed ? "It appears here by itself, unless you removed it: then it’s listed below." : "It appears here by itself.")
+    }
+    public static let add = "Add"
+}
