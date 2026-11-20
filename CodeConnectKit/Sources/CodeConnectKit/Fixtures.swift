@@ -260,10 +260,11 @@ enum Fixtures {
         case .hostedSettings:
             // The fixture carries live Codex runs beside the Claude ones, so the ack advertises the
             // Codex capabilities a Codex-hosting daemon sends — otherwise the composer reads "too
-            // old to carry a message to Codex" on the Codex runs.
+            // old to carry a message to Codex" on the Codex runs. Its runs were started from the app, so it ends
+            // them too (`stop_run`): a render reaches a run row's "…" with End Run….
             ackJSON = helloAckJSON.replacingOccurrences(
                 of: #""browse_folders":true}"#,
-                with: #""browse_folders":true,"codex_interrupt":true,"codex_compose":true,"supported_agents":["claude","codex"]}"#)
+                with: #""browse_folders":true,"codex_interrupt":true,"codex_compose":true,"stop_run":true,"supported_agents":["claude","codex"]}"#)
         default:
             ackJSON = helloAckJSON
         }

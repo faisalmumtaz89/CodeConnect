@@ -66,13 +66,17 @@
         /// `-CC_FIELD_UNFOCUSED YES`: an opened run's reply field is not given the keyboard, as when the run is opened
         /// by a click on its row; a request then holds the reply box's place.
         static var leavesFieldUnfocused: Bool { UserDefaults.standard.bool(forKey: "CC_FIELD_UNFOCUSED") }
-        /// `-CC_RUN_MENU <session uid>`: the list opens that run's "…" panel once the run is listed and can be ended or
-        /// removed.
+        /// `-CC_RUN_MENU <session uid>`: that run's "…", once shown (`-CC_HOVER fleet.row.<uid>`), opens its menu a
+        /// moment later, as a click does; the open menu's frame, its control's and the window's are printed once
+        /// (`panel: …; control: …; window: …`).
         static var openRunMenu: String? { UserDefaults.standard.string(forKey: "CC_RUN_MENU") }
+        /// `-CC_LIST_END YES`: the run list opens scrolled to its end.
+        static var listAtEnd: Bool { UserDefaults.standard.bool(forKey: "CC_LIST_END") }
         /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device`: that ask or notice is up at launch,
         /// about the first run listed, the open run (`-CC_OPEN`), the last computer, or the first device Settings lists.
         static var confirm: String? { UserDefaults.standard.string(forKey: "CC_CONFIRM") }
-        /// `-CC_COMPUTER_MENU YES`: the sidebar opens its last computer's "…" panel, when that computer can be removed.
+        /// `-CC_COMPUTER_MENU YES`: a computer's "…", once shown (`-CC_HOVER sidebar.computer.<id>`), opens its menu a
+        /// moment later, as a click does.
         static var opensComputerMenu: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_MENU") }
 
         /// `-CC_SETTINGS YES`: the Settings window opens at launch, and it is the window photographed, once its pane
