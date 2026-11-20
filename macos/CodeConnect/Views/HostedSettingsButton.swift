@@ -38,9 +38,6 @@ struct HostedSettingsButton: View {
     /// The reply box's content width, which no panel is wider than; 0 until measured.
     let room: CGFloat
 
-    /// Where the controls and the open panel are in the window, for the click that closes it.
-    @State private var frames = PanelFrames()
-
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
 
     var body: some View {
@@ -49,16 +46,15 @@ struct HostedSettingsButton: View {
             if !settings.modes.isEmpty { modeButton }
             if agent == .claude { moreButton }
         }
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.controls = $0 }
         .overlay(alignment: .bottomTrailing) {
             if let open {
                 panel(open)
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.panel = $0 }
+                    .openPanel()
                     // Clear of the 24 pt controls by the panels' one gap.
                     .offset(x: reach, y: -(24 + Theme.panelGap))
             }
         }
-        .modifier(ClosesOnClickElsewhere(open: $open, frames: frames))
+        .closesPanel(Binding(get: { open != nil }, set: { if !$0 { open = nil } }))
         // The run's menus went away (it ended, or its link is down): nothing of them stays open.
         .onDisappear { open = nil }
     }
@@ -200,7 +196,7 @@ struct HostedSettingsButton: View {
         .accessibilityIdentifier(id)
     }
 
-    /// A panel: the app's raised card, its own Esc closing it first (the window's Esc stands down while it is open).
+    /// A panel: the app's raised card.
     private func card<Content: View>(width: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
@@ -216,13 +212,6 @@ struct HostedSettingsButton: View {
             }
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
             .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
-            .background {
-                Button("Close list") { open = nil }
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityIdentifier("session.composer.commands.close")
-                    .opacity(0)
-                    .allowsHitTesting(false)
-            }
     }
 
     private func header(_ text: String) -> some View {
@@ -276,42 +265,6 @@ struct HostedSettingsButton: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-    }
-}
-
-/// Where a run's settings controls and their open panel are, in the window's coordinates.
-private final class PanelFrames {
-    var controls: CGRect = .zero
-    var panel: CGRect = .zero
-}
-
-/// While a panel is open, a click anywhere in the window but on the controls or the panel closes it; the click still
-/// does what it does there.
-private struct ClosesOnClickElsewhere: ViewModifier {
-    @Binding var open: SettingsPanel?
-    let frames: PanelFrames
-    @State private var monitor: Any?
-
-    func body(content: Content) -> some View {
-        content
-            .onChange(of: open != nil, initial: true) { _, isOpen in
-                stop()
-                guard isOpen else { return }
-                monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
-                    if let view = event.window?.contentView {
-                        let point = view.convert(event.locationInWindow, from: nil)
-                        let top = CGPoint(x: point.x, y: view.isFlipped ? point.y : view.bounds.height - point.y)
-                        if !frames.controls.contains(top), !frames.panel.contains(top) { open = nil }
-                    }
-                    return event
-                }
-            }
-            .onDisappear(perform: stop)
-    }
-
-    private func stop() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
     }
 }
 
