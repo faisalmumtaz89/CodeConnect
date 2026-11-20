@@ -433,8 +433,9 @@ struct DecisionBlock: View {
                     let number = keyed && index < 9 ? Character(String(index + 1)) : nil
                     Button { send(.optionId(option.id), from: option.id) } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: refusal ? "xmark" : "checkmark").font(.system(size: 10, weight: .semibold))
-                                .frame(width: 14).accessibilityHidden(true)
+                            // Numbered as the iPhone numbers them, never marked: a check on a row means the chosen one.
+                            Text(verbatim: "\(index + 1)").font(Theme.mono(12)).foregroundStyle(Theme.text)
+                                .frame(width: 18, alignment: .leading).accessibilityHidden(true)
                             Text(option.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
