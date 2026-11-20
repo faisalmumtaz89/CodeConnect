@@ -77,7 +77,7 @@ final class MultiMachineLiveUITests: XCTestCase {
         let select = app.buttons["Select"]
         XCTAssertTrue(select.waitForExistence(timeout: 10))
         select.tap()
-        app.buttons["Select All"].tap()
+        app.buttons["Select all"].tap()
         let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove ('"))
             .firstMatch
         XCTAssertTrue(remove.waitForExistence(timeout: 5))

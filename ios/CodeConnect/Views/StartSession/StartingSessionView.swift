@@ -83,7 +83,7 @@ struct StartingSessionView: View {
         let answered: Bool = if case .started = start.outcome { true } else { false }
         return ScrollView {
             VStack(alignment: .leading, spacing: CC.space.lg) {
-                Text("Starting \(start.agent.displayName)…")
+                Text(StartWords.starting(start.agent.displayName))
                     .ccType(Self.titleStyle)
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -93,11 +93,11 @@ struct StartingSessionView: View {
                         step(
                             answered ? .done : .running,
                             answered
-                                ? "\(start.machineName) started it"
-                                : "Asking \(start.machineName) to start it")
+                                ? StartWords.started(start.machineName)
+                                : StartWords.asking(start.machineName))
                         step(
                             answered ? .running : .waiting,
-                            "Waiting for \(start.agent.displayName)’s first words · "
+                            StartWords.waitingForFirstWords(start.agent.displayName)
                                 + Format.age(context.date.timeIntervalSince(start.sentAt)))
                     }
                 }
@@ -120,16 +120,14 @@ struct StartingSessionView: View {
                 if start.outcome == nil, !start.retryStopped {
                     VStack(alignment: .leading, spacing: CC.space.xs) {
                         CCButton(
-                            "Stop retrying", icon: "x-circle", variant: .ghost, size: .md,
+                            StartWords.stopRetrying, icon: "x-circle", variant: .ghost, size: .md,
                             fullWidth: true, haptic: nil
                         ) {
                             model.starter.stopRetrying(start.requestID)
                             dismiss()
                         }
                         .accessibilityIdentifier("start-stop-retrying")
-                        Text(
-                            "No more sends from this \(HostDevice.current.noun); \(start.machineName) may already have started it."
-                        )
+                        Text(StartWords.noMoreSends(start.machineName))
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -1179,7 +1179,7 @@ struct FleetView: View {
         return VStack(spacing: 0) {
             CCHairline()
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-                CCButton(all ? "Deselect All" : "Select All", variant: .ghost, size: .md) {
+                CCButton(all ? "Deselect all" : "Select all", variant: .ghost, size: .md) {
                     selected = all ? [] : Set(selectable)
                 }
                 .disabled(batchRunning)
@@ -1794,7 +1794,7 @@ private struct FleetBanner: View {
             message: "Nothing live has arrived this launch.",
             tone: .warning,
             icon: "clock-counter-clockwise",
-            actionTitle: "Retry",
+            actionTitle: "Try again",
             action: { machines.retryNow() })
     }
 }
@@ -2814,7 +2814,7 @@ struct LinkHealthSheet: View {
                 isUnmeasured: !model.daemonProfile.isConnected,
                 separator: true)
             CCFactRow(
-                "Computer's clock",
+                "Computer’s clock",
                 value: model.connection.serverTime ?? Self.unmeasured,
                 isUnmeasured: model.connection.serverTime == nil,
                 separator: model.connection.lastErrorMessage != nil)
@@ -2889,7 +2889,7 @@ struct LinkHealthSheet: View {
             if model.daemonProfile.connectionEncrypted == false,
                 model.connection.capabilities?.tls == true
             {
-                Text("Your computer can encrypt this connection itself, but this iPhone isn't using that.")
+                Text("Your computer can encrypt this connection itself, but this iPhone isn’t using that.")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3006,14 +3006,14 @@ struct LinkHealthSheet: View {
     private static func sentence(for result: TestPushResult?) -> String {
         switch result {
         case .accepted(let apnsID):
-            let receipt = apnsID.map { " Apple's receipt: \($0)." } ?? ""
+            let receipt = apnsID.map { " Apple’s receipt: \($0)." } ?? ""
             return "Accepted by Apple — the banner on this phone is the proof.\(receipt)"
         case .pushUnconfigured:
-            return "Your computer isn't set up to send notifications, so nothing was sent."
+            return "Your computer isn’t set up to send notifications, so nothing was sent."
         case .notPairedDevice:
             return "This iPhone is connected without pairing. Pair it to test notifications."
         case .noRegisteredToken:
-            return "Your computer can't notify this iPhone yet. Turn on notifications, then try again."
+            return "Your computer can’t notify this iPhone yet. Turn on notifications, then try again."
         case .credentialInvalid:
             return "The relay no longer trusts this phone’s credential. Reset notification registration to enroll again."
         case .rateLimited(let secs):
@@ -3034,13 +3034,13 @@ struct LinkHealthSheet: View {
     /// the user visits Settings.
     private var pushReason: String? {
         guard let capabilities = model.connection.capabilities else {
-            return "Not connected. Your computer hasn't said what it can do yet."
+            return "Not connected. Your computer hasn’t said what it can do yet."
         }
         guard capabilities.pushMode != .none else {
-            return "Your computer doesn't send notifications, so there is nothing to test."
+            return "Your computer doesn’t send notifications, so there is nothing to test."
         }
         guard capabilities.testsPush else {
-            return "Your computer's CodeConnect is too old to send a test. Update it."
+            return "Your computer’s CodeConnect is too old to send a test. Update it."
         }
         // Relay mode has an enrollment step direct mode does not; its states fold
         // in here so the one button explains why it is waiting or stuck.

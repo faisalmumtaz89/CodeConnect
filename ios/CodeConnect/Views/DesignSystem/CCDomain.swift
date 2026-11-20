@@ -296,7 +296,7 @@ extension LinkHealth {
             // asks now.
             return CCBannerItem(
                 .offline, title: word, message: detail, tone: .neutral,
-                icon: "lock", actionTitle: "Retry", action: onRetry)
+                icon: "lock", actionTitle: "Try again", action: onRetry)
         case .offline:
             switch cause {
             case .tailnetHostUnresolvable(let host):
@@ -307,7 +307,7 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Connect Tailscale",
                     message:
-                        "Can't find your computer at `\(host)`. Turn on Tailscale on this iPhone, signed in to the same account as your computer. CodeConnect reconnects on its own.",
+                        "Can’t find your computer at `\(host)`. Turn on Tailscale on this iPhone, signed in to the same account as your computer. CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: TailscaleAssist.isInstallHintNeeded
@@ -317,14 +317,14 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Host not found",
                     message:
-                        "`\(host)` isn't resolving. Check the paired address and this iPhone's network — CodeConnect reconnects on its own.",
+                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network — CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: "Settings", action: onSettings)
             case nil, .refused:
                 return CCBannerItem(
                     .offline, title: "Offline", message: detail, tone: .neutral,
-                    icon: "plugs", actionTitle: "Retry", action: onRetry)
+                    icon: "plugs", actionTitle: "Try again", action: onRetry)
             }
         case .stale:
             // No Retry: a quiet link is cut and dialled again on its own after

@@ -172,7 +172,7 @@ struct HostedSettingsSheet: View {
                 } trailing: { EmptyView() }
             }
         }
-        Text("This run isn't offering model controls right now. Its model is shown as last reported.")
+        Text("This run isn’t offering model controls right now. Its model is shown as last reported.")
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -181,7 +181,7 @@ struct HostedSettingsSheet: View {
     @ViewBuilder
     private var unavailable: some View {
         CCCard {
-            Text("This run's settings aren't available here.")
+            Text("This run’s settings aren’t available here.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
         }

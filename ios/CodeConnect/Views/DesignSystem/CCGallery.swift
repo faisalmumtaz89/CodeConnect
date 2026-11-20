@@ -1151,7 +1151,7 @@ import SwiftUI
                         "Last known state, 6m old",
                         message: "Nothing live has arrived yet this launch.",
                         tone: .warning, icon: "clock-counter-clockwise",
-                        actionTitle: "Retry", action: { lastAction = "retry" })
+                        actionTitle: "Try again", action: { lastAction = "retry" })
                     CCBanner(
                         "Showing recent history only",
                         message: "The start of this session was not loaded.",

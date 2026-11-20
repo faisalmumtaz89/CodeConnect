@@ -250,7 +250,7 @@ struct PairingView: View {
         }
 
         CCProse(
-            "Each code works once and expires after five minutes.",
+            PairingWords.codeWorksOnce,
             style: CC.type.footnote, color: CC.text.tertiary
         )
             .fixedSize(horizontal: false, vertical: true)
@@ -270,7 +270,7 @@ struct PairingView: View {
             } else {
                 CCProgressRing(.lg)
 
-                Text("Pairing…")
+                Text(PairingWords.connecting)
                     .ccType(CC.type.headline)
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -339,9 +339,9 @@ struct PairingView: View {
             CCCard {
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCField(
-                        label: "Address",
+                        label: PairingWords.address,
                         text: $address,
-                        placeholder: "Your computer's address",
+                        placeholder: "Your computer’s address",
                         hint:
                             "Shown with the code on your computer.",
                         keyboardType: .URL,
@@ -350,9 +350,9 @@ struct PairingView: View {
                         isMono: true)
 
                     CCField(
-                        label: "Code",
+                        label: PairingWords.code,
                         text: $token,
-                        placeholder: "Pairing code",
+                        placeholder: PairingWords.pairingCode,
                         hint: nil,
                         error: validationError,
                         autocapitalization: .characters,
@@ -380,7 +380,7 @@ struct PairingView: View {
             }
 
             CCButton(
-                "Save and connect", variant: .primary, size: .lg, fullWidth: true,
+                PairingWords.connect, variant: .primary, size: .lg, fullWidth: true,
                 isLoading: machines.isPairing,
                 disabledReason: manualEntryBlockedReason
             ) {
@@ -662,7 +662,7 @@ struct PairingScanSheet: View {
                     glyph: "camera-slash",
                     title: "No scanner on this device",
                     message:
-                        "This device can't scan codes. Close this and enter the address and code instead.",
+                        "This device can’t scan codes. Close this and enter the address and code instead.",
                     detail: nil,
                     primaryTitle: "Pair by hand",
                     primary: onManualEntry,
@@ -704,7 +704,7 @@ struct PairingScanSheet: View {
         .overlay {
             CCScannerFrame(
                 isDetected: detected,
-                caption: "Point the camera at the QR code in your computer's terminal.")
+                caption: "Point the camera at the QR code in your computer’s terminal.")
             .ignoresSafeArea()
         }
         .overlay(alignment: .bottom) { torchButton }
@@ -859,7 +859,7 @@ struct MachineScreen: View {
         var notes: [String] = []
         if let capabilities = model.connection.capabilities, capabilities.tls, !encrypted {
             notes.append(
-                "Your computer can encrypt this connection itself, but this iPhone isn't using that.")
+                "Your computer can encrypt this connection itself, but this iPhone isn’t using that.")
         }
         if let reason = model.tlsUnavailableReason {
             notes.append(reason)
@@ -1098,10 +1098,10 @@ private struct FolderMachineSection: View {
             }
             HStack(spacing: CC.space.xs) {
                 CCButton(
-                    trusted ? "Don’t Trust" : "Trust",
+                    trusted ? "Don’t trust" : "Trust",
                     variant: .secondary, size: .sm,
                     action: { change(folder.path, to: trusted ? .notTrusted : .trusted) })
-                    .accessibilityLabel(trusted ? "Don’t Trust \(name)" : "Trust \(name)")
+                    .accessibilityLabel(trusted ? "Don’t trust \(name)" : "Trust \(name)")
                     .accessibilityIdentifier("folder-trust-\(folder.path)")
                 CCButton(FolderWords.forget, variant: .ghost, size: .sm, action: { forget(folder.path) })
                     .accessibilityLabel("Forget \(name)")

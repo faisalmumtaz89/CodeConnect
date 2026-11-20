@@ -170,7 +170,7 @@ struct CCScannerBrackets: Shape {
         LinearGradient(
             colors: [CC.color.surfaceOverlay, CC.color.surface],
             startPoint: .topLeading, endPoint: .bottomTrailing)
-        CCScannerFrame(caption: "Point the camera at the QR code in your Mac's terminal.")
+        CCScannerFrame(caption: "Point the camera at the QR code in your Mac’s terminal.")
     }
     .ignoresSafeArea()
     .ccAppearance()

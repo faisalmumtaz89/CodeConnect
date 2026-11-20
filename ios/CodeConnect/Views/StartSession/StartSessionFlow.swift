@@ -142,7 +142,7 @@ struct StartStepsSheet: View {
         case .branch: return "Which branch?"
         case .newWorktree: return "New worktree"
         case .start: return "Ready to start"
-        case .trust: return "New session"
+        case .trust: return FleetWords.startAnAgent
         }
     }
 
@@ -203,9 +203,7 @@ struct StartStepsSheet: View {
     }
 
     private func computerSummary(_ candidate: StartContext) -> String {
-        let count = candidate.projects.count
-        let used = candidate.lastUsed.map { " · last used \(Format.ago(since: $0))" } ?? ""
-        return "\(count) recent folder\(count == 1 ? "" : "s")\(used)"
+        StartWords.recentFolders(candidate.projects.count, lastUsed: candidate.lastUsed, now: Date())
     }
 
     // MARK: Folder

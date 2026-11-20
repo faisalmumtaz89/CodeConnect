@@ -30,7 +30,7 @@ struct TailscaleNote: View {
             switch self {
             case .notInstalled:
                 "Tailscale is one way your iPhone and other computers can reach this Mac, privately, from anywhere."
-            case .notConnected: "Tailscale is on this Mac but isn't connected. Sign in to Tailscale to connect."
+            case .notConnected: "Tailscale is on this Mac but isn’t connected. Sign in to Tailscale to connect."
             case .moving: "Tailscale is connected. CodeConnect is moving onto it, which can take up to a minute."
             case .signedIn(let login): login.map { "Signed in to Tailscale as \($0)." } ?? "Signed in to Tailscale."
             case .tagged: "This Mac is on Tailscale but not as you, so your iPhone and other computers need a code to reach it."

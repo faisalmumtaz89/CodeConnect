@@ -138,3 +138,30 @@ public enum ChangesWords {
         count == 1 ? "1 unchanged line" : "\(count) unchanged lines"
     }
 }
+
+/// Starting a run: a computer's recent folders, and what the start says while
+/// it is under way.
+public enum StartWords {
+    public static func recentFolders(_ count: Int, lastUsed: Date?, now: Date) -> String {
+        let used = lastUsed.map { " · last used \(Format.ago(since: $0, now: now))" } ?? ""
+        return "\(count) recent folder\(count == 1 ? "" : "s")\(used)"
+    }
+    public static func starting(_ agent: String) -> String { "Starting \(agent)…" }
+    public static func started(_ computer: String) -> String { "\(computer) started it" }
+    public static func asking(_ computer: String) -> String { "Asking \(computer) to start it" }
+    public static func waitingForFirstWords(_ agent: String) -> String { "Waiting for \(agent)’s first words · " }
+    public static let stopRetrying = "Stop retrying"
+    public static func noMoreSends(_ computer: String) -> String {
+        "No more sends from this \(HostDevice.current.noun); \(computer) may already have started it."
+    }
+}
+
+/// Adding a computer by its address and pairing code.
+public enum PairingWords {
+    public static let address = "Address"
+    public static let code = "Code"
+    public static let pairingCode = "Pairing code"
+    public static let connect = "Connect"
+    public static let connecting = "Connecting…"
+    public static let codeWorksOnce = "Each code works once and expires after five minutes."
+}

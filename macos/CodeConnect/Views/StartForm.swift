@@ -219,9 +219,7 @@ struct StartForm: View {
 
     /// `12 recent folders · last used 4m ago`, as the iPhone says it.
     private static func summary(_ context: StartContext, now: Date) -> String {
-        let count = context.projects.count
-        let used = context.lastUsed.map { " · last used \(Format.age(since: $0, now: now)) ago" } ?? ""
-        return "\(count) recent folder\(count == 1 ? "" : "s")\(used)"
+        StartWords.recentFolders(context.projects.count, lastUsed: context.lastUsed, now: now)
     }
 
     // MARK: Folder
@@ -423,16 +421,16 @@ private struct StartProgress: View {
     private var starting: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Starting \(start.agent.displayName)…").font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
+                Text(StartWords.starting(start.agent.displayName)).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
                 TimelineView(.periodic(from: start.sentAt, by: 1)) { clock in
                     let answered = start.outcome != nil
                     VStack(alignment: .leading, spacing: 8) {
                         step(
-                            answered ? .done : .running, answered ? "\(start.machineName) started it" : "Asking \(start.machineName) to start it",
+                            answered ? .done : .running, answered ? StartWords.started(start.machineName) : StartWords.asking(start.machineName),
                             id: "start.step.asking")
                         step(
                             answered ? .running : .waiting,
-                            (start.prompt == nil ? "Opening the run · " : "Waiting for \(start.agent.displayName)’s first words · ")
+                            (start.prompt == nil ? "Opening the run · " : StartWords.waitingForFirstWords(start.agent.displayName))
                                 + Format.age(clock.date.timeIntervalSince(start.sentAt)),
                             id: "start.step.waiting")
                     }
@@ -448,12 +446,12 @@ private struct StartProgress: View {
                 // what it did: the computer may already have started it.
                 if start.outcome == nil, !start.retryStopped {
                     VStack(alignment: .leading, spacing: 4) {
-                        Button("Stop retrying", action: stopRetrying)
+                        Button(StartWords.stopRetrying, action: stopRetrying)
                             .buttonStyle(.hover(bare: true, flush: .leading, id: "start.stopRetrying"))
                             .font(Theme.ui(12.5))
                             .foregroundStyle(Theme.text2)
                             .accessibilityIdentifier("start.stopRetrying")
-                        Text("No more sends from this Mac; \(start.machineName) may already have started it.")
+                        Text(StartWords.noMoreSends(start.machineName))
                             .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                             .fixedSize(horizontal: false, vertical: true)
                     }

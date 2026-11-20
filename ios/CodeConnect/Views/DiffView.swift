@@ -239,7 +239,7 @@ struct DiffSheet: View {
                 title: "No answer from your computer",
                 message:
                     "The link is up and the request went out. Nothing came back, and your computer "
-                    + "gave no reason. This is the app's own account of what it saw.",
+                    + "gave no reason. This is the app’s own account of what it saw.",
                 tone: .warning,
                 actionTitle: ChangesWords.checkAgain,
                 action: { start(force: true) }

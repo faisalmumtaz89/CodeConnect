@@ -1401,7 +1401,7 @@ struct SessionDetailView: View {
         VStack {
             CCEmptyState(
                 glyph: "folder-dashed",
-                title: "Not on your computer's list",
+                title: "Not on your computer’s list",
                 message:
                     "This run may have exited, or CodeConnect on your computer restarted since the link was made.",
                 tone: .warning)

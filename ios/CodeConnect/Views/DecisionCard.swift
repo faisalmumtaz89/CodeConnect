@@ -1332,8 +1332,8 @@ struct DecisionCardView: View {
 
     private var codexBarNote: String {
         typeSize.isAccessibilitySize
-            ? "Choose one of Codex's options."
-            : "Answer by choosing one of Codex's options."
+            ? "Choose one of Codex’s options."
+            : "Answer by choosing one of Codex’s options."
     }
 
     private func unconfirmedNotice(_ sentAt: Date) -> some View {

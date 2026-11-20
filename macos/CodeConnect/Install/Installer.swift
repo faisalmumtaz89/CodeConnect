@@ -10,7 +10,7 @@ struct Installer {
     static let binaries = ["ccd", "codeconnect", "cc-agent-host"]
     static let notices = ["LICENSE", "AGENT_HOST_NOTICES"]
     /// A copy or a `daemon install` that failed, as the checklist says it. The system's own words go to the log.
-    static let failed = "CodeConnect couldn't set up its background service. Choose Try Again."
+    static let failed = "CodeConnect couldn’t set up its background service. Choose Try Again."
     static let log = Logger(subsystem: "com.codeconnect.mac", category: "setup")
 
     /// The CodeConnect folder, as the binaries resolve it (`protocol::root_dir`).
@@ -60,7 +60,7 @@ struct Installer {
     /// current and answers. Either way the app owns `bin` from now on: its marker stands `codeconnect update`
     /// down. Returns what went wrong, in a sentence, or nil; the error or the CLI's output behind it is logged.
     func install() -> String? {
-        guard bundled else { return "This build of CodeConnect doesn't carry its background service." }
+        guard bundled else { return "This build of CodeConnect doesn’t carry its background service." }
         let wasCurrent = current
         do {
             if !wasCurrent {
