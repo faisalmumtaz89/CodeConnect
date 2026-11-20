@@ -1,9 +1,9 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Start an agent on one of the computers that can start one: a recent folder there (on this Mac, any folder, from
-/// the standard folder panel), where in its repository (`BranchRow`), the first message, and, under it, the model, whose menu holds Claude Code's
-/// and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
+/// Start an agent on one of the computers that can start one: a recent folder there, or any folder (on this Mac from
+/// the standard folder panel, elsewhere from `FolderBrowser`), where in its repository (`BranchRow`), the first
+/// message, and, under it, the model, whose menu holds Claude Code's and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
 /// the iPhone; the Mac shows it as one form. The computer defaults to the one used last, the model to the Default of
 /// the agent last used in the folder, else of the first one there. Once sent, the form gives way to the start's
 /// progress, and the sheet closes when the run is in the list. The sent start is followed by its request on its own
@@ -39,6 +39,8 @@ struct StartForm: View {
     @State private var place = StartPlace.folder
     @State private var newName: String?
     @State private var branchMenuOpen = false
+    /// The Folder box browses the computer's folders in place of its recent ones.
+    @State private var browsing = false
     @Environment(\.sheetRoom) private var room
     /// Where the form's rows start in the sheet, under the heading: the highest a panel opened over them reaches.
     @State private var rowsTop: CGFloat = 0
@@ -67,10 +69,10 @@ struct StartForm: View {
             ?? contexts.max { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }
     }
 
-    /// The selected folder: on this Mac any folder (a recent one when it is one), elsewhere a recent one.
+    /// The selected folder: a recent one when it is one, else the one chosen or browsed to.
     private var folder: StartProject? {
         guard let folderPath, let context else { return nil }
-        return isThisMac(context) ? context.project(at: folderPath) : context.projects.first { $0.path == folderPath }
+        return context.project(at: folderPath)
     }
 
     private func isThisMac(_ context: StartContext) -> Bool {
@@ -156,6 +158,7 @@ struct StartForm: View {
         #if DEBUG
             .task {
                 menuOpen = RenderWindow.opensModelMenu
+                browsing = RenderWindow.browsed != nil
                 guard let path = RenderWindow.chosenFolder else { return }
                 for _ in 0..<150 {
                     if context?.projects.contains(where: { $0.path == path }) == true {
@@ -175,6 +178,7 @@ struct StartForm: View {
             query = back.query
             folderPath = back.folderPath
             chosen = back.chosen
+            browsing = false
         }
     }
 
@@ -280,9 +284,23 @@ struct StartForm: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 label("Folder")
                 Spacer(minLength: 8)
-                if isThisMac(context) { chooseButton }
+                if isThisMac(context) {
+                    chooseButton
+                } else if context.browses, !browsing {
+                    browseButton
+                }
             }
-            if context.starter.projects == nil {
+            if browsing {
+                FolderBrowser(
+                    context: context,
+                    use: {
+                        choose($0)
+                        browsing = false
+                    },
+                    cancel: { browsing = false }
+                )
+                .id(context.id)
+            } else if context.starter.projects == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Reading \(context.machineName)’s recent folders…").font(Theme.ui(12)).foregroundStyle(Theme.text2)
@@ -377,6 +395,19 @@ struct StartForm: View {
         }
         .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.choose"))
         .accessibilityIdentifier("start.choose")
+    }
+
+    /// Any folder on a computer that is not this Mac, browsed in the Folder box (a computer below minor 30 lists only
+    /// its recent ones).
+    private var browseButton: some View {
+        Button {
+            branchMenuOpen = false
+            browsing = true
+        } label: {
+            Text("Browse\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.browse"))
+        .accessibilityIdentifier("start.browse")
     }
 
     private func chooseFolder() {

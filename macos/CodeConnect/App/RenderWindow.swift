@@ -62,6 +62,14 @@
         static var opensModelMenu: Bool { UserDefaults.standard.bool(forKey: "CC_MODEL_MENU") }
         /// `-CC_BRANCH_MENU YES`: the start form's Branch menu open.
         static var opensBranchMenu: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_MENU") }
+        /// `-CC_BROWSE <path>`: the start form opens browsing that folder of a computer that is not this Mac; `~` is
+        /// its home. `-CC_BROWSE_HIDDEN YES` shows hidden folders, `-CC_BROWSE_UNASKED YES` never asks for the listing,
+        /// so the form stays on reading it, and `-CC_NEW_FOLDER <name>` opens New Folder's card with that name typed
+        /// (`-CC_NEW_FOLDER ""` for none).
+        static var browsed: String? { UserDefaults.standard.string(forKey: "CC_BROWSE") }
+        static var browsesHidden: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_HIDDEN") }
+        static var browseUnasked: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_UNASKED") }
+        static var newFolderName: String? { UserDefaults.standard.string(forKey: "CC_NEW_FOLDER") }
         /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.
         /// `-CC_BRANCH_NAME <name>`: a new worktree being named, as typed.
         static func branch(in git: StartGit?, place: inout StartPlace, newName: inout String?) {
@@ -358,9 +366,10 @@
                     return
                 }
                 started = true
-                // A start still reading its folder's repository (`-CC_GIT_PENDING`) shows a turning ring, which never
-                // stops changing.
-                RenderWindow.renderAndQuit(window, still: !UserDefaults.standard.bool(forKey: "CC_GIT_PENDING"))
+                // A start still reading its folder's repository (`-CC_GIT_PENDING`) or a browsed folder never asked for
+                // (`-CC_BROWSE_UNASKED`) shows a turning ring, which never stops changing.
+                RenderWindow.renderAndQuit(
+                    window, still: !UserDefaults.standard.bool(forKey: "CC_GIT_PENDING") && !RenderWindow.browseUnasked)
             }
         }
 
