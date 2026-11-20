@@ -354,6 +354,11 @@ struct FleetView: View {
                     .ccHitTarget()
                 }
                 .buttonStyle(.plain)
+                // On the button itself, not only its label: the bar sizes a
+                // leading item from the button, and sized from its label alone
+                // it gave a slot an icon's width, so a title longer than "New"
+                // spilled past the screen's left edge.
+                .fixedSize()
                 .accessibilityLabel(FleetWords.newAgent)
                 .accessibilityIdentifier("start-entry")
             }
@@ -576,7 +581,7 @@ struct FleetView: View {
         }
         let words = [
             newProjects > 0 ? "\(newProjects) new \(newProjects == 1 ? "project" : "projects")" : nil,
-            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "agent" : "agents")" : nil,
+            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "run" : "runs")" : nil,
             ended > 0 ? "\(ended) ended" : nil,
         ].compactMap { $0 }
         let total = newProjects + newRuns + ended
@@ -707,17 +712,17 @@ struct FleetView: View {
         return failed > 0 ? ("\(failed) failed", CC.color.danger) : nil
     }
 
-    /// `4 agents on 2 computers · 1 done`: every live run, the computers they
+    /// `4 runs on 2 computers · 1 done`: every live run, the computers they
     /// are on when there are several, and what they are doing — less whatever
     /// the alert above said. A status with nothing in it is omitted rather than
     /// printed as `0`.
     private func summaryLine(_ screen: FleetScreen) -> String {
         guard !screen.projects.isEmpty else {
-            return screen.rows.isEmpty ? "Nothing has arrived yet" : "No agents running"
+            return screen.rows.isEmpty ? "Nothing has arrived yet" : "Nothing running"
         }
         let live = screen.rows.filter { $0.status != .ended }
         let computers = Set(live.map(\.machineID)).count
-        let overview = "\(live.count) \(live.count == 1 ? "agent" : "agents")"
+        let overview = "\(live.count) \(live.count == 1 ? "run" : "runs")"
             + (computers > 1 ? " on \(computers) computers" : "")
         let taken: FleetStatus? =
             screen.decisions > 0 ? .blocked : (live.contains { $0.status == .failed } ? .failed : nil)

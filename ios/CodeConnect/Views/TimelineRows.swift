@@ -755,7 +755,9 @@ struct ApprovalRow: View {
         }
     }
 
-    /// The persisted approval row's header word. Pending is "NEEDS YOU";
+    /// The persisted approval row's header word. Pending is the fleet's own
+    /// word for a run held on a card, `FleetStatus.blocked`'s label, set as a
+    /// badge ("WAITING FOR YOU");
     /// otherwise the row carries a recorded outcome, and an `indeterminate` one —
     /// which the daemon could not confirm reached the agent — reads "UNCONFIRMED",
     /// never the definitive "RESOLVED". Static and pure so the string is testable
@@ -771,7 +773,7 @@ struct ApprovalRow: View {
             return outcome.indeterminate ? "UNCONFIRMED" : "RESOLVED"
         }
         if let resolution = approval.codexResolution { return Self.codexHeader(for: resolution) }
-        return "NEEDS YOU"
+        return FleetStatus.blocked.label.uppercased()
     }
 
     /// One word for how a Codex card ended. `RETIRED` rather than `RESOLVED` for

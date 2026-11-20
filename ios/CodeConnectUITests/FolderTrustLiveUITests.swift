@@ -85,15 +85,15 @@ final class FolderTrustLiveUITests: XCTestCase {
             "the Ready step (Start bar, or the pill's send when a focused message hides it)")
     }
 
-    /// The fleet header ("N agents · …", or "No agents running") counts live sessions
+    /// The fleet header ("N runs · …", or "Nothing running") counts live sessions
     /// from the model and is always drawn — unlike the session rows, which lazy
     /// rendering leaves off-screen once the fleet holds more than a couple (seen: the
-    /// header read "2 agents" while only one `session-` row was in the tree). So the
+    /// header read "2 runs" while only one `session-` row was in the tree). So the
     /// count of started runs is read from the header, not by counting rows. -1 until
     /// the header is up.
     private func agentCount(_ app: XCUIApplication) -> Int {
-        if app.staticTexts["No agents running"].exists { return 0 }
-        let h = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ agent.*")).firstMatch
+        if app.staticTexts["Nothing running"].exists { return 0 }
+        let h = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ run.*")).firstMatch
         guard h.exists else { return -1 }
         return Int(h.label.prefix(while: { $0.isNumber })) ?? -1
     }
@@ -103,7 +103,7 @@ final class FolderTrustLiveUITests: XCTestCase {
     private func settledAgentCount(_ app: XCUIApplication) -> Int {
         let loaded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'")).firstMatch.exists
-                || app.staticTexts["No agents running"].exists
+                || app.staticTexts["Nothing running"].exists
         }, object: nil)
         _ = XCTWaiter().wait(for: [loaded], timeout: 20)
         return self.agentCount(app)

@@ -315,7 +315,7 @@ final class FleetApprovalLineTests: XCTestCase {
         XCTAssertEqual(before.cards.count, 2, before.spoken)
         XCTAssertTrue(before.cards.contains { $0.contains("On studio.example.net, connected") }, before.spoken)
         XCTAssertTrue(before.cards.contains { $0.contains("On laptop.example.net, connected") }, before.spoken)
-        XCTAssertTrue(before.spoken.contains("3 agents on 2 computers"), before.spoken)
+        XCTAssertTrue(before.spoken.contains("3 runs on 2 computers"), before.spoken)
 
         laptop.connection.setPhaseForTesting(.waiting(until: Date(), reason: "down"))
         let after = try await screen()
@@ -355,7 +355,7 @@ final class FleetApprovalLineTests: XCTestCase {
         XCTAssertTrue(spoken.contains("Agents you start with CodeConnect appear here."), spoken)
         XCTAssertFalse(spoken.contains("codeconnect "), spoken)
         XCTAssertFalse(spoken.contains("Nothing is waiting for you"), spoken)
-        XCTAssertFalse(spoken.contains("No agents running"), spoken)
+        XCTAssertFalse(spoken.contains("Nothing running"), spoken)
         XCTAssertFalse(spoken.contains("No agents registered"), spoken)
         XCTAssertTrue(names.contains("Settings"), spoken)
     }

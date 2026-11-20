@@ -574,7 +574,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.fleet(app)
                 try driver.require(
-                    driver.element(containing: "Start an agent on your computer", in: app),
+                    driver.element(containing: "Start an agent", in: app),
                     "the empty fleet's instruction")
             }),
 
