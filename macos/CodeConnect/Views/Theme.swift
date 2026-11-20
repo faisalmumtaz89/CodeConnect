@@ -23,6 +23,8 @@ enum Theme {
     static let hover = Color.white.opacity(0.04)
     /// The same step for a surface with its own fill (a raised chip, a filled button): a lift in brightness.
     static let hoverLift = 0.04
+    /// A control that can't be used now: its label at this opacity.
+    static let disabledOpacity = 0.45
 
     static let text = Color(themeHex: 0xE4E4E7)
     static let text2 = Color(themeHex: 0x9C9CA3)

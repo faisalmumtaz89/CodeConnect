@@ -387,13 +387,11 @@ struct DecisionBlock: View {
                         send(.optionId("acceptForSession"), from: "allowSession")
                     }
                     .disabled(assentBlocked != nil)
-                    .opacity(assentBlocked != nil ? 0.45 : 1)
                 }
                 ActionButton(title: "Allow", key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
                     send(.allow, from: "allow")
                 }
                 .disabled(assentBlocked != nil)
-                .opacity(assentBlocked != nil ? 0.45 : 1)
                 .answerKey(.return, .command, when: keyed && !reasonTyped)
             }
             // What the session grant covers, as Claude writes the rule: it can be broader than the one command asked.
@@ -428,7 +426,6 @@ struct DecisionBlock: View {
                     }
                     .buttonStyle(.hover(id: "\(id).option.\(option.id)"))
                     .disabled(blocked != nil)
-                    .opacity(blocked != nil ? 0.45 : 1)
                     .answerKey(KeyEquivalent(number ?? "0"), .command, when: number != nil)
                     .accessibilityIdentifier("\(id).option.\(option.id)")
                 }

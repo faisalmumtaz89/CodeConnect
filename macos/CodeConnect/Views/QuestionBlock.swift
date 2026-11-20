@@ -195,7 +195,6 @@ struct QuestionBlock: View {
                 if let answers { send(.answers(answers), from: "submit") }
             }
             .disabled(blocked != nil || answers == nil)
-            .opacity(blocked != nil || answers == nil ? 0.45 : 1)
             .answerKey(.return, .command, when: keys)
         }
     }
