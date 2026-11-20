@@ -106,6 +106,8 @@ public enum SessionWords {
     public static let nothingLiveYet = "Nothing live has arrived for this run yet."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
     public static let runEnded = "This run has ended. Its conversation stays here to read."
+    /// Over an ended run's `SessionSummary.resumeCommand`.
+    public static let pickUpAtComputer = "Pick this conversation up at the computer"
 }
 
 /// A run's settings, as both apps name them.

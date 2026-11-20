@@ -1265,8 +1265,8 @@ struct SessionDetailView: View {
     @ViewBuilder
     private var sessionNotices: some View {
         let notice = SessionState.silentNotice(permissionMode: model.permissionMode(for: key))
-        let resumeID = summary?.resumeSessionID
-        if notice != nil || resumeID != nil || model.stopUnavailable(for: key) == nil {
+        let resumeCommand = summary?.resumeCommand
+        if notice != nil || resumeCommand != nil || model.stopUnavailable(for: key) == nil {
             VStack(alignment: .leading, spacing: 0) {
                 // **An ended run is not a dead end.** Claude Code keeps its own
                 // transcript under `~/.claude/projects`, so the conversation
@@ -1279,21 +1279,12 @@ struct SessionDetailView: View {
                 // Only for an ended run the next message does not relaunch: a
                 // relaunchable one opens its composer instead, so this manual
                 // command would be a second, worse path.
-                if let resumeID, let cwd = summary?.shownCwd, !cwd.isEmpty {
+                if let resumeCommand {
                     VStack(alignment: .leading, spacing: CC.rhythm.text) {
-                        Text("Pick this conversation up at the computer")
+                        Text(SessionWords.pickUpAtComputer)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.secondary)
-                        // Quoted, because this is a command a person copies and
-                        // runs. The folder and the id are whatever the run and a
-                        // hook reported — decoded as unrestricted strings, never
-                        // validated — and a space would silently cd or resume the
-                        // wrong thing while anything shell-special would run as
-                        // syntax. Quoting costs nothing on the path and UUID this
-                        // is in practice. `cd` first because Claude Code keeps a
-                        // session's record under its project folder, so `--resume`
-                        // is run from there.
-                        CCMonoBlock("cd \(Shell.quoted(cwd)) && claude --resume \(Shell.quoted(resumeID))")
+                        CCMonoBlock(resumeCommand)
                     }
                 }
                 // Stated here rather than left to be inferred from an empty
