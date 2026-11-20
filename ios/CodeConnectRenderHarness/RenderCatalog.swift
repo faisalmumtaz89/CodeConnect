@@ -722,6 +722,45 @@ enum RenderCatalog {
                     driver.text(containing: "Not sent: stopped", in: app),
                     "the cancelled send's marker on the person's own row")
             }),
+        // **The run's branch and its +N −M**, under the bar, in ccd's `git_branch`
+        // and `diff_stat`: a long branch, a short one, a Codex run, and none.
+        RenderScenario(
+            name: "session-facts-long",
+            purpose: "a branch longer than the line gives way in its middle; +N −M keeps its edge",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
+                try driver.requireExists(facts, "the run's branch line")
+                guard facts.label.contains("feature/") else { throw RenderFailure.unreachable("feature/ on the run's branch line") }
+            }),
+        RenderScenario(
+            name: "session-facts-short",
+            purpose: "a short branch and its +N −M",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
+                try driver.requireExists(facts, "the run's branch line")
+                guard facts.label.contains("main") else { throw RenderFailure.unreachable("main on the run's branch line") }
+            }),
+        RenderScenario(
+            name: "session-facts-codex",
+            purpose: "a Codex run's branch and +N −M",
+            arguments: ["-CC_FIXTURE", "stacked", "-CC_DEEPLINK", "codeconnect://session/fx-4"],
+            reach: { app, driver in
+                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
+                try driver.requireExists(facts, "the run's branch line")
+                guard facts.label.contains("main") else { throw RenderFailure.unreachable("main on the run's branch line") }
+            }),
+        RenderScenario(
+            name: "session-facts-none",
+            purpose: "a folder ccd reports no branch for: no line under the bar",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-3"],
+            reach: { app, driver in
+                try driver.require(app.buttons["session-more"], "the session detail")
+                if app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch.exists {
+                    throw RenderFailure.unreachable("no branch line for a run without one")
+                }
+            }),
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",
