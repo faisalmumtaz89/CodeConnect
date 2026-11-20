@@ -3221,7 +3221,7 @@ mod tests {
         let env = LaunchdLabelEnv::take();
 
         for (label, restartable) in [
-            (Some(protocol::LAUNCHD_LABEL), true),
+            (Some(protocol::launchd_label()), true),
             // A `ccd` started from inside somebody else's launchd job carries
             // that job's label, and that job will never restart it.
             (Some("com.example.other"), false),
