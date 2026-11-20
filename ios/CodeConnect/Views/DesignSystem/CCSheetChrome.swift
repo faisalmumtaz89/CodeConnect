@@ -143,13 +143,12 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
             Text(verbatim: title)
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
-                // **Bounded, because a title can now carry a project.** A
-                // forty-character name is what the daemon allows, and at the
-                // largest accessibility sizes an unbounded header eats the
-                // sheet it is labelling. From the tail, as a project is drawn
-                // everywhere else.
+                // **Bounded, because a title can carry a project.** A project's
+                // name may be long, and at the largest accessibility sizes an
+                // unbounded header eats the sheet it is labelling. In its
+                // middle, keeping the end, as a project is cut everywhere else.
                 .lineLimit(2)
-                .truncationMode(.tail)
+                .truncationMode(.middle)
                 .fixedSize(horizontal: false, vertical: true)
             if let subtitle {
                 CCProse(subtitle, style: CC.type.footnote, color: CC.text.secondary)

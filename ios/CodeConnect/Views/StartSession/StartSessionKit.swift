@@ -16,9 +16,12 @@ struct StartProjectRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: CC.space.sm) {
             VStack(alignment: .leading, spacing: CC.space.xxs) {
+                // Two lines at most, then a cut in its middle that keeps the end.
                 Text(project.name)
                     .ccType(CC.type.rowTitle)
                     .foregroundStyle(CC.text.primary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
                     .fixedSize(horizontal: false, vertical: true)
                 // One line at every size: the name above already says the
                 // tail, and wrapped at AX5 the path made a row half a screen.
@@ -182,7 +185,7 @@ struct StartBarTitle: View {
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
                 .lineLimit(1)
-                .truncationMode(.tail)
+                .truncationMode(.middle)
             Text(verbatim: start.folder ?? "\(project.path) · new worktree")
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(CC.text.tertiary)
