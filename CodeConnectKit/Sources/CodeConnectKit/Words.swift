@@ -24,8 +24,6 @@ public enum FleetWords {
     public static let projects = "Projects"
     public static let newAgent = "New agent"
     public static let startAnAgent = "Start an agent"
-    /// The list while its computers are still answering, or waited out: never "Start an agent" before then.
-    public static let connecting = "Connecting to your computer…"
     /// Under the launch's mark once it has waited a second for its computers (`LaunchMark`).
     public static func connecting(to computers: [String]) -> String {
         computers.count == 1 ? "Connecting to \(computers[0])…" : "Connecting to your computers…"

@@ -98,8 +98,6 @@ struct FleetList: View {
                 Group {
                     if let (computer, notice) = shownComputerNotice {
                         ComputerNotice(notice: notice, act: noticeAction(computer, notice))
-                    } else if !machines.launchSettled {
-                        Connecting()
                     } else if scope == .active {
                         NoAgentsYet(newAgent: newAgent)
                     } else {

@@ -136,14 +136,20 @@ struct RootView: View {
         MainWindow(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd)
             .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)
+            // A cold launch's splash, over the window from its first frame.
+            .overlay { LaunchSurface() }
             .environment(machines.linkModel)
-            .sheet(isPresented: Bindable(setup).shown) { SetupView().environment(setup).environment(machines) }
+            // Set Up waits for the splash: its intro, then a cut to the sheet.
+            .sheet(isPresented: Binding(get: { setup.shown && LaunchSurface.state.over }, set: { setup.shown = $0 })) {
+                SetupView().environment(setup).environment(machines)
+            }
             #if DEBUG
                 .renderLook()
                 // A render of Settings photographs that window, never this one.
                 .background(
                     RenderWindow(
-                        ready: !RenderWindow.opensSettings
+                        // A recording of the splash photographs its own frames and quits.
+                        ready: RenderWindow.launchRecord == nil && !RenderWindow.opensSettings
                             && (!RenderWindow.waitsForComputer || machines.pairingError != nil || connected)
                             && (!Setup.runsThisLaunch || setup.settled)
                             // A render of an update step photographs the update's own window.

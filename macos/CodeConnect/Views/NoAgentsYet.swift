@@ -27,19 +27,6 @@ struct NoAgentsYet: View {
     }
 }
 
-/// The list before its computers have caught up, or been waited out (the Kit's `waitOutLaunch`, as the iPhone's
-/// loader waits): what is there is still on its way, so it never says there is nothing.
-struct Connecting: View {
-    var body: some View {
-        VStack(spacing: 10) {
-            ProgressView().controlSize(.small)
-            Text(FleetWords.connecting).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("fleet.connecting")
-    }
-}
-
 /// A computer's list while its link is not working: what the sidebar's word means and what to do, in the link's own
 /// title and sentence (Kit's `LinkNotice`), and its one action when it has one.
 struct ComputerNotice: View {
