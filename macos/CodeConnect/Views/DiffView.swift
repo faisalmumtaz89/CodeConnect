@@ -3,7 +3,8 @@ import SwiftUI
 
 /// One file's diff as Kit parses it (`UnifiedDiff.FileDiff`): its path and what happened to it, its lines added and
 /// removed, then each hunk with added lines on green and removed ones on red. Unchanged stretches Kit folds are one
-/// line saying how many. What it draws and speaks from the diff is `displaySafe`: a file's name, lines and hunk headers
+/// line saying how many, which a click opens; this file's opened stretches stay open while it is shown, as the iPhone's
+/// do. What it draws and speaks from the diff is `displaySafe`: a file's name, lines and hunk headers
 /// come from the repository, and the characters that reorder a line would draw different code from what the bytes say.
 struct FileDiffView: View {
     let file: UnifiedDiff.FileDiff
@@ -14,14 +15,16 @@ struct FileDiffView: View {
     /// The most diff lines to draw, counted as Kit's card budget counts them (every line of every hunk, folded or
     /// not, and never a hunk's header); the card counts the rest.
     var lineLimit: Int?
+    /// The folded stretches opened here, by hunk and segment.
+    @State private var opened: Set<String> = []
 
     /// One drawn row: a hunk's header, a line, a folded stretch, or a note.
     private enum Row: Identifiable {
-        case header(String, Int), line(UnifiedDiff.Line, Int), folded(Int, Int), note(String, Int)
+        case header(String, Int), line(UnifiedDiff.Line, Int), folded(count: Int, fold: String, Int), note(String, Int)
 
         var id: Int {
             switch self {
-            case .header(_, let id), .line(_, let id), .folded(_, let id), .note(_, let id): id
+            case .header(_, let id), .line(_, let id), .folded(_, _, let id), .note(_, let id): id
             }
         }
     }
@@ -32,8 +35,9 @@ struct FileDiffView: View {
         for hunk in file.hunks where left > 0 {
             rows.append(.header(hunk.header, rows.count))
             for segment in hunk.segments where left > 0 {
-                if segment.isFolded {
-                    rows.append(.folded(segment.lines.count, rows.count))
+                let fold = "\(hunk.id)#\(segment.id)"
+                if segment.isFolded, !opened.contains(fold) {
+                    rows.append(.folded(count: segment.lines.count, fold: fold, rows.count))
                     left -= segment.lines.count
                 } else {
                     for line in segment.lines.prefix(left) { rows.append(.line(line, rows.count)) }
@@ -63,7 +67,7 @@ struct FileDiffView: View {
                     switch row {
                     case .header(let text, _): quiet(text, mono: true)
                     case .line(let line, _): DiffLine(line: line)
-                    case .folded(let count, _): quiet(ChangesWords.unchangedLines(count), mono: false)
+                    case .folded(let count, let fold, _): foldedRow(count: count, fold: fold)
                     case .note(let text, _): quiet(text, mono: false)
                     }
                 }
@@ -73,6 +77,28 @@ struct FileDiffView: View {
         }
         .background(Theme.code, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
+        #if DEBUG
+            .onAppear {
+                guard RenderWindow.foldsOpen else { return }
+                for hunk in file.hunks {
+                    for segment in hunk.segments where segment.isFolded { opened.insert("\(hunk.id)#\(segment.id)") }
+                }
+            }
+        #endif
+    }
+
+    private func foldedRow(count: Int, fold: String) -> some View {
+        Button { opened.insert(fold) } label: {
+            Text(ChangesWords.foldedLines(count)).font(Theme.mono(11)).foregroundStyle(Theme.text3)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ChangesWords.foldedLinesSpoken(count))
+        .accessibilityHint(ChangesWords.foldedLinesHint)
+        .accessibilityIdentifier("diff.fold")
     }
 
     private func quiet(_ text: String, mono: Bool) -> some View {

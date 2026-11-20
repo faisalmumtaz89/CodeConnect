@@ -186,6 +186,11 @@ public enum ChangesWords {
     public static func unchangedLines(_ count: Int) -> String {
         count == 1 ? "1 unchanged line" : "\(count) unchanged lines"
     }
+    /// A folded stretch of a diff, where its code starts: a click or tap opens it.
+    public static func foldedLines(_ count: Int) -> String { "⋯ \(unchangedLines(count))" }
+    /// The folded stretch as a screen reader says it, and what opening it does.
+    public static func foldedLinesSpoken(_ count: Int) -> String { "\(unchangedLines(count)) hidden" }
+    public static let foldedLinesHint = "Shows them"
 }
 
 /// Starting a run: a computer's recent folders, and what the start says while

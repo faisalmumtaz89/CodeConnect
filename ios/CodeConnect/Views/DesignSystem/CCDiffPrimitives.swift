@@ -883,8 +883,8 @@ struct CCFoldRow: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(CCFoldRowStyle())
-        .accessibilityLabel("\(count) unchanged line\(count == 1 ? "" : "s") hidden")
-        .accessibilityHint("Shows them")
+        .accessibilityLabel(ChangesWords.foldedLinesSpoken(count))
+        .accessibilityHint(ChangesWords.foldedLinesHint)
     }
 
     /// Where a row's code starts, so the label reads as a line of the file.
@@ -893,9 +893,7 @@ struct CCFoldRow: View {
         return gutter + metrics.markerWidth + CC.space.xxs
     }
 
-    private var label: String {
-        "⋯ \(ChangesWords.unchangedLines(count))"
-    }
+    private var label: String { ChangesWords.foldedLines(count) }
 }
 
 private struct CCFoldRowStyle: ButtonStyle {

@@ -165,6 +165,9 @@
         /// `-CC_FILTER computer` or `project`: the list opens narrowed to the sidebar's first computer or project.
         static var filter: String? { UserDefaults.standard.string(forKey: "CC_FILTER") }
 
+        /// `-CC_FOLDS_OPEN YES`: every diff opens with its folded stretches of unchanged lines opened, as clicks open them.
+        static var foldsOpen: Bool { UserDefaults.standard.bool(forKey: "CC_FOLDS_OPEN") }
+
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
         /// `-CC_SESSION_TAB changes`: the opened run shows its Changes.
