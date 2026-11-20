@@ -234,6 +234,26 @@ public enum StartWords {
     public static let changesStay = "Uncommitted changes stay where they are"
     public static let nameTheWorktree = "Name the worktree."
     public static let nameBreaksTheRule = "The name breaks the rule above."
+
+    // Browsing a computer's folders for one to start in. The Mac's buttons read these in title style.
+    public static let browseFolders = "Browse folders"
+    public static let showHiddenFolders = "Show hidden folders"
+    public static let newFolderAction = "New folder…"
+    public static let useThisFolder = "Use this folder"
+    /// The card that names a new folder: its title, where it goes, the field's placeholder.
+    public static let newFolder = "New folder"
+    public static func newFolderIn(_ path: String) -> String { "In \(path)" }
+    public static let folderName = "Name"
+    public static func couldNotMake(_ name: String) -> String { "Couldn’t make “\(name)”" }
+    /// While the computer lists a folder; nil is its home folder, before the computer has named it.
+    public static func readingFolder(_ path: String?, on computer: String) -> String {
+        path.map { "Reading \($0)…" } ?? "Reading \(computer)’s home folder…"
+    }
+    /// What a listing cannot show by itself.
+    public static let firstFolders = "The first 2,000 folders, in name order."
+    public static func noFolders(showingHidden: Bool) -> String {
+        showingHidden ? "No folders in here." : "No folders in here, hidden ones aside."
+    }
 }
 
 /// Adding a computer by its address and pairing code.

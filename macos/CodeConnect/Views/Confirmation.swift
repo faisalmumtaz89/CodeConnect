@@ -8,6 +8,9 @@ struct Confirmation {
     let message: String
     /// The answers left to right: the safe one first, the one that acts last.
     let answers: [Answer]
+    /// A name to type, for an ask that makes something: it has the keyboard, Return gives the plain answer, and
+    /// while it is blank only the safe answer can be given.
+    var field: Field?
 
     struct Answer {
         enum Kind {
@@ -26,6 +29,11 @@ struct Confirmation {
         /// What a driver finds it by.
         let id: String
         var perform: () -> Void = {}
+    }
+
+    struct Field {
+        let placeholder: String
+        let text: Binding<String>
     }
 }
 
@@ -81,7 +89,9 @@ private struct ConfirmationHost: ViewModifier {
                         // The window under the ask takes no clicks while it is up, and is dimmed until no control in it
                         // reads as live: at 0.6 a row's red-edged button falls below the card's own hairline in contrast.
                         Color.black.opacity(0.6).contentShape(Rectangle()).onTapGesture {}
-                        ConfirmationCard(confirmation: shown.confirmation) { answer in
+                        ConfirmationCard(
+                            confirmation: shown.confirmation, typed: shown.confirmation.field?.text ?? .constant("")
+                        ) { answer in
                             queue.shown.removeAll { $0.owner == shown.owner }
                             shown.close()
                             answer.perform()
@@ -96,15 +106,32 @@ private struct ConfirmationHost: ViewModifier {
 /// The card: its title, its sentence, its answers at the bottom right.
 private struct ConfirmationCard: View {
     let confirmation: Confirmation
+    /// The field's text, held so a blank one keeps the acting answers off as it is typed.
+    @Binding var typed: String
     let answer: (Confirmation.Answer) -> Void
-    /// The card holds the keyboard while it is up, so nothing typed reaches the window under it.
+    /// The card holds the keyboard while it is up, so nothing typed reaches the window under it; a card with a field
+    /// gives it to the field.
     @FocusState private var holdsKeyboard: Bool
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(confirmation.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
             Text(unwidowed(confirmation.message)).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
+            if let field = confirmation.field {
+                TextField("", text: field.text, prompt: Text(field.placeholder).foregroundStyle(Theme.text3))
+                    .accessibilityLabel(field.placeholder)
+                    .accessibilityIdentifier("confirmation.field")
+                    .focused($fieldFocused)
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(12.5))
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                    .padding(.top, 4)
+            }
             HStack(spacing: 8) {
                 Spacer()
                 ForEach(Array(confirmation.answers.enumerated()), id: \.offset) { _, each in
@@ -118,10 +145,12 @@ private struct ConfirmationCard: View {
         .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
         .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
-        .focusable()
+        .focusable(confirmation.field == nil)
         .focusEffectDisabled()
         .focused($holdsKeyboard)
-        .onAppear { holdsKeyboard = true }
+        .onAppear {
+            if confirmation.field == nil { holdsKeyboard = true } else { fieldFocused = true }
+        }
         // A notice's OK is its safe answer too.
         .onKeyPress(.escape) {
             guard let ok = confirmation.answers.first(where: { $0.kind == .ok }) else { return .ignored }
@@ -139,13 +168,17 @@ private struct ConfirmationCard: View {
     }
 
     @ViewBuilder private func button(_ each: Confirmation.Answer) -> some View {
+        // With a field, the plain answer is the one Return gives, and is drawn so.
+        let takesReturn = each.kind == .ok || (each.kind == .plain && confirmation.field != nil)
+        let blank = confirmation.field != nil && typed.trimmingCharacters(in: .whitespaces).isEmpty
         let face = ActionButton(
-            title: each.title, key: nil, prominent: each.kind == .ok, destructive: each.kind == .destructive,
+            title: each.title, key: nil, prominent: takesReturn, destructive: each.kind == .destructive,
             id: each.id
         ) { answer(each) }
+        .disabled(blank && each.kind != .cancel)
         switch each.kind {
         case .cancel: face.keyboardShortcut(.cancelAction)
-        case .ok: face.keyboardShortcut(.defaultAction)
+        case .ok, .plain where takesReturn: face.keyboardShortcut(.defaultAction)
         case .destructive, .plain: face
         }
     }
