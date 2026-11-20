@@ -85,7 +85,7 @@ struct FleetList: View {
         let namingComputer = machines.models.filter(\.showsFleet).count > 1
         VStack(spacing: 0) {
             let selectable = selectableKeys(rows)
-            let picked = selectable.filter(chosen.contains)
+            let picked = FleetGroup.picked(rows, by: grouping, folded: folded, chosen: chosen, removable: removable)
             HStack(spacing: 10) {
                 if selecting {
                     Text(verbatim: "\(picked.count) selected").font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
@@ -98,9 +98,10 @@ struct FleetList: View {
                     .disabled(batchRunning)
                     // No Done while a batch runs: the batch holds the choice until it has answered.
                     if !batchRunning {
+                        // While the card asks, Esc is the card's: Done keeps its face (the card stops clicks behind
+                        // it) but not the key.
                         ActionButton(title: "Done", key: nil, prominent: false, id: "fleet.selectDone") { endSelection() }
-                            .keyboardShortcut(.cancelAction)
-                            .disabled(removingMany != nil)
+                            .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
                     }
                 } else {
                     Text(scope.title).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
@@ -379,15 +380,16 @@ struct FleetList: View {
         Task { removeNote = FleetWords.removalRefused(await model.removeSession(row.summary)) }
     }
 
-    /// The runs a choice can hold, in the list's order: ended, on a computer that removes runs, and shown, so a run the
-    /// filter or a folded group hides is neither counted nor removed. Only the Ended runs.
+    /// The runs a choice can hold: the Ended runs the list shows that can be removed (`FleetGroup.choosable`).
     private func selectableKeys(_ rows: [FleetRow]) -> [String] {
         guard scope == .finished else { return [] }
-        let shown = FleetGroup.groups(rows, by: grouping).filter { !folded.contains($0.id) }.flatMap(\.rows)
-        return shown.filter {
-            $0.status == .ended && $0.summary.isRemovable
-                && machines.model(for: $0.machineID)?.daemonProfile.removesSessions == true
-        }.map(\.id)
+        return FleetGroup.choosable(rows, by: grouping, folded: folded, removable: removable)
+    }
+
+    /// Ended, on a computer that removes runs.
+    private func removable(_ row: FleetRow) -> Bool {
+        row.status == .ended && row.summary.isRemovable
+            && machines.model(for: row.machineID)?.daemonProfile.removesSessions == true
     }
 
     private func startSelection() {
