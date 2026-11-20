@@ -119,12 +119,17 @@
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
 
-        /// `-CC_UPDATE_FEED <url>`: the updater starts, with this feed in place of the app's, and checks at once.
+        /// `-CC_UPDATE_FEED <url>`: the updater starts, with this feed in place of the app's; it checks when asked
+        /// (Check for Updates…).
         static var updateFeed: String? { UserDefaults.standard.string(forKey: "CC_UPDATE_FEED") }
-        /// `-CC_UPDATE_STEP <name>`: the render waits for the update sheet's step of this name (`Updates.Step.name`) and
-        /// keeps it, photographing the update's own window; for `downloading`, Install is chosen, and the download is cancelled
-        /// once it starts. Without it, a launch with `-CC_UPDATE_FEED` checks only when asked (Check for Updates…).
+        /// `-CC_UPDATE_STEP <name>`: the update window shows the step of this name (`Updates.Step.name`) with fixed values,
+        /// over the main window once a render has placed it, and the render photographs the two. No updater starts.
+        /// `-CC_UPDATE_NOTES <text>`: the release notes the `found` step shows.
         static var updateStep: String? { UserDefaults.standard.string(forKey: "CC_UPDATE_STEP") }
+        static var updateNotes: String { UserDefaults.standard.string(forKey: "CC_UPDATE_NOTES") ?? "" }
+
+        /// The main window, once a render has placed it.
+        @MainActor private(set) static var placedMain: NSWindow?
 
         /// `-CC_HOVER <id>,<id>`: the buttons with these identifiers draw as if the pointer were on them, since a test
         /// launch has no pointer.
@@ -276,6 +281,7 @@
                     backdrop.order(.below, relativeTo: window.windowNumber)
                     self.backdrop = backdrop
                     window.alphaValue = 1
+                    RenderWindow.placedMain = window
                     self.placed = true
                     self.renderIfReady()
                 }
@@ -295,19 +301,23 @@
             }
         }
 
-        /// Photographs `window` into the render's PNG, then quits: 0 once written, 1 if it could not be.
-        @MainActor static func renderAndQuit(_ window: NSWindow) {
+        /// Photographs `window`, with `over` in front of it, into the render's PNG, then quits: 0 once written, 1 if it
+        /// could not be. `still`: the photograph waits for a frame that stops changing; a step with a moving bar never
+        /// stops, so it is taken once the window has had a moment to draw. A window `over` has its frame printed beside
+        /// the main window's.
+        @MainActor static func renderAndQuit(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) {
             guard let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") else { return }
             Task { @MainActor in
                 // `-CC_RENDER_DELAY <seconds>`: what a screen shows a while after it is ready.
                 try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))
                 do {
-                    let rep = try await RenderWindow.photograph(window)
+                    let rep = try await RenderWindow.photograph(window, over: over, still: still)
                     guard let png = rep.representation(using: .png, properties: [:]) else {
                         throw RenderFailure("could not encode the PNG")
                     }
                     try png.write(to: URL(fileURLWithPath: path))
                     let active = RenderWindow.everActive || NSApp.isActive
+                    if let over { print("frames: main \(window.frame) over \(over.frame)") }
                     print("render: \(rep.pixelsWide)x\(rep.pixelsHigh) -> \(path) active=\(active)")
                     RenderWindow.removeThrowawayData()
                     exit(0)
@@ -319,26 +329,6 @@
             }
         }
 
-        /// The backdrop behind a window `place` put on the screen.
-        @MainActor private static var placedBackdrop: NSWindow?
-
-        /// Puts a window of the app's own other than the main one (the update's) where a render photographs it: wholly on
-        /// the screen, at the back, over a backdrop of one colour; then runs `then` once it is drawn.
-        @MainActor static func place(_ window: NSWindow, then: @escaping @MainActor () -> Void) {
-            if let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
-                window.setFrameTopLeftPoint(NSPoint(x: visible.minX, y: visible.maxY))
-            }
-            window.orderBack(nil)
-            let backdrop = NSWindow(contentRect: window.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-            backdrop.isReleasedWhenClosed = false
-            backdrop.hasShadow = false
-            backdrop.ignoresMouseEvents = true
-            backdrop.backgroundColor = NSColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1)
-            backdrop.order(.below, relativeTo: window.windowNumber)
-            placedBackdrop = backdrop
-            DispatchQueue.main.async { then() }
-        }
-
         private struct RenderFailure: Error, CustomStringConvertible {
             let description: String
             init(_ description: String) { self.description = description }
@@ -346,11 +336,14 @@
 
         /// The window as the screen shows it, with its attached sheet where it sits: the window
         /// server composes this app's windows in the window's frame, and nothing else on the screen.
-        @MainActor static func photograph(_ window: NSWindow) async throws -> NSBitmapImageRep {
+        @MainActor static func photograph(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) async throws
+            -> NSBitmapImageRep
+        {
             if let sheet = window.attachedSheet { try await settle { sheet.frame } }
-            let windows = [window] + (window.attachedSheet.map { [$0] } ?? [])
+            if let over { try await settle { over.frame } }
+            let windows = [window] + (window.attachedSheet.map { [$0] } ?? []) + (over.map { [$0] } ?? [])
             var last: Data?
-            for _ in 0..<40 {
+            for attempt in 0..<40 {
                 let content = try await SCShareableContent.currentProcess
                 let ids = Set(windows.map { CGWindowID($0.windowNumber) })
                 let included = content.windows.filter { ids.contains($0.windowID) }
@@ -372,7 +365,7 @@
                 config.backgroundColor = .clear
                 let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
                 let bytes = image.dataProvider?.data as Data?
-                if let bytes, bytes == last { return NSBitmapImageRep(cgImage: image) }
+                if let bytes, bytes == last || (!still && attempt == 5) { return NSBitmapImageRep(cgImage: image) }
                 last = bytes
                 try await Task.sleep(for: .milliseconds(100))
             }

@@ -3,6 +3,11 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.2, with the iPhone app 1.1.19
+
+- On the Mac, the update window opens centred over the main window, as wide as the setup checklist,
+  and ends at its own padding: no empty band under its buttons, and no footer on a step that has none.
+
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
 - Start a Claude or Codex run with the message box empty, and the run opens waiting for your first

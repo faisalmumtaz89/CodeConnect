@@ -35,6 +35,14 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
             case .failed: "failed"
             }
         }
+
+        /// Its bar moves for as long as it is shown.
+        var moves: Bool {
+            switch self {
+            case .checking, .installing: true
+            default: false
+            }
+        }
     }
 
     private(set) var step: Step?
@@ -42,13 +50,18 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
     private(set) var version = ""
     @ObservationIgnored private var updater: SPUUpdater?
     @ObservationIgnored private var window: NSWindow?
-    /// Where the window's top left stands while it is shown: kept for every step, whatever its height.
-    @ObservationIgnored private var topLeft: NSPoint?
+    /// Where the window's centre stands while it is shown: every step is centred on it, whatever its size.
+    @ObservationIgnored private var centre: NSPoint?
 
     /// The updater for this launch: a Release app's, and a Debug app's only when `-CC_UPDATE_FEED` names its feed, so no
     /// test launch, render or rig otherwise asks codeconnect.sh.
     static func forThisLaunch() -> Updates? {
         #if DEBUG
+            if let name = RenderWindow.updateStep {
+                let updates = Updates()
+                Task { await updates.render(name) }
+                return updates
+            }
             guard RenderWindow.updateFeed != nil else { return nil }
         #endif
         let updates = Updates()
@@ -59,19 +72,12 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
         } catch {
             updates.present(.failed(text: error.localizedDescription) { [weak updates] in updates?.present(nil) })
         }
-        #if DEBUG
-            if RenderWindow.updateStep != nil { updater.checkForUpdates() }
-        #endif
         return updates
     }
 
     func checkForUpdates() { updater?.checkForUpdates() }
 
     private func present(_ next: Step?) {
-        #if DEBUG
-            // A render keeps the step it photographs, whatever Sparkle does next.
-            if let held = step?.name, held == RenderWindow.updateStep { return }
-        #endif
         step = next
         guard let next else {
             window?.orderOut(nil)
@@ -79,36 +85,69 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
         }
         let window = window ?? makeWindow()
         self.window = window
+        if !window.isVisible { centre = Self.centre(besides: window) }
         #if DEBUG
-            if RenderWindow.isRendering {
-                if next.name == RenderWindow.updateStep { RenderWindow.place(window) { RenderWindow.renderAndQuit(window) } }
+            if let main = RenderWindow.placedMain {
+                window.order(.above, relativeTo: main.windowNumber)
+                keepCentred()
+                RenderWindow.renderAndQuit(main, over: window, still: !next.moves)
                 return
             }
         #endif
-        if !window.isVisible { topLeft = Self.topLeft(width: window.frame.width, besides: window) }
         window.makeKeyAndOrderFront(nil)
-        keepTopLeft()
+        keepCentred()
     }
 
-    private func keepTopLeft() {
-        if let topLeft { window?.setFrameTopLeftPoint(topLeft) }
+    #if DEBUG
+        /// A render's step, with fixed values in place of Sparkle's, shown once the render has placed the main window.
+        private func render(_ name: String) async {
+            while RenderWindow.placedMain == nil { try? await Task.sleep(for: .milliseconds(50)) }
+            version = "0.19.2"
+            let none: () -> Void = {}
+            let choice: (SPUUserUpdateChoice) -> Void = { _ in }
+            let shown: Step? =
+                switch name {
+                case "checking": .checking(cancel: none)
+                case "found": .found(version: version, notes: RenderWindow.updateNotes, installing: false, reply: choice)
+                case "downloading": .downloading(received: 12_400_000, expected: 31_000_000, cancel: none)
+                case "extracting": .extracting(progress: 0.6)
+                case "ready": .ready(reply: choice)
+                case "installing": .installing
+                case "upToDate": .upToDate(text: "CodeConnect 0.19.1 is currently the newest version available.", done: none)
+                case "failed":
+                    .failed(text: "An error occurred while downloading the update. Please try again later.", done: none)
+                default: nil
+                }
+            guard let shown else {
+                FileHandle.standardError.write(Data("render: no update step named \(name)\n".utf8))
+                exit(2)
+            }
+            present(shown)
+        }
+    #endif
+
+    /// Centres the window on `centre` at its size now: when it opens, and each time a step gives it another size.
+    private func keepCentred() {
+        guard let window, let centre else { return }
+        window.setFrameOrigin(NSPoint(x: centre.x - window.frame.width / 2, y: centre.y - window.frame.height / 2))
     }
 
-    /// Centred over the main window, or the screen when it is closed, with its top where the tallest step's would be
-    /// when centred: every step opens at the same place.
-    private static func topLeft(width: CGFloat, besides window: NSWindow) -> NSPoint {
+    /// The main window's centre, or the screen's when it is closed.
+    private static func centre(besides window: NSWindow) -> NSPoint {
         let over = NSApp.windows.first { $0 !== window && $0.isVisible && $0.title == "CodeConnect" }?.frame
             ?? NSScreen.main?.visibleFrame ?? .zero
-        return NSPoint(x: over.midX - width / 2, y: over.midY + UpdateSheet.tallest / 2)
+        return NSPoint(x: over.midX, y: over.midY)
     }
 
     /// The steps' window: the sheet's look, with no title bar of its own, sized by what it shows. It closes by a choice.
     private func makeWindow() -> NSWindow {
-        // Under the transparent title bar, as a sheet has none: the content starts at its own top padding.
         let content = NSHostingController(
-            rootView: UpdateSheet(updates: self).ignoresSafeArea().preferredColorScheme(.dark).tint(CC.color.accent))
-        // The window takes each step's own size: the notes' step is tall, the others are not.
+            rootView: UpdateSheet(updates: self).preferredColorScheme(.dark).tint(CC.color.accent))
+        // The window takes each step's own size: the notes' step is tall, the others are not. Under the transparent
+        // title bar, as a sheet has none: no safe area, so the content starts at its own top padding and the window is
+        // exactly its height.
         content.sizingOptions = [.preferredContentSize]
+        content.safeAreaRegions = []
         let window = NSWindow(contentViewController: content)
         window.styleMask = [.titled, .fullSizeContentView]
         window.titlebarAppearsTransparent = true
@@ -117,9 +156,8 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
         window.backgroundColor = NSColor(Theme.sheet)
         window.title = "Software Update"
         window.isReleasedWhenClosed = false
-        // A step of another height keeps the window's top where it was.
         NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) {
-            [weak self] _ in MainActor.assumeIsolated { self?.keepTopLeft() }
+            [weak self] _ in MainActor.assumeIsolated { self?.keepCentred() }
         }
         return window
     }
@@ -146,9 +184,6 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
         version = appcastItem.displayVersionString
         present(.found(version: version, notes: Self.notes(appcastItem.itemDescription),
                        installing: state.stage == .installing, reply: answered(reply)))
-        #if DEBUG
-            if RenderWindow.updateStep == "downloading" { reply(.install) }
-        #endif
     }
 
     /// The feed carries its notes in the item (appcast.sh), so there are none to fetch.
@@ -166,10 +201,6 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
 
     func showDownloadInitiated(cancellation: @escaping () -> Void) {
         present(.downloading(received: 0, expected: 0, cancel: cancellation))
-        #if DEBUG
-            // A render of the download stops it there: the installer Sparkle starts next runs outside the test launch.
-            if RenderWindow.updateStep == "downloading" { Task { cancellation() } }
-        #endif
     }
 
     func showDownloadDidReceiveExpectedContentLength(_ expectedContentLength: UInt64) {
@@ -228,13 +259,10 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
     }
 }
 
-/// An update step, drawn as the setup checklist is: a title and a line under it, the step's body, and its buttons on a
-/// footer under a hairline.
+/// An update step, drawn as the setup checklist is, at its width: a title and a line under it, the step's body, and its
+/// buttons on a footer under a hairline. A step with no buttons has no footer; one with no body ends at the line.
 struct UpdateSheet: View {
     let updates: Updates
-
-    /// The tallest step's height: the one with the release's notes.
-    static let tallest: CGFloat = 400
 
     var body: some View {
         if let step = updates.step {
@@ -246,17 +274,21 @@ struct UpdateSheet: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 22)
-                .padding(.bottom, 16)
-                content(step)
-                Color.clear.frame(height: 16)
-                VStack(spacing: 0) {
-                    Rectangle().fill(Theme.hairline).frame(height: 1)
-                    HStack(spacing: 8) { buttons(step) }
-                        .padding(.horizontal, 14)
-                        .frame(height: 52)
+                .padding(.bottom, hasBody(step) || hasFooter(step) ? 16 : 22)
+                if hasBody(step) {
+                    content(step)
+                    Color.clear.frame(height: hasFooter(step) ? 16 : 22)
+                }
+                if hasFooter(step) {
+                    VStack(spacing: 0) {
+                        Rectangle().fill(Theme.hairline).frame(height: 1)
+                        HStack(spacing: 8) { buttons(step) }
+                            .padding(.horizontal, 14)
+                            .frame(height: 52)
+                    }
                 }
             }
-            .frame(width: 480, height: hasNotes(step) ? Self.tallest : nil)
+            .frame(width: 560, height: hasNotes(step) ? 400 : nil)
             .background(Theme.sheet)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("update.\(step.name)")
@@ -343,7 +375,22 @@ struct UpdateSheet: View {
             ActionButton(title: "OK", key: nil, prominent: true, id: "update.ok", action: done)
                 .keyboardShortcut(.defaultAction)
         case .extracting, .installing:
-            Spacer()
+            EmptyView()
+        }
+    }
+
+    private func hasBody(_ step: Updates.Step) -> Bool {
+        switch step {
+        case .checking, .downloading, .extracting, .installing: true
+        case .found: hasNotes(step)
+        case .ready, .upToDate, .failed: false
+        }
+    }
+
+    private func hasFooter(_ step: Updates.Step) -> Bool {
+        switch step {
+        case .extracting, .installing: false
+        default: true
         }
     }
 
