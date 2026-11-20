@@ -761,6 +761,17 @@ enum RenderCatalog {
                     throw RenderFailure.unreachable("no branch line for a run without one")
                 }
             }),
+        // **The run's ⋯ on a Claude run started from the app**: Changes, then
+        // Claude Code's Compact and Clear, as the Mac's reply box offers them.
+        RenderScenario(
+            name: "session-menu-hosted",
+            purpose: "the run's ⋯ on a hosted Claude run: every item with its icon, Compact and Clear",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                try driver.openSessionMenu(app)
+                try driver.requireExists(app.buttons["Compact…"], "Compact in the run's menu")
+                try driver.requireExists(app.buttons["Clear…"], "Clear in the run's menu")
+            }),
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",

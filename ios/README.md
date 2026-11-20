@@ -1145,8 +1145,8 @@ actually produce was checked.
   accessibility label names it, so VoiceOver does not depend on the prompt.
 
 **Semantic on surface** — all ✅: success 10.52 / info 5.71 / warning 10.36 /
-danger 6.43 on `bg`; the tightest is info on `surfaceOverlay` at 4.73.
-Semantic-on-its-own-12%-wash: success 8.31, warning 8.20, danger 5.44, info 4.84.
+danger 6.32 on `bg`; the tightest is info on `surfaceOverlay` at 4.73.
+Semantic-on-its-own-12%-wash: success 8.31, warning 8.20, danger 5.30, info 4.84.
 Diff tints carry `text` at 12.70:1 or better. Primary button: `#000` on `#EDEDED`
 = 17.94, pressed `#D4D4D4` = 14.17.
 
