@@ -354,7 +354,8 @@ struct ProjectPlace: View {
     var body: some View {
         HStack(spacing: 4) {
             if namingComputer {
-                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.tail)
+                // First in line for room: the folder takes what is left, down to "…/" and its last part cut.
+                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.tail).layoutPriority(1)
                 Text(verbatim: "·").font(Theme.ui(size))
             }
             ViewThatFits(in: .horizontal) {
@@ -364,7 +365,6 @@ struct ProjectPlace: View {
             }
             .font(Theme.mono(size))
             .lineLimit(1)
-            .layoutPriority(1)
         }
         .foregroundStyle(Theme.text3)
     }
