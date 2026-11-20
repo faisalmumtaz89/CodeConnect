@@ -54,6 +54,13 @@ pub enum ClientMessage {
         client_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_name: Option<String>,
+        /// What the device calls itself, for the daemon's list of paired devices: a Mac's computer name, or
+        /// "iPhone" (all an iPhone app may read of its name). A new device is listed under it, made unique; a
+        /// device already paired is renamed to it when it differs. Absent, the device is listed under
+        /// `client_name`, as before. `client_name` keeps naming the app, which is how an answer says which kind of
+        /// device sent it ([`AnsweredOn::from_client_name`]). Minor 44.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_name: Option<String>,
     },
     Sessions,
     /// `session_id` is a **session reference**: either a `session_uid` (exact,
@@ -1728,8 +1735,13 @@ mod tests {
             pairing_code: None,
             client_id: None,
             client_name: Some("iPhone".into()),
+            device_name: None,
         };
         let s = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !s.contains("device_name"),
+            "a hello that names no device sends no key"
+        );
         assert!(s.contains("\"type\":\"hello\""));
         assert!(!s.contains("client_id"));
         assert!(!s.contains("pairing_code"));
@@ -2046,9 +2058,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 43,
             "a Codex run's settings from an app (`menus`, `set_model`, `set_mode`) are minor 43"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 44,
+            "a device naming itself in its hello (`device_name`) is minor 44"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 43);
+        assert_eq!(crate::PROTOCOL_MINOR, 44);
     }
 
     /// **The tags, pinned on this side too.**

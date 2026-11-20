@@ -761,7 +761,8 @@ public final class DaemonConnection {
             .hello(
                 credential: credential,
                 clientID: Self.installationID,
-                clientName: Self.clientName))
+                clientName: Self.clientName,
+                deviceName: Self.deviceName))
 
         let pinger = Task { [weak self] in await self?.pingLoop(socket) }
         defer { pinger.cancel() }
@@ -1678,6 +1679,16 @@ public final class DaemonConnection {
     /// "CodeConnect Mac", as where its answers came from (`AnsweredOn` in ccd's
     /// protocol), so it is not renamed lightly.
     static let clientName = "CodeConnect \(HostDevice.current.name)"
+
+    /// What this device calls itself in the computer's list of paired devices (minor 44): a Mac's computer name,
+    /// the one its own daemon reports for it; on an iPhone, "iPhone", all an app may read of the phone's name.
+    static var deviceName: String {
+        #if os(macOS)
+            Host.current().localizedName ?? HostDevice.current.name
+        #else
+            HostDevice.current.name
+        #endif
+    }
 }
 
 /// Just the discriminator, for a frame whose *body* would not decode.

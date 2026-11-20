@@ -414,6 +414,14 @@ this release and revoked before it was seen through Tailscale cannot be placed,
 so while one is listed every such `hello` is refused; `codeconnect devices` says
 so, and unblocking it lifts that.
 
+A device is listed under what it calls itself (minor 44): its `hello` carries
+`device_name`, a Mac's computer name or an iPhone's "iPhone" (all an iPhone app may
+read of its name), apart from `client_name`, which names the app and tells an
+answer's kind of device. A new device takes that name, made unique ("iPhone",
+"iPhone-2"); a paired one is renamed to it on its next `hello` when it differs, and
+`codeconnect revoke` takes the new name. A client that sends no `device_name` keeps
+the name it has.
+
 After its ack, a paired device is sent `peers`: this computer's Tailscale state
 and login, and the owner's other computers it can reach (the ones Mail may
 message, less the computer the device connects from), each by MagicDNS name

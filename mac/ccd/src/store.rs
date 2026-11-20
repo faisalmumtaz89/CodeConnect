@@ -3509,6 +3509,29 @@ impl Store {
     /// collision is not worth failing a pairing over. Two iPhones become
     /// "iPhone" and "iPhone-2".
     pub fn unique_device_name(&self, requested: &str) -> Result<String> {
+        Self::free_device_name(&self.read(), requested, None)
+    }
+
+    /// Name `device_id` as it now asks to be named, made unique against the other devices only, so a device that
+    /// keeps its name keeps it exactly and two devices asking for one name stay `name` and `name-2`. Returns the name
+    /// it is listed under now.
+    pub fn rename_device(&self, device_id: &str, requested: &str) -> Result<String> {
+        let conn = self.write();
+        let name = Self::free_device_name(&conn, requested, Some(device_id))?;
+        conn.execute(
+            "UPDATE devices SET name = ?2 WHERE device_id = ?1 AND name <> ?2",
+            params![device_id, name],
+        )?;
+        Ok(name)
+    }
+
+    /// The first of `requested`, `requested-2`, … that no device holds, `except` this one: names are how a human
+    /// revokes a device, so they are unique, compared without case.
+    fn free_device_name(
+        conn: &Connection,
+        requested: &str,
+        except: Option<&str>,
+    ) -> Result<String> {
         let base = {
             let trimmed = requested.trim();
             if trimmed.is_empty() {
@@ -3517,7 +3540,6 @@ impl Store {
                 trimmed
             }
         };
-        let conn = self.read();
         for suffix in 1..=9999u32 {
             let candidate = if suffix == 1 {
                 base.to_string()
@@ -3525,8 +3547,8 @@ impl Store {
                 format!("{base}-{suffix}")
             };
             let taken: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM devices WHERE name = ?1 COLLATE NOCASE",
-                params![candidate],
+                "SELECT COUNT(*) FROM devices WHERE name = ?1 COLLATE NOCASE AND device_id IS NOT ?2",
+                params![candidate, except],
                 |row| row.get(0),
             )?;
             if taken == 0 {
@@ -10700,6 +10722,60 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["iPhone", "iPhone-2", "iPhone-3"]);
         assert_eq!(store.unique_device_name("  ").unwrap(), "device");
+    }
+
+    /// A paired device takes the name it now calls itself, made unique against the others only: a device that
+    /// keeps its name keeps it exactly (no drift to `-2` on each connect), two devices asking for one name stay
+    /// `name` and `name-2` whichever reconnects, and the comparison ignores case as pairing's does.
+    #[test]
+    fn a_paired_device_is_renamed_to_what_it_calls_itself_without_drifting() {
+        let (store, _path) = temp_store();
+        add_device(&store, "studio", "CodeConnect Mac", "t1");
+        add_device(&store, "air", "CodeConnect Mac", "t2");
+        let names = |store: &Store| -> Vec<String> {
+            store
+                .list_devices()
+                .unwrap()
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        };
+        assert_eq!(names(&store), vec!["CodeConnect Mac", "CodeConnect Mac-2"]);
+
+        assert_eq!(
+            store
+                .rename_device("studio", "Jordan’s Mac Studio")
+                .unwrap(),
+            "Jordan’s Mac Studio"
+        );
+        assert_eq!(
+            store.rename_device("air", "Jordan’s MacBook Air").unwrap(),
+            "Jordan’s MacBook Air"
+        );
+        assert_eq!(
+            names(&store),
+            vec!["Jordan’s Mac Studio", "Jordan’s MacBook Air"]
+        );
+        // The next connect, same name: unchanged, not "-2".
+        assert_eq!(
+            store
+                .rename_device("studio", "Jordan’s Mac Studio")
+                .unwrap(),
+            "Jordan’s Mac Studio"
+        );
+        // Two devices calling themselves one name: the second is made unique, and stays so on each connect.
+        assert_eq!(
+            store.rename_device("air", "jordan’s mac studio").unwrap(),
+            "jordan’s mac studio-2"
+        );
+        assert_eq!(
+            store.rename_device("air", "jordan’s mac studio").unwrap(),
+            "jordan’s mac studio-2"
+        );
+        assert_eq!(
+            names(&store),
+            vec!["Jordan’s Mac Studio", "jordan’s mac studio-2"]
+        );
     }
 
     #[test]
