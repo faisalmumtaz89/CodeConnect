@@ -75,7 +75,7 @@ public enum FolderWords {
 public enum SessionWords {
     public static func replyPrompt(_ agent: String) -> String { "Reply to \(agent)…" }
     public static let interrupted = "Interrupted"
-    public static let interruptedSpoken = "Interrupted — this reply was cut short"
+    public static let interruptedSpoken = "Interrupted: this reply was cut short"
     public static let loadingEarlier = "Loading earlier history…"
     public static let stopThisTurn = "Stop this turn"
     public static let stopping = "Stopping…"

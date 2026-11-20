@@ -703,12 +703,12 @@ final class AgentTableTests: XCTestCase {
     func testThePreviewLineReplacesPipeArt() {
         let source = AgentProse.previewSource(
             "| **Command** | Status |\n| --- | --- |\n| build | ok |\n| test | ok |")
-        XCTAssertEqual(source, "Table: Command, Status — 2 rows")
+        XCTAssertEqual(source, "Table: Command, Status. 2 rows")
 
         let one = onlyTable("| a | b |\n| --- | --- |\n| 1 | 2 |")!
-        XCTAssertEqual(AgentProse.tablePreviewLine(one), "Table: a, b — 1 row")
+        XCTAssertEqual(AgentProse.tablePreviewLine(one), "Table: a, b. 1 row")
         let none = onlyTable("| a | b |\n| --- | --- |")!
-        XCTAssertEqual(AgentProse.tablePreviewLine(none), "Table: a, b — 0 rows")
+        XCTAssertEqual(AgentProse.tablePreviewLine(none), "Table: a, b. 0 rows")
     }
 
     /// VoiceOver's three stops: shape, columns, then one label per row with

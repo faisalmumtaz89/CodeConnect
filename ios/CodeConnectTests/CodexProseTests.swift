@@ -19,7 +19,7 @@ final class CodexProseTests: XCTestCase {
     /// It is about the phone losing sight of a run; every Codex ending is about
     /// the *question* finishing, which is usually completely ordinary.
     private let unavailableCopy =
-        "This decision can’t be acted on here — the run is no longer on your computer, or its log was reset."
+        "This decision can’t be acted on here: the run is no longer on your computer, or its log was reset."
 
     private var allEndings: [CodexResolution] {
         [
@@ -34,6 +34,19 @@ final class CodexProseTests: XCTestCase {
                 attemptedBy: .phone, attemptedDecision: .optionId("accept"),
                 writeStage: .upstreamWriteUnconfirmed, cause: "connection reset before ack"),
         ]
+    }
+
+    /// An answer whose outcome is unknown reads like its sibling notes: how far it got in words, never the link's
+    /// own spelling of the cause, and no dash.
+    func testAnUnknownOutcomeSaysNoWireCause() {
+        let banner = CodexProse.resolution(
+            .unknown(
+                attemptedBy: .phone, attemptedDecision: .optionId("accept"),
+                writeStage: .upstreamWriteUnconfirmed, cause: "connection reset before ack"), on: .iPhone)
+        XCTAssertEqual(
+            banner.message,
+            "This phone’s answer was written and the computer did not learn what became of it. "
+                + "It was written to Codex and never acknowledged. It will not be sent again. Check the computer.")
     }
 
     /// Every terminal gets its **own** sentence. Two endings that read the same

@@ -430,7 +430,7 @@ extension DecisionCard {
     public static func unavailableBanner(on host: HostDevice = .current) -> Banner {
         Banner(
             title: "No longer available",
-            message: "This decision can’t be acted on here — the run is no longer on \(host.computer("your computer")), "
+            message: "This decision can’t be acted on here: the run is no longer on \(host.computer("your computer")), "
                 + "or its log was reset.",
             provenance: nil, tone: .warning, icon: "question")
     }

@@ -3012,7 +3012,7 @@ struct LinkHealthSheet: View {
         switch result {
         case .accepted(let apnsID):
             let receipt = apnsID.map { " Apple’s receipt: \($0)." } ?? ""
-            return "Accepted by Apple — the banner on this phone is the proof.\(receipt)"
+            return "Accepted by Apple. The banner on this phone is the proof.\(receipt)"
         case .pushUnconfigured:
             return "Your computer isn’t set up to send notifications, so nothing was sent."
         case .notPairedDevice:
@@ -3022,7 +3022,7 @@ struct LinkHealthSheet: View {
         case .credentialInvalid:
             return "The relay no longer trusts this phone’s credential. Reset notification registration to enroll again."
         case .rateLimited(let secs):
-            return "Tested a moment ago — try again in \(secs)s."
+            return "Tested a moment ago. Try again in \(secs)s."
         case .failed(let reason):
             return "The computer could not send it: \(reason)"
         case .unknown(let status):
@@ -3057,7 +3057,7 @@ struct LinkHealthSheet: View {
             }
             switch model.relayPushState {
             case .unsupported:
-                return "This iPhone can’t use CodeConnect’s push relay — it has no App Attest support. Everything else still works; a computer with its own Apple push key can notify you directly."
+                return "This iPhone can’t use CodeConnect’s push relay: it has no App Attest support. Everything else still works; a computer with its own Apple push key can notify you directly."
             case .enrolling:
                 return "Enrolling this iPhone with the push relay…"
             case .failed(let reason):

@@ -320,7 +320,7 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Host not found",
                     message:
-                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network — CodeConnect reconnects on its own.",
+                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network. CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: "Settings", action: onSettings)

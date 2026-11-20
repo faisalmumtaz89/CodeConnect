@@ -115,10 +115,10 @@ public enum CodexProse {
                 message: "Codex stopped waiting. Nothing was approved and nothing was denied.",
                 icon: "clock-countdown", tone: .warning)
 
-        // The daemon attempted a write and never confirmed it. Its `cause` is
-        // human text written to be shown, so it is shown — and the stage says
-        // how far the attempt got, in words rather than in its wire spelling.
-        case .unknown(let attemptedBy, _, let stage, let cause):
+        // The daemon attempted a write and never confirmed it. The stage says how
+        // far the attempt got, in words; its `cause` is the link's own spelling
+        // ("connection reset before ack"), which the sibling notes do not show either.
+        case .unknown(let attemptedBy, _, let stage, _):
             // A paired device's attempt, which on a Mac may be any of them: the iPhone keeps its words.
             let who =
                 attemptedBy == .phone
@@ -129,7 +129,7 @@ public enum CodexProse {
                 title: "Sent, outcome unknown",
                 message:
                     "\(who) was written and \(host.computer("the computer")) did not learn what became of it. "
-                    + "\(writeStage(stage)) It will not be sent again — check \(host.computer("the computer")). (\(cause))",
+                    + "\(writeStage(stage)) It will not be sent again. Check \(host.computer("the computer")).",
                 icon: "question", tone: .warning)
 
         case .unrecognisedStatus(let raw):

@@ -335,7 +335,7 @@ public enum AgentProse {
     /// preview's stand-in for the table itself.
     static func tablePreviewLine(_ table: MarkdownTable) -> String {
         "Table: " + table.headers.map(plainCell).joined(separator: ", ")
-            + " — " + rowCountPhrase(table.rows.count)
+            + ". " + rowCountPhrase(table.rows.count)
     }
 
     /// `Table, 3 columns, 4 rows.` — the VoiceOver container label.

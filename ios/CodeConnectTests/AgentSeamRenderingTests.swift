@@ -42,7 +42,7 @@ final class AgentSeamRenderingTests: XCTestCase {
                     "Answered at the computer", "Your computer refused this answer",
                     "The answer did not reach your computer",
                     ", but your computer couldn’t confirm it reached the agent",
-                    "This decision can’t be acted on here — the run is no longer on your computer, or its log was reset.",
+                    "This decision can’t be acted on here: the run is no longer on your computer, or its log was reset.",
                 ]
             ),
             (
@@ -54,7 +54,7 @@ final class AgentSeamRenderingTests: XCTestCase {
                     "Answered at the agent’s computer", "The agent’s computer refused this answer",
                     "The answer did not reach the agent’s computer",
                     ", but the agent’s computer couldn’t confirm it reached the agent",
-                    "This decision can’t be acted on here — the run is no longer on the agent’s computer, "
+                    "This decision can’t be acted on here: the run is no longer on the agent’s computer, "
                         + "or its log was reset.",
                 ]
             ),

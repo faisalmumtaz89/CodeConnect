@@ -399,7 +399,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .unavailable:
             return (
                 "No longer available",
-                "This question can’t be answered here — the run is no longer on \(host.computer("the computer")), or its "
+                "This question can’t be answered here: the run is no longer on \(host.computer("the computer")), or its "
                     + "log was reset.",
                 .warning, "question"
             )

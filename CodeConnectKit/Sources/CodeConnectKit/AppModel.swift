@@ -3671,13 +3671,13 @@ public final class AppModel {
         // itself is never typed through a side door.
         switch ClaudeCommandPolicy.action(for: text) {
         case .nativeModel:
-            return .refused("/model has its own control in the app — the run’s settings.")
+            return .refused("/model has its own control in the app: the run’s settings.")
         case .nativeDiff:
-            return .refused("/diff has its own view in the app — open Changes.")
+            return .refused("/diff has its own view in the app: open Changes.")
         case .nativeEffort:
-            return .refused("/effort has its own control in the app — the run’s settings.")
+            return .refused("/effort has its own control in the app: the run’s settings.")
         case .nativeCompact:
-            return .refused("/compact has its own control in the app — use the Compact sheet.")
+            return .refused("/compact has its own control in the app: use the Compact sheet.")
         case .nativeClear:
             return .refused("/clear has its own confirmation in the app.")
         case .blocked(_, let reason):
