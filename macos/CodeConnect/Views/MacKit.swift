@@ -62,6 +62,15 @@ struct HoverButtonStyle: ButtonStyle {
     var bare = false
     var id: String?
 
+    /// A test launch's `-CC_HOVER` names `id`: what has it draws as if the pointer were on it, a row's "…" included.
+    static func forced(_ id: String) -> Bool {
+        #if DEBUG
+            RenderWindow.hovered.contains(id)
+        #else
+            false
+        #endif
+    }
+
     /// How far a bare label's fill stands off it: sideways, and above and below.
     static let bareBleed = CGSize(width: 8, height: 4)
 
@@ -93,13 +102,7 @@ struct HoverButtonStyle: ButtonStyle {
 
         private var plate: Plate { Plate(radius: radius, bleed: bleed) }
 
-        private var forced: Bool {
-            #if DEBUG
-                id.map(RenderWindow.hovered.contains) ?? false
-            #else
-                false
-            #endif
-        }
+        private var forced: Bool { id.map(HoverButtonStyle.forced) ?? false }
 
         /// A test launch's `-CC_FORCE` names this button in `state`.
         private func forcedState(_ state: String) -> Bool {

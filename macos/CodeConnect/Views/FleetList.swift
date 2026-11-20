@@ -122,7 +122,8 @@ struct FleetList: View {
                                     // once it has ended.
                                     let removable =
                                         row.summary.isRemovable && model?.daemonProfile.removesSessions == true
-                                    let more = (endable || removable) && (hovered == row.id || moreOpen == row.id)
+                                    let more = (endable || removable)
+                                        && (hovered == row.id || moreOpen == row.id || HoverButtonStyle.forced("fleet.row.\(row.id)"))
                                     Button {
                                         moreOpen = nil
                                         opened = selected ? nil : row.id
@@ -239,7 +240,7 @@ struct FleetList: View {
                 open: Binding(get: { moreOpen == row.id }, set: { moreOpen = $0 ? row.id : nil }),
                 action: endable ? .endRun : .remove
             ) { if endable { ending = row } else { removing = row } }
-            .padding(.trailing, 10)
+            .padding(.trailing, 16)
         }
     }
 
@@ -371,7 +372,7 @@ private struct FleetLine: View {
     let row: FleetRow
     /// Open beside the list: the selected fill, and a bar on its leading edge.
     let selected: Bool
-    /// The run's "…" stands at the trailing edge: its width is kept clear.
+    /// The run's "…" stands in its age's place, which hides while it shows: nothing else in the row moves.
     let roomForMore: Bool
     @State private var lastTick = Date()
 
@@ -404,8 +405,8 @@ private struct FleetLine: View {
                 .font(Theme.ui(11.5))
                 .foregroundStyle(Theme.text3)
                 .monospacedDigit()
-                .frame(width: 26, alignment: .trailing)
-            if roomForMore { Color.clear.frame(width: RunMore.width) }
+                .frame(width: RunMore.width, alignment: .trailing)
+                .opacity(roomForMore ? 0 : 1)
         }
         .padding(.horizontal, 16)
         .frame(height: 36)

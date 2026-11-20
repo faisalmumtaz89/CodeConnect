@@ -198,7 +198,8 @@ private struct Sidebar: View {
                             ForEach(computers, id: \.machineID) { computer in
                                 let id = computer.machineID ?? ""
                                 let narrowed = FleetFilter.computer(id)
-                                let more = id != thisMac && (hovered == id || moreOpen == id)
+                                let more = id != thisMac
+                                    && (hovered == id || moreOpen == id || HoverButtonStyle.forced("sidebar.computer.\(id)"))
                                 ComputerRow(
                                     computer: computer,
                                     count: active.filter { $0.machineID == computer.machineID }.count,
@@ -214,7 +215,7 @@ private struct Sidebar: View {
                                             .accessibilityIdentifier("sidebar.computer.\(id).removeAction")
                                     }
                                 }
-                                // On the name line, at the row's trailing edge, so its panel lines up with the row.
+                                // On the name line, in the count's place.
                                 .overlay(alignment: Alignment(horizontal: .trailing, vertical: .computerNameLine)) {
                                     if more {
                                         RunMore(
@@ -222,6 +223,7 @@ private struct Sidebar: View {
                                             open: Binding(get: { moreOpen == id }, set: { moreOpen = $0 ? id : nil }),
                                             action: .remove
                                         ) { removing = computer }
+                                        .padding(.trailing, 8)
                                     }
                                 }
                                 .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
@@ -303,7 +305,7 @@ private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
     let selected: Bool
-    /// Its "…" is shown at the end of the name line, the count moved over for it, as a run's row makes room.
+    /// Its "…" stands in its count's place, which hides while it shows, as a run's row does with its age.
     let roomForMore: Bool
     /// Narrows the list to this computer, or back to every run when it already is.
     let select: () -> Void
@@ -358,7 +360,8 @@ private struct ComputerRow: View {
                     .lineLimit(1)
                 Spacer()
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
-                if roomForMore { Color.clear.frame(width: RunMore.width) }
+                    .frame(minWidth: RunMore.width, alignment: .trailing)
+                    .opacity(roomForMore ? 0 : 1)
             }
             .alignmentGuide(.computerNameLine) { $0[VerticalAlignment.center] }
             if let load {
