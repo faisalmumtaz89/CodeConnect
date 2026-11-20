@@ -95,7 +95,15 @@ public enum RunSettingWords {
 /// An approval card: who asks for what, its answers, and what a Codex edit
 /// leaves off the card.
 public enum CardWords {
-    public static func asks(_ agent: String, _ tool: String) -> String { "\(agent) asks to use \(tool)" }
+    /// The card's heading: a named tool is used ("Claude asks to use Bash"); a Codex request that is an act, not a
+    /// tool's name, says the act. Any other kind keeps the named form.
+    public static func asks(_ agent: String, _ tool: String) -> String {
+        switch tool {
+        case "command": "\(agent) asks to run a command"
+        case "file change": "\(agent) asks to change files"
+        default: "\(agent) asks to use \(tool)"
+        }
+    }
     public static let cantBeVerified = "Can’t be verified"
     public static let allow = "Allow"
     public static let allowForSession = "Allow for this session"

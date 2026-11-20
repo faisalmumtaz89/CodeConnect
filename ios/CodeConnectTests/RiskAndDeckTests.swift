@@ -970,3 +970,13 @@ final class FleetFreshnessTests: XCTestCase {
         XCTAssertNil(FleetFreshness.message(stamp: nil, linkDetail: nil))
     }
 }
+
+/// A card's heading names a tool when the agent uses one, and the act when a Codex request is one.
+final class CardHeadingTests: XCTestCase {
+    func testAHeadingNamesTheToolOrTheAct() {
+        XCTAssertEqual(CardWords.asks("Claude", "Bash"), "Claude asks to use Bash")
+        XCTAssertEqual(CardWords.asks("Codex", "command"), "Codex asks to run a command")
+        XCTAssertEqual(CardWords.asks("Codex", "file change"), "Codex asks to change files")
+        XCTAssertEqual(CardWords.asks("Codex", "MCP tool"), "Codex asks to use MCP tool")
+    }
+}
