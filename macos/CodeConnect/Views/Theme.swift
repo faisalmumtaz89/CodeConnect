@@ -1,4 +1,5 @@
 import AppKit
+import CodeConnectKit
 import SwiftUI
 
 /// The Mac window's look: near-black surfaces a step apart, hairlines instead of boxes, and grey
@@ -31,13 +32,14 @@ enum Theme {
     /// row's second line whole rather than cutting through its text.
     static let panelGap: CGFloat = 1
 
-    static let text = Color(themeHex: 0xE4E4E7)
-    static let text2 = Color(themeHex: 0x9C9CA3)
-    static let text3 = Color(themeHex: 0x6B6B72)
+    // The meaning colours and the text greys are the Kit's, shared with the iPhone; the grounds are the Mac's own.
+    static let text = CC.text.primary
+    static let text2 = CC.text.secondary
+    static let text3 = CC.text.tertiary
 
-    static let green = Color(themeHex: 0x4CB782)
-    static let red = Color(themeHex: 0xE5636A)
-    static let amber = Color(themeHex: 0xE9A23B)
+    static let green = CC.color.success
+    static let red = CC.color.danger
+    static let amber = CC.color.warning
 
     static func ui(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight)
