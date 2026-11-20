@@ -5,27 +5,25 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
-- On the Mac, a button you can't use right now is dimmed, everywhere in the app, in one way.
-- On the Mac, a request's full tool input lists its ids and risk as labelled lines, one each, and "Allow for this session" says what it grants, above its buttons.
-- On the Mac, the update window opens centred over the main window, as wide as the setup checklist,
-  and ends at its own padding: no empty band under its buttons, and no footer on a step that has none.
-  Its release notes box is as tall as the notes, up to twelve lines that then scroll, and its buttons
-  line up with the text above them.
-- On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
-  forgets it and its sessions. This Mac's own computer is not offered, since the app pairs with it
-  again at every launch.
-- Set Up CodeConnect on the Mac ends below its last row, with no empty band above its buttons.
-- In Set Up, every row that needs you says why under its name, the Terminal row included.
-- Set Up's Try Again and Done end on the same edge as its list.
-- The Mac's lists in Settings and Set Up share one box colour and one row inset, as Start's folder list has.
-- The Mac's Settings window takes each pane's own height and scrolls only a long list.
-- A run's model control names the model the run is on, as its header does ("Opus 5.5"), not the menu
-  row it was started with; "Default" is only a row of the menu.
-- On the Mac, a run's reply box stands on the same column as its conversation and heading.
-- In a run's Changes, a file git doesn't track yet reads as its path and "untracked", as the file
-  headers name a file's kind, in place of git's "??".
-- On the Mac, a run's Model, Mode and "…" panels open one point clear of their control, as every
-  panel in the app does.
+- The Mac's update window matches the app: it opens centred over the main window, is as tall as its
+  notes, and lines its buttons up with its text.
+- On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone. This Mac's
+  own computer is not offered, since the app pairs with it again at every launch.
+- On the Mac, Set Up and Settings are as tall as what they show, every list has one box look, and a
+  button you can't use right now looks it.
+- On the Mac, a run you click keeps its place, a finished run you have seen still reads Done, sidebar
+  rows light under the pointer and nothing in a row moves, and the sidebar's projects follow Active or
+  Finished.
+- The Mac's sheets are as tall as their tab and keep the chosen folder in view, their fields and buttons
+  share one edge, Cancel has a border, Start picks a computer with the app's own picker, tab labels hold
+  still, and every panel opens one point from its button.
+- A run names the model it is on, its reply box stands on the pane's column, and a file git doesn't
+  track yet reads "untracked". A request on the Mac lists its ids and risk as labelled lines and says
+  what "Allow for this session" grants.
+- On the iPhone, sheets keep their size as you drag them, a sheet's main action spans it, a recent
+  folder stays on one line, the back button matches the bar's other buttons and the edge swipe still
+  goes back, the compact sheet's field sits on its card, a command preview keeps whole words and its
+  end, and disclosure labels line up with their heading.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
