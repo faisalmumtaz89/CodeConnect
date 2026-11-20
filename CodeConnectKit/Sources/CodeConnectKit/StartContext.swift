@@ -67,12 +67,12 @@ public struct StartContext {
     }
 
     /// The folder a browsed one is in; the root's is the root.
-    public static func parentFolder(_ path: String) -> String {
+    nonisolated public static func parentFolder(_ path: String) -> String {
         "/" + path.split(separator: "/").dropLast().joined(separator: "/")
     }
 
     /// A folder inside a browsed one.
-    public static func childFolder(_ path: String, _ name: String) -> String {
+    nonisolated public static func childFolder(_ path: String, _ name: String) -> String {
         (path == "/" ? "" : path) + "/" + name
     }
 
