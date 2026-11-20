@@ -97,6 +97,9 @@ struct HoverButtonStyle: ButtonStyle {
                 .opacity(configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
                 // What lights is what a click takes, the label's clear gaps included.
                 .contentShape(plate)
+                // The keyboard's focus ring takes the hover's shape too: square on a row that fills its list edge to
+                // edge, never a rounded pill against the list's straight sides.
+                .contentShape(.focusEffect, plate)
                 .onHover { hovering = $0 }
         }
 
