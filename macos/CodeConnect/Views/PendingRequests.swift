@@ -61,7 +61,8 @@ struct ReplyBoxFrame<Content: View>: View {
             .padding(12)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09)))
-            .padding(.horizontal, 20)
+            // On the pane's one content column, as the reply box it stands in for: the card's text stands 28 pt in.
+            .padding(.horizontal, 28)
             .padding(.top, 4)
             .padding(.bottom, 16)
     }

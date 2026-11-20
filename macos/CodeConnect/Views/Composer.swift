@@ -94,7 +94,12 @@ private struct Composer: View {
         .onAppear { askUnansweredAgain() }
         // A run nothing has been said to yet, as one started with no first message, has the cursor in its box once its
         // conversation is in. Not "an empty conversation": a Codex run files its session start before any message.
-        .task(id: awaitsFirstMessage) { if awaitsFirstMessage { fieldFocused = true } }
+        .task(id: awaitsFirstMessage) {
+            #if DEBUG
+                if RenderWindow.leavesFieldUnfocused { return }
+            #endif
+            if awaitsFirstMessage { fieldFocused = true }
+        }
         // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
         // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
