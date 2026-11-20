@@ -809,13 +809,21 @@ async fn link(
         };
         match serde_json::from_str::<FromHost>(&line) {
             Ok(FromHost::State { seq, pending, .. }) => {
-                if let Err(why) = commit_and_ack(&daemon, &uid, host, seq, &mut write).await {
-                    break why;
+                match daemon.db.commit_cursor(uid.clone(), host, seq).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        break format!("message {seq} is not past the run's cursor for this host")
+                    }
+                    Err(err) => break format!("{err:#}"),
                 }
                 // The end of a replay: the run's cards are put right against the
-                // requests the host still holds, and a live run can be woken for its
-                // mail again, its replayed turns marked.
+                // requests the host still holds before the state is acknowledged, so an
+                // answer that follows the ack finds its card answerable; a live run can
+                // be woken for its mail again, its replayed turns marked.
                 daemon.host_cards_reconcile(&uid, &pending).await;
+                if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                    break why;
+                }
                 turns.replayed = true;
                 if live {
                     crate::mail::waiter_registered(&daemon, &uid);
