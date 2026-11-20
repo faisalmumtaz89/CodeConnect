@@ -183,11 +183,13 @@ struct CompactSheet: View {
                         // three the same edge. Measured against a shipped screen
                         // where label, border and hint share one column inside
                         // exactly this container.
-                        CCCard {
+                        // A field and its label, nothing in a gutter: the
+                        // card's own padding on both sides.
+                        CCCard(contentColumn: false) {
                             CCField(
                                 label: CompactPrompt.fieldLabel, text: $instructions,
                                 placeholder: CompactPrompt.placeholder,
-                                submitLabel: .done,
+                                submitLabel: .done, labelOnContentColumn: false,
                                 onSubmit: { apply() })
                         }
                         CCButton(
