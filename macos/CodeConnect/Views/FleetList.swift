@@ -344,8 +344,8 @@ private struct GroupHeader: View {
 }
 
 /// Where a project is: its computer, when more than one is paired, and its folder. Short in a narrow
-/// place, the two share the room, each cut where it keeps its meaning: the folder from the front, where
-/// its name is, and the computer in the middle, since one owner's Macs share the front of their names.
+/// place, each is cut once, where it keeps its meaning: the computer at its end, and the folder to its
+/// last part after "…/", whole, so a cut never lands inside a folder's name.
 struct ProjectPlace: View {
     let project: FleetGroup
     let namingComputer: Bool
@@ -354,13 +354,17 @@ struct ProjectPlace: View {
     var body: some View {
         HStack(spacing: 4) {
             if namingComputer {
-                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.middle)
+                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.tail)
                 Text(verbatim: "·").font(Theme.ui(size))
             }
-            Text(project.folder)
-                .font(Theme.mono(size))
-                .lineLimit(1)
-                .truncationMode(.head)
+            ViewThatFits(in: .horizontal) {
+                Text(project.folder)
+                Text(verbatim: "…/" + (project.folder.split(separator: "/").last.map(String.init) ?? project.folder))
+                    .truncationMode(.tail)
+            }
+            .font(Theme.mono(size))
+            .lineLimit(1)
+            .layoutPriority(1)
         }
         .foregroundStyle(Theme.text3)
     }
