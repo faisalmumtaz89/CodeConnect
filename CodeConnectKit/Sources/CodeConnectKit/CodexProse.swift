@@ -355,7 +355,7 @@ public enum CodexProse {
     static func composeUnavailable(
         agent: AgentKind, daemonUnderstandsCompose: Bool, link: CodexLinkState
     ) -> String? {
-        guard agent == .codex else { return "Only a Codex session is spoken to this way." }
+        guard agent == .codex else { return "Only a Codex run is spoken to this way." }
         guard daemonUnderstandsCompose else {
             return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to carry a message to Codex. Update it."
         }

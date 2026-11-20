@@ -1523,7 +1523,7 @@ public final class DaemonConnection {
         guard let expected = mutationSessions[requestID] else { return true }
         guard expected == sessionID else {
             unreadableFrame =
-                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)'s \(kind) for one session with another session's "
+                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)'s \(kind) for one run with another run's "
                 + "result. It was ignored."
             unreadableFrameAt = Date()
             return false

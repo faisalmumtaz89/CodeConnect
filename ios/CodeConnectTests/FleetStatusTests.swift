@@ -284,7 +284,7 @@ final class FleetStatusTests: XCTestCase {
             let badge = FleetStatusRule.capability(
                 summary: summary(lifecycle: "exited", link: link), capabilities: caps)
             XCTAssertFalse(badge.canAct, link)
-            XCTAssertEqual(badge.reason, "This session has ended.", link)
+            XCTAssertEqual(badge.reason, "This run has ended.", link)
         }
         guard case .unknown = FleetStatusRule.capability(
             summary: summary(lifecycle: "exited", link: "detached"), capabilities: nil)

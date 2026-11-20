@@ -225,7 +225,7 @@ extension StartWorktree {
     public func notes(running: Set<String>) -> String? {
         let notes =
             (missing ? ["Its folder is gone"] : [])
-            + (running.contains(path) ? ["A session is running here"] : [])
+            + (running.contains(path) ? ["A run is active here"] : [])
             + (dirty ? ["Uncommitted changes"] : [])
         return notes.isEmpty ? nil : notes.joined(separator: " · ")
     }

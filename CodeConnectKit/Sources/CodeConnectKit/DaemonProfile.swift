@@ -147,7 +147,7 @@ public struct DaemonProfile: Sendable, Hashable {
         // Returning nil left the Codex surface silent on a dropped link while
         // the diff surface beside it said what was wrong.
         guard isConnected else {
-            return "Not connected. \(HostDevice.current.computer("The computer", named: machineName)) has not said what it can do for a Codex session."
+            return "Not connected. \(HostDevice.current.computer("The computer", named: machineName)) has not said what it can do for a Codex run."
         }
         switch (stopsCodexTurns, composesToCodex) {
         case (true, true): return nil
@@ -156,7 +156,7 @@ public struct DaemonProfile: Sendable, Hashable {
         case (false, true):
             return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
         case (false, false):
-            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect cannot stop or speak to a Codex session. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect cannot stop or speak to a Codex run. Update it."
         }
     }
 

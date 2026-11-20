@@ -653,7 +653,7 @@ import SwiftUI
                         // Never `.opacity`: dimming a whole row is forbidden.
                         CCRow(
                             "infra-terraform",
-                            subtitle: "Session ended",
+                            subtitle: "Run ended",
                             titleTruncation: .tail,
                             subtitleLineLimit: 1,
                             showsChevron: false,

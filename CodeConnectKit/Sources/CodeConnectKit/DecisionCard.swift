@@ -531,7 +531,7 @@ extension DecisionCard {
     public static func unsupportedAgentReason(
         _ raw: String, computer: String? = nil, on host: HostDevice = .current
     ) -> String {
-        "This app does not know how to answer a \(raw) session. Answer it at "
+        "This app does not know how to answer a \(raw) run. Answer it at "
             + "\(host.computer("the computer", named: computer))."
     }
 

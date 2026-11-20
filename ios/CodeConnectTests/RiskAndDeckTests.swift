@@ -301,7 +301,7 @@ final class RiskAndDeckTests: XCTestCase {
             "This card arrived without the options Codex answers by, so it can only be answered at the computer.",
             "This computer's CodeConnect is too old to answer Claude's approvals from the phone. "
                 + "Update it, or answer at the computer.",
-            "This app does not know how to answer a aider session. Answer it at the computer.",
+            "This app does not know how to answer a aider run. Answer it at the computer.",
             "Still waiting on the computer - \(age).",
             "Still waiting on the computer, \(spoken).",
         ]
@@ -315,7 +315,7 @@ final class RiskAndDeckTests: XCTestCase {
                     + "agent's computer.",
                 "The agent's computer's CodeConnect is too old to answer Claude's approvals from the Mac. "
                     + "Update it, or answer at the agent's computer.",
-                "This app does not know how to answer a aider session. Answer it at the agent's computer.",
+                "This app does not know how to answer a aider run. Answer it at the agent's computer.",
                 "Still waiting on the agent's computer - \(age).",
                 "Still waiting on the agent's computer, \(spoken).",
             ])
@@ -327,7 +327,7 @@ final class RiskAndDeckTests: XCTestCase {
                     + "Jordan’s Mac Studio.",
                 "Jordan’s Mac Studio's CodeConnect is too old to answer Claude's approvals from the Mac. "
                     + "Update it, or answer at Jordan’s Mac Studio.",
-                "This app does not know how to answer a aider session. Answer it at Jordan’s Mac Studio.",
+                "This app does not know how to answer a aider run. Answer it at Jordan’s Mac Studio.",
                 "Still waiting on Jordan’s Mac Studio - \(age).",
                 "Still waiting on Jordan’s Mac Studio, \(spoken).",
             ])

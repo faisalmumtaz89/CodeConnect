@@ -636,7 +636,7 @@ function of the events:
   a later start, one after any other event, a start at the top of a window
   whose older events are not loaded, a link going down, and its coming back after
   that, do. None of them counts as activity. A start says what Claude
-  Code reports started it, with its model: "Session started", "Session resumed" or
+  Code reports started it, with its model: "Run started", "Run resumed" or
   "Conversation compacted"; one from `/clear` draws no row, as "Conversation
   cleared." already says it (for `/clear` with or without a name, and for `/new` and
   `/reset`, which Claude Code records as `/clear`). In a session started from an app,
@@ -644,7 +644,7 @@ function of the events:
   draws none, a clear's "Conversation cleared." and a compaction's "Conversation compacted"
   are ccd's own notices, and an effort set from the app is drawn in the effort menu's words
   ("Effort set to Extra high"); a Codex start
-  never says, and draws "Session started";
+  never says, and draws "Run started";
 * a turn's end stays in the timeline for the fleet's status and preview, but draws no
   "Turn complete" row when the screen already shows the turn ended: on Claude's reply,
   on "Interrupted · What should Claude do instead?" (an Esc, a Stop, a refused or denied

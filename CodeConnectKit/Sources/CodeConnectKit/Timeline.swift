@@ -630,11 +630,11 @@ public enum TimelineBuilder {
     /// keeps its row.
     private static func startTitle(source: String?, origin: EventSource) -> String? {
         switch source {
-        case "resume": return "Session resumed"
+        case "resume": return "Run resumed"
         case "compact": return "Conversation compacted"
         case "clear": return nil
         case nil where origin == .sdk: return nil
-        default: return "Session started"
+        default: return "Run started"
         }
     }
 
@@ -784,12 +784,12 @@ public enum TimelineBuilder {
             return NoticeItem(
                 kind: .sessionEnded,
                 symbol: code == 0 ? "power" : "warning-octagon",
-                title: code == 0 ? "Session ended" : "Session ended (exit \(code))",
+                title: code == 0 ? "Run ended" : "Run ended (exit \(code))",
                 detail: nil,
                 severity: code == 0 ? .info : .failure)
         }
         return NoticeItem(
-            kind: .sessionEnded, symbol: "power", title: "Session ended", detail: nil,
+            kind: .sessionEnded, symbol: "power", title: "Run ended", detail: nil,
             severity: .info)
     }
 }

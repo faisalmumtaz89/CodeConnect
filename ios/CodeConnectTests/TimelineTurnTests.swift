@@ -259,7 +259,7 @@ final class TimelineTurnTests: XCTestCase {
         ]
         let items = TimelineBuilder.build(events)
         XCTAssertEqual(
-            shape(items), ["you", "reply:Done.", "notice:Turn complete", "notice:Session resumed"])
+            shape(items), ["you", "reply:Done.", "notice:Turn complete", "notice:Run resumed"])
         guard case .notice(let notice)? = items.last?.content else { return XCTFail("\(shape(items))") }
         XCTAssertEqual(notice.detail, "Opus 5 · 1M context")
         let result = await status(events)
@@ -273,9 +273,9 @@ final class TimelineTurnTests: XCTestCase {
         let restart = event(44, "session_start", #"{"hook_event_name":"SessionStart","source":"startup"}"#)
         XCTAssertEqual(
             shape(TimelineBuilder.build([user(41), reply(42, "Done."), stop(43), restart])),
-            ["you", "reply:Done.", "notice:Turn complete", "notice:Session started"])
+            ["you", "reply:Done.", "notice:Turn complete", "notice:Run started"])
         XCTAssertEqual(
-            shape(TimelineBuilder.build([restart, user(45)])), ["notice:Session started", "you"])
+            shape(TimelineBuilder.build([restart, user(45)])), ["notice:Run started", "you"])
     }
 
     /// Whether a start is the session's own is decided by the events before
@@ -293,7 +293,7 @@ final class TimelineTurnTests: XCTestCase {
             4, "session_start", #"{"hook_event_name":"SessionStart","source":"resume"}"#)
         XCTAssertEqual(
             shape(TimelineBuilder.build([user(1), reply(2, "Done."), stop(3), late])),
-            ["you", "reply:Done.", "notice:Turn complete", "notice:Session resumed"])
+            ["you", "reply:Done.", "notice:Turn complete", "notice:Run resumed"])
     }
 
     /// Claude Code says what started it (2.1.289: startup, resume, clear,
@@ -313,8 +313,8 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(
             shape(items),
             [
-                "you", "notice:Conversation compacted", "notice:Session resumed",
-                "notice:Session started", "notice:Conversation cleared.",
+                "you", "notice:Conversation compacted", "notice:Run resumed",
+                "notice:Run started", "notice:Conversation cleared.",
             ])
     }
 

@@ -426,7 +426,7 @@ public enum FleetStatusRule {
     /// still: there is no next user message, so the verdict was permanent.
     ///
     /// The honest signal is the session's own exit, which `Timeline` already
-    /// renders as `Session ended (exit N)` and marks `.failure` **iff** a code
+    /// renders as `Run ended (exit N)` and marks `.failure` **iff** a code
     /// arrived and was non-zero. So this reads a fact the daemon reported rather
     /// than inferring one from what the agent printed.
     ///
@@ -458,7 +458,7 @@ public enum FleetStatusRule {
             // opens and the "Observe only" verdict falls away. An End-run exit and a
             // failed start stay ended.
             if summary.relaunchesOnMessage { return .control }
-            return .observe(reason: "This session has ended.")
+            return .observe(reason: "This run has ended.")
         }
         guard capabilities.canApproveReliably else {
             return .observe(
@@ -469,7 +469,7 @@ public enum FleetStatusRule {
             return .control
         case .detached:
             return .observe(
-                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
+                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this run. It can be answered again once the link is back."
             )
         }
     }
