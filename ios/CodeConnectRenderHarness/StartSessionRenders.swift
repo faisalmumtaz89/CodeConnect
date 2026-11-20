@@ -9,6 +9,9 @@ extension RenderCatalog {
     static let startSession: [RenderScenario] = steps
 
     private static let message = "Add a --strict flag that rejects trailing commas, with tests"
+    /// ccd's `agents` for a computer whose Claude Code is installed but signed
+    /// out, in its own sentence (`mac/ccd/src/start_session.rs`, `signed_out`).
+    private static let signedOutAgents = #"[{"agent":"claude","available":true,"detail":"Claude Code on Jordan’s Mac Studio isn’t signed in.","models":[],"signed_in":false},{"agent":"codex","available":true,"models":[],"signed_in":true}]"#
     private static let server = "build-server-eu-west-1"
     /// The longest path in the list, for the folder-gone failure.
     private static let longProject = "payments-reconciliation-worker"
@@ -284,6 +287,14 @@ extension RenderCatalog {
             app, driver in
             try toAgents(app, driver)
             try driver.requireExists(driver.text(containing: "Codex isn’t installed on", in: app), "the computer's reason")
+        },
+        RenderScenario(
+            name: "start2-c3-signed-out", purpose: "steps: the agent, Claude Code signed out, and how to sign in",
+            arguments: args() + ["-CC_START_AGENTS_WIRE", signedOutAgents]
+        ) { app, driver in
+            try toAgents(app, driver)
+            try driver.requireExists(driver.text(containing: "isn’t signed in", in: app), "the computer's sentence")
+            try driver.requireExists(driver.text(containing: "claude auth login", in: app), "the command to sign in")
         },
         RenderScenario(name: "start2-d-branch", purpose: "steps: the branch", arguments: args()) {
             app, driver in

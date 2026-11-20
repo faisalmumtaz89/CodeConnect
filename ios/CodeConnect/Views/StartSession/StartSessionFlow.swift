@@ -427,7 +427,7 @@ struct StartStepsSheet: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(StartAgent.allCases) { candidate in
-                        let missing = context.missingReason(candidate)
+                        let missing = context.missingReason(candidate) ?? signedOut(candidate)
                         Button {
                             agent = candidate
                             go(branchAhead ? .branch : .start)
@@ -442,10 +442,36 @@ struct StartStepsSheet: View {
                         .accessibilityIdentifier("start-agent-\(candidate.rawValue)")
                         CCHairline().padding(.leading, CC.space.md)
                     }
+                    if signedOut(.claude) != nil { signInHelp }
                 }
             }
             .accessibilityIdentifier("start-list")
         }
+    }
+
+    /// The computer's own sentence for an agent that is installed but signed
+    /// out, which cannot start until it is signed in.
+    private func signedOut(_ candidate: StartAgent) -> String? {
+        if case .signedOut(let sentence) = context.models(candidate) { return sentence }
+        return nil
+    }
+
+    /// How to sign Claude Code in on that computer, as the Mac's start form
+    /// says it: where to run it, the command to copy, and the computer asked
+    /// again while this shows (`StartContext.watchSignIn`).
+    private var signInHelp: some View {
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
+            Text(context.signInThere)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            CCMonoBlock(StartContext.claudeSignIn).onContainerEdge()
+        }
+        .padding(CC.space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: context.id) { await context.watchSignIn() }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("start-sign-in")
     }
 
     // MARK: Branch

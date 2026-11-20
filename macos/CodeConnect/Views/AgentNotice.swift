@@ -29,16 +29,8 @@ struct AgentNotice: View {
                     Text(context.signInThere).font(Theme.ui(12)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("agent.notice.there")
-                        // "CodeConnect sees it when you're done": while these lines show, that computer is asked again
-                        // every 30 s for 10 minutes, so a sign-in there clears them with the form left open. Each ask
-                        // starts Claude Code there, so it stops after that; opening the form again asks again.
-                        .task(id: context.id) {
-                            for _ in 1...20 {
-                                try? await Task.sleep(for: .seconds(30))
-                                if Task.isCancelled { return }
-                                context.load()
-                            }
-                        }
+                        // "CodeConnect sees it when you're done": see `StartContext.watchSignIn`.
+                        .task(id: context.id) { await context.watchSignIn() }
                     HStack(spacing: 8) {
                         Text(StartContext.claudeSignIn).font(Theme.mono(12)).foregroundStyle(Theme.text)
                             .textSelection(.enabled)

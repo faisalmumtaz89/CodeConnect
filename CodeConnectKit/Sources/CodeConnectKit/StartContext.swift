@@ -93,6 +93,18 @@ public struct StartContext {
     }
     public static let claudeSignIn = "claude auth login"
 
+    /// While the sign-in help shows: this computer is asked again every 30 s
+    /// for 10 minutes, so a sign-in there clears the help with the start left
+    /// open. Each ask starts Claude Code there, so it stops after that; opening
+    /// the start again asks again. Run in the view's `.task`, which cancels it.
+    public func watchSignIn() async {
+        for _ in 1...20 {
+            try? await Task.sleep(for: .seconds(30))
+            if Task.isCancelled { return }
+            load()
+        }
+    }
+
     // MARK: Models
 
     /// The model button while the computer hasn't answered, and when no agent can start.
