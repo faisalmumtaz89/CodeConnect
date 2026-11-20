@@ -1071,7 +1071,7 @@ struct SessionDetailView: View {
         .sheet(isPresented: $showCompactSheet) {
             CompactSheet(sessionKey: key, prefill: compactSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
-                .ccResizableSheet()
+                .ccFittedSheet()
         }
         .alert(ClearConfirmation.title, isPresented: $showClearConfirm) {
             Button(ClearConfirmation.clear, role: .destructive) { performClear() }

@@ -199,9 +199,10 @@ struct CompactSheet: View {
                         ) { apply() }
                     }
                     .padding(CC.space.md)
+                    .ccSheetHeightPart()
                 }
                 .scrollBounceBehavior(.basedOnSize)
-                pinnedStatus
+                pinnedStatus.ccSheetHeightPart()
             }
         }
         .onAppear {

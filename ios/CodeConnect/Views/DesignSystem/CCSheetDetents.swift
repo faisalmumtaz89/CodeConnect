@@ -55,4 +55,50 @@ extension View {
     func ccTallSheet() -> some View {
         presentationDetents([CCSheetDetents.expanded])
     }
+
+    /// As tall as its content and no taller, for a sheet whose content is fixed:
+    /// one height, so nothing to drag toward and no grabber. Its parts report
+    /// their heights (`ccSheetHeightPart`): the chrome above the content, and
+    /// the content inside its scroll view. Content taller than the screen gets
+    /// the screen, and scrolls.
+    func ccFittedSheet() -> some View {
+        modifier(CCFittedSheet())
+    }
+
+    /// Counts this view's height into its fitted sheet's.
+    func ccSheetHeightPart() -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: CCSheetHeightKey.self, value: proxy.size.height)
+            }
+        }
+    }
+}
+
+private struct CCSheetHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value += nextValue() }
+}
+
+private struct CCFittedSheet: ViewModifier {
+    @State private var height: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.ccSheetIsFitted, true)
+            .onPreferenceChange(CCSheetHeightKey.self) { height = $0 }
+            .presentationDetents(height > 0 ? [.height(height)] : [CCSheetDetents.expanded])
+    }
+}
+
+private struct CCSheetIsFittedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Set inside a fitted sheet, which has one height and so no grabber.
+    var ccSheetIsFitted: Bool {
+        get { self[CCSheetIsFittedKey.self] }
+        set { self[CCSheetIsFittedKey.self] = newValue }
+    }
 }

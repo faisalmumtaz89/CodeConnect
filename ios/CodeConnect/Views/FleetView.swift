@@ -2438,9 +2438,10 @@ struct FleetRowView: View {
                             }
                         }
                         .padding(CC.space.md)
+                        .ccSheetHeightPart()
                     }
                 }
-                .ccResizableSheet()
+                .ccFittedSheet()
             }
         } else if onStop != nil, let stopBlockedReason {
             // Greyed for the refusal's bounded window, its reason on the

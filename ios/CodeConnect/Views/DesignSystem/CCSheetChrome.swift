@@ -23,6 +23,7 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
     private let content: () -> Content
 
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.ccSheetIsFitted) private var isFitted
 
     /// Declared in the struct body rather than an extension on purpose: an
     /// initialiser in an extension does not suppress the synthesised
@@ -45,14 +46,17 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            grabber
+            VStack(spacing: 0) {
+                if !isFitted { grabber }
 
-            header
-                .padding(.horizontal, CC.space.md)
-                .padding(.top, CC.space.xs)
-                .padding(.bottom, CC.space.sm)
+                header
+                    .padding(.horizontal, CC.space.md)
+                    .padding(.top, isFitted ? CC.space.md : CC.space.xs)
+                    .padding(.bottom, CC.space.sm)
 
-            CCHairline()
+                CCHairline()
+            }
+            .ccSheetHeightPart()
 
             content()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
