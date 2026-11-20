@@ -383,10 +383,11 @@ public final class SessionStarter {
     }
 
     /// The fixture answer to `list_projects`: a Mac's forty folders, or a
-    /// Linux server's few. `-CC_START_AGENTS claude` leaves Codex uninstalled;
+    /// Linux server's few. `-CC_START_AGENTS claude` leaves Codex uninstalled,
+    /// refused in ccd's own sentence naming `computer`;
     /// `-CC_START_AGENTS_WIRE <agents>` answers with a recorded frame's `agents`
     /// as given (fixtures/claude/minor-33-wire.json), models and sign-in included.
-    public func listFixtureProjects(linux: Bool) {
+    public func listFixtureProjects(linux: Bool, computer: String) {
         projects = linux ? Self.fixtureLinuxProjects(now: Date()) : Self.fixtureProjects(now: Date())
         var codex = true
         #if DEBUG
@@ -402,8 +403,8 @@ public final class SessionStarter {
         agents = [
             StartAgentStatus(agent: .claude, available: true, detail: nil, models: [], signedIn: nil),
             StartAgentStatus(
-                agent: .codex, available: codex, detail: codex ? nil : "codex is not installed", models: [],
-                signedIn: nil),
+                agent: .codex, available: codex, detail: codex ? nil : "Codex isn’t installed on \(computer).",
+                models: [], signedIn: nil),
         ]
     }
 
