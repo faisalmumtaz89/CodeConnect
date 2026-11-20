@@ -1124,18 +1124,22 @@ actually produce was checked.
 
 | | `bg` #000000 | `surface` #0A0A0A | `surfaceRaised` #131313 | `surfaceOverlay` #1A1A1A |
 |---|---|---|---|---|
-| `text` #EDEDED | 17.94 | 16.91 | 15.87 | 14.87 |
-| `textSecondary` #A1A1A1 | 8.13 | 7.66 | 7.19 | 6.74 |
-| `textTertiary` #828282 | 5.42 | 5.11 | 4.79 | 4.50 |
+| `text` #E4E4E7 | 16.55 | 15.60 | 14.64 | 13.72 |
+| `textSecondary` #9C9CA3 | 7.70 | 7.26 | 6.81 | 6.38 |
+| `textTertiary` #83838A | 5.58 | 5.26 | 4.94 | 4.62 |
 | `textDisabled` #525252 | 2.69 | 2.53 | 2.38 | 2.23 — exempt |
 | `textPlaceholder` #5E5E5E | 3.24 | 3.05 | 2.87 | 2.68 — below AA |
 
 - **`textTertiary` was #737373 and failed AA on all four surfaces** (4.43 / 4.18
   / 3.92 / 3.67). A first correction to #7D7D7D cleared the first three but sat
   at 4.23 on `surfaceOverlay` — which would have needed a "don't use it there" rule.
-  It is now **#828282**, which clears AA on all four, so the rule is deleted
+  It is now **#83838A**, which clears AA on all four, so the rule is deleted
   rather than documented: a token that is safe everywhere cannot be misused
-  anywhere.
+  anywhere. It also clears AA on every ground of the Mac app (4.52 on its
+  raised #1C1C1F, the lightest).
+- **Shared with the Mac.** The three text greys and success, warning and danger
+  are one set across both apps, defined here and read by the Mac's `Theme`.
+  Each app keeps its own grounds.
 - `textDisabled` is intentionally below AA and is exempt under WCAG 1.4.3
   ("inactive user interface component"). Permitted uses only: diff gutter line
   numbers, the cwd breadcrumb, the `·` between a project and its start time, disabled-button
@@ -1144,16 +1148,17 @@ actually produce was checked.
   composer's empty-field prompt, which recedes behind the chat. The field's
   accessibility label names it, so VoiceOver does not depend on the prompt.
 
-**Semantic on surface** — all ✅: success 10.52 / info 5.71 / warning 10.36 /
-danger 6.32 on `bg`; the tightest is info on `surfaceOverlay` at 4.73.
-Semantic-on-its-own-12%-wash: success 8.31, warning 8.20, danger 5.30, info 4.84.
-Diff tints carry `text` at 12.70:1 or better. Primary button: `#000` on `#EDEDED`
+**Semantic on surface** — all ✅: success #4CB782 8.40 / info 5.71 / warning
+#E9A23B 9.70 / danger #E5636A 6.32 on `bg`; the tightest is info on
+`surfaceOverlay` at 4.73. Semantic-on-its-own-12%-wash on `surface`: success
+6.80, warning 7.74, danger 5.30, info 4.84. Diff tints carry `text` at 12.30:1
+or better. Primary button: `#000` on `#EDEDED`
 = 17.94, pressed `#D4D4D4` = 14.17.
 
 **Syntax** — measured against every background a diff line can have. The
-deciding one is not `bg`, it is the 22% word-diff tint `successWord` #0D2D1F:
-keyword #C792EA 8.73 / 6.18, string #C3E88D 15.25 / 10.80, comment #909090
-6.58 / 4.66. Comments are deliberately **not** set in `textDisabled`, for the
+deciding one is not `bg`, it is the 22% word-diff tint `successWord` #11281D:
+keyword #C792EA 8.73 / 6.49, string #C3E88D 15.25 / 11.34, comment #909090
+6.58 / 4.89. Comments are deliberately **not** set in `textDisabled`, for the
 same reason `textTertiary` was corrected: `textDisabled` is reserved for
 genuinely inactive text, and a code comment — at 2.69:1 — is something you have
 to read.

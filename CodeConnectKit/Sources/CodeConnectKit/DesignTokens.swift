@@ -41,25 +41,23 @@ private enum Hex {
     static let borderStrong: UInt32 = 0x383838
     static let borderFocus: UInt32 = 0xEDEDED
 
-    // Text
-    static let text: UInt32 = 0xEDEDED
-    static let textSecondary: UInt32 = 0xA1A1A1
-    /// Corrected up from an original #737373, which was never measured.
-    ///
-    /// #737373 fails AA on every surface (4.43 / 4.18 / 3.92 / 3.67). #7D7D7D
-    /// clears the first three but sits at 4.23 on `surfaceOverlay`, so shipping
-    /// it would mean shipping a "don't use it there" rule alongside it. #828282
-    /// clears **AA on all four surfaces** (≈5.42 / 5.11 / 4.79 / 4.50), so no
-    /// such rule is needed: a token that is safe everywhere cannot be misused
-    /// anywhere.
-    static let textTertiary: UInt32 = 0x828282
+    // Text. The three greys, and the semantic colours below, are shared with
+    // the Mac app, whose `Theme` reads them from here; the grounds are each
+    // app's own.
+    static let text: UInt32 = 0xE4E4E7
+    static let textSecondary: UInt32 = 0x9C9CA3
+    /// The dimmest grey that still clears AA on every ground of both apps:
+    /// 5.58 / 5.26 / 4.94 / 4.62 on the four surfaces here, 4.52 on the Mac's
+    /// raised #1C1C1F, its lightest. A token that is safe everywhere cannot be
+    /// misused anywhere.
+    static let textTertiary: UInt32 = 0x83838A
     /// 2.69:1 on `bg`. Intentionally below AA and explicitly exempt: WCAG
     /// 1.4.3 excludes "text that is part of an inactive user interface
     /// component". A disabled control must *look* disabled; the reason it is
     /// disabled is carried by the accessibility hint, not by the contrast.
     static let textDisabled: UInt32 = 0x525252
-    /// The composer's placeholder: `textTertiary` at 70% over `surface`,
-    /// 3.05:1 there. Below AA by choice — an empty composer's prompt recedes
+    /// The composer's placeholder: a grey under `textTertiary`, 3.05:1 on
+    /// `surface`. Below AA by choice — an empty composer's prompt recedes
     /// behind the chat, and the field's accessibility label carries its name.
     static let textPlaceholder: UInt32 = 0x5E5E5E
 
@@ -69,19 +67,19 @@ private enum Hex {
     static let onAccent: UInt32 = 0x000000
 
     // Semantic. Colour is information, never decoration.
-    static let success: UInt32 = 0x3ECF8E
+    static let success: UInt32 = 0x4CB782
     static let info: UInt32 = 0x3B82F6
-    static let warning: UInt32 = 0xF5A623
+    static let warning: UInt32 = 0xE9A23B
     static let danger: UInt32 = 0xE5636A
 
     // Diff tints, composited once and pinned here as literals so a row tint
     // cannot drift with an opacity change somewhere.
     // Row tint = semantic @ 12% over `bg`; word tint = semantic @ 22%.
-    // `text` on all four measures 12.70:1 or better.
-    static let successMuted: UInt32 = 0x071911
-    static let dangerMuted: UInt32 = 0x1F0909
-    static let successWord: UInt32 = 0x0D2D1F
-    static let dangerWord: UInt32 = 0x381011
+    // `text` on all four measures 12.30:1 or better.
+    static let successMuted: UInt32 = 0x091610
+    static let dangerMuted: UInt32 = 0x1B0C0D
+    static let successWord: UInt32 = 0x11281D
+    static let dangerWord: UInt32 = 0x321617
 
     // Syntax highlighting. **Three roles, and only three** — "more
     // colours than three turns a diff into a Christmas tree at phone scale".
@@ -95,10 +93,10 @@ private enum Hex {
     /// comment is none of those. A comment is something you have to *read*, so it takes a colour
     /// that clears AA rather than sitting at 2.69:1.
     ///
-    /// #909090 is the dimmest grey that clears AA on the *darkest* background a
-    /// syntax token can land on, which is not `bg` but the 22% word-diff tint
-    /// `successWord` #0D2D1F: 4.66 there, 5.26 on `dangerWord`, 6.58 on `bg`.
-    /// Still unmistakably quieter than code at `text` (17.94).
+    /// #909090 clears AA on the *darkest* background a syntax token can land
+    /// on, which is not `bg` but the 22% word-diff tint
+    /// `successWord` #11281D: 4.89 there, 5.21 on `dangerWord`, 6.58 on `bg`.
+    /// Still unmistakably quieter than code at `text` (16.55).
     static let syntaxComment: UInt32 = 0x909090
 }
 
@@ -154,7 +152,7 @@ extension CC {
         public static let danger = Color(cc: Hex.danger)
 
         /// The muted wash behind a semantic label. 12%, never a full-saturation
-        /// fill — measured at 4.84:1 (info, the tightest) up to 8.31:1.
+        /// fill — measured on `surface` at 4.84:1 (info, the tightest) up to 7.74:1.
         public static func muted(_ tone: CCTone) -> Color { tone.color.opacity(CC.opacity.muted) }
 
         // Diff row and word tints.
@@ -166,9 +164,9 @@ extension CC {
         // Syntax highlighting. Three roles; everything else is `text`.
         // Measured against every background a diff line can have — `bg`, the 12%
         // row tints and the 22% word tints — worst case in brackets:
-        //   keyword 8.73 on `bg` (6.18 on `successWord`)
-        //   string 15.25 on `bg` (10.80 on `successWord`)
-        //   comment 6.58 on `bg` (4.66 on `successWord`)
+        //   keyword 8.73 on `bg` (6.49 on `successWord`)
+        //   string 15.25 on `bg` (11.34 on `successWord`)
+        //   comment 6.58 on `bg` (4.89 on `successWord`)
         // All three clear AA everywhere the diff grid can put them.
         public static let syntaxKeyword = Color(cc: Hex.syntaxKeyword)
         public static let syntaxString = Color(cc: Hex.syntaxString)

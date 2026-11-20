@@ -198,10 +198,10 @@ import SwiftUI
                     .foregroundStyle(CC.text.tertiary)
 
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
-                    contrastRow("keyword", CC.color.syntaxKeyword, "8.73 · 6.18 on word tint")
-                    contrastRow("string", CC.color.syntaxString, "15.25 · 10.80")
-                    contrastRow("comment", CC.color.syntaxComment, "6.58 · 4.66")
-                    contrastRow("everything else = text", CC.text.primary, "17.94 · 12.70")
+                    contrastRow("keyword", CC.color.syntaxKeyword, "8.73 · 6.49 on word tint")
+                    contrastRow("string", CC.color.syntaxString, "15.25 · 11.34")
+                    contrastRow("comment", CC.color.syntaxComment, "6.58 · 4.89")
+                    contrastRow("everything else = text", CC.text.primary, "16.55 · 12.30")
                 }
 
                 ForEach(
@@ -256,9 +256,9 @@ import SwiftUI
                     .foregroundStyle(CC.text.tertiary)
                     .padding(.top, CC.space.xs)
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
-                    contrastRow("text", CC.text.primary, "17.94:1")
-                    contrastRow("textSecondary", CC.text.secondary, "8.13:1")
-                    contrastRow("textTertiary", CC.text.tertiary, "5.42:1")
+                    contrastRow("text", CC.text.primary, "16.55:1")
+                    contrastRow("textSecondary", CC.text.secondary, "7.70:1")
+                    contrastRow("textTertiary", CC.text.tertiary, "5.58:1")
                     contrastRow("textDisabled", CC.text.disabled, "2.69:1 · exempt")
                     contrastRow("textPlaceholder", CC.text.placeholder, "3.24:1 · composer only")
                 }
