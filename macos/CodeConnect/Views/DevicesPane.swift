@@ -75,18 +75,14 @@ struct DevicesPane: View {
         #if DEBUG
             .background(RenderWindow(ready: devices != nil || !answers, showsSheet: asking != nil))
         #endif
-        .alert(
-            asking?.question ?? "", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } }),
-            presenting: asking
-        ) { ask in
-            switch ask {
-            case .block:
-                Button(DeviceGroup.blockAction.titleStyle, role: .destructive) { perform(ask) }.accessibilityIdentifier("settings.ask.block")
-            case .allow: Button(DeviceGroup.allowAction.titleStyle) { perform(ask) }.accessibilityIdentifier("settings.ask.allow")
+        .confirmation($asking) { ask in
+            let acts: Confirmation.Answer = switch ask {
+            case .block: .init(title: DeviceGroup.blockAction, kind: .destructive, id: "settings.ask.block") { perform(ask) }
+            case .allow: .init(title: DeviceGroup.allowAction, kind: .plain, id: "settings.ask.allow") { perform(ask) }
             }
-            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("settings.ask.cancel")
-        } message: { ask in
-            Text(ask.sentence)
+            return Confirmation(title: ask.question, message: ask.sentence, answers: [
+                .init(title: "Cancel", kind: .cancel, id: "settings.ask.cancel"), acts,
+            ])
         }
         .task { await watch() }
     }
@@ -132,7 +128,7 @@ struct DevicesPane: View {
                     asking = .allow(group)
                 }
             } else if !isThisMac, knowsThisDevice {
-                ActionButton(title: DeviceGroup.blockAction, key: nil, prominent: false, id: "\(id).block") {
+                ActionButton(title: DeviceGroup.blockAction, key: nil, prominent: false, destructive: true, id: "\(id).block") {
                     asking = .block(group)
                 }
             }

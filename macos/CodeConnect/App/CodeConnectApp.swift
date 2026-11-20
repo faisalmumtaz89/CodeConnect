@@ -62,6 +62,7 @@ struct CodeConnectApp: App {
                 DevicesPane().tabItem { Label("Devices", systemImage: "iphone") }.tag(SettingsTab.devices)
                 FoldersPane().tabItem { Label(FolderWords.paneTitle, systemImage: "folder") }.tag(SettingsTab.folders)
             }
+            .confirmationHost()
             .environment(machines)
             .environment(setup)
             .preferredColorScheme(.dark)
@@ -101,6 +102,7 @@ struct RootView: View {
 
     var body: some View {
         MainWindow()
+            .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)
             .environment(machines.linkModel)
             .sheet(isPresented: Bindable(setup).shown) { SetupView().environment(setup).environment(machines) }

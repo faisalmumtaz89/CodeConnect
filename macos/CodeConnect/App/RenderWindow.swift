@@ -69,6 +69,9 @@
         /// `-CC_RUN_MENU <session uid>`: the list opens that run's "…" panel once the run is listed and can be ended or
         /// removed.
         static var openRunMenu: String? { UserDefaults.standard.string(forKey: "CC_RUN_MENU") }
+        /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device`: that ask or notice is up at launch,
+        /// about the first run listed, the open run (`-CC_OPEN`), the last computer, or the first device Settings lists.
+        static var confirm: String? { UserDefaults.standard.string(forKey: "CC_CONFIRM") }
         /// `-CC_COMPUTER_MENU YES`: the sidebar opens its last computer's "…" panel, when that computer can be removed.
         static var opensComputerMenu: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_MENU") }
 

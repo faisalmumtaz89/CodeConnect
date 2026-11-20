@@ -14,16 +14,15 @@ private struct RemovesComputer: ViewModifier {
     @Binding var removing: AppModel?
 
     func body(content: Content) -> some View {
-        content.alert(
-            ComputerRemoval.question,
-            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-            presenting: removing
-        ) { computer in
-            Button(ComputerRemoval.action, role: .destructive) { machines.unpair(computer) }
-                .accessibilityIdentifier("computer.remove.confirm")
-            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("computer.remove.cancel")
-        } message: { computer in
-            Text(ComputerRemoval.sentence(name: computer.machineName))
+        content.confirmation($removing) { computer in
+            Confirmation(
+                title: ComputerRemoval.question, message: ComputerRemoval.sentence(name: computer.machineName),
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "computer.remove.cancel"),
+                    .init(title: ComputerRemoval.action, kind: .destructive, id: "computer.remove.confirm") {
+                        machines.unpair(computer)
+                    },
+                ])
         }
     }
 }

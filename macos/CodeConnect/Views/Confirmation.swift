@@ -1,0 +1,151 @@
+import SwiftUI
+
+/// An ask before a change, or a notice after one, as the Mac draws every one of them: a card centred on the window
+/// under the app's own dimming, never the system's alert. Esc gives the safe answer; a destructive answer never takes
+/// Return; a notice's OK takes both.
+struct Confirmation {
+    let title: String
+    let message: String
+    /// The answers left to right: the safe one first, the one that acts last.
+    let answers: [Answer]
+
+    struct Answer {
+        enum Kind {
+            /// The safe answer: Esc gives it.
+            case cancel
+            /// An answer that acts and cannot be taken back: the destructive face, no key.
+            case destructive
+            /// An answer that acts and can be taken back: the plain face, no key.
+            case plain
+            /// A notice's one answer: Return and Esc give it.
+            case ok
+        }
+
+        let title: String
+        let kind: Kind
+        /// What a driver finds it by.
+        let id: String
+        var perform: () -> Void = {}
+    }
+}
+
+extension View {
+    /// Asks while `item` holds something, in the card `ask` makes of it; any answer lets `item` go.
+    func confirmation<Item>(_ item: Binding<Item?>, _ ask: @escaping (Item) -> Confirmation) -> some View {
+        modifier(Confirms(asking: item.wrappedValue.map(ask)) { item.wrappedValue = nil })
+    }
+
+    /// The window that draws the asks of every view in it, centred on itself.
+    func confirmationHost() -> some View { modifier(ConfirmationHost()) }
+}
+
+/// The asks waiting to be drawn in one window, the newest on top.
+@Observable final class ConfirmationQueue {
+    fileprivate var shown: [Shown] = []
+
+    /// An ask is up: the window's own keys wait until it is answered.
+    var isAsking: Bool { !shown.isEmpty }
+
+    fileprivate struct Shown {
+        let owner: UUID
+        let confirmation: Confirmation
+        let close: () -> Void
+    }
+}
+
+private struct Confirms: ViewModifier {
+    @Environment(ConfirmationQueue.self) private var queue
+    @State private var owner = UUID()
+    let asking: Confirmation?
+    let close: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: asking == nil, initial: true) { _, idle in
+                queue.shown.removeAll { $0.owner == owner }
+                if let asking, !idle { queue.shown.append(.init(owner: owner, confirmation: asking, close: close)) }
+            }
+            .onDisappear { queue.shown.removeAll { $0.owner == owner } }
+    }
+}
+
+private struct ConfirmationHost: ViewModifier {
+    @State private var queue = ConfirmationQueue()
+
+    func body(content: Content) -> some View {
+        content
+            .environment(queue)
+            .overlay {
+                if let shown = queue.shown.last {
+                    ZStack {
+                        // The window under the ask takes no clicks while it is up.
+                        Color.black.opacity(0.45).contentShape(Rectangle()).onTapGesture {}
+                        ConfirmationCard(confirmation: shown.confirmation) { answer in
+                            queue.shown.removeAll { $0.owner == shown.owner }
+                            shown.close()
+                            answer.perform()
+                        }
+                    }
+                    .ignoresSafeArea()
+                }
+            }
+    }
+}
+
+/// The card: its title, its sentence, its answers at the bottom right.
+private struct ConfirmationCard: View {
+    let confirmation: Confirmation
+    let answer: (Confirmation.Answer) -> Void
+    /// The card holds the keyboard while it is up, so nothing typed reaches the window under it.
+    @FocusState private var holdsKeyboard: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(confirmation.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+            Text(unwidowed(confirmation.message)).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                ForEach(Array(confirmation.answers.enumerated()), id: \.offset) { _, each in
+                    button(each)
+                }
+            }
+            .padding(.top, 10)
+        }
+        .padding(18)
+        .frame(width: 420, alignment: .leading)
+        .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
+        .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($holdsKeyboard)
+        .onAppear { holdsKeyboard = true }
+        // A notice's OK is its safe answer too.
+        .onKeyPress(.escape) {
+            guard let ok = confirmation.answers.first(where: { $0.kind == .ok }) else { return .ignored }
+            answer(ok)
+            return .handled
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+    }
+
+    /// The sentence with its last two words held together, so its last line never holds one word alone.
+    private func unwidowed(_ sentence: String) -> String {
+        guard let last = sentence.lastIndex(of: " ") else { return sentence }
+        return sentence.replacingCharacters(in: last...last, with: "\u{00A0}")
+    }
+
+    @ViewBuilder private func button(_ each: Confirmation.Answer) -> some View {
+        let face = ActionButton(
+            title: each.title, key: nil, prominent: each.kind == .ok, destructive: each.kind == .destructive,
+            id: each.id
+        ) { answer(each) }
+        switch each.kind {
+        case .cancel: face.keyboardShortcut(.cancelAction)
+        case .ok: face.keyboardShortcut(.defaultAction)
+        case .destructive, .plain: face
+        }
+    }
+}
