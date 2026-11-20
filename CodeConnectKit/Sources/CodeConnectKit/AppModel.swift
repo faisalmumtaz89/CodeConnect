@@ -3328,7 +3328,8 @@ public final class AppModel {
         if let setting = state.outcomeSetting, factSeq(summary, setting) > state.outcomeBaselineSeq {
             outcome = nil
         }
-        return RunSettings.of(summary: summary, inFlight: state.inFlight, lastOutcome: outcome)
+        return RunSettings.of(
+            summary: summary, confirmed: confirmedModel(for: key)?.name, inFlight: state.inFlight, lastOutcome: outcome)
     }
 
     /// A message this device sends to the run ends its settings notice: a change that applies from the

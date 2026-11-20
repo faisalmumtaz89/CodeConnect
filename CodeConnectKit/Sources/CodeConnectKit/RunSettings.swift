@@ -17,12 +17,13 @@ public enum RunSettings: Sendable, Hashable {
     /// A live hosted Claude run offering its menus.
     case hostedLive(HostedSettings)
 
-    /// The entry for a run, from its summary and the two things only the client knows: whether one of
-    /// its setting calls is in flight (the menus are then disabled), and the last answer still worth
-    /// showing. The selection follows the summary's facts only — never an optimistic guess between a
-    /// tap and its answer.
+    /// The entry for a run, from its summary and the things only the client knows: the model the run
+    /// has confirmed it is on (`AppModel.confirmedModel`), whether one of its setting calls is in flight
+    /// (the menus are then disabled), and the last answer still worth showing. The selection follows the
+    /// summary's facts only — never an optimistic guess between a tap and its answer.
     public static func of(
-        summary: SessionSummary, inFlight: Bool = false, lastOutcome: SettingOutcome? = nil
+        summary: SessionSummary, confirmed: String? = nil, inFlight: Bool = false,
+        lastOutcome: SettingOutcome? = nil
     ) -> RunSettings {
         guard summary.agent == .claude || summary.agent == .codex else { return .deferToOtherPath }
         guard let menus = summary.menus else { return .hostedReadOnly(model: summary.model?.value) }
@@ -42,9 +43,11 @@ public enum RunSettings: Sendable, Hashable {
         }
         let selectedEffort = summary.effort
             .flatMap { fact in efforts.first { $0.value == fact.value } }
-        // The one string drawn for the model — the button, the header: the selected entry's label, and
-        // the raw fact only when the daemon named no selection.
-        let modelDisplay = selectedModel?.label ?? summary.model?.value ?? ""
+        // The one string drawn for the run's model — the button, the header: the model the run is on once
+        // it has said so, by `modelName`; before that the selected entry's label, and the raw fact only when
+        // the daemon named no selection. "Default" is a row of the menu, never the run's model.
+        let modelDisplay = confirmed.map { modelName(confirmed: $0, menus: menus) }
+            ?? selectedModel?.label ?? summary.model?.value ?? ""
 
         return .hostedLive(
             HostedSettings(
@@ -77,8 +80,9 @@ public struct HostedSettings: Sendable, Hashable {
     /// The selected model's efforts, each with its display name. Empty when no model is selected.
     public let efforts: [EffortChoice]
     public let selectedEffort: EffortChoice?
-    /// The model string for a single-line surface (the button, the header): the selected row's label,
-    /// or the raw fact when nothing matched.
+    /// The model string for a single-line surface (the button, the header): the model the run has
+    /// confirmed, by `RunSettings.modelName`; before it has, the selected row's label, or the raw fact
+    /// when nothing matched.
     public let modelDisplay: String
     /// A set call is in flight: the menus are disabled, and the selection stays on the current fact.
     public let inFlight: Bool
