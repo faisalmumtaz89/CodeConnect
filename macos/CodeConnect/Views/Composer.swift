@@ -321,15 +321,7 @@ private struct Composer: View {
     }
 
     private func note(_ line: Line) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if let symbol = line.tone.symbol {
-                Image(systemName: symbol).foregroundStyle(line.tone.color).accessibilityHidden(true)
-            }
-            Text(line.text).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
-        }
-        .font(Theme.ui(12))
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("session.composer.note")
+        KitNote(text: line.text, tone: line.tone, id: "session.composer.note")
     }
 
     // MARK: Sending

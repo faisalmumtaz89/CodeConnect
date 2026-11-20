@@ -202,6 +202,8 @@ public enum ChangesWords {
     public static let foldedLinesHint = "Shows them"
     /// What a comment on a hunk asks for, in its empty field.
     public static let commentPrompt = "What should the agent do here?"
+    /// Under a hunk for a few seconds once its comment reached the agent, on the Mac, where the field closes.
+    public static let commentSent = "Comment sent"
     /// Which file and lines a comment on a hunk is about, so the agent reads it against the code: the lowest and
     /// highest line numbers in the hunk, new ones where a line has one.
     public static func commentAnchor(file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {

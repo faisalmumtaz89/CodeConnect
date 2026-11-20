@@ -195,6 +195,14 @@
             UserDefaults.standard.object(forKey: "CC_CONVERSATION_UP") == nil
                 ? nil : CGFloat(UserDefaults.standard.double(forKey: "CC_CONVERSATION_UP"))
         }
+        /// `-CC_HUNK menu|comment|sent`: the diff's first hunk header in the Changes tab, a moment after it is placed,
+        /// opens its menu, or its comment field, or says its comment was sent.
+        static var hunk: String? { UserDefaults.standard.string(forKey: "CC_HUNK") }
+        @MainActor static var hunkActed = false
+        /// `-CC_HUNK_DRAFT <text>`: the comment field opens holding these words.
+        static var hunkDraft: String? { UserDefaults.standard.string(forKey: "CC_HUNK_DRAFT") }
+        /// `-CC_HUNK_REFUSED <reason>`: the comment field opens as after a send refused for this reason.
+        static var hunkRefusal: String? { UserDefaults.standard.string(forKey: "CC_HUNK_REFUSED") }
 
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }

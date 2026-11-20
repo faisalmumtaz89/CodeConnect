@@ -329,6 +329,8 @@ enum PanelSymbol {
     static let compact = "arrow.down.right.and.arrow.up.left"
     /// iPhone: `eraser`.
     static let clear = "eraser"
+    /// iPhone: `chat-text`.
+    static let comment = "text.bubble"
     /// iPhone: `copy`.
     static let copy = "doc.on.doc"
 }
