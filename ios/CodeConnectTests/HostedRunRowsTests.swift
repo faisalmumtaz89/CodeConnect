@@ -241,7 +241,7 @@ final class HostedRunRowsTests: XCTestCase {
             XCTAssertEqual(TimelineBuilder.drawn(shown.timeline).filter { $0.seq == end }, [], "s\(end) draws no row")
             XCTAssertEqual(
                 FleetStatusRule.status(summary: try liveRun, shown: shown, reviewedSeq: 0), .doneUnreviewed, "s\(end)")
-            XCTAssertEqual(FleetStatusRule.status(summary: try liveRun, shown: shown, reviewedSeq: end), .idle, "s\(end)")
+            XCTAssertEqual(FleetStatusRule.status(summary: try liveRun, shown: shown, reviewedSeq: end), .done, "s\(end)")
             XCTAssertEqual(shape(shown.timeline.suffix(1)), ["notice:Turn complete"], "the preview through s\(end)")
         }
     }

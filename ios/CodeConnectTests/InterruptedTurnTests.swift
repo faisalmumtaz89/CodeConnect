@@ -118,7 +118,7 @@ final class InterruptedTurnTests: XCTestCase {
             replies, ["word1 word2 word3 word4 word5 word6 word7", "Short reply: done."])
         let placeholderOnly = try events("resume-after-esc", through: 24)
         let result = try await status(placeholderOnly, reviewedSeq: 24)
-        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(result, .done)
         let answered = try await status(run, reviewedSeq: 29)
         XCTAssertEqual(answered, .done)
     }

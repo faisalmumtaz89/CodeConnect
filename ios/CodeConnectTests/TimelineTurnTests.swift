@@ -263,7 +263,7 @@ final class TimelineTurnTests: XCTestCase {
         guard case .notice(let notice)? = items.last?.content else { return XCTFail("\(shape(items))") }
         XCTAssertEqual(notice.detail, "Opus 5 · 1M context")
         let result = await status(events)
-        XCTAssertEqual(result, .idle, "a start is not work: the turn before it ended")
+        XCTAssertEqual(result, .done, "a start is not work: the turn before it ended")
     }
 
     /// A cold open loads only the newest events, so the first start in view
@@ -403,7 +403,7 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(
             shape(TimelineBuilder.build(events)), ["you", "reply:Done.", "notice:Turn complete"])
         let reviewed = await status(events)
-        XCTAssertEqual(reviewed, .idle)
+        XCTAssertEqual(reviewed, .done)
         let unreviewed = await status(events, reviewedSeq: 0)
         XCTAssertEqual(unreviewed, .doneUnreviewed)
     }

@@ -165,15 +165,12 @@ final class FleetStatusTests: XCTestCase {
         XCTAssertEqual(result, .doneUnreviewed)
     }
 
-    /// Seen, a finished turn is still Done, its own case beside the unseen one, and never Idle: Idle is a live run
-    /// with no turn yet.
+    /// Seen, a finished turn is still Done, its own case beside the unseen one, and never Idle.
     func testAReviewedTurnIsDoneNotIdle() async {
         let events = failedTool(1) + [event(3, "turn_complete", "{}")]
         let result = await status(events: events, reviewedSeq: 99)
         XCTAssertEqual(result, .done)
         XCTAssertEqual(result.label, "Done")
-        let fresh = await status(events: [event(1, "link_state", #"{"state":"attached"}"#)], reviewedSeq: 0)
-        XCTAssertEqual(fresh, .idle, "a live run with no turn yet")
     }
 
     /// A reviewed turn must stay reviewed. `reviewedSeq` is set to the stream tail

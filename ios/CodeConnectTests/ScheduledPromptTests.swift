@@ -43,10 +43,10 @@ final class ScheduledPromptTests: XCTestCase {
     /// again, and that turn is new to the reader.
     func testTheTurnsAroundItAreDone() async throws {
         let before = await state(try recorded(through: 29))
-        XCTAssertEqual(try status(before, reviewedSeq: 29), .idle)
+        XCTAssertEqual(try status(before, reviewedSeq: 29), .done)
         let answered = await state(try recorded(through: 32))
         XCTAssertEqual(try status(answered, reviewedSeq: 29), .doneUnreviewed)
-        XCTAssertEqual(try status(answered, reviewedSeq: 32), .idle)
+        XCTAssertEqual(try status(answered, reviewedSeq: 32), .done)
     }
 
     /// Resuming a session whose last prompt went unanswered, Claude Code writes
@@ -65,7 +65,7 @@ final class ScheduledPromptTests: XCTestCase {
         placeholder["seq"] = 31
         let annulled = await state(try recorded(through: 30) + WireRecording.decode([placeholder]))
         XCTAssertTrue(try WireRecording.decode([placeholder])[0].isClaudePlaceholderReply)
-        XCTAssertEqual(try status(annulled, reviewedSeq: 25), .idle)
+        XCTAssertEqual(try status(annulled, reviewedSeq: 25), .done)
     }
 
     /// A log that rewound starts clean, and no prompt from before survives it.

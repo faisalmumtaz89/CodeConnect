@@ -48,7 +48,7 @@ final class FleetRowHeightTests: XCTestCase {
         for risk in [RiskClass.low, .medium, .high] {
             for cards in [1, 2] { all.append(State(status: .blocked, risk: risk, cards: cards)) }
         }
-        for status in [FleetStatus.failed, .doneUnreviewed, .running, .idle, .ended] {
+        for status in [FleetStatus.failed, .doneUnreviewed, .done, .running, .idle, .ended] {
             all.append(State(status: status, risk: nil, cards: 0))
         }
         return all
