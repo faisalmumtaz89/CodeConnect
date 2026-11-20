@@ -19,6 +19,8 @@ struct StartForm: View {
     let whyNone: String
 
     @State private var computerID: String?
+    /// The computer button's panel is open.
+    @State private var computerMenuOpen = false
     /// What was chosen on each computer, by its id: coming back to a computer, after its link dropped or a switch,
     /// finds its own choices.
     @State private var choicesByComputer: [String: Choices] = [:]
@@ -144,6 +146,8 @@ struct StartForm: View {
                 Text("Start an agent").font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
                 if let context {
                     computerRow(context)
+                        // Its panel opens below it, over what follows.
+                        .zIndex(computerMenuOpen ? 1 : 0)
                     folderRows(context)
                     AgentNotice(context: context, elsewhere: !isThisMac(context))
                     composer(context)
@@ -201,21 +205,7 @@ struct StartForm: View {
             label("Computer")
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 if contexts.count > 1 {
-                    Picker("Computer", selection: Binding(get: { context.id }, set: { computerID = $0 })) {
-                        ForEach(contexts, id: \.id) { Text($0.machineName).tag($0.id) }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .accessibilityIdentifier("start.computer")
-                    // Its choices are otherwise only in a menu that opens on the screen.
-                    .accessibilityChildren {
-                        ForEach(contexts, id: \.id) { choice in
-                            Button(choice.machineName) { computerID = choice.id }
-                                .accessibilityIdentifier("start.computer.\(choice.id)")
-                                .accessibilityAddTraits(choice.id == context.id ? .isSelected : [])
-                        }
-                    }
+                    ComputerButton(contexts: contexts, chosen: context, open: $computerMenuOpen) { computerID = $0 }
                 } else {
                     Text(context.machineName).font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
                         .accessibilityIdentifier("start.computer")
@@ -627,5 +617,70 @@ private struct FolderStep: View {
         }
         .buttonStyle(.hover(radius: 7, id: id))
         .accessibilityIdentifier(id)
+    }
+}
+
+/// The computer a start goes to: a button and its panel, the model button's kind, so one sheet has one kind of menu.
+/// The chosen computer carries the check; the row under the pointer is filled.
+private struct ComputerButton: View {
+    let contexts: [StartContext]
+    let chosen: StartContext
+    @Binding var open: Bool
+    let choose: (String) -> Void
+
+    var body: some View {
+        Button {
+            open.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                Text(chosen.machineName).font(Theme.ui(13, .medium)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
+            }
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+        }
+        // Its plate on the column's edge, as the panel under it is.
+        .buttonStyle(.hover(radius: 5, id: "start.computer"))
+        .accessibilityIdentifier("start.computer")
+        .accessibilityValue(open ? "open" : "closed")
+        .overlay(alignment: .topLeading) {
+            if open { panel.offset(y: 24 + Theme.panelGap) }
+        }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(contexts, id: \.id) { context in
+                Button {
+                    choose(context.id)
+                    open = false
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .opacity(context.id == chosen.id ? 1 : 0)
+                            .frame(width: 12)
+                            .accessibilityHidden(true)
+                        Text(context.machineName).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.hover(radius: 4, id: "start.computer.\(context.id)"))
+                .padding(.horizontal, 4)
+                .accessibilityIdentifier("start.computer.\(context.id)")
+                .accessibilityAddTraits(context.id == chosen.id ? .isSelected : [])
+            }
+        }
+        .padding(.vertical, 5)
+        .frame(width: 260)
+        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
+        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
     }
 }
