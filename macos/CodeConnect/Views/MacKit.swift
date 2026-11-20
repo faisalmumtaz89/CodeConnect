@@ -154,7 +154,11 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
                 Button {
                     if !isChosen { choose(option) }
                 } label: {
-                    segment(option, isChosen)
+                    // As wide as its chosen look whatever is chosen, so choosing moves no segment's label.
+                    ZStack {
+                        segment(option, true).hidden()
+                        segment(option, isChosen)
+                    }
                         .background(isChosen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: trackRadius - trackInset))
                         .contentShape(Rectangle())
                 }
