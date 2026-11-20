@@ -12,7 +12,7 @@ enum AddKind: String, Identifiable, CaseIterable {
     var title: String {
         switch self {
         case .agent: FleetWords.newAgent
-        case .computer: "Add computer"
+        case .computer: "Add a computer"
         case .iPhone: "Add iPhone"
         }
     }
@@ -37,7 +37,7 @@ enum AddKind: String, Identifiable, CaseIterable {
 
 extension KeyHint {
     /// What a key opens: its key and the sheet's title.
-    init(_ kind: AddKind) { self.init(keys: kind.shortcut.map { [$0] } ?? [], label: kind.title) }
+    init(_ kind: AddKind) { self.init(keys: kind.shortcut.map { [$0] } ?? [], label: kind.title.titleStyle) }
 }
 
 /// The one way anything is added: a sheet with Agent, Computer and iPhone side by side.
@@ -148,7 +148,7 @@ private struct AgentSide: View {
                         .lineSpacing(3)
                         .fixedSize(horizontal: false, vertical: true)
                     if !machines.showsFleet {
-                        ActionButton(title: "Add a computer", key: nil, prominent: false, id: "agent.addComputer", action: addComputer)
+                        ActionButton(title: AddKind.computer.title, key: nil, prominent: false, id: "agent.addComputer", action: addComputer)
                             .padding(.top, 6)
                     }
                 }

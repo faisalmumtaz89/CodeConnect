@@ -515,7 +515,7 @@ private struct EmptyFleet: View {
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .frame(maxWidth: 380)
-                ActionButton(title: "Add a computer", key: AddKind.computer.shortcut, prominent: true, id: "empty.addComputer") {
+                ActionButton(title: AddKind.computer.title, key: AddKind.computer.shortcut, prominent: true, id: "empty.addComputer") {
                     adding = .computer
                 }
                 .padding(.top, 6)
