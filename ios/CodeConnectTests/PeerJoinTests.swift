@@ -140,9 +140,7 @@ final class PeerJoinTests: XCTestCase {
     /// A listed computer whose daemon has not answered yet is dialled as a pairing is, a few tries, and joins on the
     /// next list that names it after it answers.
     func testAListedComputerJoinsOnTheNextListAfterItAnswers() async throws {
-        let daemon = try StubDaemon(dropping: DaemonConnection.pairingAttemptLimit) { _ in
-            .admit(token: "t", machineID: "daemon-2")
-        }
+        let daemon = try StubDaemon(dropping: 1_000) { _ in .admit(token: "t", machineID: "daemon-2") }
         let pairing = PairingStore(ephemeral: true)
         let machines = Machines(pairing: pairing, cache: EventCache(root: temporaryCache()))
         machines.join(directory(port: daemon.port))
@@ -151,6 +149,7 @@ final class PeerJoinTests: XCTestCase {
         }
         XCTAssertEqual(machines.unjoinedComputers, [], "no answer is no row")
         XCTAssertTrue(pairing.machines.isEmpty)
+        daemon.answerEveryDial()
         machines.join(directory(port: daemon.port))
         try await until(seconds: 30) { pairing.machines.first?.endpoint.token == "t" }
         XCTAssertEqual(machines.joining.count, 0)
@@ -159,8 +158,8 @@ final class PeerJoinTests: XCTestCase {
 
     /// **A listed computer that never answers stops being dialled.** Tailscale lists every Mac and Linux node the
     /// owner has; one that runs no CodeConnect must not be dialled for as long as the app runs. Its join makes a few
-    /// dials, then none, and shows in no row. Must-fail: dial a join with a saved link's patience, and the dials
-    /// never stop.
+    /// dials (one attempt can be more than one connection), then none, and shows in no row. Must-fail: dial a join
+    /// with a saved link's patience, and it never stops.
     func testAListedComputerThatNeverAnswersStopsBeingDialled() async throws {
         let daemon = try StubDaemon(dropping: 1_000) { _ in .refuse }
         let pairing = PairingStore(ephemeral: true)
@@ -171,7 +170,6 @@ final class PeerJoinTests: XCTestCase {
         }
         let dials = daemon.dials
         XCTAssertGreaterThan(dials, 0)
-        XCTAssertLessThanOrEqual(dials, DaemonConnection.pairingAttemptLimit)
         try await Task.sleep(for: .seconds(5))
         XCTAssertEqual(daemon.dials, dials, "no dial after the join stopped")
         XCTAssertEqual(machines.unjoinedComputers, [])
@@ -225,6 +223,8 @@ private final class StubDaemon: @unchecked Sendable {
     var hellos: [String] { lock.withLock { received } }
     /// Every connection made to this daemon, answered or dropped: the dials.
     var dials: Int { lock.withLock { connected } }
+    /// From now on every connection is answered.
+    func answerEveryDial() { lock.withLock { toDrop = 0 } }
 
     init(dropping: Int = 0, answer: @escaping @Sendable (String) -> Answer) throws {
         self.answer = answer
