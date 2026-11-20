@@ -782,6 +782,16 @@ final class FleetCountTests: XCTestCase {
 
     // MARK: Groups
 
+    /// Opening a run never moves its row: a finished turn stands in one band, seen (.done) or not (.doneUnreviewed), so the
+    /// list keeps its order when the person opens one, and only the run's mark changes.
+    func testSeeingAFinishedTurnKeepsItsPlace() {
+        let unseen = [row("a", .doneUnreviewed, blockedCount: 0), row("b", .doneUnreviewed, blockedCount: 0),
+            row("c", .doneUnreviewed, blockedCount: 0), row("d", .running, blockedCount: 0)]
+        XCTAssertEqual(FleetOrdering.sort(unseen).map(\.id), ["uid-a", "uid-b", "uid-c", "uid-d"])
+        let bSeen = [unseen[0], row("b", .done, blockedCount: 0), unseen[2], unseen[3]]
+        XCTAssertEqual(FleetOrdering.sort(bSeen).map(\.id), ["uid-a", "uid-b", "uid-c", "uid-d"])
+    }
+
     /// The fleet's order, then each run in its group: groups come in the order of their first rows
     /// (never by name), and keep that order inside, by computer and by project alike.
     func testGroupsKeepTheFleetsOrder() {

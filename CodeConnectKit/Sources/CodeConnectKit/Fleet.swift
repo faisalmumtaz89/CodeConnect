@@ -6,11 +6,14 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
     case blocked = 0
     case failed = 1
     case doneUnreviewed = 2
-    case running = 3
+    /// A finished turn already seen: still Done, marked more quietly.
+    case done = 3
+    case running = 4
     /// Asked to end (End run): still Active until it has exited.
-    case stopping = 4
-    case idle = 5
-    case ended = 6
+    case stopping = 5
+    /// A live run with no turn yet.
+    case idle = 6
+    case ended = 7
 
     public static func < (lhs: FleetStatus, rhs: FleetStatus) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -18,7 +21,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
         switch self {
         case .blocked: return "Blocked"
         case .failed: return "Failed"
-        case .doneUnreviewed: return "Done"
+        case .doneUnreviewed, .done: return "Done"
         case .running: return "Running"
         case .stopping: return "Stopping"
         case .idle: return "Idle"
@@ -31,6 +34,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
         case .blocked: return "hand-palm-fill"
         case .failed: return "warning-octagon-fill"
         case .doneUnreviewed: return "seal-check-fill"
+        case .done: return "seal-check"
         case .running, .stopping: return "circle-dashed"
         case .idle: return "moon"
         case .ended: return "power"
@@ -313,15 +317,23 @@ public enum FleetFreshness {
 
 enum FleetOrdering {
     /// Within a status band, the most recently active session comes first: the
-    /// thing that just changed is the thing you are looking for.
+    /// thing that just changed is the thing you are looking for. A finished
+    /// turn stands in one band whether or not it has been seen (`place`), so
+    /// opening a run never moves its row: being seen changes its mark only.
     static func sort(_ rows: [FleetRow]) -> [FleetRow] {
         rows.sorted { lhs, rhs in
-            if lhs.status != rhs.status { return lhs.status < rhs.status }
+            if place(lhs.status) != place(rhs.status) { return place(lhs.status) < place(rhs.status) }
             if lhs.lastActive != rhs.lastActive { return lhs.lastActive > rhs.lastActive }
             // The key, not the name: two runs called `cc-1` need a total order
             // or they can swap places between renders.
             return lhs.summary.sessionKey < rhs.summary.sessionKey
         }
+    }
+
+    /// A status's band in the list: its own, but a seen finished turn stands
+    /// with the unseen ones.
+    static func place(_ status: FleetStatus) -> Int {
+        status == .done ? FleetStatus.doneUnreviewed.rawValue : status.rawValue
     }
 }
 
@@ -358,7 +370,7 @@ public enum FleetStatusRule {
             // Done-unreviewed and re-sorted it up the fleet. What was reviewed is
             // a turn, so the question is whether *that turn* is newer than the
             // mark.
-            return last.seq > reviewedSeq ? .doneUnreviewed : .idle
+            return last.seq > reviewedSeq ? .doneUnreviewed : .done
         }
         return .running
     }

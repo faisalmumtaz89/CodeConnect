@@ -41,7 +41,7 @@ final class ApiErrorTurnTests: XCTestCase {
             let ended = await state(try recorded(through: end))
             XCTAssertEqual(
                 try status(ended, reviewedSeq: UInt64(prompt)), .doneUnreviewed, "\(name)")
-            XCTAssertEqual(try status(ended, reviewedSeq: UInt64(end)), .idle, "\(name): reviewed")
+            XCTAssertEqual(try status(ended, reviewedSeq: UInt64(end)), .done, "\(name): reviewed")
 
             let row = try XCTUnwrap(
                 ended.timeline.firstIndex { $0.seq == UInt64(error) }, "\(name): no error row")
@@ -67,6 +67,6 @@ final class ApiErrorTurnTests: XCTestCase {
         }
         let ended = await state(try recorded(through: 62))
         XCTAssertEqual(try status(ended, reviewedSeq: 54), .doneUnreviewed)
-        XCTAssertEqual(try status(ended, reviewedSeq: 62), .idle)
+        XCTAssertEqual(try status(ended, reviewedSeq: 62), .done)
     }
 }

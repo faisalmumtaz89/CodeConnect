@@ -123,7 +123,7 @@ final class FleetStatusTests: XCTestCase {
         XCTAssertNotEqual(
             result, .running,
             "and it must not count as activity, or a finished turn looks busy for ever")
-        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(result, .done)
     }
 
     // MARK: What Failed does mean
@@ -165,10 +165,12 @@ final class FleetStatusTests: XCTestCase {
         XCTAssertEqual(result, .doneUnreviewed)
     }
 
-    func testAReviewedTurnIsIdle() async {
+    /// Seen, a finished turn is still Done, its own case beside the unseen one, and never Idle.
+    func testAReviewedTurnIsDoneNotIdle() async {
         let events = failedTool(1) + [event(3, "turn_complete", "{}")]
         let result = await status(events: events, reviewedSeq: 99)
-        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(result, .done)
+        XCTAssertEqual(result.label, "Done")
     }
 
     /// A reviewed turn must stay reviewed. `reviewedSeq` is set to the stream tail
@@ -184,7 +186,7 @@ final class FleetStatusTests: XCTestCase {
             ]
         // Reviewed at the turn boundary, seq 3. Seq 4 and 5 draw nothing.
         let result = await status(events: events, reviewedSeq: 3)
-        XCTAssertEqual(result, .idle, "silent events after a reviewed turn are not new work")
+        XCTAssertEqual(result, .done, "silent events after a reviewed turn are not new work")
     }
 
     /// Link chatter is not the agent working. Guarding an existing rule that also
@@ -196,7 +198,7 @@ final class FleetStatusTests: XCTestCase {
                 event(4, "link_state", #"{"state":"attached"}"#),
             ]
         let result = await status(events: events, reviewedSeq: 99)
-        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(result, .done)
     }
 
 

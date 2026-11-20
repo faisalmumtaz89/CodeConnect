@@ -38,6 +38,8 @@ struct StartForm: View {
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
+    /// The folder list's rows, measured: the box is as tall as they are, up to its most.
+    @State private var listHeight: CGFloat = 0
 
     /// `resuming`: a start this Mac sent with no answer yet, which the sheet opens on instead of a fresh form.
     init(resuming: String?, whyNone: String, started: @escaping (String) -> Void) {
@@ -157,7 +159,7 @@ struct StartForm: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: "Start", actionID: "start.start", blocked: blocked != nil, perform: start, cancel: { dismiss() },
                 cancelID: "start.cancel"
@@ -259,14 +261,21 @@ struct StartForm: View {
                     .frame(height: 28)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
-                ScrollView {
-                    // Not lazy: every folder is in the accessibility tree, scrolled to or not.
-                    VStack(spacing: 0) {
-                        if let picked = picked(context) { pickedRow(picked) }
-                        ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
+                ScrollViewReader { list in
+                    ScrollView {
+                        // Not lazy: every folder is in the accessibility tree, scrolled to or not.
+                        VStack(spacing: 0) {
+                            if let picked = picked(context) { pickedRow(picked) }
+                            ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
+                        }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                     }
+                    // The chosen folder is always in view: scrolled to, the least that shows it, when the sheet
+                    // opens or the choice or the list changes, so a click on a row in view moves nothing.
+                    .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
-                .frame(height: 170)
+                // As tall as its rows, up to 170 pt, then it scrolls.
+                .frame(height: min(max(listHeight, 1), 170))
                 // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
                 .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
@@ -301,6 +310,7 @@ struct StartForm: View {
         .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
+        .id(project.path)
     }
 
     /// Any folder on this Mac, from the standard folder panel.
@@ -308,7 +318,7 @@ struct StartForm: View {
         Button(action: chooseFolder) {
             Text("Choose a folder\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
         }
-        .buttonStyle(.hover(bare: true, id: "start.choose"))
+        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.choose"))
         .accessibilityIdentifier("start.choose")
     }
 
@@ -449,7 +459,7 @@ private struct StartProgress: View {
                 if start.outcome == nil, !start.retryStopped {
                     VStack(alignment: .leading, spacing: 4) {
                         Button("Stop retrying", action: stopRetrying)
-                            .buttonStyle(.hover(bare: true, id: "start.stopRetrying"))
+                            .buttonStyle(.hover(bare: true, flush: .leading, id: "start.stopRetrying"))
                             .font(Theme.ui(12.5))
                             .foregroundStyle(Theme.text2)
                             .accessibilityIdentifier("start.stopRetrying")
@@ -461,7 +471,7 @@ private struct StartProgress: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: nil, actionID: "", blocked: true, perform: {}, cancel: { dismiss() }, cancelID: "start.close",
                 cancelTitle: "Close"
@@ -524,7 +534,7 @@ private struct StartProgress: View {
                         .foregroundStyle(Theme.text2)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.hover(bare: true, id: "start.failed.details"))
+                    .buttonStyle(.hover(bare: true, flush: .leading, id: "start.failed.details"))
                     .accessibilityIdentifier("start.failed.details")
                     .accessibilityValue(details ? "open" : "closed")
                     if details {
@@ -542,7 +552,7 @@ private struct StartProgress: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: words.action, actionID: "start.failed.again", blocked: false, perform: again, cancel: { dismiss() },
                 cancelID: "start.close", cancelTitle: "Close"
@@ -587,7 +597,7 @@ private struct FolderStep: View {
             .padding(.top, 18)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("folder.question")
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: nil, actionID: "", blocked: true, perform: {}, cancel: back, cancelID: "start.folder.back",
                 cancelTitle: "Back"

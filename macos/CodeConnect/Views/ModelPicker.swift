@@ -30,9 +30,10 @@ struct ModelButton: View {
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it: the menu's bottom 6pt over the button's top.
+        // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's: the button
+        // stands 3 pt in from that edge (the box's 10 pt inset, less the button's own 7).
         .overlay(alignment: .bottomLeading) {
-            if open { menu.offset(y: -28) }
+            if open { menu.offset(x: -3, y: -(22 + Theme.panelGap)) }
         }
     }
 

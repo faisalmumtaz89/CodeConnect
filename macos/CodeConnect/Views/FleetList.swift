@@ -122,7 +122,8 @@ struct FleetList: View {
                                     // once it has ended.
                                     let removable =
                                         row.summary.isRemovable && model?.daemonProfile.removesSessions == true
-                                    let more = (endable || removable) && (hovered == row.id || moreOpen == row.id)
+                                    let more = (endable || removable)
+                                        && (hovered == row.id || moreOpen == row.id || HoverButtonStyle.forced("fleet.row.\(row.id)"))
                                     Button {
                                         moreOpen = nil
                                         opened = selected ? nil : row.id
@@ -239,7 +240,7 @@ struct FleetList: View {
                 open: Binding(get: { moreOpen == row.id }, set: { moreOpen = $0 ? row.id : nil }),
                 action: endable ? .endRun : .remove
             ) { if endable { ending = row } else { removing = row } }
-            .padding(.trailing, 10)
+            .padding(.trailing, 16)
         }
     }
 
@@ -343,8 +344,8 @@ private struct GroupHeader: View {
 }
 
 /// Where a project is: its computer, when more than one is paired, and its folder. Short in a narrow
-/// place, the two share the room, each cut where it keeps its meaning: the folder from the front, where
-/// its name is, and the computer in the middle, since one owner's Macs share the front of their names.
+/// place, each is cut once, where it keeps its meaning: the computer at its end, and the folder to its
+/// last part after "…/", whole, so a cut never lands inside a folder's name.
 struct ProjectPlace: View {
     let project: FleetGroup
     let namingComputer: Bool
@@ -353,13 +354,17 @@ struct ProjectPlace: View {
     var body: some View {
         HStack(spacing: 4) {
             if namingComputer {
-                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.middle)
+                // First in line for room: the folder takes what is left, down to "…/" and its last part cut.
+                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.tail).layoutPriority(1)
                 Text(verbatim: "·").font(Theme.ui(size))
             }
-            Text(project.folder)
-                .font(Theme.mono(size))
-                .lineLimit(1)
-                .truncationMode(.head)
+            ViewThatFits(in: .horizontal) {
+                Text(project.folder)
+                Text(verbatim: "…/" + (project.folder.split(separator: "/").last.map(String.init) ?? project.folder))
+                    .truncationMode(.tail)
+            }
+            .font(Theme.mono(size))
+            .lineLimit(1)
         }
         .foregroundStyle(Theme.text3)
     }
@@ -371,7 +376,7 @@ private struct FleetLine: View {
     let row: FleetRow
     /// Open beside the list: the selected fill, and a bar on its leading edge.
     let selected: Bool
-    /// The run's "…" stands at the trailing edge: its width is kept clear.
+    /// The run's "…" stands in its age's place, which hides while it shows: nothing else in the row moves.
     let roomForMore: Bool
     @State private var lastTick = Date()
 
@@ -404,8 +409,8 @@ private struct FleetLine: View {
                 .font(Theme.ui(11.5))
                 .foregroundStyle(Theme.text3)
                 .monospacedDigit()
-                .frame(width: 26, alignment: .trailing)
-            if roomForMore { Color.clear.frame(width: RunMore.width) }
+                .frame(width: RunMore.width, alignment: .trailing)
+                .opacity(roomForMore ? 0 : 1)
         }
         .padding(.horizontal, 16)
         .frame(height: 36)
@@ -450,7 +455,7 @@ struct RunMore: View {
         .accessibilityIdentifier(id)
         .accessibilityValue(open ? "open" : "closed")
         .overlay(alignment: .topTrailing) {
-            if open { panel.offset(y: 28) }
+            if open { panel.offset(y: 22 + Theme.panelGap) }
         }
     }
 
@@ -496,6 +501,9 @@ struct StateIcon: View {
             case .doneUnreviewed:
                 Circle().fill(Theme.text2)
                 Image(systemName: "checkmark").font(.system(size: 6.5, weight: .heavy)).foregroundStyle(Theme.window)
+            case .done:
+                Circle().strokeBorder(Theme.text3, lineWidth: 1.5)
+                Image(systemName: "checkmark").font(.system(size: 6.5, weight: .heavy)).foregroundStyle(Theme.text3)
             case .idle:
                 Circle().strokeBorder(Theme.text3, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
             case .ended:

@@ -161,7 +161,7 @@ final class TaskNotificationTests: XCTestCase {
             "Agent \"Background helper\" finished · 4s")
         XCTAssertEqual(
             FleetStatusRule.status(summary: summary, shown: recorded.shown, reviewedSeq: 2),
-            .idle)
+            .done)
     }
 
     // MARK: What is not a report

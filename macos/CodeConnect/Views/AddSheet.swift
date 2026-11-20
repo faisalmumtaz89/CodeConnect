@@ -69,7 +69,7 @@ struct AddSheet: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 18)
             .frame(height: 50)
             Rectangle().fill(Theme.hairline).frame(height: 1)
             switch kind {
@@ -78,7 +78,8 @@ struct AddSheet: View {
             case .iPhone: IPhoneSide()
             }
         }
-        .frame(width: 640, height: 540)
+        // As tall as the chosen side's content, so the sheet changes height with its tab, its top edge and tabs staying.
+        .frame(width: 640)
         .background(Theme.sheet)
     }
 }
@@ -106,7 +107,7 @@ struct SheetBar<Leading: View>: View {
                 if let cancel {
                     Button(cancelTitle, action: cancel)
                         // Beside the action it lightens, so nothing of it reaches that button; alone, a bare word's plate.
-                        .buttonStyle(.hover(over: action != nil, bare: action == nil, id: cancelID))
+                        .buttonStyle(.hover(over: action != nil, bare: action == nil, flush: .trailing, id: cancelID))
                         .font(Theme.ui(12.5))
                         .foregroundStyle(Theme.text2)
                         .keyboardShortcut(.cancelAction)
@@ -118,7 +119,7 @@ struct SheetBar<Leading: View>: View {
                         .disabled(blocked)
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 18)
             .frame(height: 50)
         }
     }
@@ -156,7 +157,7 @@ private struct AgentSide: View {
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 18)
-                Spacer(minLength: 0)
+                Spacer(minLength: 18)
                 SheetBar(
                     action: refused == nil ? nil : "Try Again", actionID: "agent.tryAgain", blocked: false,
                     perform: { refused?.connection.retryNow() }, cancel: { dismiss() }, cancelID: "agent.cancel"
@@ -234,7 +235,7 @@ private struct ComputerForm: View {
                     .foregroundStyle(Theme.text2)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.hover(bare: true, id: "computer.useCode"))
+                .buttonStyle(.hover(bare: true, flush: .leading, id: "computer.useCode"))
                 .accessibilityIdentifier("computer.useCode")
                 .accessibilityValue(usesCode ? "open" : "closed")
                 .padding(.top, 4)
@@ -259,9 +260,9 @@ private struct ComputerForm: View {
                 }
             }
             .padding(.horizontal, 18)
-            .padding(.top, 22)
+            .padding(.top, 18)
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
 
             SheetBar(
                 action: usesCode ? (exchanging ? "Connecting…" : "Connect") : nil,
@@ -389,7 +390,7 @@ private struct IPhoneSide: View {
                         .padding(.top, 14)
                 }
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: added ? "Done" : nil, actionID: "iphone.done", blocked: !added, perform: { dismiss() },
                 cancel: added ? nil : { dismiss() }, cancelID: "iphone.cancel"

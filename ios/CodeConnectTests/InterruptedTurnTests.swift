@@ -54,7 +54,7 @@ final class InterruptedTurnTests: XCTestCase {
         let result = try await status(interrupted)
         XCTAssertEqual(result, .doneUnreviewed)
         let reviewed = try await status(interrupted, reviewedSeq: 18)
-        XCTAssertEqual(reviewed, .idle)
+        XCTAssertEqual(reviewed, .done)
     }
 
     /// Esc while a tool runs: the same. Claude writes the call's rejection
@@ -86,7 +86,7 @@ final class InterruptedTurnTests: XCTestCase {
         XCTAssertEqual(
             notices(items), ["Interrupted · What should Claude do instead?", "Turn complete"])
         let result = try await status(refused, reviewedSeq: 22)
-        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(result, .done)
     }
 
     // MARK: The next prompt is work again
@@ -98,7 +98,7 @@ final class InterruptedTurnTests: XCTestCase {
             let asked = try await status(try events(name, through: prompt), reviewedSeq: UInt64(prompt))
             XCTAssertEqual(asked, .running, "\(name): the next prompt is work")
             let answered = try await status(try events(name, through: end), reviewedSeq: UInt64(end))
-            XCTAssertEqual(answered, .idle, "\(name): its turn ends as usual")
+            XCTAssertEqual(answered, .done, "\(name): its turn ends as usual")
             XCTAssertEqual(
                 spoken(TimelineBuilder.build(try events(name, through: end))).last,
                 "FOLLOWUP please reply briefly")
@@ -118,9 +118,9 @@ final class InterruptedTurnTests: XCTestCase {
             replies, ["word1 word2 word3 word4 word5 word6 word7", "Short reply: done."])
         let placeholderOnly = try events("resume-after-esc", through: 24)
         let result = try await status(placeholderOnly, reviewedSeq: 24)
-        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(result, .done)
         let answered = try await status(run, reviewedSeq: 29)
-        XCTAssertEqual(answered, .idle)
+        XCTAssertEqual(answered, .done)
     }
 
     // MARK: Only Claude's own marker

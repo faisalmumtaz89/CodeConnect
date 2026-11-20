@@ -55,26 +55,42 @@ struct HoverButtonStyle: ButtonStyle {
     var radius: CGFloat = 6
     /// Lightens instead of taking a fill: a label with an opaque face of its own (a raised chip, a filled button), a tab,
     /// which its underline marks, a word right beside another button in a row (a sheet's Cancel, a folder's Forget), or
-    /// one choice of an exclusive group whose chosen one carries the plate (a segment, a sidebar row), so a group never
-    /// shows two plates at once.
+    /// a segment of a track whose chosen segment carries the plate, so a track never shows two plates at once. A row of
+    /// a list (the sidebar's) takes the ordinary fill, weaker than its selected row's plate.
     var over = false
+    /// How much an `over` label lightens.
+    var lift = Theme.hoverLift
     /// A label with no padding of its own, such as a word alone: the fill stands `bareBleed` off it.
     var bare = false
+    /// The sides of a bare label that sit on its column's edge: there its fill ends on the label, bleeding only
+    /// inward, so no fill crosses the edge the column's fields and text keep.
+    var flush: Edge.Set = []
     var id: String?
+
+    /// A test launch's `-CC_HOVER` names `id`: what has it draws as if the pointer were on it, a row's "…" included.
+    static func forced(_ id: String) -> Bool {
+        #if DEBUG
+            RenderWindow.hovered.contains(id)
+        #else
+            false
+        #endif
+    }
 
     /// How far a bare label's fill stands off it: sideways, and above and below.
     static let bareBleed = CGSize(width: 8, height: 4)
 
     func makeBody(configuration: Configuration) -> some View {
-        Hovered(configuration: configuration, radius: radius, over: over,
-                bleed: bare ? Self.bareBleed : .zero, id: id)
+        Hovered(configuration: configuration, radius: radius, over: over, lift: lift,
+                bleed: bare ? Self.bareBleed : .zero, flush: flush, id: id)
     }
 
     private struct Hovered: View {
         let configuration: Configuration
         let radius: CGFloat
         let over: Bool
+        let lift: Double
         let bleed: CGSize
+        let flush: Edge.Set
         let id: String?
         @State private var hovering = false
         @Environment(\.isEnabled) private var enabled
@@ -85,22 +101,19 @@ struct HoverButtonStyle: ButtonStyle {
             configuration.label
                 .disabled(forcedState("disabled"))
                 .background(lit && !over ? Theme.hover : .clear, in: plate)
-                .brightness(lit && over ? Theme.hoverLift : 0)
+                .brightness(lit && over ? lift : 0)
                 .opacity(off ? Theme.disabledOpacity : configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
                 // What lights is what a click takes, the label's clear gaps included.
                 .contentShape(plate)
+                // The keyboard's focus ring takes the hover's shape too: square on a row that fills its list edge to
+                // edge, never a rounded pill against the list's straight sides.
+                .contentShape(.focusEffect, plate)
                 .onHover { hovering = $0 }
         }
 
-        private var plate: Plate { Plate(radius: radius, bleed: bleed) }
+        private var plate: Plate { Plate(radius: radius, bleed: bleed, flush: flush) }
 
-        private var forced: Bool {
-            #if DEBUG
-                id.map(RenderWindow.hovered.contains) ?? false
-            #else
-                false
-            #endif
-        }
+        private var forced: Bool { id.map(HoverButtonStyle.forced) ?? false }
 
         /// A test launch's `-CC_FORCE` names this button in `state`.
         private func forcedState(_ state: String) -> Bool {
@@ -113,20 +126,29 @@ struct HoverButtonStyle: ButtonStyle {
     }
 }
 
-/// A hover fill: the label's frame grown by `bleed`, its corners rounded by `radius`.
+/// A hover fill: the label's frame grown by `bleed`, but not past a `flush` side, its corners rounded by `radius`.
 private struct Plate: Shape {
     let radius: CGFloat
     let bleed: CGSize
+    let flush: Edge.Set
 
     func path(in rect: CGRect) -> Path {
-        RoundedRectangle(cornerRadius: radius).path(in: rect.insetBy(dx: -bleed.width, dy: -bleed.height))
+        let leading = flush.contains(.leading) ? 0 : bleed.width
+        let trailing = flush.contains(.trailing) ? 0 : bleed.width
+        return RoundedRectangle(cornerRadius: radius).path(
+            in: CGRect(
+                x: rect.minX - leading, y: rect.minY - bleed.height,
+                width: rect.width + leading + trailing, height: rect.height + 2 * bleed.height))
     }
 }
 
 extension ButtonStyle where Self == HoverButtonStyle {
     /// `HoverButtonStyle`.
-    static func hover(radius: CGFloat = 6, over: Bool = false, bare: Bool = false, id: String? = nil) -> HoverButtonStyle {
-        HoverButtonStyle(radius: radius, over: over, bare: bare, id: id)
+    static func hover(
+        radius: CGFloat = 6, over: Bool = false, lift: Double = Theme.hoverLift, bare: Bool = false,
+        flush: Edge.Set = [], id: String? = nil
+    ) -> HoverButtonStyle {
+        HoverButtonStyle(radius: radius, over: over, lift: lift, bare: bare, flush: flush, id: id)
     }
 }
 
@@ -149,11 +171,16 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
                 Button {
                     if !isChosen { choose(option) }
                 } label: {
-                    segment(option, isChosen)
+                    // As wide as its chosen look whatever is chosen, so choosing moves no segment's label.
+                    ZStack {
+                        segment(option, true).hidden()
+                        segment(option, isChosen)
+                    }
                         .background(isChosen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: trackRadius - trackInset))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.hover(radius: trackRadius - trackInset, over: true, id: id(option)))
+                // A dim unchosen label needs more lift than a bright one to show it is under the pointer.
+                .buttonStyle(.hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id(option)))
                 .accessibilityIdentifier(id(option))
                 .accessibilityAddTraits(isChosen ? .isSelected : [])
             }

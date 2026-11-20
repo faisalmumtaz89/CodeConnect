@@ -198,7 +198,8 @@ private struct Sidebar: View {
                             ForEach(computers, id: \.machineID) { computer in
                                 let id = computer.machineID ?? ""
                                 let narrowed = FleetFilter.computer(id)
-                                let more = id != thisMac && (hovered == id || moreOpen == id)
+                                let more = id != thisMac
+                                    && (hovered == id || moreOpen == id || HoverButtonStyle.forced("sidebar.computer.\(id)"))
                                 ComputerRow(
                                     computer: computer,
                                     count: active.filter { $0.machineID == computer.machineID }.count,
@@ -214,7 +215,7 @@ private struct Sidebar: View {
                                             .accessibilityIdentifier("sidebar.computer.\(id).removeAction")
                                     }
                                 }
-                                // On the name line, at the row's trailing edge, so its panel lines up with the row.
+                                // On the name line, in the count's place.
                                 .overlay(alignment: Alignment(horizontal: .trailing, vertical: .computerNameLine)) {
                                     if more {
                                         RunMore(
@@ -222,6 +223,7 @@ private struct Sidebar: View {
                                             open: Binding(get: { moreOpen == id }, set: { moreOpen = $0 ? id : nil }),
                                             action: .remove
                                         ) { removing = computer }
+                                        .padding(.trailing, 8)
                                     }
                                 }
                                 .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
@@ -244,7 +246,8 @@ private struct Sidebar: View {
                         }
                     }
 
-                    let projects = FleetGroup.groups(active, by: .project)
+                    // The projects of the runs the list shows, Active or Finished, with their counts.
+                    let projects = FleetGroup.groups(scope.rows(machines.fleet), by: .project)
                     if !projects.isEmpty {
                         SidebarHeading("Projects")
                         VStack(spacing: 1) {
@@ -269,7 +272,7 @@ private struct Sidebar: View {
                                     .padding(.vertical, 5)
                                     .background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                                 }
-                                .buttonStyle(.hover(over: true, id: "sidebar.project.\(project.axID)"))
+                                .buttonStyle(.hover(id: "sidebar.project.\(project.axID)"))
                                 .accessibilityIdentifier("sidebar.project.\(project.axID)")
                                 .accessibilityAddTraits(selected ? .isSelected : [])
                             }
@@ -290,7 +293,7 @@ private struct Sidebar: View {
             NavRow(symbol: symbol, title: target.rawValue, count: target.rows(machines.fleet).count,
                 selected: scope == target)
         }
-        .buttonStyle(.hover(over: true, id: "sidebar.scope.\(target.rawValue.lowercased())"))
+        .buttonStyle(.hover(id: "sidebar.scope.\(target.rawValue.lowercased())"))
         .accessibilityIdentifier("sidebar.scope.\(target.rawValue.lowercased())")
         .accessibilityAddTraits(scope == target ? .isSelected : [])
     }
@@ -303,7 +306,7 @@ private struct ComputerRow: View {
     let computer: AppModel
     let count: Int
     let selected: Bool
-    /// Its "…" is shown at the end of the name line, the count moved over for it, as a run's row makes room.
+    /// Its "…" stands in its count's place, which hides while it shows, as a run's row does with its age.
     let roomForMore: Bool
     /// Narrows the list to this computer, or back to every run when it already is.
     let select: () -> Void
@@ -331,7 +334,7 @@ private struct ComputerRow: View {
         Group {
             if computer.linkHealth.pairingCures, let address {
                 Button { pairAgain(address) } label: { row(load).contentShape(Rectangle()) }
-                    .buttonStyle(.hover(over: true, id: "\(id).pairAgain"))
+                    .buttonStyle(.hover(id: "\(id).pairAgain"))
                     .accessibilityIdentifier("\(id).pairAgain")
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier(id)
@@ -339,7 +342,7 @@ private struct ComputerRow: View {
                 Button(action: select) {
                     row(load).background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                 }
-                .buttonStyle(.hover(over: true, id: id))
+                .buttonStyle(.hover(id: id))
                 .accessibilityIdentifier(id)
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
@@ -354,11 +357,13 @@ private struct ComputerRow: View {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).foregroundStyle(Theme.text2)
                     .frame(width: 16)
                     .accessibilityHidden(true)
+                // The name takes all the line up to the count's column, less one gap.
                 Text(computer.machineName ?? "Unknown computer").font(Theme.ui(12.5)).foregroundStyle(Theme.text)
                     .lineLimit(1)
-                Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text(verbatim: "\(count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).monospacedDigit()
-                if roomForMore { Color.clear.frame(width: RunMore.width) }
+                    .frame(minWidth: RunMore.width, alignment: .trailing)
+                    .opacity(roomForMore ? 0 : 1)
             }
             .alignmentGuide(.computerNameLine) { $0[VerticalAlignment.center] }
             if let load {

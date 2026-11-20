@@ -719,9 +719,10 @@ struct FleetView: View {
             + (computers > 1 ? " on \(computers) computers" : "")
         let taken: FleetStatus? =
             screen.decisions > 0 ? .blocked : (live.contains { $0.status == .failed } ? .failed : nil)
+        // A seen finished turn is counted with the unseen ones, under their one word.
         let rest = FleetStatus.allCases.compactMap { status -> String? in
-            guard status != taken else { return nil }
-            let count = live.filter { $0.status == status }.count
+            guard status != taken, status != .done else { return nil }
+            let count = live.filter { $0.status == status || (status == .doneUnreviewed && $0.status == .done) }.count
             return count > 0 ? "\(count) \(status.label.lowercased())" : nil
         }
         return ([overview] + rest).joined(separator: " · ")
