@@ -384,25 +384,23 @@ struct StartStepsSheet: View {
             }
         }
         .onChange(of: showsHidden) { _, _ in context.listFolder(StartFolderRequest(path: asked, showHidden: showsHidden)) }
-        .alert("New folder", isPresented: $namingFolder) {
-            TextField("Name", text: $folderName)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            Button("Cancel", role: .cancel) {}
-            Button("Create") {
-                guard let parent = listing?.path else { return }
-                creatingIn = parent
-                creating = context.createFolder(named: folderName, in: parent)
-            }
-        } message: {
-            Text(verbatim: "In \(listing?.path ?? "")")
+        .ccConfirmation(isPresented: $namingFolder) {
+            CCConfirmation(
+                title: "New folder", message: "In \(listing?.path ?? "")",
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "folder.new.cancel"),
+                    .init(title: "Create", kind: .plain, id: "folder.new.create") {
+                        guard let parent = listing?.path else { return }
+                        creatingIn = parent
+                        creating = context.createFolder(named: folderName, in: parent)
+                    },
+                ],
+                field: .init(placeholder: "Name", text: $folderName))
         }
-        .alert(
-            "Couldn’t make “\(folderName)”", isPresented: Binding(get: { folderRefusal != nil }, set: { if !$0 { folderRefusal = nil } })
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(verbatim: folderRefusal ?? "")
+        .ccConfirmation($folderRefusal) { refusal in
+            CCConfirmation(
+                title: "Couldn’t make “\(folderName)”", message: refusal,
+                answers: [.init(title: "OK", kind: .ok, id: "folder.new.ok")])
         }
     }
 

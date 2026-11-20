@@ -57,13 +57,12 @@ final class EndRunLiveUITests: XCTestCase {
         keep(app, "1 the menu, End run last")
 
         end.tap()
-        let question = app.alerts["End this run?"]
-        XCTAssertTrue(question.waitForExistence(timeout: 10), "End run asks first")
+        XCTAssertTrue(app.staticTexts["End this run?"].waitForExistence(timeout: 10), "End run asks first")
         XCTAssertTrue(
-            question.staticTexts.matching(NSPredicate(format: "label ENDSWITH 'stops, and the run moves to Ended.'"))
+            app.staticTexts.matching(NSPredicate(format: "label ENDSWITH 'stops, and the run moves to\u{00A0}Ended.'"))
                 .firstMatch.exists, "the question says what ending does")
         keep(app, "2 the question")
-        question.buttons["End run"].tap()
+        app.buttons["endRun.confirm"].tap()
 
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let row = app.buttons["session-\(uid)"]

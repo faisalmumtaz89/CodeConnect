@@ -1067,6 +1067,7 @@ struct SessionDetailView: View {
         .sheet(isPresented: $showHostedSettingsSheet) {
             HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
                 .environment(model)
+                .ccConfirmationHost()
                 .ccResizableSheet()
         }
         .sheet(isPresented: $showCompactSheet) {
@@ -1074,26 +1075,28 @@ struct SessionDetailView: View {
                 .environment(model)
                 .ccFittedSheet()
         }
-        .alert(ClearConfirmation.title, isPresented: $showClearConfirm) {
-            Button(ClearConfirmation.clear, role: .destructive) { performClear() }
-            Button(ClearConfirmation.keep, role: .cancel) {}
-        } message: {
-            Text(ClearConfirmation.message)
+        .ccConfirmation(isPresented: $showClearConfirm) {
+            CCConfirmation(
+                title: ClearConfirmation.title, message: ClearConfirmation.message,
+                answers: [
+                    .init(title: ClearConfirmation.keep, kind: .cancel, id: "session.clear.cancel"),
+                    .init(title: ClearConfirmation.clear, kind: .destructive, id: "session.clear.confirm") {
+                        performClear()
+                    },
+                ])
         }
-        .alert(FleetWords.endTitle, isPresented: $confirmingEndRun) {
-            Button("End run", role: .destructive) { endRun() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(FleetWords.endMessage(summary?.agent.displayName ?? "The agent"))
+        .ccConfirmation(isPresented: $confirmingEndRun) {
+            CCConfirmation(
+                title: FleetWords.endTitle, message: FleetWords.endMessage(summary?.agent.displayName ?? "The agent"),
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "endRun.cancel"),
+                    .init(title: "End run", kind: .destructive, id: "endRun.confirm") { endRun() },
+                ])
         }
-        .alert(
-            FleetWords.endFailedTitle,
-            isPresented: Binding(get: { endRunNote != nil }, set: { if !$0 { endRunNote = nil } }),
-            presenting: endRunNote
-        ) { _ in
-            Button("OK", role: .cancel) {}
-        } message: { note in
-            Text(note)
+        .ccConfirmation($endRunNote) { note in
+            CCConfirmation(
+                title: FleetWords.endFailedTitle, message: note,
+                answers: [.init(title: "OK", kind: .ok, id: "endRun.ok")])
         }
         .sheet(item: $openApproval) { approval in
             // `openApproval` is only the sheet's IDENTITY (and a last-known

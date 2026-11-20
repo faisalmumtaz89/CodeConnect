@@ -985,16 +985,16 @@ struct MachineScreen: View {
             )
             .fixedSize(horizontal: false, vertical: true)
         }
-        .confirmationDialog(
-            ComputerRemoval.question, isPresented: $confirmingRemove, titleVisibility: .visible
-        ) {
-            Button(ComputerRemoval.action, role: .destructive) {
-                machines.unpair(model)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(ComputerRemoval.sentence(name: model.machineName))
+        .ccConfirmation(isPresented: $confirmingRemove) {
+            CCConfirmation(
+                title: ComputerRemoval.question, message: ComputerRemoval.sentence(name: model.machineName),
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "computer.remove.cancel"),
+                    .init(title: ComputerRemoval.action, kind: .destructive, id: "computer.remove.confirm") {
+                        machines.unpair(model)
+                        dismiss()
+                    },
+                ])
         }
     }
 }

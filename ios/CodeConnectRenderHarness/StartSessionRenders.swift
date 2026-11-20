@@ -218,7 +218,7 @@ extension RenderCatalog {
             app, driver in
             try toBrowse(app, driver)
             try step(app, "start-new-folder", driver)
-            try driver.requireExists(app.alerts.textFields.firstMatch, "the folder name").typeText("scratch")
+            try driver.requireExists(app.textFields.firstMatch, "the folder name").typeText("scratch")
             try driver.requireExists(app.keyboards.firstMatch, "the keyboard")
         },
         RenderScenario(name: "start2-b7-denied", purpose: "steps: browsing, a folder that can't be read", arguments: args()) {

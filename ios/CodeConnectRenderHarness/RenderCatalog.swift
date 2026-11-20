@@ -772,6 +772,62 @@ enum RenderCatalog {
                 try driver.requireExists(app.buttons["Compact…"], "Compact in the run's menu")
                 try driver.requireExists(app.buttons["Clear…"], "Clear in the run's menu")
             }),
+        // **Every ask is the app's own card**, centred under its dimming: a
+        // run's removal, Clear, a mode that works without asking, and a
+        // computer's removal. A new folder's name is `start2-b6-new-folder`.
+        RenderScenario(
+            name: "confirm-remove-run",
+            purpose: "an ended run's Remove asks in the app's card",
+            arguments: ["-CC_FIXTURE", "ended"],
+            reach: { app, driver in
+                let show = app.buttons["Show"]
+                try driver.requireExists(show, "the Ended band's Show")
+                func drag(_ id: String, _ dx: CGFloat, _ dy: CGFloat) {
+                    let start = app.descendants(matching: .any).matching(identifier: id).firstMatch
+                        .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                    start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: dx, dy: dy)))
+                }
+                drag("session-fx-1", 0, -260)
+                show.tap()
+                drag("session-fx-1", 0, -260)
+                let ended = app.descendants(matching: .any).matching(identifier: "session-01K1B3XQ8ZC0DE5FGH7JKMNP00")
+                    .firstMatch
+                try driver.requireExists(ended, "an ended run's row")
+                // The revealed Remove sits at the row's trailing edge, fixed on
+                // the screen while the row's content slides away from it.
+                let block = CGVector(dx: ended.frame.maxX - 40, dy: ended.frame.midY)
+                drag("session-01K1B3XQ8ZC0DE5FGH7JKMNP00", -112, 0)
+                app.coordinate(withNormalizedOffset: .zero).withOffset(block).tap()
+                try driver.requireExists(app.buttons["remove.confirm"], "the card's Remove")
+            }),
+        RenderScenario(
+            name: "confirm-clear",
+            purpose: "Clear asks in the app's card",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/cl", row: "/clear")
+                try driver.requireExists(app.buttons["session.clear.confirm"], "the card's Clear")
+            }),
+        RenderScenario(
+            name: "confirm-mode",
+            purpose: "a mode that works without asking asks first, in the app's card over the settings sheet",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                let bypass = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Bypass permissions'")).firstMatch
+                try driver.require(bypass, "the Bypass permissions row").tap()
+                try driver.requireExists(app.buttons["settings.mode.confirm"], "the card's confirm")
+            }),
+        RenderScenario(
+            name: "confirm-remove-computer",
+            purpose: "Remove this computer asks in the app's card over Settings",
+            arguments: secondMachineArguments,
+            reach: { app, driver in
+                try driver.openSettings(app)
+                try driver.require(secondMachineRow(app), "the offline machine's row").tap()
+                try driver.require(app.buttons["Remove this computer"], "Remove this computer").tap()
+                try driver.requireExists(app.buttons["computer.remove.confirm"], "the card's Remove")
+            }),
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",

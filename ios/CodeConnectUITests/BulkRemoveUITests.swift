@@ -74,15 +74,15 @@ final class BulkRemoveUITests: XCTestCase {
 
         app.buttons["Remove (2)"].tap()
         XCTAssertTrue(
-            app.alerts["Remove 2 runs?"].waitForExistence(timeout: 5), "one question for all")
-        app.alerts.buttons["Cancel"].tap()
+            app.staticTexts["Remove 2 runs?"].waitForExistence(timeout: 5), "one question for all")
+        app.buttons["remove.cancel"].tap()
         XCTAssertTrue(row(app, first).isSelected, "Cancel leaves the selection as it was")
         XCTAssertFalse(
             app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] 'not removed'"))
                 .firstMatch.exists, "and removes nothing")
 
         app.buttons["Remove (2)"].tap()
-        app.alerts.buttons["Remove"].tap()
+        app.buttons["remove.confirm"].tap()
         // No Mac answers the sample fleet: the batch stops, both stay selected,
         // and the screen says so.
         XCTAssertTrue(
@@ -102,7 +102,7 @@ final class BulkRemoveUITests: XCTestCase {
         app.buttons["Remove (2)"].tap()
         // Before the tap: the hold may start while the tap is still returning.
         let confirmed = Date()
-        app.alerts.buttons["Remove"].tap()
+        app.buttons["remove.confirm"].tap()
         XCTAssertTrue(app.buttons["Removing…"].waitForExistence(timeout: 5), "the batch is held")
 
         XCUIDevice.shared.system.open(URL(string: "codeconnect://session/fx-1")!)
