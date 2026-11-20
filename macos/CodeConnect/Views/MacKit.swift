@@ -55,8 +55,8 @@ struct HoverButtonStyle: ButtonStyle {
     var radius: CGFloat = 6
     /// Lightens instead of taking a fill: a label with an opaque face of its own (a raised chip, a filled button), a tab,
     /// which its underline marks, a word right beside another button in a row (a sheet's Cancel, a folder's Forget), or
-    /// one choice of an exclusive group whose chosen one carries the plate (a segment, a sidebar row), so a group never
-    /// shows two plates at once.
+    /// a segment of a track whose chosen segment carries the plate, so a track never shows two plates at once. A row of
+    /// a list (the sidebar's) takes the ordinary fill, weaker than its selected row's plate.
     var over = false
     /// A label with no padding of its own, such as a word alone: the fill stands `bareBleed` off it.
     var bare = false

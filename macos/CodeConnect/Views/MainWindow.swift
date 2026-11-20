@@ -269,7 +269,7 @@ private struct Sidebar: View {
                                     .padding(.vertical, 5)
                                     .background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                                 }
-                                .buttonStyle(.hover(over: true, id: "sidebar.project.\(project.axID)"))
+                                .buttonStyle(.hover(id: "sidebar.project.\(project.axID)"))
                                 .accessibilityIdentifier("sidebar.project.\(project.axID)")
                                 .accessibilityAddTraits(selected ? .isSelected : [])
                             }
@@ -290,7 +290,7 @@ private struct Sidebar: View {
             NavRow(symbol: symbol, title: target.rawValue, count: target.rows(machines.fleet).count,
                 selected: scope == target)
         }
-        .buttonStyle(.hover(over: true, id: "sidebar.scope.\(target.rawValue.lowercased())"))
+        .buttonStyle(.hover(id: "sidebar.scope.\(target.rawValue.lowercased())"))
         .accessibilityIdentifier("sidebar.scope.\(target.rawValue.lowercased())")
         .accessibilityAddTraits(scope == target ? .isSelected : [])
     }
@@ -331,7 +331,7 @@ private struct ComputerRow: View {
         Group {
             if computer.linkHealth.pairingCures, let address {
                 Button { pairAgain(address) } label: { row(load).contentShape(Rectangle()) }
-                    .buttonStyle(.hover(over: true, id: "\(id).pairAgain"))
+                    .buttonStyle(.hover(id: "\(id).pairAgain"))
                     .accessibilityIdentifier("\(id).pairAgain")
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier(id)
@@ -339,7 +339,7 @@ private struct ComputerRow: View {
                 Button(action: select) {
                     row(load).background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
                 }
-                .buttonStyle(.hover(over: true, id: id))
+                .buttonStyle(.hover(id: id))
                 .accessibilityIdentifier(id)
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
