@@ -5,15 +5,16 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.4, with the iPhone app 1.1.21
 
-- On the Mac, every question and notice is the app's own card, centred on its window, never a system alert: End
-  Run, Remove, Clear, a permission mode that asks first, removing a computer, and Block or Allow in Settings. Esc
-  gives the safe answer, and a destructive answer never takes Return.
+- Every question and notice, such as ending or removing a run, Clear, or removing a computer, is the app's own
+  card, centred under the app's dimming, never a system alert, on the Mac and on the iPhone. The safe answer comes
+  first, Esc on the Mac and a tap outside the card on the iPhone give it, and a destructive answer is drawn in
+  red; on the Mac it never takes Return.
 - A model is named in the agent's own words. The Mac's model menus show the agent's description beside each
   model's name, and a run's model reads as the agent reports it.
 - On the iPhone, an open run shows its branch and its uncommitted +N −M under the session bar, and a start can
   name its model, as on the Mac.
-- On the Mac, an ended run shows one quiet line, "This run has ended. Its conversation stays here to read.",
-  where its reply box was. A run the next message would relaunch keeps its box.
+- An ended run shows one quiet line, "This run has ended. Its conversation stays here to read.", where its reply
+  box was, on the Mac and on the iPhone. A run the next message would relaunch keeps its box.
 - On the Mac, every panel closes on a click outside it or on Esc, and each act in a "…" panel has an icon, End
   Run…, Remove… and Clear… in red.
 - On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list is one Tab
