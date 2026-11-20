@@ -3418,10 +3418,13 @@ impl Daemon {
         // here); a Codex run's from its start's check and the model it started on, its model
         // fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
+        // Every Claude run CodeConnect started keeps its start's models, ended or not: its model
+        // fact is named by the chosen entry's id, never by claude's receipt of a change.
         let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
         let mut codex_menus: Vec<String> = Vec::new();
         for row in &rows {
-            if row.lifecycle != Lifecycle::Live {
+            let live = row.lifecycle == Lifecycle::Live;
+            if !live && row.agent != protocol::agent::AgentKind::Claude {
                 continue;
             }
             let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? else {
@@ -3429,7 +3432,9 @@ impl Daemon {
             };
             match row.agent {
                 protocol::agent::AgentKind::Claude => {
-                    menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
+                    if live {
+                        menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
+                    }
                     let receipt = self
                         .db
                         .newest_model_receipt(row.session_uid.clone())
@@ -3453,14 +3458,23 @@ impl Daemon {
             }
         }
         let inner = self.inner.lock().await;
+        let mut model_ids: HashMap<String, String> = HashMap::new();
         for (uid, models, receipt) in &choosing {
             let fact = inner
                 .session_facts
                 .get(uid)
                 .and_then(|facts| facts.model.as_ref());
-            if let (Some(fact), Some(menu)) = (fact, menus.get_mut(uid)) {
-                menu.selected_model =
-                    crate::claude_host::selected_model(models, &fact.value, receipt.as_deref());
+            let Some(fact) = fact else { continue };
+            let chosen =
+                crate::claude_host::selected_model(models, &fact.value, receipt.as_deref());
+            if let Some(id) = chosen
+                .as_deref()
+                .and_then(|value| crate::claude_host::entry_model_id(models, value))
+            {
+                model_ids.insert(uid.clone(), id);
+            }
+            if let Some(menu) = menus.get_mut(uid) {
+                menu.selected_model = chosen;
             }
         }
         for uid in &codex_menus {
@@ -3476,14 +3490,16 @@ impl Daemon {
                     .then(|| fact.value.clone());
             }
         }
-        Ok(Self::assemble_sessions(
-            &inner,
-            rows,
-            &last_seqs,
-            &requests,
-            &menus,
-            &relaunchable,
-        ))
+        let mut sessions =
+            Self::assemble_sessions(&inner, rows, &last_seqs, &requests, &menus, &relaunchable);
+        for session in &mut sessions {
+            if let (Some(fact), Some(id)) =
+                (session.model.as_mut(), model_ids.get(&session.session_uid))
+            {
+                fact.value = id.clone();
+            }
+        }
+        Ok(sessions)
     }
 
     /// The run `session_uid`'s agent host or app-server is attached, by `link`. Then, with the

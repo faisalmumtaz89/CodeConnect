@@ -44,7 +44,8 @@ final class Minor39WireTests: XCTestCase {
         XCTAssertEqual(menus.modes.map(\.label), ["Ask before edits", "Accept edits", "Plan", "Bypass permissions"])
         XCTAssertEqual(menus.selectedModel, "sonnet", "the daemon states the chosen model (minor 39)")
         XCTAssertEqual(s.effort?.value, "high")
-        XCTAssertEqual(s.model?.value, "sonnet (claude-sonnet-5-5)")
+        // After an app's change the fact is the chosen entry's id (minor 45), never claude's receipt.
+        XCTAssertEqual(s.model?.value, "claude-sonnet-5-5")
         XCTAssertEqual(s.permissionMode?.value, "plan")
     }
 

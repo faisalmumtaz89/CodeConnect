@@ -152,7 +152,7 @@
     },
     "model": {
       "seq": 3,
-      "value": "sonnet (claude-sonnet-5-5)"
+      "value": "claude-sonnet-5-5"
     },
     "permission_mode": {
       "seq": 5,
@@ -252,7 +252,7 @@
     "link": "attached",
     "model": {
       "seq": 3,
-      "value": "sonnet (claude-sonnet-5-5)"
+      "value": "claude-sonnet-5-5"
     },
     "permission_mode": {
       "seq": 5,

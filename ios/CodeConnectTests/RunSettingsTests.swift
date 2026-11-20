@@ -127,7 +127,8 @@ final class RunSettingsTests: XCTestCase {
         else {
             return XCTFail("a hosted run with no menus is hostedReadOnly")
         }
-        XCTAssertEqual(model, "sonnet (claude-sonnet-5-5)")
+        // The daemon names the fact by the chosen entry's id, so a run with no menus reads it bare too.
+        XCTAssertEqual(model, "claude-sonnet-5-5")
     }
 
     /// Each answer class words itself as the control should show it: the applied cases name the setting
@@ -227,7 +228,7 @@ final class RunSettingsTests: XCTestCase {
     /// Code 2.1.319's own list), never as the receipt's text.
     func testARunsModelAfterAChangeReadsAsTheChosenEntrysID() throws {
         let run = try summary("session_hosted_live")
-        XCTAssertEqual(run.model?.value, "sonnet (claude-sonnet-5-5)")
+        XCTAssertEqual(run.model?.value, "claude-sonnet-5-5")
         XCTAssertEqual(run.menus?.selectedModel, "sonnet")
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus),

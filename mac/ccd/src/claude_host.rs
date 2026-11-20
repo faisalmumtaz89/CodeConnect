@@ -1299,6 +1299,19 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
     }
 }
 
+/// The model id the entry `value` of `models` (the start's answer) runs: its `resolvedModel`, or
+/// the value itself when claude gives none. None when no entry has that value.
+pub(crate) fn entry_model_id(models: &[serde_json::Value], value: &str) -> Option<String> {
+    let entry = models.iter().find(|model| model["value"] == value)?;
+    Some(
+        entry["resolvedModel"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(value)
+            .to_string(),
+    )
+}
+
 /// Which `value` of `models` (the start's answer, as [`menus`] reads it) claude's model fact
 /// `fact` names, `receipt` being the run's newest receipt of a model change: the fact is a
 /// value; else its text before " (" is one (claude's receipt, `sonnet (claude-sonnet-5-5)`); else
@@ -9399,10 +9412,38 @@ mod tests {
         }
     }
 
+    /// **The model id an entry runs**, against claude's recorded start answer: its
+    /// `resolvedModel`; an entry claude gives none keeps its value (a third-party model's); no
+    /// entry, none.
+    #[test]
+    fn the_model_id_an_entry_runs() {
+        let answer = recorded_start_answer();
+        let mut models = answer["models"].as_array().unwrap().clone();
+        assert_eq!(
+            entry_model_id(&models, "opus").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            entry_model_id(&models, "default").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            entry_model_id(&models, "sonnet").as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        models.push(serde_json::json!({"value": "acme-coder-7b", "displayName": "Acme Coder 7B"}));
+        assert_eq!(
+            entry_model_id(&models, "acme-coder-7b").as_deref(),
+            Some("acme-coder-7b")
+        );
+        assert_eq!(entry_model_id(&models, "not-listed"), None);
+    }
+
     /// **A hosted run's summary names the menu value of its model fact**, its newest receipt
     /// read from the store: with claude's recorded start answer, an init's `claude-opus-5-5`
     /// reads `default`, claude's receipt of an app's `opus` reads `opus`, and the next init's
-    /// `claude-opus-5-5` still reads `opus`.
+    /// `claude-opus-5-5` still reads `opus`. **And its model fact is the chosen entry's id** at
+    /// every step, the receipt's included: `claude-opus-5-5`, never `opus (claude-opus-5-5)`.
     #[tokio::test]
     async fn a_hosted_runs_menus_name_its_model() {
         let rig = rig();
@@ -9420,6 +9461,7 @@ mod tests {
                 "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "model": "claude-opus-5-5"})
         };
         let mut chosen = Vec::new();
+        let mut facts = Vec::new();
         for (seq, line) in [
             (3, init("9d1f0000-0000-4000-8000-000000000071")),
             (
@@ -9434,17 +9476,15 @@ mod tests {
         ] {
             sdk(&mut played.write, seq, line).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
-            chosen.push(
-                summary(&rig.daemon, &uid)
-                    .await
-                    .menus
-                    .and_then(|menus| menus.selected_model),
-            );
+            let now = summary(&rig.daemon, &uid).await;
+            facts.push(now.model.map(|fact| fact.value));
+            chosen.push(now.menus.and_then(|menus| menus.selected_model));
         }
         assert_eq!(
             chosen,
             [Some("default"), Some("opus"), Some("opus")].map(|value| value.map(str::to_string))
         );
+        assert_eq!(facts, vec![Some("claude-opus-5-5".to_string()); 3]);
         stop(&played.dir);
     }
 
