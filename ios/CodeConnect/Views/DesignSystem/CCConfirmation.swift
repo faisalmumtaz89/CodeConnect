@@ -11,7 +11,8 @@ struct CCConfirmation {
     let message: String
     /// The answers in order: the safe one first, the one that acts last.
     let answers: [Answer]
-    /// A name to type, for an ask that makes something.
+    /// A name to type, for an ask that makes something: while it is blank,
+    /// only the safe answer can be given.
     var field: Field?
 
     struct Answer {
@@ -97,7 +98,9 @@ private struct CCConfirmationHost: ViewModifier {
             .environment(\.ccConfirmationQueue, queue)
             .overlay {
                 if let shown = queue.shown.last {
-                    CCConfirmationScreen(confirmation: shown.confirmation) { answer in
+                    CCConfirmationScreen(
+                        confirmation: shown.confirmation, typed: shown.confirmation.field?.text ?? .constant("")
+                    ) { answer in
                         queue.shown.removeAll { $0.owner == shown.owner }
                         shown.close()
                         answer.perform()
@@ -109,6 +112,8 @@ private struct CCConfirmationHost: ViewModifier {
 
 private struct CCConfirmationScreen: View {
     let confirmation: CCConfirmation
+    /// The field's text, held so a blank one keeps the acting answers off as it is typed.
+    @Binding var typed: String
     let answer: (CCConfirmation.Answer) -> Void
     @Environment(\.dynamicTypeSize) private var typeSize
 
@@ -184,7 +189,9 @@ private struct CCConfirmationScreen: View {
         case .destructive: variant = .destructive
         case .ok: variant = .primary
         }
+        let blank = confirmation.field != nil && typed.trimmingCharacters(in: .whitespaces).isEmpty
         return CCButton(each.title, variant: variant, size: .md, fullWidth: fullWidth, haptic: nil) { answer(each) }
+            .disabled(blank && each.kind != .cancel)
             .accessibilityIdentifier(each.id)
     }
 
