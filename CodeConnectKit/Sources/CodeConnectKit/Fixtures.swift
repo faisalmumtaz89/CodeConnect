@@ -551,7 +551,23 @@ enum Fixtures {
     /// the start-a-session list holds, so a card and its project are one folder.
     private static let realNames = ["storefront-api", "ios-app", "docs-site", "query-parser", "web-dashboard"]
 
+    /// `-CC_LONG_LABEL before|after`: the first run's folder, and Start's first folder, have a 60-character name,
+    /// which ccd sends cut to 40 (`before`) or whole (`after`). Its folder name, then the label as sent.
+    static var longLabel: (folder: String, sent: String)? {
+        #if DEBUG
+            let folder = "customer-analytics-platform-q4-2026-data-migration-worktrees"
+            switch UserDefaults.standard.string(forKey: "CC_LONG_LABEL") {
+            case "before": return (folder, String(folder.prefix(39)) + "…")
+            case "after": return (folder, folder)
+            default: return nil
+            }
+        #else
+            return nil
+        #endif
+    }
+
     private static func projectLabel(_ index: Int) -> String {
+        if index == 1, let long = longLabel { return long.sent }
         #if DEBUG
             if UserDefaults.standard.bool(forKey: "CC_FIXTURE_REAL_NAMES"), index <= realNames.count {
                 return realNames[index - 1]
@@ -561,6 +577,7 @@ enum Fixtures {
     }
 
     private static func cwd(_ index: Int) -> String {
+        if index == 1, let long = longLabel { return "/Users/jordan/code/\(long.folder)" }
         let label = projectLabel(index)
         return label.hasPrefix("app-") ? "/Users/dev/\(label)" : "/Users/jordan/code/\(label)"
     }

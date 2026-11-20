@@ -295,6 +295,7 @@ private struct Sidebar: View {
                                                 .frame(width: 16)
                                                 .accessibilityHidden(true)
                                             Text(project.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                                                .truncationMode(.middle)
                                             Spacer()
                                             Text(verbatim: "\(project.rows.count)").font(Theme.ui(11.5))
                                                 .foregroundStyle(Theme.text3).monospacedDigit()
