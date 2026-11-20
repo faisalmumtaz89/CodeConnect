@@ -224,15 +224,19 @@ struct BranchMenu: View {
                 }
             }
             .frame(height: CGFloat(shownRows - foot) * Self.rowHeight)
-            if git.branchesTruncated {
-                Text(StartWords.olderBranches).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                    .padding(.horizontal, 12)
-                    .frame(height: Self.rowHeight)
+            // The sections' hairline over the foot: the lines above it are a list that goes on, the foot stays.
+            VStack(alignment: .leading, spacing: 0) {
+                if git.branchesTruncated {
+                    Text(StartWords.olderBranches).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                        .padding(.horizontal, 12)
+                        .frame(height: Self.rowHeight)
+                }
+                item(id: "start.branch.new", name: StartWords.newBranch, checked: place == nil, choose: { choose(nil) }) {
+                    Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
+                    ModelDetail(text: StartWords.newBranchDetail)
+                }
             }
-            item(id: "start.branch.new", name: StartWords.newBranch, checked: place == nil, choose: { choose(nil) }) {
-                Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
-                ModelDetail(text: StartWords.newBranchDetail)
-            }
+            .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
         }
         .padding(.vertical, Self.inset)
         .frame(width: width, alignment: .leading)
