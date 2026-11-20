@@ -114,5 +114,23 @@ final class RelaunchableRunTests: XCTestCase {
         XCTAssertEqual(
             ended.resumeSessionID, "abc123",
             "a non-relaunchable ended run still offers its resume command")
+        XCTAssertNil(relaunchable.resumeCommand, "no command where there is no id to offer")
+    }
+
+    /// **Both apps offer one command, the Kit's**, quoted for the shell it is pasted into, under one sentence.
+    /// Must-fail: build it without `Shell.quoted` and the folder with a space splits into two arguments.
+    func testTheResumeCommandIsQuotedAndRunFromTheRunsFolder() throws {
+        let ended = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data(
+                """
+                {"session_uid":"u-ended","session_id":"u-ended","tmux_session":"",
+                 "cwd":"/work/my app","project_label":"my app","lifecycle":"exited","link":"attached",
+                 "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
+                 "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],"agent":"claude",
+                 "codex_link":"none","claude_session_id":"abc123"}
+                """.utf8))
+        XCTAssertEqual(ended.resumeCommand, "cd '/work/my app' && claude --resume 'abc123'")
+        XCTAssertEqual(SessionWords.pickUpAtComputer, "Pick this conversation up at the computer")
     }
 }

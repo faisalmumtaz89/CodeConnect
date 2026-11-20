@@ -4,14 +4,16 @@ import SwiftUI
 /// The reply box at the foot of a run's conversation: what became of the last thing sent, or why sending cannot work,
 /// over the words and what answers them. Where the words go is Kit's to say (`AppModel.submission`): a Codex run's own
 /// message, Claude's typed text, or a slash command this box answers with its own control. A run that takes no reply
-/// (Kit's `takesNoReply`) has no box: one quiet line in its place says it has ended.
+/// (Kit's `takesNoReply`) has no box: one quiet line in its place says it has ended, and where the run can be picked up
+/// at the computer, the command that does it stands above that line.
 struct ComposerBar: View {
     let key: String
     @Environment(Machines.self) private var machines
 
     var body: some View {
         if let model = machines.model(forSession: key) {
-            if model.shownSummary(for: key)?.takesNoReply == true {
+            if let summary = model.shownSummary(for: key), summary.takesNoReply {
+                if let command = summary.resumeCommand { ResumeCommand(command: command) }
                 EndedLine()
             } else if let kept = model.drafts(for: key) {
                 Composer(model: model, key: key, kept: kept)
@@ -38,6 +40,39 @@ private struct EndedLine: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.endedLine")
+    }
+}
+
+/// Over an ended run's foot band, on the conversation's column: the command that picks the conversation up at the
+/// computer (Kit's `resumeCommand`), drawn whole, selectable and copied whole by its button, as the iPhone offers it.
+private struct ResumeCommand: View {
+    let command: String
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+            HStack(spacing: 8) {
+                // Whole, wrapping where it must: a cut would hide what runs.
+                Text(command).font(Theme.mono(12)).foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("session.resume.command")
+                ActionButton(title: copied ? "Copied" : "Copy", key: nil, prominent: false, id: "session.resume.copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(command, forType: .string)
+                    copied = true
+                }
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.bottom, 12)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("session.resume")
     }
 }
 

@@ -596,10 +596,15 @@ enum Fixtures {
         let endedRuns = (0..<variant.endedCount).map { offset in
             let index = variant.sessionCount + offset + 1
             let relaunchable = variant == .ended && offset == variant.endedCount - 1 ? #""relaunchable":true,"# : ""
+            // Under `ended` the first one carries the Claude session id ccd records, in a long folder, so a render
+            // reaches the command that picks a run up at the computer at its longest.
+            let resumes = variant == .ended && offset == 0
+            let resumable = resumes ? #""claude_session_id":"5f0c2a8e-1b7d-4c39-9e64-2d8a7f3b1c05","# : ""
+            let folder = resumes ? "/Users/dev/clients/northwind/platform-migration-2026/\(projectLabel(index))" : cwd(index)
             return """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
-                "session_id":"fx-\(index)",\(relaunchable)\
-                "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
+                "session_id":"fx-\(index)",\(relaunchable)\(resumable)\
+                "cwd":"\(folder)","project_label":"\(projectLabel(index))",\
                 "lifecycle":"exited","link":"detached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
                 "blocked_on":[]}

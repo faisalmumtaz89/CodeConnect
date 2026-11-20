@@ -110,6 +110,8 @@ public enum SessionWords {
     public static let nothingRecorded = "Nothing recorded yet"
     /// Under `nothingRecorded`, while the run can still record something: not on one that takes no reply.
     public static let eventsAppearHere = "Events appear here as the agent works."
+    /// Over an ended run's `SessionSummary.resumeCommand`.
+    public static let pickUpAtComputer = "Pick this conversation up at the computer"
 }
 
 /// A run's settings, as both apps name them.
