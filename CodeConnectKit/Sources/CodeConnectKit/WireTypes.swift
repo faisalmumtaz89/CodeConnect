@@ -772,19 +772,31 @@ public struct RunMenus: Codable, Sendable, Hashable {
     }
 }
 
-/// One model of a run's menu: the agent's own `value` (what a `set_model` carries), the label it
-/// shows as the model's name alone, and the efforts this model takes.
+/// One model of a run's menu: the agent's own `value` (what a `set_model` carries), its label and its
+/// description, each exactly as the agent sends it, and the efforts this model takes.
 public struct MenuModel: Codable, Sendable, Hashable {
     public let value: String
     public let label: String
     public let efforts: [String]
+    /// The agent's own description of the model, as sent (Claude Code's carries the model's version); absent
+    /// when it gives none.
+    public let detail: String?
+
+    public init(value: String, label: String, efforts: [String], detail: String? = nil) {
+        self.value = value
+        self.label = label
+        self.efforts = efforts
+        self.detail = detail
+    }
 
     /// The name an app shows for a model: the agent's own label, except its default entry, which is "Default" for
     /// every agent (Claude Code's own reads "Default (recommended)"; the model's name is enough).
     public static func shownLabel(value: String, label: String) -> String { value == "default" ? "Default" : label }
 
     /// This model with the label an app shows.
-    var shown: MenuModel { MenuModel(value: value, label: Self.shownLabel(value: value, label: label), efforts: efforts) }
+    var shown: MenuModel {
+        MenuModel(value: value, label: Self.shownLabel(value: value, label: label), efforts: efforts, detail: detail)
+    }
 }
 
 /// One permission mode of a run's menu: the `value` a `set_mode` carries and the label it shows.

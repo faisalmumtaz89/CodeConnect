@@ -107,6 +107,10 @@ final class Minor33WireTests: XCTestCase {
         XCTAssertEqual(codex.first?.label, "Default")
         XCTAssertEqual(codex.dropFirst().map(\.model).first, "gpt-6.1-sol")
         XCTAssertEqual(codex.count, 10)
+        // Each row keeps the agent's own description as sent; the Default Codex lists none of has none.
+        XCTAssertEqual(claude[3].detail, "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok")
+        XCTAssertEqual(codex.first?.detail, nil)
+        XCTAssertEqual(codex[1].detail, "Latest workhorse model for coding and everyday work.")
     }
 
     func testTheButtonAndTheBarSayWhatStartDoes() throws {
