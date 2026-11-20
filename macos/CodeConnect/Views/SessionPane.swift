@@ -79,6 +79,7 @@ private struct Place<Actions: View>: View {
     let summary: SessionSummary
     let computer: String?
     @ViewBuilder let actions: Actions
+    @Environment(\.headerClearance) private var headerClearance
 
     var body: some View {
         HStack(spacing: 6) {
@@ -95,6 +96,8 @@ private struct Place<Actions: View>: View {
         .font(Theme.ui(12))
         .foregroundStyle(Theme.text2)
         .padding(.horizontal, 20)
+        .padding(.leading, max(0, headerClearance.leading - 20))
+        .padding(.trailing, max(0, headerClearance.trailing - 20))
         .frame(height: 52)
     }
 

@@ -61,6 +61,7 @@ struct FleetList: View {
     @State private var hovered: String?
     /// The window's one row menu, which a run's "…" or a right-click on its row opens.
     @Environment(RowMenu.self) private var menu
+    @Environment(\.headerClearance) private var headerClearance
     /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
     @FocusState private var listFocused: Bool
     /// The run End Run… is asking about, and what its computer said when it did not end.
@@ -84,6 +85,8 @@ struct FleetList: View {
                 GroupingSwitch(selection: $grouping)
             }
             .padding(.horizontal, 16)
+            .padding(.leading, max(0, headerClearance.leading - 16))
+            .padding(.trailing, max(0, headerClearance.trailing - 16))
             .frame(height: 52)
             Rectangle().fill(Theme.hairline).frame(height: 1)
 

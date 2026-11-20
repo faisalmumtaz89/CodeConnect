@@ -198,6 +198,8 @@ private let trackInset: CGFloat = 2
 extension EnvironmentValues {
     /// Raised each time Return in the run list asks for the open run's reply box.
     @Entry var replyFocusRequest = 0
+    /// How far from the window's edges a pane's header starts and ends: clear of the window's own controls.
+    @Entry var headerClearance = EdgeInsets()
 }
 
 extension FocusedValues {
