@@ -115,21 +115,21 @@ public enum CodexProse {
                 message: "Codex stopped waiting. Nothing was approved and nothing was denied.",
                 icon: "clock-countdown", tone: .warning)
 
-        // The daemon attempted a write and never confirmed it. Its `cause` is
-        // human text written to be shown, so it is shown — and the stage says
-        // how far the attempt got, in words rather than in its wire spelling.
-        case .unknown(let attemptedBy, _, let stage, let cause):
+        // The daemon attempted a write and never confirmed it. The stage says how
+        // far the attempt got, in words; its `cause` is the link's own spelling
+        // ("connection reset before ack"), which the sibling notes do not show either.
+        case .unknown(let attemptedBy, _, let stage, _):
             // A paired device's attempt, which on a Mac may be any of them: the iPhone keeps its words.
             let who =
                 attemptedBy == .phone
                 ? AnswerOutcome.answeringDevice(nil, on: host).map { "The answer from \($0)" }
-                    ?? "This \(host.noun)'s answer"
+                    ?? "This \(host.noun)’s answer"
                 : "The answer"
             return Banner(
                 title: "Sent, outcome unknown",
                 message:
                     "\(who) was written and \(host.computer("the computer")) did not learn what became of it. "
-                    + "\(writeStage(stage)) It will not be sent again — check \(host.computer("the computer")). (\(cause))",
+                    + "\(writeStage(stage)) It will not be sent again. Check \(host.computer("the computer")).",
                 icon: "question", tone: .warning)
 
         case .unrecognisedStatus(let raw):
@@ -313,7 +313,7 @@ public enum CodexProse {
         switch agent {
         case .codex:
             guard daemonHonoursStop else {
-                return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Codex turn. Update it."
+                return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop a Codex turn. Update it."
             }
             // **The one honest hide** is the absent turn: with nothing to name
             // there is nothing to send, so the control is absent rather than dead.
@@ -334,7 +334,7 @@ public enum CodexProse {
             // banner — in the race where the run's state changes between the button
             // showing and the tap landing (the run ends under a shown button).
             guard daemonHonoursStop else {
-                return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Claude turn. Update it."
+                return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop a Claude turn. Update it."
             }
             guard isLive else { return "This run has ended, so there is no turn to stop." }
             guard runningTurn != nil else { return "Nothing is running to stop." }
@@ -357,7 +357,7 @@ public enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex run is spoken to this way." }
         guard daemonUnderstandsCompose else {
-            return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to carry a message to Codex. Update it."
+            return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to carry a message to Codex. Update it."
         }
         return link.blockedReason(for: .compose)
     }

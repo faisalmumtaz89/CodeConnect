@@ -49,7 +49,7 @@ final class PairingFailureTests: XCTestCase {
             """)
         // And it says where it looked and what to check, in words and no command.
         guard case .failed(let reason) = connection.phase else { return }
-        XCTAssertTrue(reason.contains("Couldn't reach your computer at 127.0.0.1."), reason)
+        XCTAssertTrue(reason.contains("Couldn’t reach your computer at 127.0.0.1."), reason)
         XCTAssertTrue(reason.contains("Turn on Tailscale on this iPhone"), reason)
         XCTAssertFalse(reason.contains("codeconnect "), reason)
     }

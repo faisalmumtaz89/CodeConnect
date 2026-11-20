@@ -56,7 +56,7 @@ final class UnknownComputerTests: XCTestCase {
         XCTAssertFalse(reason.contains("too old"), reason)
     }
 
-    private let link = "Can't reach your computer. Retrying automatically."
+    private let link = "Can’t reach your computer. Retrying automatically."
 
     private func heldQuestion() throws -> (ApprovalItem, QuestionCard) {
         let url = try XCTUnwrap(
@@ -112,7 +112,7 @@ final class UnknownComputerTests: XCTestCase {
             answersQuestions: old.knownAnswersQuestions, linkReason: nil)
         XCTAssertEqual(question, .macTooOld)
         XCTAssertTrue(
-            question.banner?.message.contains("This computer's CodeConnect is too old") ?? false)
+            question.banner?.message.contains("This computer’s CodeConnect is too old") ?? false)
 
         let model = AppModel(pairing: PairingStore(ephemeral: true), cache: EventCache())
         model.connection.simulateConnectedForTesting()
@@ -120,9 +120,9 @@ final class UnknownComputerTests: XCTestCase {
         model.adoptSummariesForTesting([codexSummary()])
         XCTAssertEqual(
             model.stopUnavailable(for: uid),
-            "This computer's CodeConnect is too old to stop a Codex turn. Update it.")
+            "This computer’s CodeConnect is too old to stop a Codex turn. Update it.")
         XCTAssertEqual(
             model.composeUnavailable(for: uid),
-            "This computer's CodeConnect is too old to carry a message to Codex. Update it.")
+            "This computer’s CodeConnect is too old to carry a message to Codex. Update it.")
     }
 }

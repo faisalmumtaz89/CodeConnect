@@ -152,17 +152,17 @@ public struct DaemonProfile: Sendable, Hashable {
         switch (stopsCodexTurns, composesToCodex) {
         case (true, true): return nil
         case (true, false):
-            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect can stop a Codex turn but cannot carry a message to one. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))’s CodeConnect can stop a Codex turn but cannot carry a message to one. Update it."
         case (false, true):
-            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))’s CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
         case (false, false):
-            return "\(HostDevice.current.computer("The computer", named: machineName))'s CodeConnect cannot stop or speak to a Codex run. Update it."
+            return "\(HostDevice.current.computer("The computer", named: machineName))’s CodeConnect cannot stop or speak to a Codex run. Update it."
         }
     }
 
     /// Why the diff button might not work, or nil when it should: it works on every
     /// connected daemon.
     public var diffCaveat: String? {
-        isConnected ? nil : "Not connected. \(HostDevice.current.computer("The computer")) can't be asked for a diff."
+        isConnected ? nil : "Not connected. \(HostDevice.current.computer("The computer")) can’t be asked for a diff."
     }
 }

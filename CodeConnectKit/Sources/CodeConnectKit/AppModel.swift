@@ -1066,7 +1066,23 @@ public final class AppModel {
             // `…but the daem…` and dimmed to 3.16:1, and nothing could render
             // the frame that showed it. `LinkHealth.staleAfter` is 30s, so the
             // state arrives on its own about half a minute in.
-            guard UserDefaults.standard.string(forKey: "CC_FIXTURE_LINK") != "stale" else { return }
+            //
+            // **`-CC_FIXTURE_LINK refused-version` / `refused-pairing`** puts the link where the computer refused it,
+            // for a different version or for its pairing, with the fleet still on screen: no fixture reached a refusal,
+            // which only a live pairing produces, so the word each refusal says could not be rendered.
+            switch UserDefaults.standard.string(forKey: "CC_FIXTURE_LINK") {
+            case "stale": return
+            case "refused-version":
+                connection.setRefusedForTesting(
+                    .differentVersion,
+                    reason: "That computer runs a different version of CodeConnect. Update CodeConnect on it and on "
+                        + "this \(HostDevice.current.name), then try again.")
+                return
+            case "refused-pairing":
+                connection.setRefusedForTesting(.credential, reason: "This \(HostDevice.current.name) is not paired with it.")
+                return
+            default: break
+            }
             Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(5))
@@ -3468,7 +3484,7 @@ public final class AppModel {
         switch refusal {
         case .notAdvertised:
             return
-                "\(HostDevice.current.computer("The computer"))'s CodeConnect never said it could \(verb), so nothing was sent. Update it."
+                "\(HostDevice.current.computer("The computer"))’s CodeConnect never said it could \(verb), so nothing was sent. Update it."
         case .notACodexSession(let agent):
             return "This is a \(agent) run, so nothing was sent."
         case .nothingToSend(let reason):
@@ -3560,11 +3576,11 @@ public final class AppModel {
         switch (agent, decision) {
         case (.claude, .answers), (.claude, .decline):
             guard isQuestion else {
-                return "Answers are for Claude's questions; this card is not one, "
+                return "Answers are for Claude’s questions; this card is not one, "
                     + "so nothing was sent."
             }
             guard answersQuestions else {
-                return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer Claude's questions from the "
+                return "\(HostDevice.current.computer("The computer"))’s CodeConnect is too old to answer Claude’s questions from the "
                     + "\(HostDevice.current.noun), so nothing was sent. Answer at \(HostDevice.current.computer("the computer"))."
             }
             return nil
@@ -3572,13 +3588,13 @@ public final class AppModel {
             return "Claude is asking a question, which is answered by choosing its answers, "
                 + "so nothing was sent."
         case (.claude, _) where !answersApprovalsByHook:
-            return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer Claude's approvals from the "
+            return "\(HostDevice.current.computer("The computer"))’s CodeConnect is too old to answer Claude’s approvals from the "
                 + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
         case (.codex, _) where !resolvesCodexCards:
             // **Nothing known of the daemon.** A card is retired by the `request_id`
             // on its resolution, which every connected daemon sends. A card that
             // cannot be retired must not be answered from here, by any vocabulary.
-            return "\(HostDevice.current.computer("The computer"))'s CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
+            return "\(HostDevice.current.computer("The computer"))’s CodeConnect is too old to answer a Codex card from the \(HostDevice.current.noun), "
                 + "so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
         case (.codex, .answers), (.codex, .decline):
             // A Codex question card is answered with the question family, exactly as
@@ -3655,13 +3671,13 @@ public final class AppModel {
         // itself is never typed through a side door.
         switch ClaudeCommandPolicy.action(for: text) {
         case .nativeModel:
-            return .refused("/model has its own control in the app — the run's settings.")
+            return .refused("Use the run’s settings to change the model.")
         case .nativeDiff:
-            return .refused("/diff has its own view in the app — open Changes.")
+            return .refused("Open Changes to see the diff.")
         case .nativeEffort:
-            return .refused("/effort has its own control in the app — the run's settings.")
+            return .refused("Use the run’s settings to change the effort.")
         case .nativeCompact:
-            return .refused("/compact has its own control in the app — use the Compact sheet.")
+            return .refused("Type /compact in the reply box to compact the context.")
         case .nativeClear:
             return .refused("/clear has its own confirmation in the app.")
         case .blocked(_, let reason):
@@ -3699,7 +3715,7 @@ public final class AppModel {
         let trimmed = Self.normalizedSendText(text)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
-            return .failed("\(HostDevice.current.computer("The computer"))'s CodeConnect can't take typed text.")
+            return .failed("\(HostDevice.current.computer("The computer"))’s CodeConnect can’t take typed text.")
         }
         // A committed send retires the last Stop's note, so the shared outcome slot shows what
         // became of THIS send rather than a stale "stopped" from the turn just ended. Codex does the
@@ -3889,7 +3905,7 @@ public final class AppModel {
                 let hint =
                     self.daemonProfile.servesDiff
                     ? ""
-                    : " \(HostDevice.current.computer("The computer"))'s CodeConnect never said it can show diffs, which would explain it."
+                    : " \(HostDevice.current.computer("The computer"))’s CodeConnect never said it can show diffs, which would explain it."
                 if let quoted = self.connection.daemonErrorReported(since: askedAt) {
                     self.diffs[key] = .failed(.daemon(quoted + hint))
                 } else {

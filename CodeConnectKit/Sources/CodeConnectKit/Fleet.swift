@@ -462,7 +462,7 @@ public enum FleetStatusRule {
         }
         guard capabilities.canApproveReliably else {
             return .observe(
-                reason: "\(HostDevice.current.computer("The computer")) can't promise an answer will reach the agent.")
+                reason: "\(HostDevice.current.computer("The computer")) can’t promise an answer will reach the agent.")
         }
         switch summary.link {
         case .attached:
@@ -598,7 +598,7 @@ public struct LinkHealth: Sendable, Equatable {
         case .unreachable:
             return LinkHealth(
                 level: .offline, age: age,
-                detail: "Can't reach \(HostDevice.current.computer("your computer")). Retrying automatically.")
+                detail: "Can’t reach \(HostDevice.current.computer("your computer")). Retrying automatically.")
         case .blocked:
             return LinkHealth(
                 level: .blocked, age: age,

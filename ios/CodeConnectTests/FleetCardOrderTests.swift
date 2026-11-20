@@ -404,7 +404,7 @@ final class FleetCardOrderTests: XCTestCase {
         let phases: [(String, DaemonConnection.Phase?)] = [
             ("connected", nil), ("Connecting", .connecting),
             ("Offline", .waiting(until: Date(timeIntervalSinceNow: 60), reason: "The computer did not answer.")),
-            ("Not paired", .failed(reason: "This iPhone is not paired with it.")),
+            ("Pair again", .failed(reason: "This iPhone is not paired with it.")),
         ]
         for computer in ["Mac mini", "Design Studio MacBook Pro"] {
             for project in ["bravo", longProject] {

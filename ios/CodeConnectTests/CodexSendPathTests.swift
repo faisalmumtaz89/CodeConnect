@@ -750,7 +750,7 @@ final class CodexSendPathTests: XCTestCase {
         model.connection.simulateCapabilitiesForTesting(
             Capabilities(canApproveReliably: true, sendText: false, extra: [:]), minor: 19)
         XCTAssertEqual(
-            model.sendBlockedReason(for: key(), draft: "hello"), "The computer's CodeConnect can't take typed text.")
+            model.sendBlockedReason(for: key(), draft: "hello"), "The computer’s CodeConnect can’t take typed text.")
         model.connection.setPhaseForTesting(.connecting)
         let link = try XCTUnwrap(model.linkHealth.disabledReason)
         XCTAssertEqual(model.sendBlockedReason(for: key(), draft: "hello"), link, "the link's reason comes first")

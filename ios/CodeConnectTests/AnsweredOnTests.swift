@@ -116,7 +116,7 @@ final class AnsweredOnTests: XCTestCase {
         let unsure = CodexResolution.unknown(
             attemptedBy: .phone, attemptedDecision: nil, writeStage: .upstreamWriteUnconfirmed, cause: "the link dropped")
         XCTAssertTrue(
-            CodexProse.resolution(unsure, on: .iPhone).message.hasPrefix("This phone's answer was written "),
+            CodexProse.resolution(unsure, on: .iPhone).message.hasPrefix("This phone’s answer was written "),
             CodexProse.resolution(unsure, on: .iPhone).message)
         XCTAssertTrue(
             CodexProse.resolution(unsure, on: .mac).message.hasPrefix("The answer from a paired device was written "),

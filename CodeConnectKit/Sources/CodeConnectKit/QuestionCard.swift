@@ -353,7 +353,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .macTooOld:
             return (
                 "Answer at \(host.computer("the computer"))",
-                "\(host.computer("This computer"))'s CodeConnect is too old to answer \(who)'s questions from the "
+                "\(host.computer("This computer"))’s CodeConnect is too old to answer \(who)’s questions from the "
                     + "\(host.noun). Answer it at \(host.computer("the computer")), or update it to answer here.",
                 .warning, "desktop"
             )
@@ -399,7 +399,7 @@ public enum QuestionCardStatus: Sendable, Hashable {
         case .unavailable:
             return (
                 "No longer available",
-                "This question can't be answered here — the run is no longer on \(host.computer("the computer")), or its "
+                "This question can’t be answered here. The run is no longer on \(host.computer("the computer")), or its "
                     + "log was reset.",
                 .warning, "question"
             )

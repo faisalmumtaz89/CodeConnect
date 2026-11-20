@@ -209,11 +209,20 @@ final class TimelineTurnTests: XCTestCase {
     func testAComputersLinkIsSaidInAWordOnlyWhenItIsNotLive() {
         let words: [LinkHealth.Level: String?] = [
             .live: nil, .lagging: nil, .stale: "Stale", .connecting: "Connecting",
-            .offline: "Offline", .rejected: "Not paired",
+            .offline: "Offline", .rejected: nil,
         ]
         for (level, word) in words {
             XCTAssertEqual(level.machineMark.word, word, "\(level)")
         }
+    }
+
+    /// A refused link is said by its cause, as the link's own word says it: a different version is not a
+    /// pairing to redo.
+    func testAComputersRefusedLinkIsSaidInTheLinksOwnWord() {
+        let version = LinkHealth.evaluate(phase: .failed(reason: "x"), lastContactAt: nil, refusal: .differentVersion)
+        XCTAssertEqual(version.machineWord, "Different version")
+        let pairing = LinkHealth.evaluate(phase: .failed(reason: "x"), lastContactAt: nil, refusal: .credential)
+        XCTAssertEqual(pairing.machineWord, "Pair again")
     }
 
     // MARK: An earlier daemon's hook notifications

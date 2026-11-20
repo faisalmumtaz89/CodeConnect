@@ -24,7 +24,7 @@ final class ModeConfirmationTests: XCTestCase {
         XCTAssertEqual(
             w.message,
             "Codex will run commands and edit files in this run without asking you first, outside this "
-                + "project's folder and with network access, until you change the mode back.")
+                + "project’s folder and with network access, until you change the mode back.")
         XCTAssertEqual(w.confirm, "Give Full Access")
         XCTAssertEqual(w.cancel, "Keep Asking")
     }

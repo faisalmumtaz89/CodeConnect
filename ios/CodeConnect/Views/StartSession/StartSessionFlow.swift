@@ -593,7 +593,7 @@ struct StartStepsSheet: View {
                         isMono: true, labelOnContentColumn: false,
                         onSubmit: { if valid { useNewWorktree(name) } })
                     VStack(alignment: .leading, spacing: CC.space.xs) {
-                        fact("Branch", valid ? StartPlace.newBranch(name, for: agent) : "—", mono: true)
+                        fact("Branch", valid ? StartPlace.newBranch(name, for: agent) : "Not named yet", mono: valid)
                         fact("From", StartPlace.newWorktreeBase(for: agent, from: here))
                         if here?.dirty == true {
                             fact("Changes", "Uncommitted changes stay where they are")

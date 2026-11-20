@@ -83,7 +83,7 @@ final class SampleModeUITests: XCTestCase {
         app.buttons["Settings"].tap()
         XCTAssertTrue(
             app.descendants(matching: .any).matching(
-                NSPredicate(format: "label BEGINSWITH 'Not paired'")
+                NSPredicate(format: "label BEGINSWITH 'No computers yet'")
             ).firstMatch.waitForExistence(timeout: 10),
             "Settings must say no computer is paired")
     }

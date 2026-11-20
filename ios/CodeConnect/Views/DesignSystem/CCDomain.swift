@@ -168,6 +168,9 @@ struct CCMachineLabel: View {
     /// alone.
     let name: String?
     let level: LinkHealth.Level
+    /// The word beside the name: the link's own (`LinkHealth.machineWord`) where the caller has the link, else
+    /// what the level alone says.
+    var word: String?
     /// Nil wraps, which a project card has room for; the header's one line
     /// truncates the name instead, and never the word.
     var lineLimit: Int?
@@ -186,7 +189,7 @@ struct CCMachineLabel: View {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
                     Text(verbatim: name ?? "").foregroundStyle(CC.text.secondary)
                         .lineLimit(lineLimit)
-                    Text(Self.suffix(name: name, word: mark.word))
+                    Text(Self.suffix(name: name, word: word ?? mark.word))
                         .foregroundStyle(CC.text.primary)
                         .fixedSize()
                 }
@@ -195,7 +198,7 @@ struct CCMachineLabel: View {
                 // One run of text, so it wraps as a whole: a word wrapped apart
                 // from the name it belongs to reads as a second fact.
                 (Text(verbatim: name ?? "").foregroundStyle(CC.text.secondary)
-                    + Text(Self.suffix(name: name, word: mark.word)).foregroundStyle(CC.text.primary))
+                    + Text(Self.suffix(name: name, word: word ?? mark.word)).foregroundStyle(CC.text.primary))
                     .ccType(CC.type.footnote)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -210,7 +213,8 @@ struct CCMachineLabel: View {
 
 extension LinkHealth.Level {
     /// The dot, and the word said beside a computer's name — none while the
-    /// link is live or merely lagging.
+    /// link is live or merely lagging, and none for a refusal, whose word is
+    /// its cause's (`LinkHealth.machineWord`), which the level alone cannot tell.
     var machineMark: (dot: Color, hollow: Bool, word: String?) {
         switch self {
         case .live: return (CC.color.success, false, nil)
@@ -218,13 +222,17 @@ extension LinkHealth.Level {
         case .stale: return (CC.color.danger, false, "Stale")
         case .connecting: return (CC.color.info, false, "Connecting")
         case .offline: return (CC.text.tertiary, true, "Offline")
-        case .rejected: return (CC.color.danger, false, "Not paired")
+        case .rejected: return (CC.color.danger, false, nil)
         case .blocked: return (CC.color.danger, false, "Blocked")
         }
     }
 }
 
 extension LinkHealth {
+    /// The word said beside a computer's name: the link's own word for a refusal ("Different version" or "Pair
+    /// again"), and the level's word otherwise.
+    var machineWord: String? { level == .rejected ? word : level.machineMark.word }
+
     /// What VoiceOver says for the link: the state, and its age while there is
     /// a link to age, spelled out — "14s" is read as "fourteen ess".
     var spokenValue: String {
@@ -312,7 +320,7 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Host not found",
                     message:
-                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network — CodeConnect reconnects on its own.",
+                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network. CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: "Settings", action: onSettings)

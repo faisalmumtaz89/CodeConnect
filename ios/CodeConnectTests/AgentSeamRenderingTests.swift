@@ -42,19 +42,19 @@ final class AgentSeamRenderingTests: XCTestCase {
                     "Answered at the computer", "Your computer refused this answer",
                     "The answer did not reach your computer",
                     ", but your computer couldn’t confirm it reached the agent",
-                    "This decision can't be acted on here — the run is no longer on your computer, or its log was reset.",
+                    "This decision can’t be acted on here. The run is no longer on your computer, or its log was reset.",
                 ]
             ),
             (
                 .mac,
                 [
-                    "Allowed, confirmed by the agent's computer", "handed straight to Claude",
-                    "Allowed, but the agent's computer couldn’t confirm it landed",
-                    "The agent's computer accepted this but never confirmed it reached the agent.",
-                    "Answered at the agent's computer", "The agent's computer refused this answer",
-                    "The answer did not reach the agent's computer",
-                    ", but the agent's computer couldn’t confirm it reached the agent",
-                    "This decision can't be acted on here — the run is no longer on the agent's computer, "
+                    "Allowed, confirmed by the agent’s computer", "handed straight to Claude",
+                    "Allowed, but the agent’s computer couldn’t confirm it landed",
+                    "The agent’s computer accepted this but never confirmed it reached the agent.",
+                    "Answered at the agent’s computer", "The agent’s computer refused this answer",
+                    "The answer did not reach the agent’s computer",
+                    ", but the agent’s computer couldn’t confirm it reached the agent",
+                    "This decision can’t be acted on here. The run is no longer on the agent’s computer, "
                         + "or its log was reset.",
                 ]
             ),

@@ -22,7 +22,7 @@ extension ApprovalCard {
         public var summary: String {
             hashMatchesDisplayText
                 ? "Matches what \(HostDevice.current.computer("your computer")) sent."
-                : "This card's text doesn't match what \(HostDevice.current.computer("your computer")) sent."
+                : "This card’s text doesn’t match what \(HostDevice.current.computer("your computer")) sent."
         }
     }
 

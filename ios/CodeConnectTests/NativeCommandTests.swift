@@ -81,7 +81,7 @@ final class NativeCommandTests: XCTestCase {
         XCTAssertEqual(
             said(.sending("keep the plan")),
             ["Typing /compact on the computer…", "Typing /compact on the computer…",
-             "Typing /compact on the agent's computer…", "Typing /compact on \(host)…"])
+             "Typing /compact on the agent’s computer…", "Typing /compact on \(host)…"])
         XCTAssertEqual(
             said(.waiting(request: compact.request, quietly: false)),
             Array(repeating: "Waiting for Claude Code to confirm…", count: 4))
@@ -90,7 +90,7 @@ final class NativeCommandTests: XCTestCase {
             said(.waiting(request: "keep the plan", quietly: true)),
             ["Compaction requested on the computer. CodeConnect has not received a completion signal.",
              "Compaction requested on the computer. CodeConnect has not received a completion signal.",
-             "Compaction requested on the agent's computer. CodeConnect has not received a completion signal.",
+             "Compaction requested on the agent’s computer. CodeConnect has not received a completion signal.",
              "Compaction requested on \(host). CodeConnect has not received a completion signal."])
         let settled: [(CommandPhase, ComposeProse.Tone)] = [
             (.confirmed("Claude Code confirmed the compaction."), .success),

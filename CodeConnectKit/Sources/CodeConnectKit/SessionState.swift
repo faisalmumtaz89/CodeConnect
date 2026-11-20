@@ -34,7 +34,7 @@ public struct GapNotice: Sendable, Hashable {
         case .sequenceJump(let missing):
             return "Resynced, \(missing) event\(missing == 1 ? "" : "s") not shown."
         case .logRewound:
-            return "Resynced. \(HostDevice.current.computer("The computer"))'s log was reset; cached history was discarded."
+            return "Resynced. \(HostDevice.current.computer("The computer"))’s log was reset; cached history was discarded."
         case .cacheDiscarded:
             return
                 "Resynced. \(HostDevice.current.computer("The computer")) now tells its runs apart, so history cached under the old name was discarded."
