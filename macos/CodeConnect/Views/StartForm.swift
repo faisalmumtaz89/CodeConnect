@@ -38,6 +38,8 @@ struct StartForm: View {
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
+    /// The folder list's rows, measured: the box is as tall as they are, up to its most.
+    @State private var listHeight: CGFloat = 0
 
     /// `resuming`: a start this Mac sent with no answer yet, which the sheet opens on instead of a fresh form.
     init(resuming: String?, whyNone: String, started: @escaping (String) -> Void) {
@@ -157,7 +159,7 @@ struct StartForm: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: "Start", actionID: "start.start", blocked: blocked != nil, perform: start, cancel: { dismiss() },
                 cancelID: "start.cancel"
@@ -265,8 +267,10 @@ struct StartForm: View {
                         if let picked = picked(context) { pickedRow(picked) }
                         ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                 }
-                .frame(height: 170)
+                // As tall as its rows, up to 170 pt, then it scrolls.
+                .frame(height: min(max(listHeight, 1), 170))
                 // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
                 .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
@@ -461,7 +465,7 @@ private struct StartProgress: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: nil, actionID: "", blocked: true, perform: {}, cancel: { dismiss() }, cancelID: "start.close",
                 cancelTitle: "Close"
@@ -542,7 +546,7 @@ private struct StartProgress: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: words.action, actionID: "start.failed.again", blocked: false, perform: again, cancel: { dismiss() },
                 cancelID: "start.close", cancelTitle: "Close"
@@ -587,7 +591,7 @@ private struct FolderStep: View {
             .padding(.top, 18)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("folder.question")
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: nil, actionID: "", blocked: true, perform: {}, cancel: back, cancelID: "start.folder.back",
                 cancelTitle: "Back"

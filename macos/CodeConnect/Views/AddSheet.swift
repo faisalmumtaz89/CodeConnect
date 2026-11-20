@@ -78,7 +78,8 @@ struct AddSheet: View {
             case .iPhone: IPhoneSide()
             }
         }
-        .frame(width: 640, height: 540)
+        // As tall as the chosen side's content, so the sheet changes height with its tab, its top edge and tabs staying.
+        .frame(width: 640)
         .background(Theme.sheet)
     }
 }
@@ -157,7 +158,7 @@ private struct AgentSide: View {
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 18)
-                Spacer(minLength: 0)
+                Spacer(minLength: 18)
                 SheetBar(
                     action: refused == nil ? nil : "Try Again", actionID: "agent.tryAgain", blocked: false,
                     perform: { refused?.connection.retryNow() }, cancel: { dismiss() }, cancelID: "agent.cancel"
@@ -262,7 +263,7 @@ private struct ComputerForm: View {
             .padding(.horizontal, 18)
             .padding(.top, 22)
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
 
             SheetBar(
                 action: usesCode ? (exchanging ? "Connecting…" : "Connect") : nil,
@@ -390,7 +391,7 @@ private struct IPhoneSide: View {
                         .padding(.top, 14)
                 }
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 18)
             SheetBar(
                 action: added ? "Done" : nil, actionID: "iphone.done", blocked: !added, perform: { dismiss() },
                 cancel: added ? nil : { dismiss() }, cancelID: "iphone.cancel"
