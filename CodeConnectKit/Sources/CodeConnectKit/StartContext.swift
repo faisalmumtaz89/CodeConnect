@@ -66,6 +66,16 @@ public struct StartContext {
                 lastUsed: Date(), lastAgent: nil, gitBranch: nil, exists: true)
     }
 
+    /// The folder a browsed one is in; the root's is the root.
+    public static func parentFolder(_ path: String) -> String {
+        "/" + path.split(separator: "/").dropLast().joined(separator: "/")
+    }
+
+    /// A folder inside a browsed one.
+    public static func childFolder(_ path: String, _ name: String) -> String {
+        (path == "/" ? "" : path) + "/" + name
+    }
+
     /// The folders a live session of this computer's is running in.
     public var runningFolders: Set<String> { model.liveFolders }
 
