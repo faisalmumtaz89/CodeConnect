@@ -199,7 +199,8 @@ private struct Prose: View {
 }
 
 /// Text that must keep its lines: code, a command's output. Drawn `displaySafe`, as the prose around it is: the
-/// characters that reorder a line would otherwise draw different code from what the bytes say.
+/// characters that reorder a line would otherwise draw different code from what the bytes say. Its Copy takes the text
+/// as it came, not as drawn.
 private struct CodeBlock: View {
     let text: String
 
@@ -210,10 +211,12 @@ private struct CodeBlock: View {
             .lineSpacing(2)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(12)
+            .padding([.vertical, .leading], 12)
+            .padding(.trailing, CopyButton.slot)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.code, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
+            .overlay(alignment: .trailing) { CopyButton(text: text, id: "conversation.code.copy") }
     }
 }
 

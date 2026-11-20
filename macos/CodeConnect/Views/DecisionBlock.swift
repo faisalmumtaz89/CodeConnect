@@ -136,6 +136,11 @@ struct DecisionBlock: View {
 
     /// What the agent asks: who and which tool (waiting on you while it can be answered), the command as it was
     /// hashed, what it was given, a Codex edit, the risk, then what became of it, or why it can't be answered here.
+    /// The command as it was hashed: what the block shows and what its Copy takes.
+    private var command: String {
+        approval.card.primaryText(verification: approval.card.verification, agent: summary?.agent)
+    }
+
     private var asked: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
@@ -151,12 +156,13 @@ struct DecisionBlock: View {
                 MoreWaiting(count: slot?.more ?? 0)
             }
             VStack(spacing: 0) {
-                Text(approval.card.primaryText(verification: approval.card.verification, agent: summary?.agent))
+                Text(command)
                     .font(Theme.mono(12))
                     .foregroundStyle(Theme.text)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10)
+                    .padding(.leading, 10)
+                    .padding(.trailing, CopyButton.slot)
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
@@ -166,6 +172,8 @@ struct DecisionBlock: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("\(id).command")
+            // Outside the command's one spoken element, so Copy is a control of its own.
+            .overlay(alignment: .trailing) { CopyButton(text: command, id: "\(id).command.copy").padding(.bottom, 1) }
             if summary?.agent == .claude { fullInput }
             if let why = CodexCard.reason(in: approval.card.toolInput) {
                 Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
