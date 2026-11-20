@@ -164,7 +164,8 @@ struct HunkCommentField: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .focusedValue(\.composerHoldsEscape, focused ? true : nil)
-        .onAppear { focused = true }
+        // From a task, as the reply box takes the keyboard: in onAppear the field is not in the window yet.
+        .task { focused = true }
         #if DEBUG
             .task {
                 // A render's words and refusal, typed after the field has the keyboard, as a person's are.
