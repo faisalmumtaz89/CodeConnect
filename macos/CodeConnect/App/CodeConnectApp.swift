@@ -136,7 +136,9 @@ struct RootView: View {
         MainWindow(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd)
             .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)
-            // A cold launch's splash, over the window from its first frame.
+            // A cold launch's splash, over the window from its first frame: until it is over, no control under it
+            // draws a focus ring.
+            .focusEffectDisabled(!LaunchSurface.state.over)
             .overlay { LaunchSurface() }
             .environment(machines.linkModel)
             // Set Up waits for the splash: its intro, then a cut to the sheet.

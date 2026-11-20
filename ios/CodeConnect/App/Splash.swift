@@ -5,12 +5,13 @@ import SwiftUI
 /// the first frame: the system's launch screen is that ground alone
 /// (`UILaunchScreen` › `LaunchGround`), and the intro starts from it. The mark
 /// holds, breathing, until every computer has caught up or the wait for it ran
-/// out (`Machines.waitOutLaunch`); then it leaves on a hold-loop boundary with the
-/// first screen already laid out under it, the ground gone so the screen shows
-/// between the parts. Nothing changes opacity. Past a second the line under the
-/// mark says what the launch waits for, and at the cap which computers never
-/// answered. With no computer set up the intro plays and the onboarding is cut to.
-/// Reduce Motion: the still mark, then a cut at the same moment.
+/// out (`Machines.waitOutLaunch`); then it leaves at once (`LaunchMark.exitStart`)
+/// with the first screen already laid out under it, the ground gone so the screen
+/// shows between the parts. Nothing changes opacity. Past a second the line under
+/// the mark says where the launch is connecting; once the wait has run out the
+/// screen itself says which computers are not answering. With no computer set up
+/// the intro plays and the onboarding is cut to. Reduce Motion: the still mark,
+/// then a cut at the same moment.
 struct Splash: View {
     /// When the splash appeared, the zero of its time.
     let started: Date
@@ -45,13 +46,7 @@ struct Splash: View {
         return unpaired || reduceMotion ? t >= exitAt : LaunchMark.finished(t: t, exitAt: exitAt)
     }
 
-    private var line: String {
-        let names = machines.models.compactMap(\.machineName)
-        if Self.frozenUnreachable { return FleetWords.notAnswering(names) }
-        let silent = machines.models.filter { !$0.connection.phase.isConnected }.compactMap(\.machineName)
-        if settledAt != nil, !silent.isEmpty { return FleetWords.notAnswering(silent) }
-        return FleetWords.connecting(to: names)
-    }
+    private var line: String { FleetWords.connecting(to: machines.models.compactMap(\.machineName)) }
 
     /// Only a cold launch of the app plays it, never a render pass's, whose
     /// screenshots are of the screen under it, unless one asks for a still.
@@ -73,12 +68,9 @@ struct Splash: View {
             UserDefaults.standard.object(forKey: "CC_LAUNCH_T") == nil
                 ? nil : UserDefaults.standard.double(forKey: "CC_LAUNCH_T")
         }
-        /// `-CC_LAUNCH_UNREACHABLE YES`: the line as at the cap, every computer silent.
-        static var frozenUnreachable: Bool { UserDefaults.standard.bool(forKey: "CC_LAUNCH_UNREACHABLE") }
     #else
         static let frozenSettledAt: Double? = nil
         static let frozenT: Double? = nil
-        static let frozenUnreachable = false
     #endif
 }
 
@@ -112,21 +104,21 @@ struct SplashFrame: View {
     extension Splash {
         /// `-CC_LAUNCH_FRAMES <folder>`: the splash's frames for the owner's page, 30 a second, each a 402 x 402 pt
         /// crop around the mark on the ground at 3x: a fast launch (caught up at 0.3 s), a slow one (at 4 s), one
-        /// whose computer never answered (the cap, 15 s; from 14 s on), and one with no computer set up, as
+        /// still catching up at the cap (15 s; from 14 s on), and one with no computer set up, as
         /// splash-<case>-<000…>.png.
         @MainActor static func writeFrames(to folder: String, computer: String) {
-            let cases: [(String, Double?, Bool, String?, Double)] = [
-                ("fast", 0.3, false, FleetWords.connecting(to: [computer]), 0),
-                ("slow", 4, false, FleetWords.connecting(to: [computer]), 0),
-                ("unreachable", 15, false, nil, 14),
-                ("unpaired", nil, true, nil, 0),
+            let cases: [(String, Double?, Bool, Double)] = [
+                ("fast", 0.3, false, 0),
+                ("slow", 4, false, 0),
+                ("cap", 15, false, 14),
+                ("unpaired", nil, true, 0),
             ]
-            for (name, settledAt, unpaired, connecting, from) in cases {
+            for (name, settledAt, unpaired, from) in cases {
                 let exitAt = unpaired ? LaunchMark.introEnd : settledAt.map { LaunchMark.exitStart(settledAt: $0) }
                 let end = (exitAt ?? 0) + (unpaired ? 0 : LaunchMark.exitLength)
                 for index in Int(from * 30)...Int((end * 30).rounded(.up)) {
                     let t = Double(index) / 30
-                    let line = unpaired ? nil : (connecting ?? (t >= 15 ? FleetWords.notAnswering([computer]) : FleetWords.connecting(to: [computer])))
+                    let line = unpaired ? nil : FleetWords.connecting(to: [computer])
                     let renderer = ImageRenderer(
                         content: SplashFrame(t: t, exitAt: exitAt, cut: unpaired, reduceMotion: false, line: line)
                             .frame(width: 402, height: 402)

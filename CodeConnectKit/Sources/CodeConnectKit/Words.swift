@@ -28,12 +28,6 @@ public enum FleetWords {
     public static func connecting(to computers: [String]) -> String {
         computers.count == 1 ? "Connecting to \(computers[0])…" : "Connecting to your computers…"
     }
-    /// Under the launch's mark when the wait ran out on computers that never answered.
-    public static func notAnswering(_ computers: [String]) -> String {
-        computers.count == 1
-            ? "\(computers[0]) isn’t answering. Showing what it last said."
-            : "Your computers aren’t answering. Showing what they last said."
-    }
     public static let agentsAppearHere = "Agents you start with CodeConnect appear here."
     public static let noEndedRuns = "No ended runs."
     public static let noComputersYet = "No computers yet"

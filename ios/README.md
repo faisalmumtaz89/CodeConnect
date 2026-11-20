@@ -301,10 +301,9 @@ is enforced.
 * **A cold open waits to be caught up, under the splash.** The system's launch
   screen is the app's ground alone; the mark's slice (`LaunchMark`, the Mac's
   too) assembles from it, then breathes until the first link's catch-up ends,
-  and leaves on a loop boundary with the fleet already laid out under it.
-  Nothing fades. Past a second the line under the mark says
-  "Connecting to <computer>…", and when the wait ran out, which computers never
-  answered. The Mac is dialled once the saved fleet is loaded, so the saved
+  and leaves the moment that wait is over, with the fleet already laid out under
+  it. Nothing fades. Past a second the line under the mark says
+  "Connecting to <computer>…". The Mac is dialled once the saved fleet is loaded, so the saved
   fleet is what the splash leaves to. A Mac that has not answered gets three
   seconds, then the saved fleet under the link banner; one that has answered
   gets until it has caught up, fifteen seconds at most, after which the saved

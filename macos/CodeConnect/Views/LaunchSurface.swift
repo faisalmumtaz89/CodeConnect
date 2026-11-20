@@ -4,11 +4,12 @@ import SwiftUI
 
 /// A cold launch's splash, inside the main window over the app from the window's first frame: the Kit's mark (the
 /// slice) on the window's ground, the app laid out under it. The intro plays, the mark breathes until the fleet has
-/// caught up (the Kit's `waitOutLaunch`: 3 s for a silent computer, 15 s at most), and on the next loop boundary the
-/// bands slide away with the ground already gone, so the app shows between them. Past a second, one quiet line under
-/// the mark says where it is connecting, or, when the wait ran out, which computers didn't answer. With no computer
-/// set up there is nothing to wait for: the intro, then a cut (to Set Up). Reduce Motion: the still mark, then a cut.
-/// Nothing changes opacity. Only a cold launch plays it: a window reopened later opens on the app.
+/// caught up (the Kit's `waitOutLaunch`: 3 s for a silent computer, 15 s at most), and then at once
+/// (`LaunchMark.exitStart`) the bands slide away with the ground already gone, so the app shows between them. Past a
+/// second, one quiet line under the mark says where it is connecting; once the wait has run out the app itself says
+/// which computers are not answering. While it is up it holds the keyboard, and nothing under it draws a focus ring.
+/// With no computer set up there is nothing to wait for: the intro, then a cut (to Set Up). Reduce Motion: the still
+/// mark, then a cut. Nothing changes opacity. Only a cold launch plays it: a window reopened later opens on the app.
 struct LaunchSurface: View {
     /// Whether the splash is over for this process, for what waits on it (Set Up's sheet).
     @Observable @MainActor final class State {
@@ -21,8 +22,8 @@ struct LaunchSurface: View {
     @SwiftUI.State private var start = Date()
     /// When the fleet caught up, in the splash's own time.
     @SwiftUI.State private var settledAt: Double?
-    /// The computers still silent when the wait ran out.
-    @SwiftUI.State private var silent: [String] = []
+    /// Nothing under the splash takes the keyboard while it is up: it holds it itself.
+    @FocusState private var holdsFocus: Bool
 
     var body: some View {
         if !Self.state.over, shows {
@@ -31,6 +32,10 @@ struct LaunchSurface: View {
             }
             .ignoresSafeArea()
             .allowsHitTesting(exitAt == nil)
+            .focusable()
+            .focused($holdsFocus)
+            .focusEffectDisabled()
+            .onAppear { holdsFocus = true }
             .onChange(of: machines.launchSettled, initial: true) { _, settled in
                 if settled, settledAt == nil { settle(at: time(Date())) }
                 #if DEBUG
@@ -74,7 +79,7 @@ struct LaunchSurface: View {
     /// No computer set up to wait for, or Reduce Motion: the splash ends by a cut, not the exit's slide.
     private var cuts: Bool { reduceMotion || !machines.showsFleet }
 
-    /// When the exit begins: with no computer, at the intro's end; else on the loop boundary after the fleet caught up.
+    /// When the exit begins: with no computer, at the intro's end; else as `LaunchMark.exitStart` places it.
     private var exitAt: Double? {
         if !machines.showsFleet { return LaunchMark.introEnd }
         return settledAt.map { LaunchMark.exitStart(settledAt: $0) }
@@ -82,18 +87,13 @@ struct LaunchSurface: View {
 
     private var line: String? {
         let names = machines.models.compactMap(\.machineName)
-        guard !names.isEmpty else { return nil }
-        return silent.isEmpty ? FleetWords.connecting(to: names) : FleetWords.notAnswering(silent)
+        return names.isEmpty ? nil : FleetWords.connecting(to: names)
     }
 
     private func settle(at t: Double) {
         settledAt = t
-        silent = machines.models.filter { !$0.connection.phase.isConnected }.compactMap(\.machineName)
         #if DEBUG
-            if let given = RenderWindow.launchSettle {
-                settledAt = given
-                silent = RenderWindow.launchUnreachable ? Array(machines.models.compactMap(\.machineName).prefix(1)) : []
-            }
+            if let given = RenderWindow.launchSettle { settledAt = given }
         #endif
     }
 

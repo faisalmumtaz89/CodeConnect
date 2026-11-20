@@ -183,9 +183,9 @@
             UserDefaults.standard.string(forKey: "CC_REPLY")?.replacingOccurrences(of: "\\n", with: "\n")
         }
         /// The cold launch's splash for a render (`LaunchSurface`): `-CC_LAUNCH_T <seconds>` draws it at that moment;
-        /// `-CC_LAUNCH_SETTLE <seconds>` is when the fleet is taken to have caught up (0: at once), with
-        /// `-CC_LAUNCH_UNREACHABLE YES` because the wait ran out on a silent computer; `-CC_LAUNCH_RECORD <folder>`
-        /// plays it a frame at a time, 30 a second, photographing the window into launch-<000…>.png there from
+        /// `-CC_LAUNCH_SETTLE <seconds>` is when the fleet is taken to have caught up (0: at once), drawn as a live
+        /// launch draws it: the hold until then, the exit from then; `-CC_LAUNCH_RECORD <folder>` plays it a frame at a
+        /// time, 30 a second, photographing the window into launch-<000…>.png there from
         /// `-CC_LAUNCH_RECORD_FROM <seconds>`, then quits.
         static var launchT: Double? {
             UserDefaults.standard.object(forKey: "CC_LAUNCH_T") == nil ? nil : UserDefaults.standard.double(forKey: "CC_LAUNCH_T")
@@ -194,7 +194,6 @@
             UserDefaults.standard.object(forKey: "CC_LAUNCH_SETTLE") == nil
                 ? nil : UserDefaults.standard.double(forKey: "CC_LAUNCH_SETTLE")
         }
-        static var launchUnreachable: Bool { UserDefaults.standard.bool(forKey: "CC_LAUNCH_UNREACHABLE") }
         static var launchRecord: String? { UserDefaults.standard.string(forKey: "CC_LAUNCH_RECORD") }
         static var launchRecordFrom: Double { UserDefaults.standard.double(forKey: "CC_LAUNCH_RECORD_FROM") }
         /// A render shows the splash only when it asks for it; every other render opens on the app.
