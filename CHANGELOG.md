@@ -10,6 +10,9 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
   forgets it and its sessions. This Mac's own computer is not offered, since the app pairs with it
   again at every launch.
+- Set Up CodeConnect on the Mac ends below its last row, with no empty band above its buttons.
+- In Set Up, every row that needs you says why under its name, the Terminal row included.
+- Set Up's Try Again and Done end on the same edge as its list.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 

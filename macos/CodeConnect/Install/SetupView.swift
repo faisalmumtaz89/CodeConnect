@@ -28,7 +28,7 @@ struct SetupView: View {
             .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
             .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             .padding(.horizontal, 24)
-            Spacer(minLength: 16)
+            .padding(.bottom, 24)
             VStack(spacing: 0) {
                 Rectangle().fill(Theme.hairline).frame(height: 1)
                 HStack(spacing: 8) {
@@ -41,11 +41,12 @@ struct SetupView: View {
                     ActionButton(title: "Done", key: nil, prominent: true, id: "setup.done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
                 }
-                .padding(.horizontal, 14)
+                // Its buttons end on the content's edge.
+                .padding(.horizontal, 24)
                 .frame(height: 52)
             }
         }
-        .frame(width: 560, height: 470)
+        .frame(width: 560)
         .background(Theme.sheet)
         // The agents' rows are this Mac's service's answer: asked for once its link is up, while the checklist is open.
         .task(id: machines.startContexts.map(\.id)) { setup.thisMacContext(in: machines)?.load() }
@@ -79,12 +80,22 @@ struct SetupView: View {
 
     /// CodeConnect in a new Terminal window: set up only when the person chooses Set up.
     @ViewBuilder private var commandLine: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 mark(setup.commandLine, id: "setup.commandLine")
                 Text("Use CodeConnect from Terminal").font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
                 Spacer(minLength: 12)
-                Text(detail(setup.commandLine)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                if !setup.commandLine.isMissing {
+                    Text(detail(setup.commandLine)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                }
+            }
+            // A row that needs the person says why under its name, as every row above does.
+            if setup.commandLine.isMissing {
+                Text(detail(setup.commandLine))
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 24)
             }
             if case .missing = setup.commandLine, let installer = setup.installer {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {

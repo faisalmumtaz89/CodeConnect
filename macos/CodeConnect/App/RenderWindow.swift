@@ -67,9 +67,44 @@
         /// `-CC_COMPUTER_MENU YES`: the sidebar opens its last computer's "…" panel, when that computer can be removed.
         static var opensComputerMenu: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_MENU") }
 
-        /// `-CC_SETTINGS YES`: the Settings window opens at launch, and it is the window photographed, once its
-        /// device list has been read.
-        static var opensSettings: Bool { UserDefaults.standard.bool(forKey: "CC_SETTINGS") || devices != nil }
+        /// `-CC_SETTINGS YES`: the Settings window opens at launch, and it is the window photographed, once its pane
+        /// has its list: Devices, or the pane `-CC_SETTINGS_TAB devices|folders` names.
+        static var opensSettings: Bool {
+            UserDefaults.standard.bool(forKey: "CC_SETTINGS") || devices != nil || folders != nil
+                || UserDefaults.standard.string(forKey: "CC_SETTINGS_TAB") != nil
+        }
+        static var settingsTab: SettingsTab {
+            UserDefaults.standard.string(forKey: "CC_SETTINGS_TAB").flatMap(SettingsTab.init(rawValue:))
+                ?? (folders != nil ? .folders : .devices)
+        }
+
+        /// `-CC_FOLDERS <folders>`: the `folder_trust` frame's `folders` every computer is taken to answer, read from
+        /// the arguments as given; Settings opens on Folders.
+        static var folders: [FolderAnswer]? {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-CC_FOLDERS"), flag + 1 < arguments.count else { return nil }
+            return try? JSONDecoder().decode([FolderAnswer].self, from: Data(arguments[flag + 1].utf8))
+        }
+
+        /// `-CC_SETUP_ROWS "service=missing:<sentence>;claude=ready:Ready;codex=checking;path=missing:<sentence>"`: the
+        /// checklist opens with these answers, settled, and runs nothing.
+        static var setupRows: [String: Setup.Row]? {
+            guard let text = UserDefaults.standard.string(forKey: "CC_SETUP_ROWS") else { return nil }
+            var rows: [String: Setup.Row] = [:]
+            for entry in text.split(separator: ";") {
+                let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { continue }
+                let state = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
+                let sentence = state.count == 2 ? state[1] : ""
+                rows[parts[0]] =
+                    switch state[0] {
+                    case "ready": .ready(sentence)
+                    case "missing": .missing(sentence)
+                    default: .checking
+                    }
+            }
+            return rows
+        }
 
         /// `-CC_DEVICES <frame>`: the `devices` frame this Mac's daemon is taken to answer (a recorded one, from
         /// fixtures/wire/devices.json), read from the arguments as given; Settings opens on it.

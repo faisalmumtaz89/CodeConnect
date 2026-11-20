@@ -40,6 +40,9 @@ final class Setup {
     /// form say the same: Checking… until it has answered, Ready, or why not (the computer's own sentence
     /// for either agent). A later answer replaces it.
     func agent(_ agent: StartAgent, in machines: Machines) -> Row {
+        #if DEBUG
+            if let forced = RenderWindow.setupRows { return forced[agent == .claude ? "claude" : "codex"] ?? .checking }
+        #endif
         guard let context = thisMacContext(in: machines) else { return .checking }
         switch context.models(agent) {
         case .checking: return .checking
@@ -70,6 +73,14 @@ final class Setup {
     init(installer: Installer?, pairing: PairingStore) {
         self.installer = installer
         self.pairing = pairing
+        #if DEBUG
+            if let forced = RenderWindow.setupRows {
+                service = forced["service"] ?? .checking
+                commandLine = forced["path"] ?? .checking
+                settled = true
+                shown = true
+            }
+        #endif
     }
 
     /// The pairing with this Mac's own daemon follows the daemon to where it answers now: paired at

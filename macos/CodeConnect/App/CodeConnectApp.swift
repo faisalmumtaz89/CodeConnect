@@ -10,6 +10,7 @@ struct CodeConnectApp: App {
     @State private var setup: Setup
     /// Sparkle's updater, with the app's own update sheet: started with the app.
     @State private var updates: Updates?
+    @State private var settingsTab = SettingsTab.devices
 
     /// `machines` is made here, after a test launch has chosen its keychain and its data folder,
     /// because making it reads the one and writes the other; and after the pairing with this Mac's own
@@ -17,6 +18,7 @@ struct CodeConnectApp: App {
     init() {
         #if DEBUG
             RenderWindow.isolateTestLaunch()
+            _settingsTab = State(initialValue: RenderWindow.settingsTab)
         #endif
         let installer = Installer.forThisLaunch()
         let pairing = PairingStore()
@@ -56,9 +58,9 @@ struct CodeConnectApp: App {
         }
         // CodeConnect > Settings… (⌘,): this computer's devices, and the folders' answers to the folder question.
         Settings {
-            TabView {
-                DevicesPane().tabItem { Label("Devices", systemImage: "iphone") }
-                FoldersPane().tabItem { Label(FolderWords.paneTitle, systemImage: "folder") }
+            TabView(selection: $settingsTab) {
+                DevicesPane().tabItem { Label("Devices", systemImage: "iphone") }.tag(SettingsTab.devices)
+                FoldersPane().tabItem { Label(FolderWords.paneTitle, systemImage: "folder") }.tag(SettingsTab.folders)
             }
             .environment(machines)
             .environment(setup)
@@ -69,6 +71,11 @@ struct CodeConnectApp: App {
             #endif
         }
     }
+}
+
+/// The Settings window's panes.
+enum SettingsTab: String {
+    case devices, folders
 }
 
 /// Dark only, as the iPhone app is: pinned for the whole app, so menus, alerts and sheets the
