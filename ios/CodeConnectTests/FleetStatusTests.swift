@@ -259,7 +259,7 @@ final class FleetStatusTests: XCTestCase {
         }
         XCTAssertFalse(badge.canAct, "nothing may act before the ack")
         XCTAssertFalse(badge.isSettled, "and the fleet must say nothing")
-        XCTAssertEqual(reason, "Not connected. Your computer hasn't said what it can do yet.")
+        XCTAssertEqual(reason, "Not connected. Your computer hasn’t said what it can do yet.")
     }
 
     /// The band-header rule, whole: only settled observe earns the words.
@@ -284,7 +284,7 @@ final class FleetStatusTests: XCTestCase {
             let badge = FleetStatusRule.capability(
                 summary: summary(lifecycle: "exited", link: link), capabilities: caps)
             XCTAssertFalse(badge.canAct, link)
-            XCTAssertEqual(badge.reason, "This session has ended.", link)
+            XCTAssertEqual(badge.reason, "This run has ended.", link)
         }
         guard case .unknown = FleetStatusRule.capability(
             summary: summary(lifecycle: "exited", link: "detached"), capabilities: nil)

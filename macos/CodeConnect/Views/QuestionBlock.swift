@@ -143,7 +143,7 @@ struct QuestionBlock: View {
             }
             if question.takesOther {
                 Button { draft.tapOther(of: index, in: questions) } label: {
-                    ChoiceLabel(chosen: entry.otherChosen, multi: question.multiSelect, label: "Other", detail: nil, order: nil)
+                    ChoiceLabel(chosen: entry.otherChosen, multi: question.multiSelect, label: QuestionWords.other, detail: nil, order: nil)
                 }
                 .buttonStyle(.hover(id: "\(id).q\(index).other"))
                 .disabled(!editable)
@@ -151,14 +151,14 @@ struct QuestionBlock: View {
                 .accessibilityAddTraits(entry.otherChosen ? .isSelected : [])
                 if entry.otherChosen {
                     field(
-                        "Your answer",
+                        QuestionWords.typeYourAnswer,
                         text: Binding { draft.entries[index].otherText } set: { draft.entries[index].otherText = $0 },
                         id: "\(id).q\(index).other.text")
                 }
             }
             if question.takesNotes {
                 field(
-                    "Notes for Claude (optional)",
+                    QuestionWords.notesPrompt(agent?.displayName ?? "the agent"),
                     text: Binding { draft.entries[index].notes } set: { draft.entries[index].notes = $0 },
                     id: "\(id).q\(index).notes")
             }
@@ -186,12 +186,12 @@ struct QuestionBlock: View {
                 Text(note).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).accessibilityIdentifier("\(id).blocked")
             }
             Spacer(minLength: 8)
-            ActionButton(title: "Decline", key: keys ? "⌘D" : nil, prominent: false, id: "\(id).decline") {
+            ActionButton(title: QuestionWords.decline, key: keys ? "⌘D" : nil, prominent: false, id: "\(id).decline") {
                 send(.decline, from: "decline")
             }
             .disabled(blocked != nil)
             .answerKey("d", .command, when: keys)
-            ActionButton(title: "Submit", key: keys ? "⌘↩" : nil, prominent: true, id: "\(id).submit") {
+            ActionButton(title: QuestionWords.submit, key: keys ? "⌘↩" : nil, prominent: true, id: "\(id).submit") {
                 if let answers { send(.answers(answers), from: "submit") }
             }
             .disabled(blocked != nil || answers == nil)
@@ -201,7 +201,7 @@ struct QuestionBlock: View {
 
     /// What Submit waits for while the answers are incomplete: not a warning, an untouched form is not a fault.
     private var incompleteNote: String {
-        questions.questions.count == 1 ? "Choose an answer to submit." : "Answer every question to submit."
+        QuestionWords.submitNeeds(questions: questions.questions.count)
     }
 
     /// One answer, as the decision card sends one: never while the card cannot be answered or one is on its way.

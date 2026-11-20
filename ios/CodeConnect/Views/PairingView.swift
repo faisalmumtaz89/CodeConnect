@@ -190,8 +190,8 @@ struct PairingView: View {
                 CCHairline()
                 CCStepRow(
                     index: 4,
-                    title: "Start an agent",
-                    message: "Agents you start with CodeConnect appear here.")
+                    title: FleetWords.startAnAgent,
+                    message: FleetWords.agentsAppearHere)
             }
         }
         .padding(.top, CC.rhythm.textSurface)
@@ -250,7 +250,7 @@ struct PairingView: View {
         }
 
         CCProse(
-            "Each code works once and expires after five minutes.",
+            PairingWords.codeWorksOnce,
             style: CC.type.footnote, color: CC.text.tertiary
         )
             .fixedSize(horizontal: false, vertical: true)
@@ -270,7 +270,7 @@ struct PairingView: View {
             } else {
                 CCProgressRing(.lg)
 
-                Text("Pairing…")
+                Text(PairingWords.connecting)
                     .ccType(CC.type.headline)
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -339,9 +339,9 @@ struct PairingView: View {
             CCCard {
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCField(
-                        label: "Address",
+                        label: PairingWords.address,
                         text: $address,
-                        placeholder: "Your computer's address",
+                        placeholder: "Your computer’s address",
                         hint:
                             "Shown with the code on your computer.",
                         keyboardType: .URL,
@@ -350,9 +350,9 @@ struct PairingView: View {
                         isMono: true)
 
                     CCField(
-                        label: "Code",
+                        label: PairingWords.code,
                         text: $token,
-                        placeholder: "Pairing code",
+                        placeholder: PairingWords.pairingCode,
                         hint: nil,
                         error: validationError,
                         autocapitalization: .characters,
@@ -380,7 +380,7 @@ struct PairingView: View {
             }
 
             CCButton(
-                "Save and connect", variant: .primary, size: .lg, fullWidth: true,
+                PairingWords.connect, variant: .primary, size: .lg, fullWidth: true,
                 isLoading: machines.isPairing,
                 disabledReason: manualEntryBlockedReason
             ) {
@@ -467,10 +467,10 @@ struct PairingView: View {
                     // Nothing paired — the sample fleet — has no machine to open,
                     // and the row says so.
                     if listedMachines.isEmpty {
-                        CCRow("Not paired") {
+                        CCRow(FleetWords.noComputersYet) {
                             CCStatusDot(
                                 color: CC.text.tertiary, isHollow: true,
-                                accessibilityText: "Not paired")
+                                accessibilityText: FleetWords.noComputersYet)
                         }
                     }
                     ForEach(listedMachines, id: \.machineID) { machine in
@@ -662,7 +662,7 @@ struct PairingScanSheet: View {
                     glyph: "camera-slash",
                     title: "No scanner on this device",
                     message:
-                        "This device can't scan codes. Close this and enter the address and code instead.",
+                        "This device can’t scan codes. Close this and enter the address and code instead.",
                     detail: nil,
                     primaryTitle: "Pair by hand",
                     primary: onManualEntry,
@@ -704,7 +704,7 @@ struct PairingScanSheet: View {
         .overlay {
             CCScannerFrame(
                 isDetected: detected,
-                caption: "Point the camera at the QR code in your computer's terminal.")
+                caption: "Point the camera at the QR code in your computer’s terminal.")
             .ignoresSafeArea()
         }
         .overlay(alignment: .bottom) { torchButton }
@@ -859,7 +859,7 @@ struct MachineScreen: View {
         var notes: [String] = []
         if let capabilities = model.connection.capabilities, capabilities.tls, !encrypted {
             notes.append(
-                "Your computer can encrypt this connection itself, but this iPhone isn't using that.")
+                "Your computer can encrypt this connection itself, but this iPhone isn’t using that.")
         }
         if let reason = model.tlsUnavailableReason {
             notes.append(reason)
@@ -965,8 +965,7 @@ struct FoldersView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: CC.space.lg) {
                 CCProse(
-                    "Agents load the scripts, tools and instructions of folders you trust. "
-                        + "In other folders they start with nothing from the folder.",
+                    FolderWords.paneIntro,
                     style: CC.type.callout, color: CC.text.secondary
                 )
                 .fixedSize(horizontal: false, vertical: true)
@@ -988,7 +987,7 @@ struct FoldersView: View {
         }
         .background(CC.color.bg)
         .ccNavigationChrome()
-        .navigationTitle("Folders")
+        .navigationTitle(FolderWords.paneTitle)
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -1026,7 +1025,7 @@ private struct FolderMachineSection: View {
     private var content: some View {
         if let answers {
             if answers.isEmpty {
-                Text("No folders yet. CodeConnect asks the first time an agent starts in a folder.")
+                Text(FolderWords.empty)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1045,7 +1044,7 @@ private struct FolderMachineSection: View {
                 .padding(.horizontal, CC.space.md)
                 // Once for the list, not once per row: Forget's help is the same
                 // sentence on every folder.
-                Text("Forgetting a folder asks again the next time an agent starts there.")
+                Text(FolderWords.forgetHelp)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1061,7 +1060,7 @@ private struct FolderMachineSection: View {
                     .padding(.top, CC.space.xs)
             }
         } else if failed {
-            Text("Couldn’t read folders from \(computerName).")
+            Text(FolderWords.unreachable(computerName))
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1069,7 +1068,7 @@ private struct FolderMachineSection: View {
         } else {
             HStack(spacing: CC.space.sm) {
                 CCProgressRing()
-                Text("Reading folders…")
+                Text(FolderWords.reading(computerName))
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1092,19 +1091,19 @@ private struct FolderMachineSection: View {
                 // A plain tone label, not a badge: it keeps the decided case
                 // ("Not trusted") and wraps rather than truncating at the
                 // accessibility sizes.
-                Text(trusted ? "Trusted" : "Not trusted")
+                Text(trusted ? FolderWords.trusted : FolderWords.notTrusted)
                     .ccType(CC.type.footnote.weight(.semibold))
                     .foregroundStyle(trusted ? CC.color.success : CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: CC.space.xs) {
                 CCButton(
-                    trusted ? "Don’t Trust" : "Trust",
+                    trusted ? "Don’t trust" : "Trust",
                     variant: .secondary, size: .sm,
                     action: { change(folder.path, to: trusted ? .notTrusted : .trusted) })
-                    .accessibilityLabel(trusted ? "Don’t Trust \(name)" : "Trust \(name)")
+                    .accessibilityLabel(trusted ? "Don’t trust \(name)" : "Trust \(name)")
                     .accessibilityIdentifier("folder-trust-\(folder.path)")
-                CCButton("Forget", variant: .ghost, size: .sm, action: { forget(folder.path) })
+                CCButton(FolderWords.forget, variant: .ghost, size: .sm, action: { forget(folder.path) })
                     .accessibilityLabel("Forget \(name)")
                     .accessibilityIdentifier("folder-forget-\(folder.path)")
                 Spacer(minLength: 0)

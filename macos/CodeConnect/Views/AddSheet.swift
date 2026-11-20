@@ -11,8 +11,8 @@ enum AddKind: String, Identifiable, CaseIterable {
 
     var title: String {
         switch self {
-        case .agent: "New agent"
-        case .computer: "Add computer"
+        case .agent: FleetWords.newAgent
+        case .computer: "Add a computer"
         case .iPhone: "Add iPhone"
         }
     }
@@ -37,7 +37,7 @@ enum AddKind: String, Identifiable, CaseIterable {
 
 extension KeyHint {
     /// What a key opens: its key and the sheet's title.
-    init(_ kind: AddKind) { self.init(keys: kind.shortcut.map { [$0] } ?? [], label: kind.title) }
+    init(_ kind: AddKind) { self.init(keys: kind.shortcut.map { [$0] } ?? [], label: kind.title.titleStyle) }
 }
 
 /// The one way anything is added: a sheet with Agent, Computer and iPhone side by side.
@@ -148,7 +148,7 @@ private struct AgentSide: View {
                         .lineSpacing(3)
                         .fixedSize(horizontal: false, vertical: true)
                     if !machines.showsFleet {
-                        ActionButton(title: "Add a computer", key: nil, prominent: false, id: "agent.addComputer", action: addComputer)
+                        ActionButton(title: AddKind.computer.title, key: nil, prominent: false, id: "agent.addComputer", action: addComputer)
                             .padding(.top, 6)
                     }
                 }
@@ -239,9 +239,9 @@ private struct ComputerForm: View {
                 if usesCode {
                     HStack(alignment: .top, spacing: 12) {
                         field(
-                            "Address", id: "computer.address", text: $address, prompt: "The other computer's address",
+                            PairingWords.address, id: "computer.address", text: $address, prompt: "The other computer’s address",
                             hint: "Shown with the code on the other computer.")
-                        field("Code", id: "computer.code", text: $code, prompt: "Pairing code")
+                        field(PairingWords.code, id: "computer.code", text: $code, prompt: PairingWords.pairingCode)
                     }
                     .padding(.leading, 15)
                     .disabled(exchanging)
@@ -262,7 +262,7 @@ private struct ComputerForm: View {
             Spacer(minLength: 18)
 
             SheetBar(
-                action: usesCode ? (exchanging ? "Connecting…" : "Connect") : nil,
+                action: usesCode ? (exchanging ? PairingWords.connecting : PairingWords.connect) : nil,
                 actionID: "computer.connect",
                 blocked: !usesCode || exchanging || PairingCredentialInput.blockedReason(address: address, code: code) != nil,
                 perform: connect,
@@ -273,7 +273,7 @@ private struct ComputerForm: View {
                 cancelID: "computer.cancel"
             ) {
                 if usesCode {
-                    Text("Each code works once and expires after five minutes.")
+                    Text(PairingWords.codeWorksOnce)
                         .font(Theme.ui(11.5))
                         .foregroundStyle(Theme.text3)
                 }
@@ -393,7 +393,7 @@ private struct IPhoneSide: View {
                 cancel: added ? nil : { dismiss() }, cancelID: "iphone.cancel"
             ) {
                 if case .shown = code {
-                    Text("Each code works once and expires after five minutes.")
+                    Text(PairingWords.codeWorksOnce)
                         .font(Theme.ui(11.5))
                         .foregroundStyle(Theme.text3)
                 }
@@ -436,10 +436,10 @@ private struct IPhoneSide: View {
     private var intro: String {
         switch code {
         case .unreachable:
-            "Your iPhone can't reach this Mac yet. Connect this Mac to a network your iPhone can reach, such as Tailscale, then come back here."
-        case .notAnswering: "The background service isn't answering. Choose Set Up CodeConnect… to try again."
+            "Your iPhone can’t reach this Mac yet. Connect this Mac to a network your iPhone can reach, such as Tailscale, then come back here."
+        case .notAnswering: "The background service isn’t answering. Choose Set Up CodeConnect… to try again."
         case .added(let name): "\(name) was added."
-        case .shown, nil: "Scan this with your iPhone's camera to pair it with this Mac."
+        case .shown, nil: "Scan this with your iPhone’s camera to pair it with this Mac."
         }
     }
 

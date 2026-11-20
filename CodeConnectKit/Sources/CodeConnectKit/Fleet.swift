@@ -19,7 +19,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .blocked: return "Blocked"
+        case .blocked: return "Waiting for you"
         case .failed: return "Failed"
         case .doneUnreviewed, .done: return "Done"
         case .running: return "Running"
@@ -426,7 +426,7 @@ public enum FleetStatusRule {
     /// still: there is no next user message, so the verdict was permanent.
     ///
     /// The honest signal is the session's own exit, which `Timeline` already
-    /// renders as `Session ended (exit N)` and marks `.failure` **iff** a code
+    /// renders as `Run ended (exit N)` and marks `.failure` **iff** a code
     /// arrived and was non-zero. So this reads a fact the daemon reported rather
     /// than inferring one from what the agent printed.
     ///
@@ -447,7 +447,7 @@ public enum FleetStatusRule {
     public static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
             return .unknown(
-                reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn't said what it can do yet.")
+                reason: "Not connected. \(HostDevice.current.computer("Your computer")) hasn’t said what it can do yet.")
         }
         // Before any link reason: an ended run has no agent host because it has
         // ended, and nothing can answer it anywhere, the Mac included. A failed
@@ -458,7 +458,7 @@ public enum FleetStatusRule {
             // opens and the "Observe only" verdict falls away. An End-run exit and a
             // failed start stay ended.
             if summary.relaunchesOnMessage { return .control }
-            return .observe(reason: "This session has ended.")
+            return .observe(reason: "This run has ended.")
         }
         guard capabilities.canApproveReliably else {
             return .observe(
@@ -469,7 +469,7 @@ public enum FleetStatusRule {
             return .control
         case .detached:
             return .observe(
-                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
+                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this run. It can be answered again once the link is back."
             )
         }
     }

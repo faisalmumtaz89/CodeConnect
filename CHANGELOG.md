@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.3
+
+- The Mac and the iPhone word the same things the same way: an ended run is "Ended" and a run waiting on an
+  answer "Waiting for you" in both, a refused link says "Different version" when that is why, the reply box says
+  "Reply to <agent>…", cards, Changes, starting and pairing read alike, each agent is named one way, the default
+  model is "Default" for both agents, and Mac buttons are in title case.
+
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 
 - The Mac's update window matches the app: it opens centred over the main window, is as tall as its

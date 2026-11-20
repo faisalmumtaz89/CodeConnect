@@ -115,9 +115,9 @@ final class Setup {
             service = .missing(failure)
         } else if let address = LocalDaemon.address(root: installer.root) {
             let paired = await pairWithThisMac(at: address, machines: machines, root: installer.root)
-            service = paired ? .ready("Running") : .missing("Running, but this Mac couldn't pair with it.")
+            service = paired ? .ready("Running") : .missing("Running, but this Mac couldn’t pair with it.")
         } else {
-            service = .missing("The background service isn't answering.")
+            service = .missing("The background service isn’t answering.")
         }
         localMachineID = LocalDaemon.machineID(root: installer.root)
         let bin = installer.bin
@@ -155,7 +155,7 @@ final class Setup {
             try PathBlock.add(home: installer.home, bin: installer.bin)
             commandLine = .ready("Ready")
         } catch {
-            commandLine = .missing("Couldn't set this up: \(error.localizedDescription)")
+            commandLine = .missing("Couldn’t set this up: \(error.localizedDescription)")
         }
     }
 

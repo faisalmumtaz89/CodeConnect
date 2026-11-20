@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// The Active list with nothing in it: where agents come from, in plain words, and New agent.
@@ -11,8 +12,8 @@ struct NoAgentsYet: View {
                 .foregroundStyle(Theme.text3)
                 .padding(.bottom, 4)
                 .accessibilityHidden(true)
-            Text("Start an agent").font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
-            Text("Agents you start with CodeConnect appear here.")
+            Text(FleetWords.startAnAgent).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+            Text(FleetWords.agentsAppearHere)
                 .font(Theme.ui(12.5))
                 .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)

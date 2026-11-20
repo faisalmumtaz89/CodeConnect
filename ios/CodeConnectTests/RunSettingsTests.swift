@@ -39,6 +39,8 @@ final class RunSettingsTests: XCTestCase {
             return XCTFail("a live hosted run with menus is hostedLive")
         }
         XCTAssertEqual(s.models.map(\.value), ["default", "sonnet"])
+        // The default entry is named "Default" whatever the agent calls it.
+        XCTAssertEqual(s.models.first?.label, "Default")
         XCTAssertEqual(s.modes.map(\.value), ["default", "acceptEdits", "plan", "bypassPermissions"])
         // Selection: the daemon's `selected_model` ("sonnet") for the model; the mode and effort facts
         // ("plan", "high") match their menu values directly.

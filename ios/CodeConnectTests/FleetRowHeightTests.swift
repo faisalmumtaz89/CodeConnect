@@ -55,7 +55,7 @@ final class FleetRowHeightTests: XCTestCase {
     }
 
     private let capabilities: [CapabilityBadge] = [
-        .control, .observe(reason: "This session has ended."), .unknown(reason: "Not connected."),
+        .control, .observe(reason: "This run has ended."), .unknown(reason: "Not connected."),
     ]
 
     private let activities: [(FleetActivity?, String)] = [

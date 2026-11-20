@@ -379,7 +379,7 @@ final class SessionFollowUITests: XCTestCase {
         XCTAssertTrue(
             waitUntil(timeout: 8) {
                 let shown = (field.value as? String) ?? ""
-                return shown.isEmpty || shown == "Ask anything"
+                return shown.isEmpty || shown.hasPrefix("Reply to ")
             },
             "the composer still shows what it sent: \((field.value as? String) ?? "nil")")
     }

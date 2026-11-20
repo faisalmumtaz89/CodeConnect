@@ -60,10 +60,10 @@ final class BulkRemoveUITests: XCTestCase {
 
     func testSelectAllCoversEveryEndedRow() {
         let app = launchSelecting()
-        app.buttons["Select All"].tap()
+        app.buttons["Select all"].tap()
         XCTAssertTrue(app.buttons["Remove (8)"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Deselect All"].exists)
-        app.buttons["Deselect All"].tap()
+        XCTAssertTrue(app.buttons["Deselect all"].exists)
+        app.buttons["Deselect all"].tap()
         XCTAssertTrue(app.buttons["Remove (0)"].waitForExistence(timeout: 5))
     }
 
@@ -74,7 +74,7 @@ final class BulkRemoveUITests: XCTestCase {
 
         app.buttons["Remove (2)"].tap()
         XCTAssertTrue(
-            app.alerts["Remove 2 sessions?"].waitForExistence(timeout: 5), "one question for all")
+            app.alerts["Remove 2 runs?"].waitForExistence(timeout: 5), "one question for all")
         app.alerts.buttons["Cancel"].tap()
         XCTAssertTrue(row(app, first).isSelected, "Cancel leaves the selection as it was")
         XCTAssertFalse(

@@ -139,7 +139,7 @@
 
         /// `-CC_FLEET_SCOPE finished`: the list opens on the runs that have ended.
         static var fleetScope: FleetScope {
-            FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE")?.capitalized ?? "") ?? .active
+            FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE") ?? "") ?? .active
         }
 
         /// `-CC_FLEET_GROUPING project` or `computer`: the list opens grouped so, whatever this Mac keeps, and keeps

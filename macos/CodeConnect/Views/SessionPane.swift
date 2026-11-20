@@ -161,7 +161,7 @@ private struct Heading: View {
     /// model when there is one, so the line and the settings list spell it alike (Kit's `modelName`).
     private var agentLine: String {
         [
-            row.summary.agent.displayName,
+            row.summary.agent.productName,
             model.confirmedModel(for: row.id).map { RunSettings.modelName(confirmed: $0.name, menus: row.summary.menus) },
         ]
             .compactMap { $0 }
@@ -241,11 +241,11 @@ private struct StopTurn: View {
     var body: some View {
         let stopping = model.codexStop(for: key) == .inFlight
         let greyed = model.codexControls(for: key).isStopGreyed(now: model.now)
-        ActionButton(title: stopping ? "Stopping…" : "Stop this turn", key: nil, prominent: false, id: "session.stop") {
+        ActionButton(title: stopping ? SessionWords.stopping : SessionWords.stopThisTurn, key: nil, prominent: false, id: "session.stop") {
             Task { await model.stopCodexTurn(sessionKey: key) }
         }
         .disabled(stopping || greyed)
-        .help(greyed ? "Try again in a moment." : "Stop the turn this run is running")
+        .help(greyed ? SessionWords.tryAgainInAMoment : SessionWords.stopHelp)
     }
 }
 

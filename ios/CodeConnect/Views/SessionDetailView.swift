@@ -905,7 +905,7 @@ private struct HistoryHead: View {
                     reachedTop: { model.reachedTop(key: key) },
                     pageBackOnItsOwn: { model.pageBackOnItsOwn(key: key) }))
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading earlier history")
+            .accessibilityLabel(SessionWords.loadingEarlier)
             .accessibilityHidden(!loading)
         } else {
             CCGapMarker(
@@ -1079,11 +1079,11 @@ struct SessionDetailView: View {
         } message: {
             Text(ClearConfirmation.message)
         }
-        .alert("End this run?", isPresented: $confirmingEndRun) {
+        .alert(FleetWords.endTitle, isPresented: $confirmingEndRun) {
             Button("End run", role: .destructive) { endRun() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(summary?.agent.displayName ?? "The agent") stops, and the run moves to Ended.")
+            Text(FleetWords.endMessage(summary?.agent.displayName ?? "The agent"))
         }
         .alert(
             "End run",
@@ -1328,14 +1328,14 @@ struct SessionDetailView: View {
                 stopCodexTurn()
             }
             .accessibilityIdentifier("stop-\(key)")
-            .accessibilityLabel("Stop the turn this session is running")
+            .accessibilityLabel(SessionWords.stopHelp)
             .padding(.top, CC.space.sm)
         }
     }
 
     private var stopLabel: String {
-        if isStopping { return "Stopping…" }
-        return screenTypeSize.isAccessibilitySize ? "Stop" : "Stop this turn"
+        if isStopping { return SessionWords.stopping }
+        return screenTypeSize.isAccessibilitySize ? "Stop" : SessionWords.stopThisTurn
     }
 
     private var isStopping: Bool {
@@ -1355,7 +1355,7 @@ struct SessionDetailView: View {
     /// column that pushed the row out of line with its Claude neighbour.
     private var stopGreyedReason: String? {
         model.codexControls(for: key).isStopGreyed(now: model.now)
-            ? "Try again in a moment." : nil
+            ? SessionWords.tryAgainInAMoment : nil
     }
 
     private var dotColour: Color {
@@ -1401,7 +1401,7 @@ struct SessionDetailView: View {
         VStack {
             CCEmptyState(
                 glyph: "folder-dashed",
-                title: "Not on your computer's list",
+                title: "Not on your computer’s list",
                 message:
                     "This run may have exited, or CodeConnect on your computer restarted since the link was made.",
                 tone: .warning)
@@ -2032,7 +2032,7 @@ private struct SessionBanner: View {
         return CCBannerItem(
             .cached,
             title: "From the cache, \(Format.age(since: cachedAt, now: model.now)) old",
-            message: "Nothing live has arrived for this session yet.",
+            message: SessionWords.nothingLiveYet,
             tone: .warning,
             icon: "clock-counter-clockwise")
     }
@@ -2205,7 +2205,8 @@ private struct SessionComposeBar: View {
     private var field: some View {
         TextField(
             "", text: $text,
-            prompt: Text("Ask anything").foregroundStyle(CC.text.placeholder),
+            prompt: Text(SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent"))
+                .foregroundStyle(CC.text.placeholder),
             // `.vertical` keeps the system keyboard's dictation key available
             // too — the mic in the circle is the first-class door, not the
             // only one.

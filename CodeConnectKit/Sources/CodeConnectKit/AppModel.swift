@@ -3470,7 +3470,7 @@ public final class AppModel {
             return
                 "\(HostDevice.current.computer("The computer"))'s CodeConnect never said it could \(verb), so nothing was sent. Update it."
         case .notACodexSession(let agent):
-            return "This is a \(agent) session, so nothing was sent."
+            return "This is a \(agent) run, so nothing was sent."
         case .nothingToSend(let reason):
             return reason
         }
@@ -3599,10 +3599,10 @@ public final class AppModel {
             // Codex vocabulary the Mac refuses by name.
             return nil
         case (.claude, .optionId):
-            return "An option id is for a Codex session; this is a Claude session, "
+            return "An option id is for a Codex run; this is a Claude run, "
                 + "so nothing was sent."
         case (.unsupported(let raw), _):
-            return "This app does not know how to answer a \(raw) session, so nothing was sent."
+            return "This app does not know how to answer a \(raw) run, so nothing was sent."
         default:
             return nil
         }

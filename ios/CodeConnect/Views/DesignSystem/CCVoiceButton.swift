@@ -158,7 +158,7 @@ struct CCVoiceButton: View {
         if let blockedReason, isBlocked { return blockedReason }
         switch phase {
         case .dictate: return "Transcribes speech on this phone into the message field."
-        case .send: return "Types this into the agent's prompt."
+        case .send: return "Types this into the agent’s prompt."
         case .stop: return "Keeps the transcript in the field for review."
         case .sending: return ""
         }

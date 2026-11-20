@@ -29,14 +29,14 @@ private struct PendingRemoval {
 
     @MainActor
     init(row: SessionSummary, model: AppModel, remove: @escaping () -> Void) {
-        title = "Remove \(model.runLabel(for: row.sessionKey).project)?"
-        message = "\(row.agent.displayName)'s own transcript stays on the computer."
+        title = FleetWords.removeTitle(model.runLabel(for: row.sessionKey).project)
+        message = FleetWords.removeKeeps(row.agent.displayName)
         self.remove = remove
     }
 
     init(count: Int, remove: @escaping () -> Void) {
-        title = "Remove \(count) sessions?"
-        message = "Their own transcripts stay on the computer."
+        title = FleetWords.removeManyTitle(count)
+        message = FleetWords.removeManyKeeps
         self.remove = remove
     }
 }
@@ -296,7 +296,7 @@ struct FleetView: View {
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
             .ccNavigationChrome()
-            .navigationTitle("Projects")
+            .navigationTitle(FleetWords.projects)
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SessionRoute.self) { route in
                 destination(route).ccBackButton(to: "Projects")
@@ -346,7 +346,7 @@ struct FleetView: View {
                 } label: {
                     HStack(spacing: CC.space.xxs) {
                         CCIcon("plus", size: 16)
-                        Text("New")
+                        Text(FleetWords.newAgent)
                             .ccType(CC.type.body)
                     }
                     .foregroundStyle(CC.text.primary)
@@ -354,7 +354,7 @@ struct FleetView: View {
                     .ccHitTarget()
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("New session")
+                .accessibilityLabel(FleetWords.newAgent)
                 .accessibilityIdentifier("start-entry")
             }
             .ccPlainToolbarItem()
@@ -363,7 +363,7 @@ struct FleetView: View {
             // The same word the scroll header carries, arriving only as
             // that header leaves. Two titles at once is the bug this
             // fade exists to prevent.
-            Text("Projects")
+            Text(FleetWords.projects)
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
                 .opacity(titleVisible ? 1 : 0)
@@ -646,7 +646,7 @@ struct FleetView: View {
     private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-                Text("Projects")
+                Text(FleetWords.projects)
                     .ccType(CC.type.display)
                     .foregroundStyle(CC.text.primary)
                     .accessibilityAddTraits(.isHeader)
@@ -1179,7 +1179,7 @@ struct FleetView: View {
         return VStack(spacing: 0) {
             CCHairline()
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-                CCButton(all ? "Deselect All" : "Select All", variant: .ghost, size: .md) {
+                CCButton(all ? "Deselect all" : "Select all", variant: .ghost, size: .md) {
                     selected = all ? [] : Set(selectable)
                 }
                 .disabled(batchRunning)
@@ -1363,7 +1363,7 @@ struct FleetView: View {
         .frame(minHeight: CC.size.controlLg)
         .padding(.bottom, CC.space.xl)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(band.rows.count) ended sessions, collapsed")
+        .accessibilityLabel("\(band.rows.count) ended runs, collapsed")
     }
 
     // MARK: States
@@ -1379,10 +1379,9 @@ struct FleetView: View {
             Color.clear.containerRelativeFrame(.vertical)
             CCEmptyState(
                 glyph: "terminal-window",
-                title: "Start an agent on your computer",
-                message:
-                    "Start one with CodeConnect and its project shows up here, ready to follow and answer from this phone.",
-                actionTitle: start == nil ? nil : "Start an agent",
+                title: FleetWords.startAnAgent,
+                message: FleetWords.agentsAppearHere,
+                actionTitle: start == nil ? nil : FleetWords.startAnAgent,
                 action: start)
         }
     }
@@ -1795,7 +1794,7 @@ private struct FleetBanner: View {
             message: "Nothing live has arrived this launch.",
             tone: .warning,
             icon: "clock-counter-clockwise",
-            actionTitle: "Retry",
+            actionTitle: "Try again",
             action: { machines.retryNow() })
     }
 }
@@ -2766,17 +2765,7 @@ struct LinkHealthSheet: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var heroWord: String {
-        switch model.linkHealth.level {
-        case .live: return "Live"
-        case .lagging: return "Lagging"
-        case .stale: return "Stale"
-        case .connecting: return "Connecting"
-        case .offline: return "Offline"
-        case .rejected: return "Pair again"
-        case .blocked: return "Blocked"
-        }
-    }
+    private var heroWord: String { model.linkHealth.word }
 
     /// The product's central promise, expressed as a number, at the top of the
     /// trust screen.
@@ -2825,7 +2814,7 @@ struct LinkHealthSheet: View {
                 isUnmeasured: !model.daemonProfile.isConnected,
                 separator: true)
             CCFactRow(
-                "Computer's clock",
+                "Computer’s clock",
                 value: model.connection.serverTime ?? Self.unmeasured,
                 isUnmeasured: model.connection.serverTime == nil,
                 separator: model.connection.lastErrorMessage != nil)
@@ -2900,7 +2889,7 @@ struct LinkHealthSheet: View {
             if model.daemonProfile.connectionEncrypted == false,
                 model.connection.capabilities?.tls == true
             {
-                Text("Your computer can encrypt this connection itself, but this iPhone isn't using that.")
+                Text("Your computer can encrypt this connection itself, but this iPhone isn’t using that.")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3017,14 +3006,14 @@ struct LinkHealthSheet: View {
     private static func sentence(for result: TestPushResult?) -> String {
         switch result {
         case .accepted(let apnsID):
-            let receipt = apnsID.map { " Apple's receipt: \($0)." } ?? ""
+            let receipt = apnsID.map { " Apple’s receipt: \($0)." } ?? ""
             return "Accepted by Apple — the banner on this phone is the proof.\(receipt)"
         case .pushUnconfigured:
-            return "Your computer isn't set up to send notifications, so nothing was sent."
+            return "Your computer isn’t set up to send notifications, so nothing was sent."
         case .notPairedDevice:
             return "This iPhone is connected without pairing. Pair it to test notifications."
         case .noRegisteredToken:
-            return "Your computer can't notify this iPhone yet. Turn on notifications, then try again."
+            return "Your computer can’t notify this iPhone yet. Turn on notifications, then try again."
         case .credentialInvalid:
             return "The relay no longer trusts this phone’s credential. Reset notification registration to enroll again."
         case .rateLimited(let secs):
@@ -3034,7 +3023,7 @@ struct LinkHealthSheet: View {
         case .unknown(let status):
             return "The computer answered “\(status)”, which this build does not know."
         case .none:
-            return "No answer from the computer."
+            return "No answer from your computer."
         }
     }
 
@@ -3045,13 +3034,13 @@ struct LinkHealthSheet: View {
     /// the user visits Settings.
     private var pushReason: String? {
         guard let capabilities = model.connection.capabilities else {
-            return "Not connected. Your computer hasn't said what it can do yet."
+            return "Not connected. Your computer hasn’t said what it can do yet."
         }
         guard capabilities.pushMode != .none else {
-            return "Your computer doesn't send notifications, so there is nothing to test."
+            return "Your computer doesn’t send notifications, so there is nothing to test."
         }
         guard capabilities.testsPush else {
-            return "Your computer's CodeConnect is too old to send a test. Update it."
+            return "Your computer’s CodeConnect is too old to send a test. Update it."
         }
         // Relay mode has an enrollment step direct mode does not; its states fold
         // in here so the one button explains why it is waiting or stuck.

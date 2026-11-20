@@ -583,7 +583,7 @@ import SwiftUI
                             // announced on every row whether or not the badge is
                             // drawn.
                             accessibilityLabelText:
-                                "codeconnect, Claude Code session, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
+                                "codeconnect, Claude Code session, Waiting for you, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
                             action: { lastAction = "fleet row" }
                         ) {
                             // **No dot, and no column.** A blocked row draws
@@ -653,7 +653,7 @@ import SwiftUI
                         // Never `.opacity`: dimming a whole row is forbidden.
                         CCRow(
                             "infra-terraform",
-                            subtitle: "Session ended",
+                            subtitle: "Run ended",
                             titleTruncation: .tail,
                             subtitleLineLimit: 1,
                             showsChevron: false,
@@ -956,7 +956,7 @@ import SwiftUI
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCField(
                         label: "Reason", text: $fieldText,
-                        placeholder: "Tell Claude what to do instead",
+                        placeholder: CardWords.denyPrompt("Claude"),
                         hint: "Denies the call, and Claude gets this with the denial.")
                     CCField(
                         label: "Daemon address", text: $monoField,
@@ -969,7 +969,7 @@ import SwiftUI
                         error: "That is not a valid pairing token.")
                     CCField(
                         label: "Message", text: $multiline,
-                        placeholder: "Ask anything",
+                        placeholder: SessionWords.replyPrompt("Claude"),
                         axis: .vertical, lineLimit: 1...5)
 
                     Text("NO LABEL - THE COMPOSE BAR'S FORM")
@@ -983,7 +983,7 @@ import SwiftUI
                     .fixedSize(horizontal: false, vertical: true)
                     CCField(
                         text: $unlabelled,
-                        placeholder: "Ask anything",
+                        placeholder: SessionWords.replyPrompt("Claude"),
                         axis: .vertical, lineLimit: 1...5)
                 }
             }
@@ -1151,7 +1151,7 @@ import SwiftUI
                         "Last known state, 6m old",
                         message: "Nothing live has arrived yet this launch.",
                         tone: .warning, icon: "clock-counter-clockwise",
-                        actionTitle: "Retry", action: { lastAction = "retry" })
+                        actionTitle: "Try again", action: { lastAction = "retry" })
                     CCBanner(
                         "Showing recent history only",
                         message: "The start of this session was not loaded.",

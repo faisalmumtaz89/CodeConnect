@@ -125,8 +125,8 @@ struct DiffSheet: View {
             CCEmptyState(
                 glyph: "stop-circle",
                 title: "Stopped asking",
-                message: "The computer never answered, so nothing was rendered. Nothing was changed.",
-                actionTitle: "Ask again",
+                message: "Your computer never answered, so nothing was rendered. Nothing was changed.",
+                actionTitle: ChangesWords.checkAgain,
                 action: { start(force: true) })
         case .idle, .loading:
             if model.daemonProfile.isConnected || state.isLoading {
@@ -169,8 +169,8 @@ struct DiffSheet: View {
 
                 CCWaitingNotice(
                     elapsed: elapsed,
-                    label: "Asking the computer for git diff HEAD",
-                    lateLabel: "Still asking the computer",
+                    label: ChangesWords.reading,
+                    lateLabel: ChangesWords.stillReading,
                     lateAfter: 8,
                     actionTitle: "Cancel",
                     action: cancelAction)
@@ -183,9 +183,9 @@ struct DiffSheet: View {
         CCEmptyState(
             glyph: "plugs",
             title: "Not connected",
-            message: "Not connected. The computer can't be asked for a diff.",
+            message: "Not connected. Your computer can’t be asked for the changes.",
             tone: .warning,
-            actionTitle: "Try again",
+            actionTitle: ChangesWords.checkAgain,
             action: { start(force: true) }
         ) {
             // The link's own account of itself, so the reader does not have to
@@ -209,10 +209,10 @@ struct DiffSheet: View {
         ScrollView {
             CCEmptyState(
                 glyph: "warning-octagon",
-                title: "The computer could not read the diff",
-                message: "No diff was produced. Your computer's own reason follows, word for word.",
+                title: ChangesWords.couldNotRead,
+                message: ChangesWords.itsReason,
                 tone: .danger,
-                actionTitle: "Try again",
+                actionTitle: ChangesWords.checkAgain,
                 action: { start(force: true) }
             ) {
                 // Verbatim, monospace, selectable, never truncated, never
@@ -236,12 +236,12 @@ struct DiffSheet: View {
         ScrollView {
             CCEmptyState(
                 glyph: "question",
-                title: "No answer from the computer",
+                title: "No answer from your computer",
                 message:
                     "The link is up and the request went out. Nothing came back, and your computer "
-                    + "gave no reason. This is the app's own account of what it saw.",
+                    + "gave no reason. This is the app’s own account of what it saw.",
                 tone: .warning,
-                actionTitle: "Ask again",
+                actionTitle: ChangesWords.checkAgain,
                 action: { start(force: true) }
             ) {
                 Text(reason)
@@ -493,7 +493,7 @@ private struct DiffRefreshButton: View {
         .buttonStyle(.plain)
         .ccSheetButtonSizing()
         .disabled(isLoading || blockedReason != nil)
-        .accessibilityLabel("Ask the computer for a fresh diff")
+        .accessibilityLabel(ChangesWords.checkAgain)
         // The visible reason for this control lives in the content beneath it —
         // the ticking wait notice while it is loading, the link's own account of
         // itself when the link is what stopped it. A header row has nowhere to
@@ -525,7 +525,7 @@ private struct DiffProvenanceLine: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Text("\(capturedAge) ago")
+        Text(ChangesWords.checked(since: capturedAt, now: model.now))
             // The age turns `danger` on a stale link: the capture is
             // still true, but nothing newer is coming.
             .foregroundStyle(
@@ -879,7 +879,7 @@ struct DiffDocumentView: View {
     /// stamp once drew `+2,… −2,… 1 fi…`, numbers the app has counted exactly
     /// shown as ellipses.
     private var counts: some View {
-        let files = diff.files.count == 1 ? "1 file" : "\(diff.files.count) files"
+        let files = ChangesWords.files(diff.files.count)
         // Read as "+6 −3 · 2 files, Captured on the computer 3s ago": the
         // separator before the age is drawn, not spoken.
         let spokenSize = "+\(diff.additions) −\(diff.deletions) · \(files)"
@@ -1098,11 +1098,11 @@ struct DiffDocumentView: View {
         ScrollView {
             CCEmptyState(
                 glyph: raw.note == nil ? "check" : "folder-dashed",
-                title: raw.note == nil ? "No uncommitted changes" : "No diff to show",
+                title: raw.note == nil ? ChangesWords.noUncommitted : ChangesWords.noDiff,
                 message: raw.note == nil
-                    ? "This session's worktree was clean when it was read."
-                    : "No diff was produced. Your computer's own reason follows, word for word.",
-                actionTitle: "Check again",
+                    ? ChangesWords.clean
+                    : ChangesWords.computersReason,
+                actionTitle: ChangesWords.checkAgain,
                 action: refresh
             ) {
                 VStack(spacing: CC.space.sm) {
@@ -1185,7 +1185,7 @@ struct DiffDocumentView: View {
                     // than the label:
                     // it changes on every tap, and a label that renumbers itself
                     // as you use it is noise.
-                    label: "\(plan.heldBack.formatted()) more lines · Draw more",
+                    label: ChangesWords.showMoreLines(min(plan.heldBack, Self.hunkRowBudget)),
                     actionLabel:
                         "Draws the next \(min(plan.heldBack, Self.hunkRowBudget).formatted()) "
                         + "lines of this hunk",

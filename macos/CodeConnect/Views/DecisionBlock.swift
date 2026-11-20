@@ -70,7 +70,7 @@ struct DecisionBlock: View {
     /// …and its keys answer, while no sheet covers the window: a key meant for the sheet never answers behind it.
     private var keyed: Bool { boxed && slot?.sheetUp != true }
     private var agentName: String { summary?.agent.displayName ?? "The agent" }
-    private var placeholder: String { "What should \(agentName) do instead?" }
+    private var placeholder: String { CardWords.denyPrompt(agentName) }
     /// The reason a Deny carries, typed in the box: the run's (`RunDrafts`), so it outlives this view.
     private var reason: String {
         get { model.drafts(for: approval.sessionKey)?.reasons[approval.id] ?? "" }
@@ -140,7 +140,7 @@ struct DecisionBlock: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
                 if actionable { StateIcon(status: .blocked) }
-                Text("\(agentName) asks to use \(approval.card.toolName)")
+                Text(CardWords.asks(agentName, approval.card.toolName))
                     .font(Theme.ui(12.5, .medium))
                     .foregroundStyle(actionable ? Theme.text : Theme.text2)
                 Spacer(minLength: 8)
@@ -210,7 +210,7 @@ struct DecisionBlock: View {
     /// of an answer (this Mac's, or one recorded).
     private var banner: BannerLine? {
         if !approval.card.verification.hashMatchesDisplayText {
-            return BannerLine(title: "Can't be verified", message: DecisionCard.hashMismatchSentence, tone: .danger)
+            return BannerLine(title: CardWords.cantBeVerified, message: DecisionCard.hashMismatchSentence, tone: .danger)
         }
         if let codexEnding {
             let ending = CodexProse.resolution(codexEnding)
@@ -331,16 +331,16 @@ struct DecisionBlock: View {
                     }
                 }
                 if plan.heldBack > 0 {
-                    Text("\(plan.heldBack) more lines not drawn here").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                    Text(CardWords.linesNotDrawn(plan.heldBack)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                 }
                 if all.count > shown.count {
-                    Button("Show \(all.count - shown.count) more files") { openAllChanges() }
+                    Button(CardWords.showMoreFiles(all.count - shown.count)) { openAllChanges() }
                         .buttonStyle(.hover(bare: true, id: "\(id).moreChanges"))
                         .font(Theme.ui(12)).foregroundStyle(Theme.text2)
                         .accessibilityIdentifier("\(id).moreChanges")
                 }
                 if let omitted = CodexCard.changesOmitted(in: approval.card.toolInput) {
-                    Text("\(omitted.count) more files were too many to carry on the card")
+                    Text("\(CardWords.filesNotShown(omitted.count)) \(CardWords.approvesThoseToo)")
                         .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                 }
             }
@@ -406,19 +406,19 @@ struct DecisionBlock: View {
             HStack(spacing: 8) {
                 blockedLine(assentBlocked)
                 Spacer(minLength: 8)
-                ActionButton(title: "Deny", key: keyed ? (reasonTyped ? "↩" : "⌘D") : nil, prominent: false, id: "\(id).deny") {
+                ActionButton(title: reasonTyped ? CardWords.denyAndSend : CardWords.deny, key: keyed ? (reasonTyped ? "↩" : "⌘D") : nil, prominent: false, id: "\(id).deny") {
                     send(reasonTyped ? .text(trimmedReason) : .deny, from: reasonTyped ? "reason" : "deny")
                 }
                 .disabled(refusalBlocked != nil)
                 .answerKey(reasonTyped ? .return : "d", reasonTyped ? [] : .command, when: keyed)
                 if allowForSession {
                     // A grant that outlives this card says yes as Allow does, so it waits as Allow waits; no key.
-                    ActionButton(title: "Allow for this session", key: nil, prominent: false, id: "\(id).allowSession") {
+                    ActionButton(title: CardWords.allowForSession, key: nil, prominent: false, id: "\(id).allowSession") {
                         send(.optionId("acceptForSession"), from: "allowSession")
                     }
                     .disabled(assentBlocked != nil)
                 }
-                ActionButton(title: "Allow", key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
+                ActionButton(title: CardWords.allow, key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
                     send(.allow, from: "allow")
                 }
                 .disabled(assentBlocked != nil)
@@ -426,6 +426,7 @@ struct DecisionBlock: View {
             }
         case .codexOptions(let options):
             VStack(alignment: .leading, spacing: 4) {
+                Text(CardWords.chooseOne).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text2)
                 ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
                     let refusal = !DecisionCard.needsSecondFactor(risk: .high, decision: .optionId(option.id))
                     let blocked = refusal ? refusalBlocked : assentBlocked

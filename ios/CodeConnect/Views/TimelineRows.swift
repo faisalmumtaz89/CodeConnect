@@ -274,13 +274,13 @@ struct AgentMessageRow: View {
                 HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
                     CCIcon("stop-circle", size: 12, weight: .regular, relativeTo: .caption)
                         .ccMark(beside: CC.type.micro)
-                    Text("Interrupted")
+                    Text(SessionWords.interrupted)
                         .ccType(CC.type.micro)
                 }
                 .foregroundStyle(CC.text.tertiary)
                 .padding(.top, CC.space.xs)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Interrupted — this reply was cut short")
+                .accessibilityLabel(SessionWords.interruptedSpoken)
             }
             if isLong {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
@@ -522,7 +522,7 @@ struct ToolRow: View {
         if tool.isTruncated {
             // Verbatim. This sentence is the honest description of a payload cap
             // and it must survive every redesign.
-            Text("Your computer cut this short; the fact is complete, the bulk is not.")
+            Text(SessionWords.cutShort)
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.color.warning)
                 .fixedSize(horizontal: false, vertical: true)

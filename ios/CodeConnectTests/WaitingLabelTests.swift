@@ -179,7 +179,7 @@ final class WaitingLabelTests: XCTestCase {
     /// what the shipped row says.
     func testTheGallerysBlockedRowSpeaksTheShippedWait() throws {
         let found = try spoken(CCGallery(page: .rows))
-        let row = try XCTUnwrap(found.first { $0.contains(", Blocked, risk HIGH, ") }, "\(found)")
+        let row = try XCTUnwrap(found.first { $0.contains(", Waiting for you, risk HIGH, ") }, "\(found)")
         XCTAssertTrue(row.hasSuffix(", waiting 4 minutes, control"), row)
     }
 }

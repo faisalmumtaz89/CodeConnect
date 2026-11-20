@@ -169,7 +169,7 @@ final class LinkOfflineTests: XCTestCase {
             dialFailure: .unreachable)
         let item = health.ccBannerItem(onRetry: {}, onSettings: {}, onTailscale: {})
         XCTAssertEqual(item?.title, "Offline")
-        XCTAssertEqual(item?.actionTitle, "Retry")
+        XCTAssertEqual(item?.actionTitle, "Try again")
     }
 
     // MARK: Plain words

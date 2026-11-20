@@ -133,16 +133,11 @@ extension CCBadge {
 }
 
 extension CCTag {
-    /// The agent tag. The tag's own names, not `AgentKind.displayName`: prose
-    /// says "Claude", the tag names the product the session runs. An
-    /// unsupported agent is the daemon's word, verbatim.
+    /// The agent tag: the product the session runs (`AgentKind.productName`),
+    /// not the name prose addresses it by (`displayName`). An unsupported agent
+    /// is the daemon's word, verbatim.
     init(agent: AgentKind) {
-        let name: String
-        switch agent {
-        case .claude: name = "Claude Code"
-        case .codex: name = "Codex"
-        case .unsupported(let raw): name = raw
-        }
+        let name = agent.productName
         self.init(name, accessibilityText: "\(name) session")
     }
 }
@@ -288,7 +283,7 @@ extension LinkHealth {
             return nil
         case .rejected:
             return CCBannerItem(
-                .rejected, title: "Pair again", message: detail, tone: .danger,
+                .rejected, title: word, message: detail, tone: .danger,
                 icon: "lock-open", actionTitle: "Settings", action: onSettings)
         case .blocked:
             // The pairing is still held, so this is not "Pair again" — no Settings/code
@@ -296,7 +291,7 @@ extension LinkHealth {
             // asks now.
             return CCBannerItem(
                 .offline, title: word, message: detail, tone: .neutral,
-                icon: "lock", actionTitle: "Retry", action: onRetry)
+                icon: "lock", actionTitle: "Try again", action: onRetry)
         case .offline:
             switch cause {
             case .tailnetHostUnresolvable(let host):
@@ -307,7 +302,7 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Connect Tailscale",
                     message:
-                        "Can't find your computer at `\(host)`. Turn on Tailscale on this iPhone, signed in to the same account as your computer. CodeConnect reconnects on its own.",
+                        "Can’t find your computer at `\(host)`. Turn on Tailscale on this iPhone, signed in to the same account as your computer. CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: TailscaleAssist.isInstallHintNeeded
@@ -317,14 +312,14 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Host not found",
                     message:
-                        "`\(host)` isn't resolving. Check the paired address and this iPhone's network — CodeConnect reconnects on its own.",
+                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network — CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "plugs",
                     actionTitle: "Settings", action: onSettings)
             case nil, .refused:
                 return CCBannerItem(
                     .offline, title: "Offline", message: detail, tone: .neutral,
-                    icon: "plugs", actionTitle: "Retry", action: onRetry)
+                    icon: "plugs", actionTitle: "Try again", action: onRetry)
             }
         case .stale:
             // No Retry: a quiet link is cut and dialled again on its own after

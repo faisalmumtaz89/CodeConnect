@@ -97,7 +97,7 @@ struct QuestionCardView: View {
     /// What Submit is waiting for while the answers are incomplete. Not a
     /// warning: an untouched form is not a fault.
     private var incompleteNote: String {
-        count == 1 ? "Choose an answer to submit." : "Answer every question to submit."
+        QuestionWords.submitNeeds(questions: count)
     }
 
     // MARK: Body
@@ -212,14 +212,14 @@ struct QuestionCardView: View {
             }
             if entry.otherChosen {
                 CCField(
-                    label: "Other", text: otherBinding(index), placeholder: "Type your answer",
+                    label: QuestionWords.other, text: otherBinding(index), placeholder: QuestionWords.typeYourAnswer,
                     labelOnContentColumn: false)
                 .accessibilityIdentifier("question-\(index)-other-text")
             }
             if question.takesNotes {
                 CCField(
-                    label: "Notes", text: notesBinding(index),
-                    placeholder: "Optional notes for Claude on this choice", axis: .vertical,
+                    label: QuestionWords.notes, text: notesBinding(index),
+                    placeholder: QuestionWords.notesPrompt(sessionAgent?.displayName ?? "the agent"), axis: .vertical,
                     lineLimit: 1...4, labelOnContentColumn: false)
                 .accessibilityIdentifier("question-\(index)-notes")
             }
@@ -289,7 +289,7 @@ struct QuestionCardView: View {
         } label: {
             ChoiceRowLabel(
                 symbol: Self.symbol(chosen: chosen, multiSelect: question.multiSelect),
-                isChosen: chosen, label: "Other", detail: "Type your own answer",
+                isChosen: chosen, label: QuestionWords.other, detail: QuestionWords.typeYourAnswer,
                 order: nil)
         }
         .buttonStyle(
@@ -512,7 +512,7 @@ struct QuestionCardView: View {
     private var forward: some View {
         if count == 1 || isReview {
             CCButton(
-                "Submit", variant: .primary, size: .lg, fullWidth: true,
+                QuestionWords.submit, variant: .primary, size: .lg, fullWidth: true,
                 isLoading: spinningControl == "submit"
             ) {
                 if let answers = draft.answers(in: questions) {
@@ -538,7 +538,7 @@ struct QuestionCardView: View {
     private var subordinateControls: some View {
         VStack(spacing: CC.rhythm.controls) {
             CCButton(
-                "Decline", icon: "x", variant: .secondary, size: .md, fullWidth: true,
+                QuestionWords.decline, icon: "x", variant: .secondary, size: .md, fullWidth: true,
                 isLoading: spinningControl == "decline"
             ) {
                 submit(.decline, key: "decline")

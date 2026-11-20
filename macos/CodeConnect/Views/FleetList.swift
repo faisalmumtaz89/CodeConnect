@@ -3,8 +3,10 @@ import SwiftUI
 
 /// Which runs the list shows: the ones still going, or the ones that have ended.
 enum FleetScope: String {
-    case active = "Active"
-    case finished = "Finished"
+    case active, finished
+
+    /// The scope by name: the ended runs carry their status's own word.
+    var title: String { self == .active ? "Active" : FleetStatus.ended.label }
 
     func rows(_ fleet: [FleetRow]) -> [FleetRow] {
         fleet.filter { ($0.status == .ended) == (self == .finished) }
@@ -70,7 +72,7 @@ struct FleetList: View {
         let namingComputer = machines.models.filter(\.showsFleet).count > 1
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text(scope.rawValue).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
+                Text(scope.title).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
                 Text(verbatim: "\(rows.count)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
                 if let filter {
                     FilterChip(name: filter.name(in: machines)) { self.filter = nil }
@@ -91,7 +93,7 @@ struct FleetList: View {
                     } else if scope == .active {
                         NoAgentsYet(newAgent: newAgent)
                     } else {
-                        Text("No finished agents.").font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+                        Text(FleetWords.noEndedRuns).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
                     }
                 }
                 .padding(.horizontal, 24)
@@ -161,7 +163,7 @@ struct FleetList: View {
                             Button { scope = .finished } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .bold))
-                                    Text("Finished").font(Theme.ui(12, .medium))
+                                    Text(FleetScope.finished.title).font(Theme.ui(12, .medium))
                                     Text(verbatim: "\(finished)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
                                     Spacer()
                                 }
@@ -194,13 +196,13 @@ struct FleetList: View {
         #endif
         // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
         .alert(
-            "End this run?", isPresented: Binding(get: { ending != nil }, set: { if !$0 { ending = nil } }),
+            FleetWords.endTitle, isPresented: Binding(get: { ending != nil }, set: { if !$0 { ending = nil } }),
             presenting: ending
         ) { row in
             Button("End Run", role: .destructive) { endRun(row) }.accessibilityIdentifier("endRun.confirm")
             Button("Cancel", role: .cancel) {}.accessibilityIdentifier("endRun.cancel")
         } message: { row in
-            Text("\(row.summary.agent.displayName) stops, and the run moves to Finished.")
+            Text(FleetWords.endMessage(row.summary.agent.displayName))
         }
         .alert(
             "End Run", isPresented: Binding(get: { endNote != nil }, set: { if !$0 { endNote = nil } }),
@@ -213,14 +215,14 @@ struct FleetList: View {
         // Removing forgets CodeConnect's own record of a run, never the agent's transcript: it asks once, in the
         // iPhone's words, then says only what went wrong.
         .alert(
-            removing.map { "Remove \($0.label.project)?" } ?? "",
+            removing.map { FleetWords.removeTitle($0.label.project) } ?? "",
             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
             presenting: removing
         ) { row in
             Button("Remove", role: .destructive) { remove(row) }.accessibilityIdentifier("remove.confirm")
             Button("Cancel", role: .cancel) {}.accessibilityIdentifier("remove.cancel")
         } message: { row in
-            Text("\(row.summary.agent.displayName)'s own transcript stays on the computer.")
+            Text(FleetWords.removeKeeps(row.summary.agent.displayName))
         }
         .alert(
             "Not removed", isPresented: Binding(get: { removeNote != nil }, set: { if !$0 { removeNote = nil } }),
@@ -326,9 +328,12 @@ private struct GroupHeader: View {
                 .font(.system(size: 11))
                 .foregroundStyle(grouping == .computer ? Theme.text2 : Theme.text3)
             Text(group.name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-            Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+            // The counts stay whole on one line; the name before them is what gives way.
+            Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
             if group.waiting > 0 {
-                Text(verbatim: "\(group.waiting) waiting").font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
+                Text(FleetCount.waitingForYou(group.waiting)).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
+                    .lineLimit(1)
+                    .fixedSize()
             }
             Spacer(minLength: 16)
             if grouping == .project {
@@ -535,8 +540,8 @@ struct AgentMark: View {
         .foregroundStyle(Theme.text2)
         .frame(width: 18, height: 18)
         .background(Circle().fill(Color.white.opacity(0.08)))
-        .help(agent.displayName)
+        .help(agent.productName)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(agent.displayName)
+        .accessibilityLabel(agent.productName)
     }
 }

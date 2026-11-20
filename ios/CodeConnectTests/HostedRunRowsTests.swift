@@ -76,7 +76,7 @@ final class HostedRunRowsTests: XCTestCase {
         let drawn = await state(all)
         XCTAssertEqual(shape(drawn.timeline.filter { $0.seq == 7 }), [], "a hosted turn's start draws no row")
         XCTAssertEqual(
-            shape(drawn.timeline.filter { $0.seq == 3 }), ["notice:Session started"],
+            shape(drawn.timeline.filter { $0.seq == 3 }), ["notice:Run started"],
             "the launch's start keeps its row")
     }
 
@@ -90,7 +90,7 @@ final class HostedRunRowsTests: XCTestCase {
                 source: "codex"),
         ]
         XCTAssertNil(events[1].payload["source"])
-        XCTAssertEqual(shape(TimelineBuilder.build(events)), ["you:Fix the build", "notice:Session started"])
+        XCTAssertEqual(shape(TimelineBuilder.build(events)), ["you:Fix the build", "notice:Run started"])
     }
 
     /// **Decision 227: a hosted command whose end carries no `local_command` draws no stray "Turn complete".**
@@ -112,12 +112,12 @@ final class HostedRunRowsTests: XCTestCase {
     }
 
     /// The fleet reads the run as it did with the row drawn: Running through the woken turn, done when it ends. The
-    /// preview after the woken turn's start is the mail notice, where it was "Session started".
+    /// preview after the woken turn's start is the mail notice, where it was "Run started".
     func testAHostedRunsStatusAndPreviewThroughAWokenTurn() async throws {
         let all = try events("mail-wake-wire")
         let summary = try decoded(SessionSummary.self, "session_hosted_live", in: "mail-wake-wire")
         let expected: [(through: UInt64, status: FleetStatus, preview: String)] = [
-            (3, .running, "notice:Session started"),
+            (3, .running, "notice:Run started"),
             (4, .doneUnreviewed, "notice:Turn complete"),
             (7, .running, "notice:Reading CodeConnect mail"),
             (8, .running, "reply:I read my mail."),
