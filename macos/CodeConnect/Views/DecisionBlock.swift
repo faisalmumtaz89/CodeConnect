@@ -251,21 +251,38 @@ struct DecisionBlock: View {
         .buttonStyle(.hover(bare: true, id: "\(id).input"))
         .accessibilityIdentifier("\(id).input")
         .accessibilityValue(showInput ? "open" : "closed")
+        #if DEBUG
+            .onAppear { if RenderWindow.opensToolInput, !showInput { toggleInput() } }
+        #endif
         if showInput {
             VStack(alignment: .leading, spacing: 6) {
                 Text(approval.card.shownToolInput)
                     .font(Theme.mono(11.5))
                     .foregroundStyle(Theme.text)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("request_id \(approval.card.requestID)\npayload_hash \(approval.card.payloadHash)")
-                    .font(Theme.mono(10.5))
-                    .foregroundStyle(Theme.text3)
+                // The ids the answer is checked against, and what the computer said of the call, as the iPhone lists
+                // them: one line each, a long value cut in its middle; selecting copies it whole.
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 2) {
+                    evidence("request_id", approval.card.requestID)
+                    evidence("payload_hash", approval.card.payloadHash)
+                    if let mode = approval.card.permissionMode { evidence("permission_mode", mode) }
+                    if let declared = approval.card.risk { evidence("risk.class", declared.cls) }
+                }
+                .font(Theme.mono(10.5))
+                .foregroundStyle(Theme.text3)
             }
             .textSelection(.enabled)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
             .accessibilityIdentifier("\(id).input.text")
+        }
+    }
+
+    private func evidence(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+            Text(value).lineLimit(1).truncationMode(.middle)
         }
     }
 
@@ -349,7 +366,7 @@ struct DecisionBlock: View {
     /// The answers. In the box (`boxed`): for Allow/Deny the reason a Deny carries, then Deny and Allow, whose keys
     /// (`keyed`) follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return denies with it, and Allow
     /// keeps no key); where the card offers it, "Allow for this session" between them, waiting as Allow waits and with
-    /// no key, the rule it grants under the row; for Codex its options, ⌘1 onwards. Held above the reply box: the same
+    /// no key, and above the row the rule it grants; for Codex its options, ⌘1 onwards. Held above the reply box: the same
     /// answers, with no field and no keys.
     @ViewBuilder private var controls: some View {
         switch surface {
@@ -373,6 +390,19 @@ struct DecisionBlock: View {
                     .accessibilityLabel(placeholder)
                     .accessibilityIdentifier("\(id).reason.text")
             }
+            // What the session grant covers, as Claude writes the rule, read before the buttons as the iPhone has it:
+            // the rule can be broader than the one command asked.
+            if allowForSession, let rule = DecisionCard.sessionRuleCaption(card: approval.card) {
+                Text("\(DecisionCard.sessionGrantLead) \(Text(rule).font(Theme.mono(11.5)))")
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text3)
+                    .lineLimit(DecisionCard.sessionCaptionLineLimit)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("\(DecisionCard.sessionGrantLead) \(rule)")
+                    .accessibilityIdentifier("\(id).sessionRule")
+            }
             HStack(spacing: 8) {
                 blockedLine(assentBlocked)
                 Spacer(minLength: 8)
@@ -387,26 +417,12 @@ struct DecisionBlock: View {
                         send(.optionId("acceptForSession"), from: "allowSession")
                     }
                     .disabled(assentBlocked != nil)
-                    .opacity(assentBlocked != nil ? 0.45 : 1)
                 }
                 ActionButton(title: "Allow", key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
                     send(.allow, from: "allow")
                 }
                 .disabled(assentBlocked != nil)
-                .opacity(assentBlocked != nil ? 0.45 : 1)
                 .answerKey(.return, .command, when: keyed && !reasonTyped)
-            }
-            // What the session grant covers, as Claude writes the rule: it can be broader than the one command asked.
-            if allowForSession, let rule = DecisionCard.sessionRuleCaption(card: approval.card) {
-                Text(rule)
-                    .font(Theme.mono(11.5))
-                    .foregroundStyle(Theme.text3)
-                    .lineLimit(DecisionCard.sessionCaptionLineLimit)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel("Allowing for this session grants \(rule)")
-                    .accessibilityIdentifier("\(id).sessionRule")
             }
         case .codexOptions(let options):
             VStack(alignment: .leading, spacing: 4) {
@@ -428,7 +444,6 @@ struct DecisionBlock: View {
                     }
                     .buttonStyle(.hover(id: "\(id).option.\(option.id)"))
                     .disabled(blocked != nil)
-                    .opacity(blocked != nil ? 0.45 : 1)
                     .answerKey(KeyEquivalent(number ?? "0"), .command, when: number != nil)
                     .accessibilityIdentifier("\(id).option.\(option.id)")
                 }

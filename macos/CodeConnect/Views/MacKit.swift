@@ -80,12 +80,13 @@ struct HoverButtonStyle: ButtonStyle {
         @Environment(\.isEnabled) private var enabled
 
         var body: some View {
-            let lit = (hovering || forced) && enabled && !forcedState("disabled")
+            let off = !enabled || forcedState("disabled")
+            let lit = (hovering || forced) && !off
             configuration.label
                 .disabled(forcedState("disabled"))
                 .background(lit && !over ? Theme.hover : .clear, in: plate)
                 .brightness(lit && over ? Theme.hoverLift : 0)
-                .opacity(configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
+                .opacity(off ? Theme.disabledOpacity : configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
                 // What lights is what a click takes, the label's clear gaps included.
                 .contentShape(plate)
                 .onHover { hovering = $0 }

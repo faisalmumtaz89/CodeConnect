@@ -116,7 +116,6 @@ struct SheetBar<Leading: View>: View {
                     ActionButton(title: action, key: "⌘↩", prominent: true, id: actionID, action: perform)
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(blocked)
-                        .opacity(blocked ? 0.45 : 1)
                 }
             }
             .padding(.horizontal, 14)

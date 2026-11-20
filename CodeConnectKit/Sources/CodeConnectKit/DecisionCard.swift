@@ -207,6 +207,9 @@ public enum DecisionCard {
     /// the one command on the card, so a person must be able to read it.
     public static let sessionCaptionLineLimit = 3
 
+    /// The words before the rule a session grant names, so the rule reads as what "Allow for this session" grants.
+    public static let sessionGrantLead = "Allowing for this session grants"
+
     /// The read-before-you-decide gate, as a value.
     ///
     /// **This is a viewport test, and it was not one.** The previous implementation
