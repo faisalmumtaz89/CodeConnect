@@ -261,13 +261,18 @@ struct StartForm: View {
                     .frame(height: 28)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
-                ScrollView {
-                    // Not lazy: every folder is in the accessibility tree, scrolled to or not.
-                    VStack(spacing: 0) {
-                        if let picked = picked(context) { pickedRow(picked) }
-                        ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
+                ScrollViewReader { list in
+                    ScrollView {
+                        // Not lazy: every folder is in the accessibility tree, scrolled to or not.
+                        VStack(spacing: 0) {
+                            if let picked = picked(context) { pickedRow(picked) }
+                            ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
+                        }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                     }
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
+                    // The chosen folder is always in view: scrolled to, the least that shows it, when the sheet
+                    // opens or the choice or the list changes, so a click on a row in view moves nothing.
+                    .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
                 // As tall as its rows, up to 170 pt, then it scrolls.
                 .frame(height: min(max(listHeight, 1), 170))
@@ -305,6 +310,7 @@ struct StartForm: View {
         .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
+        .id(project.path)
     }
 
     /// Any folder on this Mac, from the standard folder panel.
