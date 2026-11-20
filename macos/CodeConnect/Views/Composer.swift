@@ -65,7 +65,8 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        .padding(.horizontal, 20)
+        // On the pane's one content column: the conversation's rows and the heading stand 28 pt in.
+        .padding(.horizontal, 28)
         .padding(.top, 4)
         .padding(.bottom, 16)
         .onChange(of: kept.reply) { old, new in
