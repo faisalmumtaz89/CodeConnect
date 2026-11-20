@@ -117,7 +117,7 @@ struct HunkHeader: View {
 }
 
 /// The comment field under a hunk's header, in the reply box's style: the file and lines it is about over the field,
-/// Return sends it to the run's agent (⌥ or ⇧ Return adds a line), Esc closes it. Whether it can be sent, and what
+/// Return sends it to the run's agent (⇧ or ⌥ Return adds a line), Esc closes it. Whether it can be sent, and what
 /// became of it, are the Kit's words for the run, as under the reply box. Once it reaches the agent the field closes;
 /// a refusal keeps the words.
 struct HunkCommentField: View {
@@ -149,7 +149,7 @@ struct HunkCommentField: View {
                 .font(Theme.ui(13))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1...5)
-                .onSubmit(send)
+                .sendsOnReturn(send)
                 .focused($focused)
                 .onExitCommand { actions.commenting = nil }
                 .accessibilityLabel(ChangesWords.commentPrompt)

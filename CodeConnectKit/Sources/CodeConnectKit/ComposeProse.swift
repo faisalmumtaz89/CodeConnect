@@ -23,6 +23,12 @@ public enum ComposeProse {
         case neutral, info, success, warning, danger
     }
 
+    /// Whether Return, with these keys held, adds a line in a box that sends to an agent, as every message box does:
+    /// ⇧Return and ⌥Return add a line; Return alone sends, and with ⌘ or ⌃ it is the box's own.
+    public static func returnAddsLine(shift: Bool, option: Bool, command: Bool, control: Bool) -> Bool {
+        (shift || option) && !command && !control
+    }
+
     /// What became of a Claude send, or nil when it landed: the message appearing in the conversation says so.
     public static func note(_ attempt: ComposeAttempt) -> Note? {
         switch attempt {

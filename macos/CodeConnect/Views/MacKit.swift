@@ -365,6 +365,21 @@ struct PanelItem: View {
 }
 
 extension View {
+    /// A box that sends to an agent (the reply box, a card's reason, a hunk's comment): Return sends; ⇧Return and
+    /// ⌥Return add a line where the caret is (`ComposeProse.returnAddsLine`).
+    func sendsOnReturn(_ send: @escaping () -> Void) -> some View {
+        onKeyPress(.return, phases: .down) { press in
+            let held = press.modifiers
+            guard ComposeProse.returnAddsLine(
+                shift: held.contains(.shift), option: held.contains(.option), command: held.contains(.command),
+                control: held.contains(.control))
+            else { return .ignored }
+            NSApp.sendAction(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), to: nil, from: nil)
+            return .handled
+        }
+        .onSubmit(send)
+    }
+
     /// A right-click on this view, at the pointer's place in the window's coordinates (top-left origin), the coordinates
     /// `.global` frames use. Only the right button stops here: every other click, the hover and the keyboard reach the
     /// view as before, and nothing else draws a menu for it.

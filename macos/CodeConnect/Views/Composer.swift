@@ -226,7 +226,7 @@ private struct Composer: View {
                 .font(Theme.ui(13))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1...5)
-                .onSubmit(submit)
+                .sendsOnReturn(submit)
                 .focused($fieldFocused)
                 .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
                 .accessibilityLabel(SessionWords.replyPrompt(agent))
