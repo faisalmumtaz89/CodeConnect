@@ -23,13 +23,13 @@ final class PairingSubmissionTests: XCTestCase {
     func testACodeOfNeitherShapeIsRefused() {
         XCTAssertEqual(
             PairingCredentialInput.submission(address: "100.64.0.1", code: "abc"),
-            .refused("That isn't a pairing code: it's eight letters and digits."))
+            .refused("That isn’t a pairing code: it’s eight letters and digits."))
     }
 
     func testAnAddressThatDoesNotParseIsRefused() {
         XCTAssertEqual(
             PairingCredentialInput.submission(address: "ws://", code: "35AG-AE55"),
-            .refused("That address isn't valid. Enter it exactly as your computer shows it."))
+            .refused("That address isn’t valid. Enter it exactly as your computer shows it."))
     }
 
     func testAReadyFormPairsByCodeOrConnectsByToken() {

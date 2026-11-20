@@ -430,7 +430,7 @@ extension DecisionCard {
     public static func unavailableBanner(on host: HostDevice = .current) -> Banner {
         Banner(
             title: "No longer available",
-            message: "This decision can't be acted on here — the run is no longer on \(host.computer("your computer")), "
+            message: "This decision can’t be acted on here — the run is no longer on \(host.computer("your computer")), "
                 + "or its log was reset.",
             provenance: nil, tone: .warning, icon: "question")
     }
@@ -521,7 +521,7 @@ extension DecisionCard {
         if isQuestion { return "This card cannot be answered from here." }
         guard let hookOnlyApprovals else { return linkReason ?? cannotAnswerHere(computer: computer, on: host) }
         guard hookOnlyApprovals else {
-            return "\(host.computer("This computer", named: computer))'s CodeConnect is too old to answer Claude's "
+            return "\(host.computer("This computer", named: computer))’s CodeConnect is too old to answer Claude’s "
                 + "approvals from the \(host.noun). Update it, or answer at \(host.computer("the computer", named: computer))."
         }
         return cannotAnswerHere(computer: computer, on: host)

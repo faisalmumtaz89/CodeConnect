@@ -123,7 +123,7 @@ public enum CodexProse {
             let who =
                 attemptedBy == .phone
                 ? AnswerOutcome.answeringDevice(nil, on: host).map { "The answer from \($0)" }
-                    ?? "This \(host.noun)'s answer"
+                    ?? "This \(host.noun)’s answer"
                 : "The answer"
             return Banner(
                 title: "Sent, outcome unknown",
@@ -313,7 +313,7 @@ public enum CodexProse {
         switch agent {
         case .codex:
             guard daemonHonoursStop else {
-                return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Codex turn. Update it."
+                return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop a Codex turn. Update it."
             }
             // **The one honest hide** is the absent turn: with nothing to name
             // there is nothing to send, so the control is absent rather than dead.
@@ -334,7 +334,7 @@ public enum CodexProse {
             // banner — in the race where the run's state changes between the button
             // showing and the tap landing (the run ends under a shown button).
             guard daemonHonoursStop else {
-                return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to stop a Claude turn. Update it."
+                return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop a Claude turn. Update it."
             }
             guard isLive else { return "This run has ended, so there is no turn to stop." }
             guard runningTurn != nil else { return "Nothing is running to stop." }
@@ -357,7 +357,7 @@ public enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex run is spoken to this way." }
         guard daemonUnderstandsCompose else {
-            return "\(HostDevice.current.computer("This computer"))'s CodeConnect is too old to carry a message to Codex. Update it."
+            return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to carry a message to Codex. Update it."
         }
         return link.blockedReason(for: .compose)
     }

@@ -20,7 +20,7 @@ public struct HostDevice: Sendable, Equatable {
 
     public static let iPhone = HostDevice(
         name: "iPhone", noun: "phone", biometric: "Face ID", secret: "passcode",
-        addWithCode: "Scan this computer's code to add it.",
+        addWithCode: "Scan this computer’s code to add it.",
         codeAgain: "Show a new code on your computer and scan it (codeconnect.sh/support shows how).")
     public static let mac = HostDevice(
         name: "Mac", noun: "Mac", biometric: "Touch ID", secret: "password",
@@ -41,7 +41,7 @@ public struct HostDevice: Sendable, Equatable {
     public func computer(_ phrase: String, named name: String? = nil) -> String {
         guard self == .mac else { return phrase }
         if let name { return name }
-        return phrase.first?.isUppercase == true ? "The agent's computer" : "the agent's computer"
+        return phrase.first?.isUppercase == true ? "The agent’s computer" : "the agent’s computer"
     }
 
     /// The computer a pairing sentence is about: the iPhone keeps `phrase`; a

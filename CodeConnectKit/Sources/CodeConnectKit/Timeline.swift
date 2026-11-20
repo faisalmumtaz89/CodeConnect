@@ -520,7 +520,7 @@ public enum TimelineBuilder {
                                     kind: .failure,
                                     symbol: "warning",
                                     title: "Approval request could not be read",
-                                    detail: "\(HostDevice.current.computer("The computer")) sent a card this app couldn't read.",
+                                    detail: "\(HostDevice.current.computer("The computer")) sent a card this app couldn’t read.",
                                     severity: .warning))))
                     break
                 }

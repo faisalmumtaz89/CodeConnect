@@ -67,7 +67,7 @@ final class LinkOfflineTests: XCTestCase {
         let health = LinkHealth.evaluate(
             phase: waiting, lastContactAt: nil, dialFailure: .unreachable)
         XCTAssertEqual(health.level, .offline)
-        XCTAssertEqual(health.detail, "Can't reach your computer. Retrying automatically.")
+        XCTAssertEqual(health.detail, "Can’t reach your computer. Retrying automatically.")
         XCTAssertNil(health.cause)
     }
 

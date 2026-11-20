@@ -211,7 +211,7 @@ public struct PairingQRPayload: Sendable, Hashable {
                 return "That pairing code has an impossible port (\(port))."
             case .unreachableHost(let host, _):
                 return
-                    "Your \(HostDevice.current.name) can't reach the address in this code (\(host)). Connect \(HostDevice.current.pairingComputer("your computer")) to a network your \(HostDevice.current.name) can reach, such as Tailscale. \(HostDevice.current.codeAgain)"
+                    "Your \(HostDevice.current.name) can’t reach the address in this code (\(host)). Connect \(HostDevice.current.pairingComputer("your computer")) to a network your \(HostDevice.current.name) can reach, such as Tailscale. \(HostDevice.current.codeAgain)"
             }
         }
     }
@@ -233,7 +233,7 @@ public struct PairingQRPayload: Sendable, Hashable {
         let trimmed = host.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return "is empty" }
         if trimmed.caseInsensitiveCompare("localhost") == .orderedSame {
-            return "is \(HostDevice.current.computer("the computer"))'s own loopback name"
+            return "is \(HostDevice.current.computer("the computer"))’s own loopback name"
         }
         // An IPv6 literal may arrive bracketed, as it does inside a URL.
         var bare = trimmed
@@ -371,7 +371,7 @@ public enum PairingCredentialInput {
         switch credential {
         case .token: return "Read as a key from \(HostDevice.current.pairingComputer("your computer")), not a pairing code."
         case .pairingCode(let code): return "Read as the pairing code \(code)."
-        case .tailnet: return "Read as nothing: this device's Tailscale identity."
+        case .tailnet: return "Read as nothing: this device’s Tailscale identity."
         }
     }
 
@@ -398,10 +398,10 @@ public enum PairingCredentialInput {
 
     public static func submission(address: String, code: String) -> Submission {
         guard let credential = classify(code) else {
-            return .refused("That isn't a pairing code: it's eight letters and digits.")
+            return .refused("That isn’t a pairing code: it’s eight letters and digits.")
         }
         guard let endpoint = DaemonEndpoint.parse(address: address, credential: credential) else {
-            return .refused("That address isn't valid. Enter it exactly as \(HostDevice.current.pairingComputer("your computer")) shows it.")
+            return .refused("That address isn’t valid. Enter it exactly as \(HostDevice.current.pairingComputer("your computer")) shows it.")
         }
         // A typed code is the same one-shot exchange the QR performs; it must
         // not be stored, so it goes through the pairing path.
@@ -753,7 +753,7 @@ public final class PairingStore {
         guard let endpoint = machine(id: id)?.endpoint else { return }
         tlsUnavailableReasons[id] =
             unusable
-            ? "\(HostDevice.current.pairingComputer("Your computer"))'s own encryption works only at its Tailscale name, not at the address \(endpoint.host). \(HostDevice.current.codeAgain)"
+            ? "\(HostDevice.current.pairingComputer("Your computer"))’s own encryption works only at its Tailscale name, not at the address \(endpoint.host). \(HostDevice.current.codeAgain)"
             : nil
     }
 

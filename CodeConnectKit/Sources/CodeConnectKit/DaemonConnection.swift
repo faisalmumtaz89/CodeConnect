@@ -51,8 +51,8 @@ public enum ConnectionError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .notConnected: return "Not connected to \(HostDevice.current.pairingComputer("your computer"))"
-        case .timedOut: return "\(HostDevice.current.pairingComputer("Your computer")) didn't answer in time"
-        case .unauthorized: return "\(HostDevice.current.pairingComputer("Your computer")) didn't accept this code."
+        case .timedOut: return "\(HostDevice.current.pairingComputer("Your computer")) didn’t answer in time"
+        case .unauthorized: return "\(HostDevice.current.pairingComputer("Your computer")) didn’t accept this code."
         case .rejectedPairingCode:
             return
                 "\(HostDevice.current.pairingComputer("The computer")) rejected this pairing code. It may have expired, already been used, or been mistyped. \(HostDevice.current.codeAgain)"
@@ -64,7 +64,7 @@ public enum ConnectionError: LocalizedError, Sendable {
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
-        case .hostUnresolvable: return "\(HostDevice.current.pairingComputer("Your computer"))'s address can't be found"
+        case .hostUnresolvable: return "\(HostDevice.current.pairingComputer("Your computer"))’s address can’t be found"
         case .sentButUnanswered:
             return "This left the \(HostDevice.current.noun) and \(HostDevice.current.computer("the computer")) never answered."
         }
@@ -562,7 +562,7 @@ public final class DaemonConnection {
     /// What a pairing that never reached the computer says: where it looked, and
     /// the two fixes, the commonest first (Tailscale off on this device).
     static func pairingUnreachable(host: String) -> String {
-        "Couldn't reach \(HostDevice.current.pairingComputer("your computer")) at \(host). Turn on Tailscale on this \(HostDevice.current.name), make sure CodeConnect is running on \(HostDevice.current.pairingComputer("your computer")), then try again."
+        "Couldn’t reach \(HostDevice.current.pairingComputer("your computer")) at \(host). Turn on Tailscale on this \(HostDevice.current.name), make sure CodeConnect is running on \(HostDevice.current.pairingComputer("your computer")), then try again."
     }
 
     /// Which scheme this attempt should use.
@@ -775,7 +775,7 @@ public final class DaemonConnection {
             try? await Task.sleep(for: Self.handshakeTimeout)
             guard let self, !Task.isCancelled, self.socket === socket, !self.phase.isConnected
             else { return }
-            self.lastErrorMessage = "\(HostDevice.current.pairingComputer("Your computer")) connected but didn't answer"
+            self.lastErrorMessage = "\(HostDevice.current.pairingComputer("Your computer")) connected but didn’t answer"
             // Cancelling the socket makes the receive below throw, which drops
             // into the normal backoff path.
             socket.cancel(with: .goingAway, reason: nil)
@@ -1523,7 +1523,7 @@ public final class DaemonConnection {
         guard let expected = mutationSessions[requestID] else { return true }
         guard expected == sessionID else {
             unreadableFrame =
-                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)'s \(kind) for one run with another run's "
+                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)’s \(kind) for one run with another run’s "
                 + "result. It was ignored."
             unreadableFrameAt = Date()
             return false

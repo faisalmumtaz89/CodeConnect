@@ -26,7 +26,7 @@ public enum ModeConfirmation {
             return Words(
                 title: "Give Codex full access?",
                 message: "Codex will run commands and edit files in this run without asking you first, "
-                    + "outside this project's folder and with network access, until you change the mode back.",
+                    + "outside this project’s folder and with network access, until you change the mode back.",
                 confirm: "Give Full Access",
                 cancel: "Keep Asking")
         case .claude, .unsupported:

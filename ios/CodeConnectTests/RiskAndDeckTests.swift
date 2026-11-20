@@ -272,7 +272,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// run on, in each device's words.
     func testTheWaitNamesTheAgentsComputerInEachDevicesWords() {
         XCTAssertEqual(DecisionCard.waitingSentence(on: .iPhone), "Waiting for your computer to confirm…")
-        XCTAssertEqual(DecisionCard.waitingSentence(on: .mac), "Waiting for the agent's computer to confirm…")
+        XCTAssertEqual(DecisionCard.waitingSentence(on: .mac), "Waiting for the agent’s computer to confirm…")
     }
 
     /// Why a card offers nothing to tap, and the wait for an unconfirmed
@@ -299,7 +299,7 @@ final class RiskAndDeckTests: XCTestCase {
         let iPhone = [
             "The phone can no longer answer this. Answer it at the computer.",
             "This card arrived without the options Codex answers by, so it can only be answered at the computer.",
-            "This computer's CodeConnect is too old to answer Claude's approvals from the phone. "
+            "This computer’s CodeConnect is too old to answer Claude’s approvals from the phone. "
                 + "Update it, or answer at the computer.",
             "This app does not know how to answer a aider run. Answer it at the computer.",
             "Still waiting on the computer - \(age).",
@@ -310,14 +310,14 @@ final class RiskAndDeckTests: XCTestCase {
         XCTAssertEqual(
             reasons(.mac, nil),
             [
-                "The Mac can no longer answer this. Answer it at the agent's computer.",
+                "The Mac can no longer answer this. Answer it at the agent’s computer.",
                 "This card arrived without the options Codex answers by, so it can only be answered at the "
                     + "agent's computer.",
-                "The agent's computer's CodeConnect is too old to answer Claude's approvals from the Mac. "
-                    + "Update it, or answer at the agent's computer.",
-                "This app does not know how to answer a aider run. Answer it at the agent's computer.",
-                "Still waiting on the agent's computer - \(age).",
-                "Still waiting on the agent's computer, \(spoken).",
+                "The agent’s computer’s CodeConnect is too old to answer Claude’s approvals from the Mac. "
+                    + "Update it, or answer at the agent’s computer.",
+                "This app does not know how to answer a aider run. Answer it at the agent’s computer.",
+                "Still waiting on the agent’s computer - \(age).",
+                "Still waiting on the agent’s computer, \(spoken).",
             ])
         XCTAssertEqual(
             reasons(.mac, studio),
@@ -325,7 +325,7 @@ final class RiskAndDeckTests: XCTestCase {
                 "The Mac can no longer answer this. Answer it at Jordan’s Mac Studio.",
                 "This card arrived without the options Codex answers by, so it can only be answered at "
                     + "Jordan’s Mac Studio.",
-                "Jordan’s Mac Studio's CodeConnect is too old to answer Claude's approvals from the Mac. "
+                "Jordan’s Mac Studio’s CodeConnect is too old to answer Claude’s approvals from the Mac. "
                     + "Update it, or answer at Jordan’s Mac Studio.",
                 "This app does not know how to answer a aider run. Answer it at Jordan’s Mac Studio.",
                 "Still waiting on Jordan’s Mac Studio - \(age).",
@@ -953,11 +953,11 @@ final class FleetFreshnessTests: XCTestCase {
             cachedAt: now.addingTimeInterval(-7200), hasLiveFleet: false, now: now)
         let message = FleetFreshness.message(
             stamp: stamp,
-            linkDetail: "Can't reach your computer. Retrying automatically.")
+            linkDetail: "Can’t reach your computer. Retrying automatically.")
         XCTAssertEqual(
             message,
             "Showing the last known state, 2h old. "
-                + "Can't reach your computer. Retrying automatically.")
+                + "Can’t reach your computer. Retrying automatically.")
         XCTAssertTrue(
             message?.hasPrefix("Showing the last known state") == true,
             "the age leads: it is what decides how much of the screen to trust")

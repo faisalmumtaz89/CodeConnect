@@ -195,7 +195,7 @@ extension AppModel {
             return composeUnavailable(for: summary.sessionKey)
         }
         if connection.capabilities?.sendText == false {
-            return "\(HostDevice.current.computer("The computer"))'s CodeConnect can't take typed text."
+            return "\(HostDevice.current.computer("The computer"))’s CodeConnect can’t take typed text."
         }
         if let summary,
             let reason = FleetStatusRule.capability(summary: summary, capabilities: connection.capabilities).reason
