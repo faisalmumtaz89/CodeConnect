@@ -686,6 +686,12 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         relaunchable ?? (lifecycle == .exited && codexLink == .boundNotStarted)
     }
 
+    /// **The run takes no reply**: it has ended (or never started) and the next message would not relaunch it, so
+    /// both apps show it no reply box, only that it has ended (`SessionWords.runEnded`).
+    public var takesNoReply: Bool {
+        (lifecycle == .exited || lifecycle == .failed) && !relaunchesOnMessage
+    }
+
     /// The `claude --resume` session id to offer at the computer for an ended run, or nil. **Not offered
     /// for a run the next message relaunches**: that run is picked up in the app by sending it a
     /// message, so the manual command would be a second, worse path beside the open composer. Also nil for
