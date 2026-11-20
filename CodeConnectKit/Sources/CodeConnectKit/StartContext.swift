@@ -93,6 +93,18 @@ public struct StartContext {
     }
     public static let claudeSignIn = "claude auth login"
 
+    /// While the sign-in help shows: this computer is asked again every 30 s
+    /// for 10 minutes, so a sign-in there clears the help with the start left
+    /// open. Each ask starts Claude Code there, so it stops after that; opening
+    /// the start again asks again. Run in the view's `.task`, which cancels it.
+    public func watchSignIn() async {
+        for _ in 1...20 {
+            try? await Task.sleep(for: .seconds(30))
+            if Task.isCancelled { return }
+            load()
+        }
+    }
+
     // MARK: Models
 
     /// The model button while the computer hasn't answered, and when no agent can start.
@@ -191,6 +203,27 @@ extension Machines {
     public var outstandingStart: SessionStart? {
         models.flatMap { $0.starter.unanswered }.filter { !$0.retryStopped }
             .max { $0.sentAt < $1.sentAt }
+    }
+
+    /// A computer refused for running a different version of CodeConnect: what
+    /// keeps it from starting agents, cured only by updating, then trying again.
+    public var startRefusedComputer: AppModel? {
+        models.first { $0.linkHealth.cause == .refused(.differentVersion) }
+    }
+
+    /// Why no computer can start an agent right now: none paired, none
+    /// connected, or a computer's CodeConnect too old to start one from here.
+    public var noStartReason: String {
+        guard showsFleet else {
+            return "An agent runs on one of your computers, in a project there. Add a computer first, then start one here."
+        }
+        if let refused = startRefusedComputer {
+            return "\(refused.machineName ?? "A computer") isn’t connected. \(refused.linkHealth.detail)"
+        }
+        guard let old = models.first(where: { $0.connection.phase.isConnected }) else {
+            return "None of your computers is connected right now. You can start an agent once one is."
+        }
+        return "\(old.machineName ?? "That computer")’s CodeConnect is too old to start agents from here. Update it, then try again."
     }
 }
 

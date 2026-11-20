@@ -9,6 +9,12 @@ extension RenderCatalog {
     static let startSession: [RenderScenario] = steps
 
     private static let message = "Add a --strict flag that rejects trailing commas, with tests"
+    /// ccd's `agents` for a computer whose Claude Code is installed but signed
+    /// out, in its own sentence (`mac/ccd/src/start_session.rs`, `signed_out`).
+    /// ccd's `agents` for a computer whose Claude Code lists its models, in the
+    /// shape of the recorded minor-33 frame: Default first, then each by name.
+    private static let modelAgents = #"[{"agent":"claude","available":true,"models":[{"value":"default","label":"Default (recommended)"},{"value":"sonnet","label":"Sonnet"},{"value":"opus","label":"Opus"}],"signed_in":true},{"agent":"codex","available":true,"models":[],"signed_in":true}]"#
+    private static let signedOutAgents = #"[{"agent":"claude","available":true,"detail":"Claude Code on Jordan’s Mac Studio isn’t signed in.","models":[],"signed_in":false},{"agent":"codex","available":true,"models":[],"signed_in":true}]"#
     private static let server = "build-server-eu-west-1"
     /// The longest path in the list, for the folder-gone failure.
     private static let longProject = "payments-reconciliation-worker"
@@ -264,6 +270,18 @@ extension RenderCatalog {
             guard app.buttons["start-project-query-parser"].exists, !app.buttons["start-project-gpu-benchmarks"].exists
             else { throw RenderFailure.unreachable("Jordan’s folders after the drop, not \(server)’s") }
         },
+        RenderScenario(
+            name: "start2-k-none-connected", purpose: "steps: New while no computer is connected says why",
+            arguments: args(linkDropMS: 8000)
+        ) { app, driver in
+            try driver.fleet(app)
+            // The fixture drops the link 8 s after the app starts and brings it
+            // back 5 s later; New is tapped once the fleet says it is connecting.
+            try driver.require(driver.text(containing: "Connecting", in: app), "the dropped link")
+            try tap(app, "start-entry", driver)
+            try driver.requireExists(
+                driver.text(containing: "None of your computers is connected", in: app), "why none can start")
+        },
         RenderScenario(name: "start2-c-agent", purpose: "steps: the agent", arguments: args()) {
             app, driver in
             try toAgents(app, driver)
@@ -272,6 +290,14 @@ extension RenderCatalog {
             app, driver in
             try toAgents(app, driver)
             try driver.requireExists(driver.text(containing: "Codex isn’t installed on", in: app), "the computer's reason")
+        },
+        RenderScenario(
+            name: "start2-c3-signed-out", purpose: "steps: the agent, Claude Code signed out, and how to sign in",
+            arguments: args() + ["-CC_START_AGENTS_WIRE", signedOutAgents]
+        ) { app, driver in
+            try toAgents(app, driver)
+            try driver.requireExists(driver.text(containing: "isn’t signed in", in: app), "the computer's sentence")
+            try driver.requireExists(driver.text(containing: "claude auth login", in: app), "the command to sign in")
         },
         RenderScenario(name: "start2-d-branch", purpose: "steps: the branch", arguments: args()) {
             app, driver in
@@ -305,6 +331,21 @@ extension RenderCatalog {
         RenderScenario(name: "start2-e-ready", purpose: "steps: ready, on the folder's branch", arguments: args()) {
             app, driver in
             try toReady(app, driver)
+        },
+        RenderScenario(
+            name: "start2-e5-model", purpose: "steps: ready, with the model a start names",
+            arguments: args() + ["-CC_START_AGENTS_WIRE", modelAgents]
+        ) { app, driver in
+            try toReady(app, driver)
+            try driver.requireExists(app.buttons["start-summary-Model"], "the Model row")
+        },
+        RenderScenario(
+            name: "start2-e6-which-model", purpose: "steps: the models an agent offers, by name",
+            arguments: args() + ["-CC_START_AGENTS_WIRE", modelAgents]
+        ) { app, driver in
+            try toReady(app, driver)
+            try tap(app, "start-summary-Model", driver)
+            try driver.requireExists(app.buttons["start-model-Sonnet"], "the model list")
         },
         RenderScenario(name: "start2-e2-ready-worktree", purpose: "steps: ready, in a worktree", arguments: args()) {
             app, driver in

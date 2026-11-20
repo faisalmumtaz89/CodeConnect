@@ -142,7 +142,6 @@ struct FleetView: View {
     @State private var startSeed: StartSeed?
     /// Every paired computer that can start a session.
     private var startContexts: [StartContext] { machines.startContexts }
-    private var canStart: Bool { !startContexts.isEmpty }
 
     /// Where every line of text on this screen starts: 52 at reading sizes.
     private var textColumn: CGFloat { ContentColumn.text(dot: gutterDot) }
@@ -338,32 +337,30 @@ struct FleetView: View {
 
     @ToolbarContentBuilder
     private var toolbarItems: some ToolbarContent {
-        if canStart {
-            ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    CCHaptic.light.fire()
-                    openStart()
-                } label: {
-                    HStack(spacing: CC.space.xxs) {
-                        CCIcon("plus", size: 16)
-                        Text(FleetWords.newAgent)
-                            .ccType(CC.type.body)
-                    }
-                    .foregroundStyle(CC.text.primary)
-                    .fixedSize()
-                    .ccHitTarget()
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                CCHaptic.light.fire()
+                openStart()
+            } label: {
+                HStack(spacing: CC.space.xxs) {
+                    CCIcon("plus", size: 16)
+                    Text(FleetWords.newAgent)
+                        .ccType(CC.type.body)
                 }
-                .buttonStyle(.plain)
-                // On the button itself, not only its label: the bar sizes a
-                // leading item from the button, and sized from its label alone
-                // it gave a slot an icon's width, so a title longer than "New"
-                // spilled past the screen's left edge.
+                .foregroundStyle(CC.text.primary)
                 .fixedSize()
-                .accessibilityLabel(FleetWords.newAgent)
-                .accessibilityIdentifier("start-entry")
+                .ccHitTarget()
             }
-            .ccPlainToolbarItem()
+            .buttonStyle(.plain)
+            // On the button itself, not only its label: the bar sizes a
+            // leading item from the button, and sized from its label alone
+            // it gave a slot an icon's width, so a title longer than "New"
+            // spilled past the screen's left edge.
+            .fixedSize()
+            .accessibilityLabel(FleetWords.newAgent)
+            .accessibilityIdentifier("start-entry")
         }
+        .ccPlainToolbarItem()
         ToolbarItem(placement: .principal) {
             // The same word the scroll header carries, arriving only as
             // that header leaves. Two titles at once is the bug this
@@ -895,8 +892,8 @@ struct FleetView: View {
 
     // MARK: Start
 
+    /// New: the flow, which says why when no computer can start one.
     private func openStart() {
-        guard canStart else { return }
         // A start this phone already sent and has not heard back on reopens to
         // its own Starting screen — which carries Stop retrying — instead of a
         // fresh flow, so a start whose computer went quiet is not started again
@@ -918,7 +915,7 @@ struct FleetView: View {
     /// still holding its request; a link that dropped in between falls back to a
     /// fresh flow.
     private func openTrust(_ start: SessionStart, _ folderPath: String) {
-        guard canStart, let context = startContexts.first(where: { $0.starter.starts[start.id] != nil }) else {
+        guard let context = startContexts.first(where: { $0.starter.starts[start.id] != nil }) else {
             path = []
             Task {
                 try? await Task.sleep(for: .milliseconds(450))
@@ -928,7 +925,7 @@ struct FleetView: View {
         }
         startSeed = StartSeed(
             context: context, project: start.project, place: start.place, agent: start.agent,
-            message: start.prompt ?? "", trustPath: folderPath)
+            model: start.model, message: start.prompt ?? "", trustPath: folderPath)
         path = []
         Task {
             try? await Task.sleep(for: .milliseconds(450))
@@ -1374,11 +1371,10 @@ struct FleetView: View {
     // MARK: States
 
     /// How an agent gets onto this screen, in words and never a command, with a
-    /// button to start one from here when a paired computer can. Centred in the
-    /// viewport.
+    /// button to start one from here; with no computer able to, the flow says
+    /// why. Centred in the viewport.
     private var emptyState: some View {
-        let start: (() -> Void)? = canStart ? { openStart() } : nil
-        return ZStack {
+        ZStack {
             // At least the viewport's height, so the instruction sits on its
             // centre; taller content at the largest sizes still scrolls.
             Color.clear.containerRelativeFrame(.vertical)
@@ -1386,8 +1382,8 @@ struct FleetView: View {
                 glyph: "terminal-window",
                 title: FleetWords.startAnAgent,
                 message: FleetWords.agentsAppearHere,
-                actionTitle: start == nil ? nil : FleetWords.startAnAgent,
-                action: start)
+                actionTitle: FleetWords.startAnAgent,
+                action: { openStart() })
         }
     }
 
