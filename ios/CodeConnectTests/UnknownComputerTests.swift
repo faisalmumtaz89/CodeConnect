@@ -112,7 +112,7 @@ final class UnknownComputerTests: XCTestCase {
             answersQuestions: old.knownAnswersQuestions, linkReason: nil)
         XCTAssertEqual(question, .macTooOld)
         XCTAssertTrue(
-            question.banner?.message.contains("This computer's CodeConnect is too old") ?? false)
+            question.banner?.message.contains("This computer’s CodeConnect is too old") ?? false)
 
         let model = AppModel(pairing: PairingStore(ephemeral: true), cache: EventCache())
         model.connection.simulateConnectedForTesting()

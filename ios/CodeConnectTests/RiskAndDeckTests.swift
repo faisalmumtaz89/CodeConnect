@@ -312,7 +312,7 @@ final class RiskAndDeckTests: XCTestCase {
             [
                 "The Mac can no longer answer this. Answer it at the agent’s computer.",
                 "This card arrived without the options Codex answers by, so it can only be answered at the "
-                    + "agent's computer.",
+                    + "agent’s computer.",
                 "The agent’s computer’s CodeConnect is too old to answer Claude’s approvals from the Mac. "
                     + "Update it, or answer at the agent’s computer.",
                 "This app does not know how to answer a aider run. Answer it at the agent’s computer.",
