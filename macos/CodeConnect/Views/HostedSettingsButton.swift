@@ -122,7 +122,8 @@ struct HostedSettingsButton: View {
             if isOpen {
                 panel()
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.panel = $0 }
-                    .offset(y: -30)
+                    // Clear of the 24 pt control by the panels' one gap.
+                    .offset(y: -(24 + Theme.panelGap))
             }
         }
     }

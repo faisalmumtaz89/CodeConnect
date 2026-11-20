@@ -24,6 +24,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, a run's reply box stands on the same column as its conversation and heading.
 - In a run's Changes, a file git doesn't track yet reads as its path and "untracked", as the file
   headers name a file's kind, in place of git's "??".
+- On the Mac, a run's Model, Mode and "…" panels open one point clear of their control, as every
+  panel in the app does.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
