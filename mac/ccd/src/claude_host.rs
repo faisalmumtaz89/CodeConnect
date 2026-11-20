@@ -1274,6 +1274,7 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
                 Some(MenuModel {
                     label: text(model, "displayName").unwrap_or_else(|| value.clone()),
                     detail: text(model, "description"),
+                    resolved_model: text(model, "resolvedModel"),
                     efforts: model
                         .get("supportedEffortLevels")
                         .and_then(serde_json::Value::as_array)
@@ -9309,6 +9310,7 @@ mod tests {
                         detail: Some(
                             "Use the default model (currently Opus 5.5) · $4/$20 per Mtok".into()
                         ),
+                        resolved_model: Some("claude-opus-5-5".into()),
                         efforts: efforts.clone(),
                     },
                     MenuModel {
@@ -9317,6 +9319,7 @@ mod tests {
                         detail: Some(
                             "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok".into()
                         ),
+                        resolved_model: Some("claude-sonnet-5-5".into()),
                         efforts,
                     },
                 ],

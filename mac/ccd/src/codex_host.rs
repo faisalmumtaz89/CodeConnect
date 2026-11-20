@@ -2507,6 +2507,8 @@ pub(crate) fn menus(models: &[Value]) -> RunMenus {
                 Some(MenuModel {
                     label: text(model, "displayName").unwrap_or_else(|| value.clone()),
                     detail: text(model, "description"),
+                    // A Codex entry's value is the model it runs.
+                    resolved_model: None,
                     efforts: model
                         .get("supportedReasoningEfforts")
                         .and_then(Value::as_array)
