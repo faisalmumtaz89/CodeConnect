@@ -184,8 +184,10 @@ impl Tailnet {
 
 /// The [`ServerMessage::Peers`] frame for one reading of the tailnet: `None` when
 /// Tailscale is not running, or not installed, which `installed` tells apart. The
-/// computers are those [`Tailnet::reachable_peers`] names, less the one at `viewer`,
-/// the address the connection came from: a computer is never told about itself.
+/// computers are those [`Tailnet::reachable_peers`] names, less the viewer's own: the
+/// node at `viewer`, the address the connection came from, and `viewer_node`, the
+/// Tailscale device the viewer is known to be. A computer is never told about itself,
+/// even linked by a LAN address its tailnet node does not hold.
 /// `port` is this daemon's, which Mail also takes as every peer's.
 ///
 /// Names come from `DNSName`, never `HostName`: an iPhone reports its `HostName`
@@ -195,6 +197,7 @@ pub fn peers_frame(
     installed: bool,
     port: u16,
     viewer: IpAddr,
+    viewer_node: Option<&str>,
 ) -> ServerMessage {
     let Some(tailnet) = tailnet else {
         return ServerMessage::Peers {
@@ -211,7 +214,9 @@ pub fn peers_frame(
     let computers = tailnet
         .peers
         .iter()
-        .filter(|node| tailnet.reachable(node) && !node.ips.contains(&viewer))
+        .filter(|node| {
+            tailnet.reachable(node) && !node.ips.contains(&viewer) && viewer_node != Some(node.id.as_str())
+        })
         .filter_map(|node| {
             let ipv4 = node.ips.iter().copied().find(IpAddr::is_ipv4)?;
             Some(PeerComputer {
@@ -485,6 +490,20 @@ mod tests {
 
     /// The same computers Mail may reach, named by their whole MagicDNS name, or
     /// by their IPv4 address when they have none.
+    /// **A computer linked by a LAN address is not told about itself.** The address it came from is on no tailnet
+    /// node, so only its own Tailscale device, as the daemon knows it, leaves it out; without that it is listed to
+    /// itself, joins itself by its tailnet name, and shows as a second row of itself. Must-fail: drop the
+    /// `viewer_node` test from the filter, and `laptop` is listed.
+    #[test]
+    fn a_viewer_linked_by_a_lan_address_is_not_listed_to_itself() {
+        let tailnet = edited(|s| peer(s, "linux-box")["Online"] = true.into());
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let laptop = tailnet.peers.iter().find(|node| node.name == "laptop").unwrap().id.clone();
+        let names = |frame: ServerMessage| -> Vec<String> { computers(frame).into_iter().map(|c| c.name).collect() };
+        assert_eq!(names(peers_frame(Some(&tailnet), true, 8787, lan, None)), ["laptop", "linux-box"]);
+        assert_eq!(names(peers_frame(Some(&tailnet), true, 8787, lan, Some(&laptop))), ["linux-box"]);
+    }
+
     #[test]
     fn the_peers_frame_lists_the_computers_mail_may_reach() {
         let tailnet = edited(|s| peer(s, "linux-box")["Online"] = true.into());
@@ -492,7 +511,7 @@ mod tests {
             Some(&tailnet),
             true,
             8787,
-            std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::Ipv4Addr::LOCALHOST.into(), None,
         ));
         assert_eq!(
             listed,
@@ -524,7 +543,7 @@ mod tests {
                 Some(&tailnet),
                 true,
                 8787,
-                std::net::Ipv4Addr::LOCALHOST.into()
+                std::net::Ipv4Addr::LOCALHOST.into(), None
             ))[0]
                 .host,
             "100.64.0.6"
@@ -537,7 +556,7 @@ mod tests {
     fn the_peers_frame_leaves_out_the_computer_asking() {
         let tailnet = edited(|s| peer(s, "linux-box")["Online"] = true.into());
         let names = |viewer: &str| -> Vec<String> {
-            computers(peers_frame(Some(&tailnet), true, 8787, ip(viewer)))
+            computers(peers_frame(Some(&tailnet), true, 8787, ip(viewer), None))
                 .into_iter()
                 .map(|computer| computer.name)
                 .collect()
@@ -566,7 +585,7 @@ mod tests {
             }]
         );
         let names: Vec<String> =
-            computers(peers_frame(Some(&tailnet), true, 8787, ip("100.64.0.4")))
+            computers(peers_frame(Some(&tailnet), true, 8787, ip("100.64.0.4"), None))
                 .into_iter()
                 .map(|computer| computer.name)
                 .collect();
@@ -586,7 +605,7 @@ mod tests {
             Some(&tailnet),
             true,
             8787,
-            std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::Ipv4Addr::LOCALHOST.into(), None,
         )
         else {
             panic!("not a peers frame");
@@ -602,7 +621,7 @@ mod tests {
             Some(&tailnet),
             true,
             8787,
-            std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::Ipv4Addr::LOCALHOST.into(), None,
         ) else {
             panic!("not a peers frame");
         };
@@ -613,9 +632,9 @@ mod tests {
     /// computer without Tailscale.
     fn derived_peers_wire() -> serde_json::Value {
         serde_json::json!({
-            "running": peers_frame(Some(&recorded()), true, 8787, std::net::Ipv4Addr::LOCALHOST.into()),
-            "not_running": peers_frame(None, true, 8787, std::net::Ipv4Addr::LOCALHOST.into()),
-            "not_installed": peers_frame(None, false, 8787, std::net::Ipv4Addr::LOCALHOST.into()),
+            "running": peers_frame(Some(&recorded()), true, 8787, std::net::Ipv4Addr::LOCALHOST.into(), None),
+            "not_running": peers_frame(None, true, 8787, std::net::Ipv4Addr::LOCALHOST.into(), None),
+            "not_installed": peers_frame(None, false, 8787, std::net::Ipv4Addr::LOCALHOST.into(), None),
         })
     }
 
