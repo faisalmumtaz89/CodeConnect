@@ -1158,7 +1158,7 @@ struct DiffDocumentView: View {
                 header: hunk.header, fontSize: metrics.fontSize,
                 actions: CCHunkActions(
                     comment: { comment = DiffCommentTarget(file: file, hunk: hunk) },
-                    copyHunk: { CCPasteboard.copy(Self.hunkText(hunk)) },
+                    copyHunk: { CCPasteboard.copy(hunk.text) },
                     copyPath: { CCPasteboard.copy(file.displayPath) }))
 
             ForEach(plan.segments) { segment in
@@ -1269,18 +1269,6 @@ struct DiffDocumentView: View {
 
     // MARK: Helpers
 
-    private static func hunkText(_ hunk: UnifiedDiff.Hunk) -> String {
-        let body = hunk.lines.map { line -> String in
-            switch line.kind {
-            case .addition: return "+\(line.text)"
-            case .deletion: return "-\(line.text)"
-            case .context: return " \(line.text)"
-            case .note: return line.text
-            }
-        }
-        return ([hunk.header] + body).joined(separator: "\n")
-    }
-
     /// Word-level ranges for the lines the grid is drawing.
     ///
     /// `nonisolated` and pure so it can run off the main actor: it is a
@@ -1317,15 +1305,7 @@ struct DiffCommentTarget: Identifiable {
 
     /// The anchor the agent needs: which file, which lines. Prefixed on the wire
     /// so a comment is never a sentence floating free of the code it is about.
-    var anchor: String {
-        let numbers = hunk.lines.compactMap { $0.newNumber ?? $0.oldNumber }
-        guard let first = numbers.min(), let last = numbers.max() else {
-            return "In `\(file.displayPath)`"
-        }
-        return first == last
-            ? "In `\(file.displayPath)` line \(first)"
-            : "In `\(file.displayPath)` lines \(first)–\(last)"
-    }
+    var anchor: String { ChangesWords.commentAnchor(file: file, hunk: hunk) }
 }
 
 /// Read → steer in one gesture. The thesis of the diff surface: the place you
@@ -1372,7 +1352,7 @@ private struct DiffCommentSheet: View {
                     CCField(
                         label: "Your comment",
                         text: $text,
-                        placeholder: "What should the agent do here?",
+                        placeholder: ChangesWords.commentPrompt,
                         axis: .vertical,
                         lineLimit: 3...8)
 
@@ -1445,7 +1425,8 @@ private struct DiffCommentSheet: View {
         sending = true
         result = nil
         Task {
-            let attempt = await model.send(text: "\(target.anchor): \(text)", to: key)
+            let attempt = await model.send(
+                text: ChangesWords.comment(text, file: target.file, hunk: target.hunk), to: key)
             sending = false
             result = attempt
             switch attempt {

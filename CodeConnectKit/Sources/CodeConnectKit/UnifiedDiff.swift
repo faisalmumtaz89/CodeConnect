@@ -135,6 +135,18 @@ public struct UnifiedDiff: Sendable, Hashable {
         public var lines: [Line]
         /// The hunk split into runs that are shown and runs that are folded.
         public var segments: [Segment]
+
+        /// The hunk as a diff says it, its header and every line under its mark: what Copy Hunk copies.
+        public var text: String {
+            ([header] + lines.map { line in
+                switch line.kind {
+                case .addition: "+\(line.text)"
+                case .deletion: "-\(line.text)"
+                case .context: " \(line.text)"
+                case .note: line.text
+                }
+            }).joined(separator: "\n")
+        }
     }
 
     public struct Line: Sendable, Hashable, Identifiable {

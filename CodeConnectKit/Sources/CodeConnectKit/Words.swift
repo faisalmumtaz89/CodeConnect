@@ -200,6 +200,21 @@ public enum ChangesWords {
     /// The folded stretch as a screen reader says it, and what opening it does.
     public static func foldedLinesSpoken(_ count: Int) -> String { "\(unchangedLines(count)) hidden" }
     public static let foldedLinesHint = "Shows them"
+    /// What a comment on a hunk asks for, in its empty field.
+    public static let commentPrompt = "What should the agent do here?"
+    /// Which file and lines a comment on a hunk is about, so the agent reads it against the code: the lowest and
+    /// highest line numbers in the hunk, new ones where a line has one.
+    public static func commentAnchor(file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
+        let numbers = hunk.lines.compactMap { $0.newNumber ?? $0.oldNumber }
+        guard let first = numbers.min(), let last = numbers.max() else { return "In `\(file.displayPath)`" }
+        return first == last
+            ? "In `\(file.displayPath)` line \(first)"
+            : "In `\(file.displayPath)` lines \(first)–\(last)"
+    }
+    /// A comment on a hunk as it is sent to the agent: its anchor, then the words.
+    public static func comment(_ text: String, file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
+        "\(commentAnchor(file: file, hunk: hunk)): \(text)"
+    }
 }
 
 /// Starting a run: a computer's recent folders, and what the start says while
