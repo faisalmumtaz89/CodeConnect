@@ -290,62 +290,73 @@ public final class Machines {
         joining.append((computer, model))
     }
 
-    /// A computer the owner's tailnet lists that is not in this device's list, and why: never silent.
+    /// One of the owner's computers his tailnet lists whose join has not succeeded, and why. Never silent: a computer
+    /// he has not removed and that is failing to connect is his to see.
     public struct UnjoinedComputer: Identifiable, Hashable, Sendable {
         public let computer: PeerComputer
         /// What the row says under the computer's name.
         public let reason: String
-        /// Removed from this device once: its action adds it again rather than retrying.
-        public let removed: Bool
         public var id: String { computer.host }
     }
 
-    /// The listed computers that have not joined: each one this device removed, and each whose join has failed
-    /// (its daemon refused it) or is waiting to dial again (nothing answered). A join still dialling its first
-    /// attempt is not here, so a computer joining as it should never flashes as a problem.
+    /// The listed computers whose join has failed (their daemon refused it) or is waiting to dial again (nothing
+    /// answered). A join still dialling its first attempt is not here, so a computer joining as it should never
+    /// flashes as a problem.
     public var unjoinedComputers: [UnjoinedComputer] {
         #if DEBUG
-            if let shown = Self.unjoinedFixture { return shown }
+            if let shown = Self.fixture.unjoined { return shown }
         #endif
-        var seen = Set<String>()
-        let listed = listedBy.values.joined().filter { seen.insert($0.host.lowercased()).inserted }
-        let removed = listed.filter { pairing.isDeclined(host: $0.host) && pairing.machine(matching: $0.endpoint) == nil }
-            .map { UnjoinedComputer(computer: $0, reason: PeerWords.removed, removed: true) }
-        let failing = joining.compactMap { entry -> UnjoinedComputer? in
+        return joining.compactMap { entry -> UnjoinedComputer? in
             switch entry.model.connection.phase {
-            case .failed(let reason):
-                return UnjoinedComputer(computer: entry.computer, reason: PeerWords.refused(reason), removed: false)
-            case .waiting:
-                return UnjoinedComputer(computer: entry.computer, reason: PeerWords.unreachable, removed: false)
-            default:
-                return nil
+            case .failed(let reason): return UnjoinedComputer(computer: entry.computer, reason: PeerWords.refused(reason))
+            case .waiting: return UnjoinedComputer(computer: entry.computer, reason: PeerWords.unreachable)
+            default: return nil
             }
         }
-        return removed + failing
     }
 
-    /// The row's one action: a removed computer is wanted again and joins; any other is asked again now.
+    /// The computers his tailnet lists that he removed from this device: out of the list, as he asked, and offered
+    /// where a computer is added, so they are never undiscoverable.
+    public var removedComputers: [PeerComputer] {
+        #if DEBUG
+            if let shown = Self.fixture.removed { return shown }
+        #endif
+        var seen = Set<String>()
+        return listedBy.values.joined().filter { computer in
+            seen.insert(computer.host.lowercased()).inserted && pairing.isDeclined(host: computer.host)
+                && pairing.machine(matching: computer.endpoint) == nil
+        }
+    }
+
+    /// A failing join's one action: ask again now.
     public func tryAgain(_ unjoined: UnjoinedComputer) {
-        if unjoined.removed { pairing.undecline(host: unjoined.computer.host) }
         if let index = joiningIndex(at: unjoined.computer.endpoint) { joining.remove(at: index).model.leave() }
         join(unjoined.computer)
     }
 
+    /// Add a removed computer again, with no code: it is wanted, and joins as any listed computer does.
+    public func addAgain(_ computer: PeerComputer) {
+        pairing.undecline(host: computer.host)
+        join(computer)
+    }
+
     #if DEBUG
-        /// `-CC_UNJOINED removed,unreachable,refused`: those rows, for a render, in that order.
-        static var unjoinedFixture: [UnjoinedComputer]? {
-            guard let kinds = UserDefaults.standard.string(forKey: "CC_UNJOINED") else { return nil }
+        /// `-CC_UNJOINED unreachable,refused,removed`: those rows for a render, the first two in the list of computers
+        /// and `removed` in Add a Computer.
+        static var fixture: (unjoined: [UnjoinedComputer]?, removed: [PeerComputer]?) {
+            guard let kinds = UserDefaults.standard.string(forKey: "CC_UNJOINED")?.split(separator: ",") else {
+                return (nil, nil)
+            }
             let air = PeerComputer(name: "faisals-macbook-air", host: "faisals-macbook-air.tail1234.ts.net", port: 8787)
-            return kinds.split(separator: ",").compactMap { kind in
+            let unjoined = kinds.compactMap { kind -> UnjoinedComputer? in
                 switch kind {
-                case "removed": return UnjoinedComputer(computer: air, reason: PeerWords.removed, removed: true)
-                case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable, removed: false)
+                case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable)
                 case "refused":
-                    return UnjoinedComputer(
-                        computer: air, reason: PeerWords.refused("Tailscale device was revoked"), removed: false)
+                    return UnjoinedComputer(computer: air, reason: PeerWords.refused("Tailscale device was revoked"))
                 default: return nil
                 }
             }
+            return (unjoined, kinds.contains("removed") ? [air] : [])
         }
     #endif
 

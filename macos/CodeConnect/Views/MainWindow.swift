@@ -392,7 +392,7 @@ private struct UnjoinedComputerRow: View {
                 Text(unjoined.computer.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button((unjoined.removed ? PeerWords.addAgain : PeerWords.tryAgain).titleStyle, action: act)
+                Button(PeerWords.tryAgain.titleStyle, action: act)
                     .buttonStyle(.hover(bare: true, id: "\(id).act"))
                     .font(Theme.ui(11.5))
                     .foregroundStyle(Theme.text2)

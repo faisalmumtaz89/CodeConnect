@@ -223,8 +223,9 @@ public enum PeerWords {
     public static let unreachable = "Can’t be reached over Tailscale"
     /// Its CodeConnect answered and would not let this device in, in its own words.
     public static func refused(_ reason: String) -> String { "Didn’t let this \(HostDevice.current.name) in: \(reason)" }
-    /// Removed from this device once; a person's choice, undone here.
-    public static let removed = "Removed: add it again"
     public static let tryAgain = "Try again"
-    public static let addAgain = "Add again"
+    /// Add a Computer's section of the computers his Tailscale account lists that he removed, each added by one
+    /// action with no code.
+    public static let onYourTailscale = "On your Tailscale account"
+    public static let add = "Add"
 }

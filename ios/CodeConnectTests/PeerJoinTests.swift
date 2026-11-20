@@ -95,15 +95,14 @@ final class PeerJoinTests: XCTestCase {
         XCTAssertEqual(pairing.machines, [])
         XCTAssertFalse(machines.models.contains { $0.machineID != nil })
         XCTAssertEqual(pairing.declined.count, 1)
-        // Never silent: the listed computer is shown as removed, and its one action adds it again.
-        let removed = try XCTUnwrap(machines.unjoinedComputers.first)
-        XCTAssertEqual(machines.unjoinedComputers.count, 1)
-        XCTAssertEqual(removed.reason, PeerWords.removed)
-        XCTAssertTrue(removed.removed)
-        machines.tryAgain(removed)
+        // Out of the list, as removed, and offered where a computer is added; adding it there joins it, no code.
+        XCTAssertEqual(machines.unjoinedComputers, [])
+        let removed = try XCTUnwrap(machines.removedComputers.first)
+        XCTAssertEqual(machines.removedComputers.count, 1)
+        machines.addAgain(removed)
         try await until { pairing.machines.first?.endpoint.token == "t" }
         XCTAssertEqual(pairing.declined, [])
-        XCTAssertEqual(machines.unjoinedComputers, [])
+        XCTAssertEqual(machines.removedComputers, [])
         for model in machines.models { model.leave() }
     }
 
@@ -117,7 +116,7 @@ final class PeerJoinTests: XCTestCase {
         try await until { !machines.unjoinedComputers.isEmpty }
         let refused = try XCTUnwrap(machines.unjoinedComputers.first)
         XCTAssertEqual(refused.reason, PeerWords.refused(ConnectionError.notAdmitted.localizedDescription))
-        XCTAssertFalse(refused.removed)
+        XCTAssertEqual(machines.removedComputers, [], "refused is not removed")
         let asked = daemon.hellos.count
         machines.join(directory(port: daemon.port))
         try await until { daemon.hellos.count > asked }

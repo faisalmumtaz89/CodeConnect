@@ -191,6 +191,36 @@ private struct ComputerForm: View {
     }
 
     private var exchanging: Bool { machines.isPairing && machines.pairingError == nil }
+
+    /// The computers his Tailscale account lists that he removed from this Mac: each added again by one click, no code.
+    private var onYourTailscale: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(PeerWords.onYourTailscale).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
+            VStack(spacing: 0) {
+                ForEach(machines.removedComputers, id: \.host) { computer in
+                    HStack(spacing: 8) {
+                        Image(systemName: "desktopcomputer").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                            .frame(width: 16)
+                            .accessibilityHidden(true)
+                        Text(computer.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ActionButton(
+                            title: PeerWords.add, key: nil, prominent: false, id: "computer.tailnet.\(computer.host).add"
+                        ) {
+                            machines.addAgain(computer)
+                            dismiss()
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 40)
+                }
+            }
+            .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 14)
+    }
     private var problem: String? { refusal ?? machines.pairingError }
 
     var body: some View {
@@ -205,6 +235,7 @@ private struct ComputerForm: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
+            if !machines.removedComputers.isEmpty { onYourTailscale }
             TailscaleNote()
 
             VStack(alignment: .leading, spacing: 14) {

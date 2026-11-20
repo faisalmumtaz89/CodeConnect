@@ -403,6 +403,7 @@ struct PairingView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                     machinesSection
+                    onYourTailscaleSection
                     foldersSection
                     aboutSection
                 }
@@ -499,6 +500,39 @@ struct PairingView: View {
         }
     }
 
+    /// The computers his Tailscale account lists that he removed from this iPhone: out of the list of computers, as
+    /// he asked, and offered here, beside the way to add one, each added again by one tap, no code. Shown only
+    /// while there is one.
+    @ViewBuilder
+    private var onYourTailscaleSection: some View {
+        if !machines.removedComputers.isEmpty {
+            VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
+                CCSectionHeader(PeerWords.onYourTailscale)
+                CCCard(padding: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(machines.removedComputers.enumerated()), id: \.element.host) { index, computer in
+                            CCRow(
+                                computer.name,
+                                showsChevron: false,
+                                separator: index < machines.removedComputers.count - 1,
+                                action: { machines.addAgain(computer) }
+                            ) {
+                                CCIcon("desktop", size: CC.size.icon, weight: .medium)
+                                    .foregroundStyle(CC.text.tertiary)
+                            } trailing: {
+                                Text(PeerWords.add)
+                                    .ccType(CC.type.footnote)
+                                    .foregroundStyle(CC.text.secondary)
+                                    .fixedSize()
+                            }
+                            .accessibilityIdentifier("tailnet-add-\(computer.host)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The way to the one pane that changes a folder's trust answer after it is
     /// given (decision 168). Behind its own row, so Settings stays a list of
     /// computers and the folders, kept per computer, are grouped there.
@@ -526,8 +560,7 @@ struct PairingView: View {
     /// A computer the owner's tailnet lists that has not joined: its Tailscale name, why, and the one thing to do,
     /// which the row does when tapped.
     private func unjoinedRow(_ unjoined: Machines.UnjoinedComputer) -> some View {
-        let action = unjoined.removed ? PeerWords.addAgain : PeerWords.tryAgain
-        return CCRow(
+        CCRow(
             unjoined.computer.name,
             subtitle: unjoined.reason,
             isDimmed: true,
@@ -536,7 +569,7 @@ struct PairingView: View {
         ) {
             CCStatusDot(color: CC.text.tertiary, isHollow: true, pulses: false, accessibilityText: unjoined.reason)
         } trailing: {
-            Text(action)
+            Text(PeerWords.tryAgain)
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize()
