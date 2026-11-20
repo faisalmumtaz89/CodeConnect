@@ -200,7 +200,9 @@ async fn main() -> Result<()> {
         let token = Arc::clone(&token);
         tokio::spawn(async move {
             let trust = ws_server::PlaintextTrust::TrustedPath;
-            crate::log_info!("also listening on the tailnet at {tailnet}, for the owner's other computers");
+            crate::log_info!(
+                "also listening on the tailnet at {tailnet}, for the owner's other computers"
+            );
             if let Err(err) = ws_server::serve(daemon, tailnet, token, None, trust).await {
                 crate::log_warn!("tailnet listener unavailable ({err:#}); other computers reach this one only by its LAN address");
             }
@@ -954,10 +956,11 @@ fn plan_bind(config: &Config, tailnet: &[IpAddr], managed_by_codeconnect_job: bo
         let (trust, opt_in) = plaintext_admission(config, ip, tailnet);
         // Not beside a loopback bind, which asks for a daemon nothing else reaches, nor a wildcard one, which
         // already listens on the tailnet address.
-        let tailnet_listener = (!tailnet.contains(&ip) && !ip.is_loopback() && !ip.is_unspecified())
-            .then(|| preferred_tailnet_ip(tailnet))
-            .flatten()
-            .map(|tailnet_ip| SocketAddr::new(tailnet_ip, config.ws_port));
+        let tailnet_listener =
+            (!tailnet.contains(&ip) && !ip.is_loopback() && !ip.is_unspecified())
+                .then(|| preferred_tailnet_ip(tailnet))
+                .flatten()
+                .map(|tailnet_ip| SocketAddr::new(tailnet_ip, config.ws_port));
         return BindPlan {
             bind: SocketAddr::new(ip, config.ws_port),
             trust,
@@ -2401,7 +2404,11 @@ mod tests {
     #[test]
     fn a_lan_bind_also_listens_on_the_tailnet_and_nothing_else_does() {
         let lan = plan_bind(&config_with(Some("192.168.1.20")), &tailnet(), false);
-        assert_eq!(lan.tailnet_listener, Some("100.64.12.34:8787".parse().unwrap()), "{lan:?}");
+        assert_eq!(
+            lan.tailnet_listener,
+            Some("100.64.12.34:8787".parse().unwrap()),
+            "{lan:?}"
+        );
 
         // Bound on the tailnet already, on loopback, or on every address: nothing to add.
         for bind in ["100.64.12.34", "127.0.0.1", "0.0.0.0"] {
@@ -2409,10 +2416,19 @@ mod tests {
             assert_eq!(plan.tailnet_listener, None, "{bind}");
         }
         // No tailnet address known: nothing to listen on.
-        assert_eq!(plan_bind(&config_with(Some("192.168.1.20")), &[], false).tailnet_listener, None);
+        assert_eq!(
+            plan_bind(&config_with(Some("192.168.1.20")), &[], false).tailnet_listener,
+            None
+        );
         // The tailnet plan and the loopback fallback bind what they bind.
-        assert_eq!(plan_bind(&config_with(None), &tailnet(), false).tailnet_listener, None);
-        assert_eq!(plan_bind(&config_with(None), &[], false).tailnet_listener, None);
+        assert_eq!(
+            plan_bind(&config_with(None), &tailnet(), false).tailnet_listener,
+            None
+        );
+        assert_eq!(
+            plan_bind(&config_with(None), &[], false).tailnet_listener,
+            None
+        );
     }
 
     #[test]

@@ -215,7 +215,9 @@ pub fn peers_frame(
         .peers
         .iter()
         .filter(|node| {
-            tailnet.reachable(node) && !node.ips.contains(&viewer) && viewer_node != Some(node.id.as_str())
+            tailnet.reachable(node)
+                && !node.ips.contains(&viewer)
+                && viewer_node != Some(node.id.as_str())
         })
         .filter_map(|node| {
             let ipv4 = node.ips.iter().copied().find(IpAddr::is_ipv4)?;
@@ -498,10 +500,24 @@ mod tests {
     fn a_viewer_linked_by_a_lan_address_is_not_listed_to_itself() {
         let tailnet = edited(|s| peer(s, "linux-box")["Online"] = true.into());
         let lan: IpAddr = "192.168.1.20".parse().unwrap();
-        let laptop = tailnet.peers.iter().find(|node| node.name == "laptop").unwrap().id.clone();
-        let names = |frame: ServerMessage| -> Vec<String> { computers(frame).into_iter().map(|c| c.name).collect() };
-        assert_eq!(names(peers_frame(Some(&tailnet), true, 8787, lan, None)), ["laptop", "linux-box"]);
-        assert_eq!(names(peers_frame(Some(&tailnet), true, 8787, lan, Some(&laptop))), ["linux-box"]);
+        let laptop = tailnet
+            .peers
+            .iter()
+            .find(|node| node.name == "laptop")
+            .unwrap()
+            .id
+            .clone();
+        let names = |frame: ServerMessage| -> Vec<String> {
+            computers(frame).into_iter().map(|c| c.name).collect()
+        };
+        assert_eq!(
+            names(peers_frame(Some(&tailnet), true, 8787, lan, None)),
+            ["laptop", "linux-box"]
+        );
+        assert_eq!(
+            names(peers_frame(Some(&tailnet), true, 8787, lan, Some(&laptop))),
+            ["linux-box"]
+        );
     }
 
     #[test]
@@ -511,7 +527,8 @@ mod tests {
             Some(&tailnet),
             true,
             8787,
-            std::net::Ipv4Addr::LOCALHOST.into(), None,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            None,
         ));
         assert_eq!(
             listed,
@@ -543,7 +560,8 @@ mod tests {
                 Some(&tailnet),
                 true,
                 8787,
-                std::net::Ipv4Addr::LOCALHOST.into(), None
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                None
             ))[0]
                 .host,
             "100.64.0.6"
@@ -584,11 +602,16 @@ mod tests {
                 ip: ip("100.64.0.3")
             }]
         );
-        let names: Vec<String> =
-            computers(peers_frame(Some(&tailnet), true, 8787, ip("100.64.0.4"), None))
-                .into_iter()
-                .map(|computer| computer.name)
-                .collect();
+        let names: Vec<String> = computers(peers_frame(
+            Some(&tailnet),
+            true,
+            8787,
+            ip("100.64.0.4"),
+            None,
+        ))
+        .into_iter()
+        .map(|computer| computer.name)
+        .collect();
         assert_eq!(names, ["linux-box"]);
         assert_eq!(tailnet.sender(ip("100.64.0.3")).unwrap().name, "linux-box");
 
@@ -605,7 +628,8 @@ mod tests {
             Some(&tailnet),
             true,
             8787,
-            std::net::Ipv4Addr::LOCALHOST.into(), None,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            None,
         )
         else {
             panic!("not a peers frame");
@@ -621,7 +645,8 @@ mod tests {
             Some(&tailnet),
             true,
             8787,
-            std::net::Ipv4Addr::LOCALHOST.into(), None,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            None,
         ) else {
             panic!("not a peers frame");
         };

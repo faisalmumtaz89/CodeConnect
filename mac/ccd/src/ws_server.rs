@@ -2765,8 +2765,10 @@ mod tests {
     #[tokio::test]
     async fn a_device_linked_by_a_lan_address_is_not_listed_to_itself() {
         let (server, device) = live_server(protocol::config::Config::default()).await;
-        let mut status: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/tailscale/status-six-nodes.json")).unwrap();
+        let mut status: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
         for node in status["Peer"].as_object_mut().unwrap().values_mut() {
             if node["HostName"] == "linux-box" {
                 node["Online"] = true.into();
@@ -2780,7 +2782,10 @@ mod tests {
             .and_then(|node| node["ID"].as_str())
             .expect("the laptop's node id")
             .to_string();
-        set_tailnet(&server, Some(protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap()));
+        set_tailnet(
+            &server,
+            Some(protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap()),
+        );
         server
             .daemon
             .db
@@ -2795,11 +2800,20 @@ mod tests {
             "type": "hello", "protocol_version": protocol::PROTOCOL_VERSION, "token": device, "client_name": "CodeConnect Mac",
         });
         socket.send(Message::Text(hello.to_string())).await.unwrap();
-        let peers = next_peers(&mut socket, Duration::from_secs(5)).await.expect("a peers frame after the ack");
-        let names: Vec<&str> =
-            peers["computers"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+        let peers = next_peers(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("a peers frame after the ack");
+        let names: Vec<&str> = peers["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
         assert!(!names.contains(&"laptop"), "listed to itself: {names:?}");
-        assert!(names.contains(&"linux-box"), "the other computer is still listed: {names:?}");
+        assert!(
+            names.contains(&"linux-box"),
+            "the other computer is still listed: {names:?}"
+        );
     }
 
     /// **The owner's own Tailscale device signs in with no code, over the real
