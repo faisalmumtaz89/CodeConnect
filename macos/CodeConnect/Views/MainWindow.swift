@@ -12,13 +12,16 @@ struct MainWindow: View {
     @State private var adding: AddKind?
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
-    @State private var scope = FleetScope.active
+    /// The list, what it is narrowed to, and the run open beside it: the app's, so a closed window opens on them again.
+    @Binding var scope: FleetScope
     /// The grouping last chosen on this Mac, kept in its preferences, else by computer.
     @State private var grouping = FleetGroup.Kind.kept(in: .standard)
     /// What the sidebar narrows the list to, if anything.
-    @State private var filter: FleetFilter?
+    @Binding var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
-    @State private var opened: String?
+    @Binding var opened: String?
+    /// What the File menu asked to add while the window was closed: the window opens its sheet on it.
+    @Binding var pendingAdd: AddKind?
     /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
     /// conversation, and each run opens on it.
     @State private var chosen: (run: String, tab: SessionTab)?
@@ -30,14 +33,16 @@ struct MainWindow: View {
     /// The window's width, from which the list's share beside an open run is worked out.
     @State private var width: CGFloat = 0
 
-    init() {
+    init(scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>) {
+        _scope = scope
+        _filter = filter
+        _opened = opened
+        _pendingAdd = pendingAdd
         #if DEBUG
             _adding = State(
                 initialValue: RenderWindow.opensOnIPhone
                     ? .iPhone : RenderWindow.opensOnAgent ? .agent : RenderWindow.opensAddComputer ? .computer : nil)
-            _scope = State(initialValue: RenderWindow.fleetScope)
             if let given = RenderWindow.fleetGrouping { _grouping = State(initialValue: given) }
-            _opened = State(initialValue: RenderWindow.opened)
         #endif
     }
 
@@ -79,6 +84,11 @@ struct MainWindow: View {
         .background(WindowChrome())
         .rowMenuHost(rowMenu)
         .focusedSceneValue(\.adding, $adding)
+        .onChange(of: pendingAdd != nil, initial: true) {
+            guard let pendingAdd else { return }
+            adding = pendingAdd
+            self.pendingAdd = nil
+        }
         // Until every computer has caught up, or been waited out, the list says it is connecting.
         .task { await machines.waitOutLaunch() }
         .onChange(of: opened) { chosen = nil }
@@ -147,20 +157,32 @@ extension FocusedValues {
 }
 
 /// File > New Agent (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
-/// and these open its sheet. Unavailable with no main window, or with its sheet already open.
+/// and these open its sheet, opening the window first when it is closed or behind another. Unavailable while its
+/// sheet is open.
 struct AddCommands: Commands {
     @FocusedValue(\.adding) private var adding
+    @Environment(\.openWindow) private var openWindow
+    @Binding var pending: AddKind?
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Group {
-                Button("New Agent…") { adding?.wrappedValue = .agent }
+                Button("New Agent…") { add(.agent) }
                     .keyboardShortcut("n", modifiers: .command)
-                Button("Add Computer…") { adding?.wrappedValue = .computer }
+                Button("Add Computer…") { add(.computer) }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("Add iPhone…") { adding?.wrappedValue = .iPhone }
+                Button("Add iPhone…") { add(.iPhone) }
             }
-            .disabled(adding.map { $0.wrappedValue != nil } ?? true)
+            .disabled(adding?.wrappedValue != nil)
+        }
+    }
+
+    private func add(_ kind: AddKind) {
+        if let adding {
+            adding.wrappedValue = kind
+        } else {
+            pending = kind
+            openWindow(id: "main")
         }
     }
 }

@@ -13,6 +13,12 @@ struct CodeConnectApp: App {
     @State private var settingsTab = SettingsTab.devices
     /// Help › CodeConnect Support.
     private static let support = URL(string: "https://codeconnect.sh/support")!
+    /// Where the main window was, kept while it is closed: it opens again on the same list and run.
+    @State private var scope = FleetScope.active
+    @State private var filter: FleetFilter?
+    @State private var opened: String?
+    @State private var pendingAdd: AddKind?
+    @State private var started = false
 
     /// `machines` is made here, after a test launch has chosen its keychain and its data folder,
     /// because making it reads the one and writes the other; and after the pairing with this Mac's own
@@ -21,6 +27,8 @@ struct CodeConnectApp: App {
         #if DEBUG
             RenderWindow.isolateTestLaunch()
             _settingsTab = State(initialValue: RenderWindow.settingsTab)
+            _scope = State(initialValue: RenderWindow.fleetScope)
+            _opened = State(initialValue: RenderWindow.opened)
         #endif
         let installer = Installer.forThisLaunch()
         let pairing = PairingStore()
@@ -37,12 +45,15 @@ struct CodeConnectApp: App {
     var body: some Scene {
         // The app's one window: no New Window, and no window tabs.
         Window("CodeConnect", id: "main") {
-            RootView()
+            RootView(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd)
                 .environment(machines)
                 .environment(setup)
                 .preferredColorScheme(.dark)
                 .tint(CC.color.accent)
+                // Once a launch, not once a window: the window opened again keeps the computers as they are.
                 .task {
+                    guard !started else { return }
+                    started = true
                     machines.bootstrap()
                     if Setup.runsThisLaunch { await setup.run(machines: machines) }
                 }
@@ -50,7 +61,7 @@ struct CodeConnectApp: App {
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentMinSize)
         .commands {
-            AddCommands()
+            AddCommands(pending: $pendingAdd)
             CommandGroup(after: .appInfo) {
                 if let updates {
                     Button("Check for Updates\u{2026}") { updates.checkForUpdates() }
@@ -96,7 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the main window leaves the app running in the Dock; ⌘Q quits. (An app whose one window scene is a
+    /// `Window` quits with it otherwise.)
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 /// The main window, paired or not.
@@ -106,9 +119,13 @@ struct RootView: View {
     #if DEBUG
         @Environment(\.openSettings) private var openSettings
     #endif
+    @Binding var scope: FleetScope
+    @Binding var filter: FleetFilter?
+    @Binding var opened: String?
+    @Binding var pendingAdd: AddKind?
 
     var body: some View {
-        MainWindow()
+        MainWindow(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd)
             .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)
             .environment(machines.linkModel)
