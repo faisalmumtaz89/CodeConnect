@@ -998,6 +998,7 @@ struct SessionDetailView: View {
             // the conversation starts where the bar stops. What the header carried
             // only sometimes — a Codex turn's Stop, the permission note, an ended
             // run's resume command — still shows, under the bar, while it applies.
+            RunFacts(summary: summary)
             sessionNotices
 
             if shown != nil {
@@ -2424,6 +2425,43 @@ extension ComposeProse.Tone {
         case .success: return .success
         case .warning: return .warning
         case .danger: return .danger
+        }
+    }
+}
+
+/// **What the screen does not already say about the run**, one line under the
+/// bar: the folder's branch in code type, and its uncommitted +N −M at the
+/// right edge. The agent is in the reply box's placeholder and the model
+/// above it, so neither repeats here. Short of room the branch gives way in
+/// its middle; with neither fact known the line is absent.
+private struct RunFacts: View {
+    let summary: SessionSummary?
+
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        let branch = summary?.gitBranch?.displaySafe
+        let diff = summary?.diffStat
+        if branch != nil || diff != nil {
+            HStack(spacing: CC.space.sm) {
+                if let branch {
+                    Text(verbatim: branch)
+                        .foregroundStyle(CC.text.secondary)
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                if let diff {
+                    (Text(verbatim: "+\(diff.added)").foregroundStyle(CC.color.success)
+                        + Text(verbatim: " −\(diff.removed)").foregroundStyle(CC.color.danger))
+                        .fixedSize()
+                }
+            }
+            .ccType(CC.type.monoSmall)
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.xs)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("session-facts")
         }
     }
 }
