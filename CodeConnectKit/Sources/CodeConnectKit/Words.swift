@@ -1,5 +1,18 @@
 import Foundation
 
+extension String {
+    /// The words as a Mac button reads them, in title style: each word starts with a capital except a short article,
+    /// conjunction or preposition after the first. A word that already holds a capital ("iPhone") is kept as it is.
+    public var titleStyle: String {
+        let minor: Set<String> = ["a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "at", "by", "from"]
+        return split(separator: " ", omittingEmptySubsequences: false).enumerated().map { index, word in
+            let word = String(word)
+            guard let first = word.first, first.isLowercase, index == 0 || !minor.contains(word) else { return word }
+            return first.uppercased() + word.dropFirst()
+        }.joined(separator: " ")
+    }
+}
+
 /// The words both apps show for the same thing, said once.
 ///
 /// A sentence the Mac and the iPhone both draw lives here, so the two cannot

@@ -19,7 +19,7 @@ public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .blocked: return "Blocked"
+        case .blocked: return "Waiting for you"
         case .failed: return "Failed"
         case .doneUnreviewed, .done: return "Done"
         case .running: return "Running"

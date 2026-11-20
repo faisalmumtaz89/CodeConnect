@@ -117,7 +117,7 @@ public struct StartContext {
             return .signedOut(said(agent) ?? "\(agent.displayName) on \(machineName) isn’t signed in.")
         }
         let offered = (status?.models ?? []).map {
-            StartModelChoice(agent: agent, model: $0.value, label: $0.label)
+            StartModelChoice(agent: agent, model: $0.value, label: MenuModel.shownLabel(value: $0.value, label: $0.label))
         }
         if offered.contains(where: \.isDefault) { return .choices(offered) }
         return .choices([StartModelChoice(agent: agent, model: nil, label: "Default")] + offered)

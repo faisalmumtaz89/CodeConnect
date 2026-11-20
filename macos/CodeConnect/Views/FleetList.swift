@@ -330,7 +330,7 @@ private struct GroupHeader: View {
             Text(group.name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text).lineLimit(1)
             Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
             if group.waiting > 0 {
-                Text(verbatim: "\(group.waiting) waiting").font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
+                Text(FleetCount.waitingForYou(group.waiting)).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
             }
             Spacer(minLength: 16)
             if grouping == .project {
@@ -537,8 +537,8 @@ struct AgentMark: View {
         .foregroundStyle(Theme.text2)
         .frame(width: 18, height: 18)
         .background(Circle().fill(Color.white.opacity(0.08)))
-        .help(agent.displayName)
+        .help(agent.productName)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(agent.displayName)
+        .accessibilityLabel(agent.productName)
     }
 }

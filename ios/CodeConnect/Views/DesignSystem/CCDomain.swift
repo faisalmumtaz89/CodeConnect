@@ -133,16 +133,11 @@ extension CCBadge {
 }
 
 extension CCTag {
-    /// The agent tag. The tag's own names, not `AgentKind.displayName`: prose
-    /// says "Claude", the tag names the product the session runs. An
-    /// unsupported agent is the daemon's word, verbatim.
+    /// The agent tag: the product the session runs (`AgentKind.productName`),
+    /// not the name prose addresses it by (`displayName`). An unsupported agent
+    /// is the daemon's word, verbatim.
     init(agent: AgentKind) {
-        let name: String
-        switch agent {
-        case .claude: name = "Claude Code"
-        case .codex: name = "Codex"
-        case .unsupported(let raw): name = raw
-        }
+        let name = agent.productName
         self.init(name, accessibilityText: "\(name) session")
     }
 }

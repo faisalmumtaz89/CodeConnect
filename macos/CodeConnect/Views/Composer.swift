@@ -120,9 +120,9 @@ private struct Composer: View {
             }
         }
         .alert(ClearConfirmation.title, isPresented: $clearing) {
-            Button(ClearConfirmation.clear, role: .destructive) { performClear() }
+            Button(ClearConfirmation.clear.titleStyle, role: .destructive) { performClear() }
                 .accessibilityIdentifier("session.composer.clear.confirm")
-            Button(ClearConfirmation.keep, role: .cancel) {}
+            Button(ClearConfirmation.keep.titleStyle, role: .cancel) {}
                 .accessibilityIdentifier("session.composer.clear.cancel")
         } message: {
             Text(ClearConfirmation.message)

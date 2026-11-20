@@ -81,8 +81,8 @@ struct DevicesPane: View {
         ) { ask in
             switch ask {
             case .block:
-                Button(DeviceGroup.blockAction, role: .destructive) { perform(ask) }.accessibilityIdentifier("settings.ask.block")
-            case .allow: Button(DeviceGroup.allowAction) { perform(ask) }.accessibilityIdentifier("settings.ask.allow")
+                Button(DeviceGroup.blockAction.titleStyle, role: .destructive) { perform(ask) }.accessibilityIdentifier("settings.ask.block")
+            case .allow: Button(DeviceGroup.allowAction.titleStyle) { perform(ask) }.accessibilityIdentifier("settings.ask.allow")
             }
             Button("Cancel", role: .cancel) {}.accessibilityIdentifier("settings.ask.cancel")
         } message: { ask in

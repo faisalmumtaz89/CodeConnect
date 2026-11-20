@@ -27,12 +27,13 @@ public enum RunSettings: Sendable, Hashable {
     ) -> RunSettings {
         guard summary.agent == .claude || summary.agent == .codex else { return .deferToOtherPath }
         guard let menus = summary.menus else { return .hostedReadOnly(model: summary.model?.value) }
+        let models = menus.models.map(\.shown)
 
         // The model the daemon states as chosen — never re-derived from the fact's text here, because
         // the fact at a turn's init is claude's full id and only the daemon knows the alias it resolves
         // to. Absent (an older daemon, or an unlisted value) selects nothing.
         let selectedModel = menus.selectedModel
-            .flatMap { value in menus.models.first { $0.value == value } }
+            .flatMap { value in models.first { $0.value == value } }
         // Effort and mode facts carry the menu's own words, so a plain equality selects them.
         let selectedMode = summary.permissionMode
             .flatMap { fact in menus.modes.first { $0.value == fact.value } }
@@ -51,7 +52,7 @@ public enum RunSettings: Sendable, Hashable {
 
         return .hostedLive(
             HostedSettings(
-                models: menus.models, modes: menus.modes,
+                models: models, modes: menus.modes,
                 selectedModel: selectedModel, selectedMode: selectedMode,
                 efforts: efforts, selectedEffort: selectedEffort,
                 modelDisplay: modelDisplay, inFlight: inFlight, lastOutcome: lastOutcome))
@@ -62,7 +63,7 @@ public enum RunSettings: Sendable, Hashable {
     /// a model no entry carries (a Claude run's full id, or its receipt's `alias (full-id)` until the
     /// next turn's init) or a run with no menus.
     public static func modelName(confirmed: String, menus: RunMenus?) -> String {
-        menus?.models.first { $0.value == confirmed }?.label ?? ModelDisplay.from(confirmed).name
+        menus?.models.first { $0.value == confirmed }?.shown.label ?? ModelDisplay.from(confirmed).name
     }
 }
 

@@ -161,7 +161,7 @@ private struct Heading: View {
     /// model when there is one, so the line and the settings list spell it alike (Kit's `modelName`).
     private var agentLine: String {
         [
-            row.summary.agent.displayName,
+            row.summary.agent.productName,
             model.confirmedModel(for: row.id).map { RunSettings.modelName(confirmed: $0.name, menus: row.summary.menus) },
         ]
             .compactMap { $0 }

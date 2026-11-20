@@ -99,7 +99,8 @@ final class Minor33WireTests: XCTestCase {
         let (context, _) = try context(try projects(claudeSignedIn: true))
         guard case .choices(let claude) = context.models(.claude) else { return XCTFail("no Claude Code models") }
         XCTAssertEqual(claude.map(\.model), ["default", "opus", "fable", "sonnet", "haiku"], "its own Default, once")
-        XCTAssertEqual(claude.map(\.label), ["Default (recommended)", "Opus", "Fable", "Sonnet", "Haiku"])
+        // The agent's "Default (recommended)" is shown as "Default", as Codex's Default is: the name alone.
+        XCTAssertEqual(claude.map(\.label), ["Default", "Opus", "Fable", "Sonnet", "Haiku"])
         XCTAssertTrue(claude[0].isDefault)
         guard case .choices(let codex) = context.models(.codex) else { return XCTFail("no Codex models") }
         XCTAssertEqual(codex.first?.model, nil, "Codex lists no default: Default names no model")

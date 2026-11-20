@@ -548,7 +548,7 @@ struct ActionButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Text(title).font(Theme.ui(12, .medium))
+                Text(title.titleStyle).font(Theme.ui(12, .medium))
                 if let key { Text(key).font(Theme.ui(11)).opacity(0.6) }
             }
             .foregroundStyle(prominent ? Color.black : Theme.text)
