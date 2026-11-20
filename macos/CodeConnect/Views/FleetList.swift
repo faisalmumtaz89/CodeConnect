@@ -364,7 +364,8 @@ private struct GroupHeader: View {
                 .font(.system(size: 11))
                 .foregroundStyle(grouping == .computer ? Theme.text2 : Theme.text3)
             Text(group.name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-            // The counts stay whole on one line; the name before them is what gives way.
+                .truncationMode(.middle)
+            // The counts stay whole on one line; the name before them is what gives way, in its middle.
             Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
             if group.waiting > 0 {
                 Text(FleetCount.waitingForYou(group.waiting)).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
@@ -402,7 +403,7 @@ struct ProjectPlace: View {
             ViewThatFits(in: .horizontal) {
                 Text(project.folder)
                 Text(verbatim: "…/" + (project.folder.split(separator: "/").last.map(String.init) ?? project.folder))
-                    .truncationMode(.tail)
+                    .truncationMode(.middle)
             }
             .font(Theme.mono(size))
             .lineLimit(1)
@@ -455,6 +456,7 @@ private struct FleetLine: View {
                 .font(Theme.ui(12.5, row.status == .blocked ? .medium : .regular))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
+                .truncationMode(.middle)
                 .layoutPriority(1)
             // What it is on: the tool call in prose and its argument as code, or else the
             // daemon's own sentence; asked to end, that it is stopping, until it has.

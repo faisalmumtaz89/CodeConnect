@@ -1152,11 +1152,12 @@ struct SessionDetailView: View {
     /// bar titles do, since a bar has one height. A long press copies the whole
     /// path, as it did on the header's path line.
     private var barTitle: some View {
+        // A long name gives way in its middle and keeps its end, as on the Mac.
         let name = Text(verbatim: label.project)
             .ccType(CC.type.headline)
             .foregroundStyle(CC.text.primary)
             .lineLimit(1)
-            .truncationMode(.tail)
+            .truncationMode(.middle)
         // The path is the Mac's, as it is: the phone does not know whose home
         // folder it is under, so it does not shorten one. Head truncation keeps
         // the tail, the part that identifies the run.

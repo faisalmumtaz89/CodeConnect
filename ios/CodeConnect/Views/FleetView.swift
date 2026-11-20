@@ -834,11 +834,13 @@ struct FleetView: View {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
-                        // Wrapped, never cut: a folder's name is what tells two
-                        // cards apart.
+                        // Two lines at most, then a cut in its middle: the end
+                        // of a folder's name is what tells two cards apart.
                         Text(project.name)
                             .ccType(CC.type.headline)
                             .foregroundStyle(CC.text.primary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
                             .fixedSize(horizontal: false, vertical: true)
                         CCAdaptiveSpacer(minLength: CC.space.sm)
                         MachineLabel(machineID: project.id.machineID, name: project.machineName)

@@ -121,6 +121,7 @@ private struct Heading: View {
                 .font(Theme.ui(18, .semibold))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
+                .truncationMode(.middle)
                 .accessibilityIdentifier("session.title")
             HStack(spacing: 12) {
                 HStack(spacing: 6) {

@@ -333,14 +333,14 @@ struct DecisionCardView: View {
                 Text(verbatim: label.project)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
-                    // **Bounded, because the decision comes first.** A project
-                    // may be forty characters, and at the largest accessibility
-                    // sizes that is four lines of provenance standing between
-                    // the reader and the command they came to answer. The full
-                    // path is on the line below, so nothing here is the only
-                    // copy of anything.
+                    // **Bounded, because the decision comes first.** A project's
+                    // name may be long, and at the largest accessibility sizes
+                    // that is lines of provenance standing between the reader
+                    // and the command they came to answer. It gives way in its
+                    // middle, keeping its end; the full path is on the line
+                    // below, so nothing here is the only copy of anything.
                     .lineLimit(2)
-                    .truncationMode(.tail)
+                    .truncationMode(.middle)
                 if let qualifier = label.qualifier {
                     Text("·")
                         .ccType(CC.type.footnote)

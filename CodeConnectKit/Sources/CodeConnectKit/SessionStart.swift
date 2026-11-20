@@ -489,10 +489,12 @@ public final class SessionStarter {
                 ("code/\(name)", index % 4 == 3 ? "develop" : "main",
                  TimeInterval(4 + index) * 86400, index % 5 == 2 ? StartAgent.codex : .claude)
             }
-        return rows.map { relative, branch, age, agent in
+        let long = Fixtures.longLabel.map { [("code/\($0.folder)", "main" as String?, 60.0, StartAgent.claude as StartAgent?)] } ?? []
+        return (long + rows).map { relative, branch, age, agent in
             let path = "\(home)/\(relative)"
+            let last = String(relative.split(separator: "/").last ?? "")
             return StartProject(
-                path: path, name: String(relative.split(separator: "/").last ?? ""),
+                path: path, name: last == Fixtures.longLabel?.folder ? Fixtures.longLabel!.sent : last,
                 lastUsed: now.addingTimeInterval(-age), lastAgent: agent, gitBranch: branch,
                 exists: true)
         }

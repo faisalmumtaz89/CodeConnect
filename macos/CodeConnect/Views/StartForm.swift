@@ -296,6 +296,7 @@ struct StartForm: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer(minLength: 8)
                     AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
                         .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
@@ -363,6 +364,7 @@ struct StartForm: View {
     private func pickedRow(_ project: StartProject) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                        .truncationMode(.middle)
             Text(project.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
         }
         .padding(.horizontal, 10)

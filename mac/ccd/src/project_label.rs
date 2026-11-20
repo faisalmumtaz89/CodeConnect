@@ -17,13 +17,6 @@
 //! and the surface above says so. Falling back to the session's name would put
 //! its uid on the screen through the one door left open.
 
-/// Longest label any surface will be handed.
-///
-/// A directory name is normally a word. This exists for the one that is not —
-/// a timestamped export directory, a generated worktree — so it cannot run off
-/// the end of a notification title.
-const MAX_CHARS: usize = 40;
-
 /// The project a run is working in, or empty when its `cwd` does not name one.
 ///
 /// Empty covers every way that can happen — no cwd recorded, the filesystem
@@ -61,17 +54,10 @@ pub fn project_label(cwd: &str) -> String {
         })
         .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}')
         .collect();
-    let cleaned = cleaned.trim();
-    if cleaned.is_empty() {
-        return String::new();
-    }
-    if cleaned.chars().count() <= MAX_CHARS {
-        return cleaned.to_string();
-    }
-    // Counted in `char`s rather than sliced by byte, so a multi-byte name is
-    // cut between characters instead of through one.
-    let kept: String = cleaned.chars().take(MAX_CHARS - 1).collect();
-    format!("{kept}…")
+    // Whole, however long: each app cuts a name where it has no room, and the
+    // one surface with a fixed bound, the push title, cuts its own
+    // ([`crate::apns::alert`]).
+    cleaned.trim().to_string()
 }
 
 #[cfg(test)]
@@ -162,15 +148,13 @@ mod tests {
         assert_eq!(project_label("/srv/dev/\n\t"), "");
     }
 
+    /// A long folder name reaches the apps whole: they cut it where they have no
+    /// room, and keep its end in view.
     #[test]
-    fn an_overlong_name_is_cut_between_characters() {
-        let long = "é".repeat(60);
-        let label = project_label(&format!("/srv/dev/{long}"));
-        assert_eq!(label.chars().count(), MAX_CHARS);
-        assert!(label.ends_with('…'));
-        // The point of counting chars: a byte slice at 39 would have split a
-        // two-byte character and produced invalid UTF-8.
-        assert!(label.chars().take(MAX_CHARS - 1).all(|c| c == 'é'));
+    fn a_long_name_comes_back_whole() {
+        let long = "customer-analytics-platform-q4-2026-data-migration-worktrees";
+        assert_eq!(long.chars().count(), 60);
+        assert_eq!(project_label(&format!("/srv/dev/{long}")), long);
     }
 
     /// Provenance, not shape. A directory really can be called `cc-1`, and a
@@ -200,11 +184,5 @@ mod tests {
     #[test]
     fn surrounding_whitespace_is_trimmed() {
         assert_eq!(project_label("/srv/dev/  Aion  "), "Aion");
-    }
-
-    #[test]
-    fn a_name_exactly_at_the_bound_is_left_alone() {
-        let exact = "a".repeat(MAX_CHARS);
-        assert_eq!(project_label(&format!("/srv/dev/{exact}")), exact);
     }
 }
