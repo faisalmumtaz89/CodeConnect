@@ -14,6 +14,7 @@ User-facing changes, newest first. Mac releases are cut per
 - In Set Up, every row that needs you says why under its name, the Terminal row included.
 - Set Up's Try Again and Done end on the same edge as its list.
 - The Mac's lists in Settings and Set Up share one box colour and one row inset, as Start's folder list has.
+- The Mac's Settings window takes each pane's own height and scrolls only a long list.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
