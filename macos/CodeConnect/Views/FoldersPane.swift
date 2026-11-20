@@ -47,7 +47,7 @@ struct FoldersPane: View {
         let contexts = machines.models
             .filter { $0.machineID != nil && ($0.connection.capabilities?.startsSessions ?? true) }
             .map(StartContext.init(model:))
-        ScrollView {
+        SettingsScroll {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(FolderWords.paneTitle).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
@@ -60,11 +60,7 @@ struct FoldersPane: View {
                         .accessibilityIdentifier("folders.refusal")
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(24)
         }
-        .frame(width: 560, height: 460)
-        .background(Theme.sheet)
         #if DEBUG
             .background(RenderWindow(ready: contexts.allSatisfy { lists[$0.id] != nil || unreadable.contains($0.id) }))
         #endif

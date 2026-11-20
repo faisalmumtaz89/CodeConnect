@@ -48,7 +48,7 @@ struct DevicesPane: View {
     private var knowsThisDevice: Bool { thisDevice != nil || setup.thisMac(at: address) == nil }
 
     var body: some View {
-        ScrollView {
+        SettingsScroll {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(DeviceGroup.title).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
@@ -71,11 +71,7 @@ struct DevicesPane: View {
                     Text(refusal).font(Theme.ui(12)).foregroundStyle(Theme.red).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(24)
         }
-        .frame(width: 560, height: 460)
-        .background(Theme.sheet)
         #if DEBUG
             .background(RenderWindow(ready: devices != nil || !answers, showsSheet: asking != nil))
         #endif
