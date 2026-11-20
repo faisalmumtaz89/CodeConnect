@@ -6,6 +6,8 @@ User-facing changes, newest first. Mac releases are cut per
 ## CodeConnect 0.19.3, with the iPhone app 1.1.20
 
 - On the Mac, a conversation's notices and tool lines start their words on one edge.
+- On the Mac, a tool line's and "Show more lines"'s hover fill stays inside the conversation's and the
+  diff's column.
 
 ## CodeConnect 0.19.2, with the iPhone app 1.1.19
 

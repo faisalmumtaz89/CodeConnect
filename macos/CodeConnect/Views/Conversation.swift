@@ -230,7 +230,8 @@ private struct ToolLine: View {
         VStack(alignment: .leading, spacing: 8) {
             if opens {
                 Button { toggle() } label: { line(opens: true) }
-                    .buttonStyle(.hover(bare: true, id: "session.tool.\(id)"))
+                    // The row spans the column: its fill ends on both of its edges.
+                    .buttonStyle(.hover(bare: true, flush: [.leading, .trailing], id: "session.tool.\(id)"))
                     .accessibilityLabel(spoken)
                     .accessibilityIdentifier("session.tool.\(id)")
                     .accessibilityValue(open ? "open" : "closed")
