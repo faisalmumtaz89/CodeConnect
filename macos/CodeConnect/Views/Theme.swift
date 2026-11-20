@@ -19,6 +19,8 @@ enum Theme {
     static let hover = Color.white.opacity(0.04)
     /// The same step for a surface with its own fill (a raised chip, a filled button): a lift in brightness.
     static let hoverLift = 0.04
+    /// How much an unchosen segment lightens under the pointer: its label is dim, so it takes more than `hoverLift`.
+    static let segmentLift = 0.15
     /// How far a panel stands off the button that opens it: close enough that, under a two-line row, it covers the
     /// row's second line whole rather than cutting through its text.
     static let panelGap: CGFloat = 1

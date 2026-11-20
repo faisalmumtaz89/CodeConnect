@@ -58,6 +58,8 @@ struct HoverButtonStyle: ButtonStyle {
     /// a segment of a track whose chosen segment carries the plate, so a track never shows two plates at once. A row of
     /// a list (the sidebar's) takes the ordinary fill, weaker than its selected row's plate.
     var over = false
+    /// How much an `over` label lightens.
+    var lift = Theme.hoverLift
     /// A label with no padding of its own, such as a word alone: the fill stands `bareBleed` off it.
     var bare = false
     var id: String?
@@ -75,7 +77,7 @@ struct HoverButtonStyle: ButtonStyle {
     static let bareBleed = CGSize(width: 8, height: 4)
 
     func makeBody(configuration: Configuration) -> some View {
-        Hovered(configuration: configuration, radius: radius, over: over,
+        Hovered(configuration: configuration, radius: radius, over: over, lift: lift,
                 bleed: bare ? Self.bareBleed : .zero, id: id)
     }
 
@@ -83,6 +85,7 @@ struct HoverButtonStyle: ButtonStyle {
         let configuration: Configuration
         let radius: CGFloat
         let over: Bool
+        let lift: Double
         let bleed: CGSize
         let id: String?
         @State private var hovering = false
@@ -93,7 +96,7 @@ struct HoverButtonStyle: ButtonStyle {
             configuration.label
                 .disabled(forcedState("disabled"))
                 .background(lit && !over ? Theme.hover : .clear, in: plate)
-                .brightness(lit && over ? Theme.hoverLift : 0)
+                .brightness(lit && over ? lift : 0)
                 .opacity(configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
                 // What lights is what a click takes, the label's clear gaps included.
                 .contentShape(plate)
@@ -130,8 +133,10 @@ private struct Plate: Shape {
 
 extension ButtonStyle where Self == HoverButtonStyle {
     /// `HoverButtonStyle`.
-    static func hover(radius: CGFloat = 6, over: Bool = false, bare: Bool = false, id: String? = nil) -> HoverButtonStyle {
-        HoverButtonStyle(radius: radius, over: over, bare: bare, id: id)
+    static func hover(
+        radius: CGFloat = 6, over: Bool = false, lift: Double = Theme.hoverLift, bare: Bool = false, id: String? = nil
+    ) -> HoverButtonStyle {
+        HoverButtonStyle(radius: radius, over: over, lift: lift, bare: bare, id: id)
     }
 }
 
@@ -162,7 +167,8 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
                         .background(isChosen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: trackRadius - trackInset))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.hover(radius: trackRadius - trackInset, over: true, id: id(option)))
+                // A dim unchosen label needs more lift than a bright one to show it is under the pointer.
+                .buttonStyle(.hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id(option)))
                 .accessibilityIdentifier(id(option))
                 .accessibilityAddTraits(isChosen ? .isSelected : [])
             }
