@@ -661,6 +661,8 @@ struct ActionButton: View {
     /// Acts and cannot be taken back: the plain face in red, as every destructive button on the Mac is drawn. Never
     /// prominent, never Return.
     var destructive = false
+    /// A title the button is as wide as, too: a button whose word changes (Trust, Don't Trust) keeps one width.
+    var sizedFor: String? = nil
     /// What a driver finds it by.
     let id: String
     let action: () -> Void
@@ -668,7 +670,10 @@ struct ActionButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Text(title.titleStyle).font(Theme.ui(12, .medium))
+                ZStack {
+                    if let sizedFor { Text(sizedFor.titleStyle).font(Theme.ui(12, .medium)).hidden() }
+                    Text(title.titleStyle).font(Theme.ui(12, .medium))
+                }
                 if let key { Text(key).font(Theme.ui(11)).opacity(0.6) }
             }
             .foregroundStyle(prominent ? Color.black : destructive ? Theme.red : Theme.text)
