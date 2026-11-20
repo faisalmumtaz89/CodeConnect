@@ -376,7 +376,7 @@ enum Fixtures {
         +        self.subtitle = nil\\n         self.createdAt = .now\\n     }\\n }\\n\
         diff --git a/Sources/New.swift b/Sources/New.swift\\nnew file mode 100644\\nindex 0000000..abcdefg\\n\
         --- /dev/null\\n+++ b/Sources/New.swift\\n@@ -0,0 +1,3 @@\\n+enum New {\\n+    static let value = 1\\n+}\\n\
-        ?? Sources/Untracked.swift\\n"}
+        \\n# 1 untracked file(s), not shown as a diff:\\n#   Sources/Untracked.swift\\n"}
         """
 
     static func diff() -> SessionDiff? {
