@@ -868,7 +868,7 @@ struct DecisionCardView: View {
             // Claude's, and only on a card known to be Claude's. An unknown
             // agent gets no raw disclosure: the JSON may be Codex's.
             if isClaudeCard {
-                CCDisclosure("Full tool input") {
+                CCDisclosure("Full tool input", labelOnContentColumn: false) {
                     VStack(alignment: .leading, spacing: CC.space.sm) {
                         CCMonoBlock(approval.card.shownToolInput)
                         VStack(alignment: .leading, spacing: 2) {
@@ -900,7 +900,7 @@ struct DecisionCardView: View {
     private var codexDetails: some View {
         let cwd = CodexCard.cwd(in: approval.card.toolInput)
         if cwd != nil || !changes.isEmpty {
-            CCDisclosure("Details") {
+            CCDisclosure("Details", labelOnContentColumn: false) {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     if let cwd {
                         detailRow("Runs in", cwd)

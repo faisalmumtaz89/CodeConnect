@@ -23,6 +23,11 @@ struct CCDisclosure<Content: View>: View {
     /// Draws the 1pt rule above the row. Off for the first disclosure in a
     /// stack, where the block above has already drawn its own edge.
     var showsTopRule: Bool = true
+    /// Where the label sits: on the content column (the default, among rows
+    /// that keep a gutter), or on the container's own edge, for a document with
+    /// no gutter — a decision card, whose every other heading starts at its
+    /// margin — as `CCField.labelOnContentColumn` does for a field's label.
+    var labelOnContentColumn: Bool = true
 
     /// Set when the caller needs to drive or observe the state — the timeline's
     /// failed tool rows auto-expand once on arrival and must stay collapsed if
@@ -62,12 +67,14 @@ struct CCDisclosure<Content: View>: View {
         _ label: String,
         note: String? = nil,
         showsTopRule: Bool = true,
+        labelOnContentColumn: Bool = true,
         initiallyExpanded: Bool = false,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.label = label
         self.note = note
         self.showsTopRule = showsTopRule
+        self.labelOnContentColumn = labelOnContentColumn
         self.external = nil
         self._local = State(initialValue: initiallyExpanded)
         self.content = content
@@ -112,7 +119,8 @@ struct CCDisclosure<Content: View>: View {
                 // label 16.00 against block text 52.00, a third
                 // edge inside one component. The *content* still gets inset 0
                 // and the full measure; it is only the heading that moves.
-                .padding(.leading, CCColumn.step(from: columnInset, scaledDot: scaledDot))
+                .padding(
+                    .leading, labelOnContentColumn ? CCColumn.step(from: columnInset, scaledDot: scaledDot) : 0)
                 .frame(minHeight: CC.size.hitTarget)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
