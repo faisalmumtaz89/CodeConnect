@@ -227,7 +227,7 @@ private struct ComputerForm: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Add a computer").font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
-                Text("Install CodeConnect on it and sign in to the same Tailscale account. It appears here by itself.")
+                Text(PeerWords.addIntro(removedListed: !machines.removedComputers.isEmpty))
                     .font(Theme.ui(13.5))
                     .foregroundStyle(Theme.text2)
                     .lineSpacing(3)

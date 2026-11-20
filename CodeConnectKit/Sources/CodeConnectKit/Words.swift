@@ -227,5 +227,11 @@ public enum PeerWords {
     /// Add a Computer's section of the computers his Tailscale account lists that he removed, each added by one
     /// action with no code.
     public static let onYourTailscale = "On your Tailscale account"
+    /// Add a Computer's opening sentence, true beside that section: a computer on the account joins by itself
+    /// unless he removed it, and a removed one is then listed below.
+    public static func addIntro(removedListed: Bool) -> String {
+        "Install CodeConnect on it and sign in to the same Tailscale account. "
+            + (removedListed ? "It appears here by itself, unless you removed it: then it’s listed below." : "It appears here by itself.")
+    }
     public static let add = "Add"
 }
