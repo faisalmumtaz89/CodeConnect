@@ -834,7 +834,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     in its report of each change. [`ws::ClientMessage::SetModel`] and
 ///     [`ws::ClientMessage::SetMode`] serve it as they serve a Claude run, answered with
 ///     [`ws::ServerMessage::SettingResult`]. A daemon below 43 sends a Codex run no `menus`.
-pub const PROTOCOL_MINOR: u32 = 43;
+///   * `44` — **A device names itself in its hello.**
+///
+///     [`ws::ClientMessage::Hello`] may carry `device_name`, what the device calls itself (a Mac's computer
+///     name, an iPhone's "iPhone"). The daemon lists a new device under it, made unique, and renames a paired
+///     device to it on its next hello when it differs. A client below 44 sends none and is listed under its
+///     `client_name` as before; a daemon below 44 ignores the field.
+pub const PROTOCOL_MINOR: u32 = 44;
 
 #[cfg(test)]
 mod ledger_tests {

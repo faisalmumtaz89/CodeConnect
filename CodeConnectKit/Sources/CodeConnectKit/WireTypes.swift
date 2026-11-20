@@ -1924,7 +1924,7 @@ public enum HelloCredential: Sendable, Hashable {
 /// can resolve to a *different run* than the one the screen is showing — and for
 /// `sendText` that would send to the wrong agent.
 public enum ClientMessage: Sendable {
-    case hello(credential: HelloCredential, clientID: String?, clientName: String?)
+    case hello(credential: HelloCredential, clientID: String?, clientName: String?, deviceName: String? = nil)
     case sessions
     case subscribe(session: String, afterSeq: UInt64)
     case unsubscribe(session: String)
@@ -2026,6 +2026,7 @@ extension ClientMessage: Encodable {
         case pairingCode = "pairing_code"
         case clientID = "client_id"
         case clientName = "client_name"
+        case deviceName = "device_name"
         case sessionID = "session_id"
         case sessionUID = "session_uid"
         case afterSeq = "after_seq"
@@ -2056,7 +2057,7 @@ extension ClientMessage: Encodable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let credential, let clientID, let clientName):
+        case .hello(let credential, let clientID, let clientName, let deviceName):
             try c.encode("hello", forKey: .type)
             try c.encode(Wire.protocolVersion, forKey: .protocolVersion)
             switch credential {
@@ -2077,6 +2078,7 @@ extension ClientMessage: Encodable {
             }
             try c.encodeIfPresent(clientID, forKey: .clientID)
             try c.encodeIfPresent(clientName, forKey: .clientName)
+            try c.encodeIfPresent(deviceName, forKey: .deviceName)
         case .getDiff(let session):
             try c.encode("get_diff", forKey: .type)
             try c.encode(session, forKey: .sessionID)

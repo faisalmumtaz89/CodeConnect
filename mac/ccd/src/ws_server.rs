@@ -471,6 +471,7 @@ where
                             token: given,
                             pairing_code,
                             client_name,
+                            device_name,
                             ..
                         } => {
                             // Checked *before* the credential, and refused
@@ -509,7 +510,9 @@ where
                                     &token,
                                     given.as_deref(),
                                     pairing_code.as_deref(),
-                                    client_name.as_deref(),
+                                    // The name a new device is listed under: what it calls itself, else
+                                    // the app's name, as before minor 44.
+                                    device_name.as_deref().or(client_name.as_deref()),
                                     vouched.as_deref().map_err(|refusal| *refusal),
                                 )
                                 .await;
@@ -542,6 +545,22 @@ where
                                 }
                                 outcome => outcome,
                             };
+                            // A paired device that now names itself differently is listed under its
+                            // new name; one that names nothing keeps the name it has.
+                            if let (AuthOutcome::Device(device), Some(name)) =
+                                (&ack, device_name.as_deref())
+                            {
+                                if let Err(err) = daemon
+                                    .db
+                                    .rename_device(device.device_id.clone(), name.to_string())
+                                    .await
+                                {
+                                    crate::log_error!(
+                                        "could not rename device {}: {err:#}",
+                                        device.device_id
+                                    );
+                                }
+                            }
                             authed = true;
                             device_id = match &ack {
                                 AuthOutcome::Device(device) => Some(device.device_id.clone()),
@@ -2654,6 +2673,79 @@ mod tests {
             .await
             .expect("a reply to hello");
         (socket, reply)
+    }
+
+    /// One hello, sent as `hello`, from this test's loopback; the daemon's first reply.
+    async fn hello_raw(server: &LiveServer, hello: serde_json::Value) -> serde_json::Value {
+        let stream = TcpStream::connect(server.addr).await.unwrap();
+        let url = format!("ws://{}/", server.addr);
+        let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
+        socket.send(Message::Text(hello.to_string())).await.unwrap();
+        next_raw(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("a reply to hello")
+    }
+
+    async fn device_name(server: &LiveServer, device_id: &str) -> String {
+        let devices = server.daemon.list_devices().await.unwrap();
+        devices
+            .into_iter()
+            .find(|d| d.device_id == device_id)
+            .expect("the device is listed")
+            .name
+    }
+
+    /// **A device is listed under what it calls itself (minor 44), over the real listener.** A new device takes
+    /// its `device_name`; a paired one is renamed on its next hello when the name differs; a hello naming nothing
+    /// keeps the name the device has, as every client before minor 44 does. Must-fail: drop `device_name` from
+    /// the name `authenticate` is given, or the rename after a token hello, and the device reads "iPad" or the
+    /// old name.
+    #[tokio::test]
+    async fn a_device_is_listed_under_what_it_calls_itself_and_renamed_on_its_next_hello() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        set_tailnet(&server, Some(tailnet_from_the_laptop(|_| {})));
+        let hello = |extra: serde_json::Value| {
+            let mut hello = serde_json::json!({
+                "type": "hello",
+                "protocol_version": protocol::PROTOCOL_VERSION,
+                "client_name": "CodeConnect Mac",
+            });
+            hello
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hello
+        };
+
+        let ack = hello_raw(
+            &server,
+            hello(serde_json::json!({"device_name": "Jordan’s MacBook Air"})),
+        )
+        .await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        assert_eq!(ack["device_name"], "Jordan’s MacBook Air", "{ack}");
+        let id = ack["device_id"].as_str().unwrap().to_string();
+        let token = ack["device_token"].as_str().unwrap().to_string();
+
+        let again = hello_raw(
+            &server,
+            hello(serde_json::json!({"token": token, "device_name": "Air"})),
+        )
+        .await;
+        assert_eq!(again["type"], "hello_ack", "{again}");
+        assert_eq!(
+            device_name(&server, &id).await,
+            "Air",
+            "renamed on its next hello"
+        );
+
+        let older = hello_raw(&server, hello(serde_json::json!({"token": token}))).await;
+        assert_eq!(older["type"], "hello_ack", "{older}");
+        assert_eq!(
+            device_name(&server, &id).await,
+            "Air",
+            "a hello naming nothing keeps the name"
+        );
     }
 
     /// **The owner's own Tailscale device signs in with no code, over the real

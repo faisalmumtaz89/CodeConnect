@@ -47,6 +47,18 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNil(fields["pairing_code"])
     }
 
+    /// The device names itself apart from the app (minor 44): `client_name` stays "CodeConnect iPhone", which is
+    /// how a daemon tells which kind of device answered, and `device_name` is what the computer lists it under.
+    @MainActor
+    func testTheHelloNamesTheDeviceApartFromTheApp() throws {
+        let fields = try encodeClient(
+            .hello(
+                credential: .token("deadbeef"), clientID: nil, clientName: DaemonConnection.clientName,
+                deviceName: DaemonConnection.deviceName))
+        XCTAssertEqual(fields["client_name"]?.stringValue, "CodeConnect iPhone")
+        XCTAssertEqual(fields["device_name"]?.stringValue, "iPhone")
+    }
+
     // MARK: hello_ack
 
     func testTheSdkSourceIsNamed() throws {

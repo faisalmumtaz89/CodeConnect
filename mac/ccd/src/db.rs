@@ -989,6 +989,11 @@ impl Db {
             .await
     }
 
+    pub async fn rename_device(&self, device_id: String, requested: String) -> Result<String> {
+        self.run(move |store| store.rename_device(&device_id, &requested))
+            .await
+    }
+
     /// Returns the device rows the token was taken from — see the store.
     ///
     /// The credential is owned rather than borrowed, like every other argument
