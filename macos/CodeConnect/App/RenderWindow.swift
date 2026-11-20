@@ -2,7 +2,6 @@
     import AppKit
     import CodeConnectKit
     import ScreenCaptureKit
-    import Security
     import SwiftUI
 
     /// The render harness, inside the app: launched with `-CC_RENDER_WINDOW <png-path>`, the app
@@ -228,12 +227,9 @@
             return (String(words[0]), String(words[1]))
         }
 
-        /// True when the render shows a real computer, one it pairs with (`-CC_RENDER_PAIR`) or one a
-        /// run's keychain already holds (`-CC_KEYCHAIN_RUN`): it is ready once that computer has
-        /// answered, connected or refused.
-        static var waitsForComputer: Bool {
-            pairing != nil || ProcessInfo.processInfo.arguments.contains("-CC_KEYCHAIN_RUN")
-        }
+        /// True when the render shows a real computer, one it pairs with (`-CC_RENDER_PAIR`): it is ready
+        /// once that computer has answered, connected or refused.
+        static var waitsForComputer: Bool { pairing != nil }
 
         /// Where a test launch keeps the app's data (its cache) instead of the owner's Library; nil for
         /// an ordinary launch.
@@ -242,79 +238,25 @@
         private static var throwaway = false
 
         /// The keychain and the data folder a test launch uses, chosen before anything reads or writes
-        /// either (`CodeConnectApp.init`), from the launch's arguments, never from saved defaults.
-        /// `-CC_KEYCHAIN_RUN <uuid>` keeps the pairing under that run's own service and its data in a
-        /// folder of the same name in the user's temporary folder, and turns any keychain prompt into a
-        /// failure (`SecKeychainSetUserInteractionAllowed`: deprecated, and still the only switch the
-        /// Mac's file-based keychain honours); the run's harness has the same build remove both when
-        /// the app has ended. A value that is not a UUID stops the launch, quietly (a crash would put
-        /// its report on the screen). Any other `-CC_` flag means no keychain at all and a throwaway
-        /// data folder, removed when the render ends. A test launch's installation id is volatile, never
-        /// written to the app's defaults: the run's UUID, or a fresh one. An ordinary launch keeps the
-        /// app's own keychain, data and id.
+        /// either (`CodeConnectApp.init`), from the launch's arguments, never from saved defaults. Any
+        /// `-CC_` flag means no keychain at all and a throwaway data folder, removed when the render
+        /// ends, and an installation id of its own, never written to the app's defaults. An ordinary
+        /// launch keeps the app's own keychain, data and id.
         static func isolateTestLaunch() {
-            let arguments = ProcessInfo.processInfo.arguments
-            if let flag = arguments.firstIndex(of: "-CC_KEYCHAIN_RUN") {
-                guard arguments.indices.contains(flag + 1), let run = UUID(uuidString: arguments[flag + 1]) else {
-                    stop("-CC_KEYCHAIN_RUN takes a UUID")
-                }
-                let status = SecKeychainSetUserInteractionAllowed(false)
-                guard status == errSecSuccess else { stop("keychain prompts could not be turned off: \(status)") }
-                let service = "com.codeconnect.pairing.run-\(run.uuidString)"
-                Keychain.service = service
-                appData = FileManager.default.temporaryDirectory.appendingPathComponent(service, isDirectory: true)
-                if arguments.contains("-CC_KEYCHAIN_REMOVE") { removeRun(service) }
-                UserDefaults.standard.register(defaults: [DeviceIdentity.key: run.uuidString])
-            } else if arguments.contains(where: { $0.hasPrefix("-CC_") }) {
-                Keychain.service = nil
-                let id = UUID().uuidString
-                appData = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("codeconnect-test-\(id)", isDirectory: true)
-                throwaway = true
-                UserDefaults.standard.register(defaults: [DeviceIdentity.key: id])
-            } else {
-                return
-            }
-            FileHandle.standardError.write(
-                Data("test launch: keychain \(Keychain.service ?? "none"), data \(appData?.path ?? "")\n".utf8))
+            guard ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("-CC_") }) else { return }
+            Keychain.service = nil
+            let id = UUID().uuidString
+            appData = FileManager.default.temporaryDirectory
+                .appendingPathComponent("codeconnect-test-\(id)", isDirectory: true)
+            throwaway = true
+            UserDefaults.standard.register(defaults: [DeviceIdentity.key: id])
+            FileHandle.standardError.write(Data("test launch: keychain none, data \(appData?.path ?? "")\n".utf8))
         }
 
         /// Removes a throwaway data folder: a render's, as it quits.
         static func removeThrowawayData() {
             guard throwaway, let appData else { return }
             try? FileManager.default.removeItem(at: appData)
-        }
-
-        /// `-CC_KEYCHAIN_REMOVE`: removes every item under the run's service, and the run's data
-        /// folder, and quits before any window opens, printing the accounts it found and any left, by
-        /// their attributes alone (an item's data is never asked for). It must be launched from the
-        /// build that wrote the items: the keychain refuses another program's removal.
-        private static func removeRun(_ service: String) -> Never {
-            let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service]
-            func accounts() -> [String] {
-                var found: CFTypeRef?
-                let listing = query.merging([
-                    kSecReturnAttributes as String: true, kSecMatchLimit as String: kSecMatchLimitAll,
-                ]) { _, new in new }
-                guard SecItemCopyMatching(listing as CFDictionary, &found) == errSecSuccess,
-                    let items = found as? [[String: Any]]
-                else { return [] }
-                return items.compactMap { $0[kSecAttrAccount as String] as? String }.sorted()
-            }
-            let found = accounts()
-            let status = SecItemDelete(query as CFDictionary)
-            let left = accounts()
-            print("keychain: \(service): found \(found), removal status \(status), left \(left)")
-            let data = appData.map { $0.path } ?? ""
-            try? FileManager.default.removeItem(atPath: data)
-            let dataLeft = FileManager.default.fileExists(atPath: data)
-            print("data: \(data) \(dataLeft ? "LEFT" : "removed or absent")")
-            exit(left.isEmpty && !dataLeft ? 0 : 5)
-        }
-
-        private static func stop(_ reason: String) -> Never {
-            FileHandle.standardError.write(Data("keychain: \(reason)\n".utf8))
-            exit(2)
         }
 
         func makeNSView(context: Context) -> Probe { Probe() }
