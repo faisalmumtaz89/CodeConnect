@@ -25,7 +25,7 @@ struct SetupView: View {
                 row("Codex", setup.agent(.codex, in: machines), id: "setup.codex")
                 commandLine
             }
-            .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
+            .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
             .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
@@ -71,7 +71,7 @@ struct SetupView: View {
                     .padding(.leading, 24)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Theme.rowInset)
         .padding(.vertical, 11)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
         .accessibilityElement(children: .contain)
@@ -109,7 +109,7 @@ struct SetupView: View {
                 .padding(.leading, 24)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Theme.rowInset)
         .padding(.vertical, 11)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.commandLine")

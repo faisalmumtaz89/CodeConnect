@@ -13,6 +13,7 @@ User-facing changes, newest first. Mac releases are cut per
 - Set Up CodeConnect on the Mac ends below its last row, with no empty band above its buttons.
 - In Set Up, every row that needs you says why under its name, the Terminal row included.
 - Set Up's Try Again and Done end on the same edge as its list.
+- The Mac's lists in Settings and Set Up share one box colour and one row inset, as Start's folder list has.
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 
