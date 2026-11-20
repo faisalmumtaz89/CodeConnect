@@ -7,6 +7,8 @@ import SwiftUI
 /// Add Computer (⇧⌘N); an iPhone from File > Add iPhone.
 struct MainWindow: View {
     @Environment(Machines.self) private var machines
+    /// The one "…" menu a row of the list or the sidebar opens, drawn over the whole window.
+    @State private var rowMenu = RowMenu()
     @State private var adding: AddKind?
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
@@ -75,6 +77,7 @@ struct MainWindow: View {
         .toolbar(removing: .title)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
+        .rowMenuHost(rowMenu)
         .focusedSceneValue(\.adding, $adding)
         // Until every computer has caught up, or been waited out, the list says it is connecting.
         .task { await machines.waitOutLaunch() }
@@ -178,9 +181,10 @@ private struct Sidebar: View {
     @Binding var filter: FleetFilter?
     @Binding var opened: String?
     let pairAgain: (String) -> Void
-    /// The computer row under the pointer, and the one whose "…" panel is open, by the computer's id.
+    /// The computer row under the pointer, by the computer's id.
     @State private var hovered: String?
-    @State private var moreOpen: String?
+    /// The window's one row menu, which a computer's "…" or a right-click on its row opens.
+    @Environment(RowMenu.self) private var menu
     /// The computer Remove… is asking about.
     @State private var removing: AppModel?
     /// Where this Mac's own daemon answers. Its computer, which Setup pairs with again at every launch, is never offered
@@ -220,7 +224,8 @@ private struct Sidebar: View {
                                 let id = computer.machineID ?? ""
                                 let narrowed = FleetFilter.computer(id)
                                 let more = id != thisMac
-                                    && (hovered == id || moreOpen == id || HoverButtonStyle.forced("sidebar.computer.\(id)"))
+                                    && (hovered == id || menu.shown?.owner == "sidebar.computer.\(id).more"
+                                        || HoverButtonStyle.forced("sidebar.computer.\(id)"))
                                 ComputerRow(
                                     computer: computer,
                                     count: active.filter { $0.machineID == computer.machineID }.count,
@@ -240,17 +245,19 @@ private struct Sidebar: View {
                                 // On the name line, in the count's place.
                                 .overlay(alignment: Alignment(horizontal: .trailing, vertical: .computerNameLine)) {
                                     if more {
-                                        RunMore(
-                                            id: "sidebar.computer.\(id).more",
-                                            open: Binding(get: { moreOpen == id }, set: { moreOpen = $0 ? id : nil }),
-                                            action: .remove
-                                        ) { removing = computer }
-                                        .padding(.trailing, 8)
+                                        RunMore(id: "sidebar.computer.\(id).more", action: .remove) { removing = computer }
+                                            .padding(.trailing, 8)
                                     }
                                 }
+                                // The same menu, at the pointer; this Mac's own has none.
+                                .onRightClick { point in
+                                    guard id != thisMac else { return }
+                                    RunMore.show(
+                                        menu, at: CGRect(origin: point, size: .zero), id: "sidebar.computer.\(id).more",
+                                        action: .remove
+                                    ) { removing = computer }
+                                }
                                 .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
-                                // Its panel opens below the row, over the rows after it.
-                                .zIndex(moreOpen == id ? 1 : 0)
                             }
                             // The owner's other computers Tailscale lists that have not joined, each with why.
                             ForEach(machines.unjoinedComputers) { unjoined in
@@ -258,22 +265,18 @@ private struct Sidebar: View {
                             }
                         }
                         .padding(.horizontal, 8)
-                        .zIndex(moreOpen == nil ? 0 : 1)
                         .task(id: computers.map(\.machineID)) {
-                            guard let root = setup.installer?.root else { return }
-                            address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
                             #if DEBUG
-                                if RenderWindow.opensComputerMenu, let last = computers.last?.machineID,
-                                    last != setup.thisMac(at: address)
-                                {
-                                    moreOpen = last
-                                }
+                                // A render's ask about the last computer, reached by a fixture too, which has no
+                                // install to read this Mac's address from; this Mac's own is told apart as its row does.
                                 if RenderWindow.confirm == "computer", let last = computers.last,
-                                    last.machineID != setup.thisMac(at: address)
+                                    (last.machineID ?? "") != setup.thisMac(at: address)
                                 {
                                     removing = last
                                 }
                             #endif
+                            guard let root = setup.installer?.root else { return }
+                            address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
                         }
                     }
 

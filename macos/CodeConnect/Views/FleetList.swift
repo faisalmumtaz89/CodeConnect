@@ -59,7 +59,8 @@ struct FleetList: View {
     @State private var folded: Set<String> = []
     /// The row under the pointer, and the row whose "…" panel is open.
     @State private var hovered: String?
-    @State private var moreOpen: String?
+    /// The window's one row menu, which a run's "…" or a right-click on its row opens.
+    @Environment(RowMenu.self) private var menu
     /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
     @FocusState private var listFocused: Bool
     /// The run End Run… is asking about, and what its computer said when it did not end.
@@ -131,9 +132,9 @@ struct FleetList: View {
                                     let removable =
                                         row.summary.isRemovable && model?.daemonProfile.removesSessions == true
                                     let more = (endable || removable)
-                                        && (hovered == row.id || moreOpen == row.id || HoverButtonStyle.forced("fleet.row.\(row.id)"))
+                                        && (hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
+                                            || HoverButtonStyle.forced("fleet.row.\(row.id)"))
                                     Button {
-                                        moreOpen = nil
                                         opened = selected ? nil : row.id
                                         keepListFocus()
                                     } label: {
@@ -159,9 +160,15 @@ struct FleetList: View {
                                         }
                                     }
                                     .overlay(alignment: .trailing) { moreButton(row, endable: endable, shown: more) }
+                                    // The same menu, at the pointer.
+                                    .onRightClick { point in
+                                        guard endable || removable else { return }
+                                        RunMore.show(
+                                            menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
+                                            action: endable ? .endRun : .remove
+                                        ) { if endable { ending = row } else { removing = row } }
+                                    }
                                     .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
-                                    // Its panel opens below the row, over the rows after it.
-                                    .zIndex(moreOpen == row.id ? 1 : 0)
                                     .id(group.id + "/" + row.id)
                                 }
                             }
@@ -185,9 +192,12 @@ struct FleetList: View {
                             .accessibilityIdentifier("fleet.showFinished")
                         }
                     }
-                    // Room below the last row for its "…" panel, which opens downward and a scroll view clips.
+                    // Room below the last row.
                     .padding(.bottom, 40)
                 }
+                #if DEBUG
+                    .defaultScrollAnchor(RenderWindow.listAtEnd ? .bottom : nil)
+                #endif
                 // One stop for the keyboard: ↑ and ↓ move the open run through the runs as the list shows them, a
                 // folded group's skipped, and the list keeps the keyboard as the run opens beside it.
                 .focusable()
@@ -213,7 +223,6 @@ struct FleetList: View {
         }
         .background(Theme.window)
         #if DEBUG
-            .onAppear { moreOpen = RenderWindow.openRunMenu }
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
                 switch RenderWindow.confirm {
@@ -263,11 +272,9 @@ struct FleetList: View {
     /// The row's "…" while it is shown: on hover, or while its panel is open.
     @ViewBuilder private func moreButton(_ row: FleetRow, endable: Bool, shown: Bool) -> some View {
         if shown {
-            RunMore(
-                id: "fleet.row.\(row.id).more",
-                open: Binding(get: { moreOpen == row.id }, set: { moreOpen = $0 ? row.id : nil }),
-                action: endable ? .endRun : .remove
-            ) { if endable { ending = row } else { removing = row } }
+            RunMore(id: "fleet.row.\(row.id).more", action: endable ? .endRun : .remove) {
+                if endable { ending = row } else { removing = row }
+            }
             .padding(.trailing, 16)
         }
     }
@@ -485,8 +492,9 @@ private struct FleetLine: View {
     }
 }
 
-/// A row's "…" (a run's, or a computer's in the sidebar), and the panel it opens below it, in the app's own panel style
-/// (the model panel's), holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent.
+/// A row's "…" (a run's, or a computer's in the sidebar): it opens the window's row menu (`RowMenu`) below itself,
+/// holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent. A right-click
+/// on the row opens the same menu at the pointer (`RunMore.show`).
 struct RunMore: View {
     enum Action {
         case endRun, remove
@@ -498,12 +506,23 @@ struct RunMore: View {
 
     static let width: CGFloat = 26
     let id: String
-    @Binding var open: Bool
     let action: Action
     let perform: () -> Void
+    #if DEBUG
+        /// A render's `-CC_RUN_MENU <uid>` names this run's "…", or `-CC_COMPUTER_MENU` a computer's: once shown, it
+        /// opens a moment later, as a click opens it.
+        private var opensAtLaunch: Bool {
+            RenderWindow.openRunMenu.map { id == "fleet.row.\($0).more" } == true
+                || (RenderWindow.opensComputerMenu && id.hasPrefix("sidebar.computer."))
+        }
+    #endif
+    @Environment(RowMenu.self) private var menu
+    @State private var frame: CGRect = .zero
+
+    private var open: Bool { menu.shown?.owner == id }
 
     var body: some View {
-        Button { open.toggle() } label: {
+        Button { Self.show(menu, at: frame, id: id, action: action, perform: perform) } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.text2)
@@ -518,22 +537,26 @@ struct RunMore: View {
         .accessibilityLabel("More")
         .accessibilityIdentifier(id)
         .accessibilityValue(open ? "open" : "closed")
-        .overlay(alignment: .topTrailing) {
-            if open { panel.openPanel().offset(y: 22 + Theme.panelGap) }
-        }
-        .closesPanel($open)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame = $0 }
+        #if DEBUG
+            .task {
+                guard opensAtLaunch else { return }
+                // After the render has sized and placed its window, as a click comes on a window at rest.
+                try? await Task.sleep(for: .seconds(1))
+                Self.show(menu, at: frame, id: id, action: action, perform: perform)
+            }
+        #endif
     }
 
-    private var panel: some View {
-        PanelItem(title: action.title, symbol: action.symbol, destructive: true, id: "\(id).\(action.id)") {
-            open = false
-            perform()
-        }
-        .padding(.vertical, 5)
-        .frame(width: 180)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+    /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect), its one item acting on the
+    /// row's own subject through `perform`.
+    @MainActor static func show(
+        _ menu: RowMenu, at rect: CGRect, id: String, action: Action, perform: @escaping () -> Void
+    ) {
+        menu.toggle(rect, owner: id, items: [
+            RowMenu.Item(id: "\(id).\(action.id)", title: action.title, symbol: action.symbol, destructive: true,
+                         perform: perform)
+        ])
     }
 }
 

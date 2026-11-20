@@ -208,8 +208,9 @@ extension FocusedValues {
 extension View {
     /// A control that opens a panel, and toggles it itself. While the panel is open, a click anywhere in the window
     /// outside the control and the panel closes it, and the click still does what it does there (another control's
-    /// opens that control's panel); Esc closes it and goes no further, so a second Esc does what Esc did before.
-    func closesPanel(_ open: Binding<Bool>) -> some View { modifier(ClosesPanel(open: open)) }
+    /// opens that control's panel); Esc closes it and goes no further, so a second Esc does what Esc did before; a
+    /// scroll or a window's resize closes it too.
+    func closesPanel(_ open: Binding<Bool>) -> some View { modifier(ClosesPanel(open: open, measuresControl: true)) }
 
     /// The panel a `closesPanel` control opens: a click on it keeps it open.
     func openPanel() -> some View { modifier(OpenPanel()) }
@@ -227,13 +228,18 @@ extension EnvironmentValues {
 
 private struct ClosesPanel: ViewModifier {
     @Binding var open: Bool
+    /// The view it modifies is the control; else the panel says where its control is (the window's row menu).
+    let measuresControl: Bool
     @State private var frames = PanelFrames()
     @State private var monitor: Any?
+    @State private var resizing: NSObjectProtocol?
 
     func body(content: Content) -> some View {
         content
             .environment(\.panelFrames, frames)
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.control = $0 }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                if measuresControl { frames.control = $0 }
+            }
             .onChange(of: open, initial: true) { _, isOpen in
                 stop()
                 if isOpen { start() }
@@ -244,7 +250,13 @@ private struct ClosesPanel: ViewModifier {
     private func start() {
         let frames = frames
         let close = $open
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) {
+            event in
+            // A scroll closes it: an open panel never moves with, or hides behind, what scrolls under it.
+            if event.type == .scrollWheel {
+                close.wrappedValue = false
+                return event
+            }
             if event.type == .keyDown {
                 guard event.keyCode == 53 else { return event }  // Esc
                 close.wrappedValue = false
@@ -257,11 +269,17 @@ private struct ClosesPanel: ViewModifier {
             }
             return event
         }
+        // A resize closes it too: a panel never outlives the geometry it was placed from.
+        resizing = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { close.wrappedValue = false } }
     }
 
     private func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        resizing.map(NotificationCenter.default.removeObserver)
+        resizing = nil
     }
 }
 
@@ -312,5 +330,150 @@ struct PanelItem: View {
         .buttonStyle(.hover(radius: 4, id: id))
         .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
+    }
+}
+
+extension View {
+    /// A right-click on this view, at the pointer's place in the window's coordinates (top-left origin), the coordinates
+    /// `.global` frames use. Only the right button stops here: every other click, the hover and the keyboard reach the
+    /// view as before, and nothing else draws a menu for it.
+    func onRightClick(_ perform: @escaping (CGPoint) -> Void) -> some View {
+        overlay(RightClick(perform: perform))
+    }
+}
+
+private struct RightClick: NSViewRepresentable {
+    let perform: (CGPoint) -> Void
+
+    func makeNSView(context: Context) -> Catcher { Catcher(perform: perform) }
+    func updateNSView(_ view: Catcher, context: Context) { view.perform = perform }
+
+    final class Catcher: NSView {
+        var perform: (CGPoint) -> Void
+
+        init(perform: @escaping (CGPoint) -> Void) {
+            self.perform = perform
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            NSApp.currentEvent?.type == .rightMouseDown ? super.hitTest(point) : nil
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            guard let content = window?.contentView else { return }
+            let point = content.convert(event.locationInWindow, from: nil)
+            perform(CGPoint(x: point.x, y: content.isFlipped ? point.y : content.bounds.height - point.y))
+        }
+    }
+}
+
+/// The one "…" panel the main window shows for a row: where it was asked for, what it holds, and whose it is. A row
+/// opens it at the click with what it knows (its "…"'s frame, or a point where a right-click landed) and the items it
+/// builds over its own subject, so the panel never looks its row up.
+@Observable @MainActor final class RowMenu {
+    struct Item: Identifiable {
+        let id: String
+        let title: String
+        let symbol: String
+        let destructive: Bool
+        let perform: () -> Void
+    }
+
+    struct Shown {
+        let owner: String
+        let rect: CGRect
+        let items: [Item]
+    }
+
+    private(set) var shown: Shown?
+
+    /// Opens `items` by `rect`, in the window's coordinates; the same control asking again closes it.
+    func toggle(_ rect: CGRect, owner: String, items: [Item]) {
+        shown = shown?.owner == owner && shown?.rect == rect ? nil : Shown(owner: owner, rect: rect, items: items)
+    }
+
+    func close() { shown = nil }
+}
+
+extension View {
+    /// The main window's row menu (`RowMenu`), drawn over everything in the window: below the rect it was opened by
+    /// where it fits, above it where it would cross the window's bottom, never past the window's sides. It closes as
+    /// every panel does (`closesPanel`), the rect being its control.
+    func rowMenuHost(_ menu: RowMenu) -> some View { modifier(RowMenuHost(menu: menu)) }
+}
+
+private struct RowMenuHost: ViewModifier {
+    let menu: RowMenu
+    static let width: CGFloat = 180
+    @State private var height: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .environment(menu)
+            .overlay(alignment: .topLeading) {
+                GeometryReader { window in
+                    if let shown = menu.shown {
+                        let bounds = window.frame(in: .global)
+                        let corner = place(shown.rect, in: bounds)
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(shown.items) { item in
+                                PanelItem(title: item.title, symbol: item.symbol, destructive: item.destructive, id: item.id) {
+                                    menu.close()
+                                    item.perform()
+                                }
+                            }
+                        }
+                        .padding(.vertical, 5)
+                        .frame(width: Self.width)
+                        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
+                        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                        .modifier(ControlRect(rect: shown.rect, window: bounds))
+                        .openPanel()
+                        .offset(x: corner.x - bounds.minX, y: corner.y - bounds.minY)
+                    }
+                }
+            }
+            .modifier(ClosesPanel(
+                open: Binding(get: { menu.shown != nil }, set: { if !$0 { menu.close() } }), measuresControl: false))
+    }
+
+    /// Its top leading corner: its trailing edge on the rect's, below it where it fits, above it where it would cross
+    /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
+    private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
+        let point = rect.size == .zero
+        let x = point ? rect.minX : rect.maxX - Self.width
+        let gap = point ? 0 : Theme.panelGap
+        let below = rect.maxY + gap
+        let above = rect.minY - gap - height
+        let y = below + height <= bounds.maxY || above < bounds.minY ? below : above
+        return CGPoint(x: min(max(x, bounds.minX), bounds.maxX - Self.width), y: y)
+    }
+}
+
+/// Tells the open panel's closing where its control is: the rect it was opened by.
+private struct ControlRect: ViewModifier {
+    let rect: CGRect
+    let window: CGRect
+    @Environment(\.panelFrames) private var frames
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { frames?.control = rect }
+            .onChange(of: rect) { _, rect in frames?.control = rect }
+            #if DEBUG
+                // For a render's check: once, where the panel stands beside its control and inside its window.
+                .task(id: rect) {
+                    guard RenderWindow.isRendering else { return }
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard let panel = frames?.panel else { return }
+                    func text(_ r: CGRect) -> String { "\(Int(r.minX)) \(Int(r.minY)) \(Int(r.width)) \(Int(r.height))" }
+                    print("panel: \(text(panel)); control: \(text(rect)); window: \(text(window))")
+                }
+            #endif
     }
 }
