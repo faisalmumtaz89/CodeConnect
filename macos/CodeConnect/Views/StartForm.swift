@@ -40,6 +40,8 @@ struct StartForm: View {
     @State private var newName: String?
     @State private var branchMenuOpen = false
     @Environment(\.sheetRoom) private var room
+    /// Where the form's rows start in the sheet, under the heading: the highest a panel opened over them reaches.
+    @State private var rowsTop: CGFloat = 0
     @State private var message = ""
     @State private var requestID: String?
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
@@ -185,11 +187,14 @@ struct StartForm: View {
                     computerRow(context)
                         // Its panel opens below it, over what follows.
                         .zIndex(computerMenuOpen ? 1 : 0)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(AddSheet.space)).minY } action: {
+                            rowsTop = $0
+                        }
                     folderRows(context)
                     if let folder, context.branchAhead(folder) {
                         BranchRow(
                             context: context, folder: folder, agent: pick?.agent, place: $place, newName: $newName,
-                            open: $branchMenuOpen
+                            open: $branchMenuOpen, top: rowsTop
                         )
                         // Its menu opens over what is above or below it.
                         .zIndex(branchMenuOpen ? 1 : 0)

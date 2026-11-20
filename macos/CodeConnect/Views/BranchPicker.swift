@@ -13,6 +13,8 @@ struct BranchRow: View {
     /// A new worktree's name while one is being named, else nil.
     @Binding var newName: String?
     @Binding var open: Bool
+    /// The highest the menu may reach in the sheet: under the heading, so it never covers part of a line there.
+    let top: CGFloat
 
     @Environment(\.sheetHeight) private var sheetHeight
     /// The row, label to last line, in the sheet's coordinates.
@@ -50,12 +52,12 @@ struct BranchRow: View {
     private static let margin: CGFloat = 8
 
     /// The menu, as tall as its rows up to `BranchMenu.mostRows` and no wider than the row. It opens above the row,
-    /// clear of the label, when all of it fits between the label and the sheet's top; else on the side of the button
+    /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
     /// with more room, as many whole rows as fit there, the rest scrolled to.
     private func menu(_ git: StartGit) -> some View {
         let rows = BranchMenu.rows(git: git, folder: folder)
         let gap = Theme.panelGap
-        let above = frame.minY - gap - Self.margin
+        let above = frame.minY - gap - max(top, Self.margin)
         let below = sheetHeight - frame.minY - buttonBottom - gap - Self.margin
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
@@ -167,9 +169,9 @@ struct BranchMenu: View {
     let running: Set<String>
     /// The chosen place, checked; nil while a new one is being named.
     let place: StartPlace?
-    /// How many lines show before it scrolls; nil for as many as it has, up to `mostRows`.
-    var shownRows: Int? = nil
-    var width: CGFloat = BranchMenu.width
+    /// How many lines show before it scrolls.
+    let shownRows: Int
+    let width: CGFloat
     let choose: (StartPlace?) -> Void
 
     static let width: CGFloat = 440
@@ -193,7 +195,6 @@ struct BranchMenu: View {
     }
 
     var body: some View {
-        let rows = Self.rows(git: git, folder: folder)
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if let here = git.checkout(at: folder.path) {
@@ -223,7 +224,7 @@ struct BranchMenu: View {
             }
             .padding(.vertical, Self.inset)
         }
-        .frame(width: width, height: Self.height(rows: min(shownRows ?? rows, rows, Self.mostRows)))
+        .frame(width: width, height: Self.height(rows: shownRows))
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
