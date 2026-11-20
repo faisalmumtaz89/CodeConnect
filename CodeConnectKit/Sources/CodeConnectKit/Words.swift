@@ -221,8 +221,14 @@ public enum PairingWords {
 public enum PeerWords {
     /// Listed, but nothing answers at its tailnet name.
     public static let unreachable = "Can’t be reached over Tailscale"
-    /// Its CodeConnect answered and would not let this device in, in its own words.
-    public static func refused(_ reason: String) -> String { "Didn’t let this \(HostDevice.current.name) in: \(reason)" }
+    /// Its CodeConnect answered and would not let this device in: why, for each refusal a join can get.
+    public static func refused(_ refusal: ConnectionRefusal?) -> String {
+        switch refusal {
+        case .notAdmitted: "Won’t let this \(HostDevice.current.name) in without a pairing code"
+        case .differentVersion: "Runs a different version of CodeConnect"
+        case .credential, .pairingCode, nil: "Didn’t let this \(HostDevice.current.name) in"
+        }
+    }
     public static let tryAgain = "Try again"
     /// Add a Computer's section of the computers his Tailscale account lists that he removed, each added by one
     /// action with no code.

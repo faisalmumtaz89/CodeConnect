@@ -308,7 +308,9 @@ public final class Machines {
         #endif
         return joining.compactMap { entry -> UnjoinedComputer? in
             switch entry.model.connection.phase {
-            case .failed(let reason): return UnjoinedComputer(computer: entry.computer, reason: PeerWords.refused(reason))
+            case .failed:
+                return UnjoinedComputer(
+                    computer: entry.computer, reason: PeerWords.refused(entry.model.connection.refusal))
             case .waiting: return UnjoinedComputer(computer: entry.computer, reason: PeerWords.unreachable)
             default: return nil
             }
@@ -354,7 +356,7 @@ public final class Machines {
                 switch kind {
                 case "unreachable": return UnjoinedComputer(computer: air, reason: PeerWords.unreachable)
                 case "refused":
-                    return UnjoinedComputer(computer: mini, reason: PeerWords.refused("Tailscale device was revoked"))
+                    return UnjoinedComputer(computer: mini, reason: PeerWords.refused(.notAdmitted))
                 default: return nil
                 }
             }

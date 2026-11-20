@@ -115,7 +115,7 @@ final class PeerJoinTests: XCTestCase {
         machines.join(directory(port: daemon.port))
         try await until { !machines.unjoinedComputers.isEmpty }
         let refused = try XCTUnwrap(machines.unjoinedComputers.first)
-        XCTAssertEqual(refused.reason, PeerWords.refused(ConnectionError.notAdmitted.localizedDescription))
+        XCTAssertEqual(refused.reason, "Won’t let this iPhone in without a pairing code")
         XCTAssertEqual(machines.removedComputers, [], "refused is not removed")
         let asked = daemon.hellos.count
         machines.join(directory(port: daemon.port))
