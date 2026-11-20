@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// The Active list with nothing in it: where agents come from, in plain words, and New agent.
