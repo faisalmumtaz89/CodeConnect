@@ -451,20 +451,20 @@ private struct FleetLine: View {
             // What it is on: the tool call in prose and its argument as code, or else the
             // daemon's own sentence; asked to end, that it is stopping, until it has.
             if row.status == .stopping {
-                Text("Stopping…").font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
+                Text("Stopping…").font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
             } else if let activity = row.activity {
-                Text(activity.tool).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(1)
+                Text(activity.tool).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(1).modifier(DropsWhenNarrow())
                     // Beside a command, which fills the row, the tool's name keeps its own width.
                     .layoutPriority(isCommandTool(activity.tool) ? 0.5 : 0)
                 if let argument = activity.argument, !argument.isEmpty {
                     if isCommandTool(activity.tool) {
                         CommandPreview(command: argument).layoutPriority(0.5)
                     } else {
-                        Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                        Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
                     }
                 }
             } else if !row.subtitle.isEmpty {
-                Text(row.subtitle).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
+                Text(row.subtitle).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
             }
             Spacer(minLength: 6)
             AgentMark(agent: row.summary.agent)
@@ -536,6 +536,17 @@ struct RunMore: View {
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+    }
+}
+
+/// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name.
+private struct DropsWhenNarrow: ViewModifier {
+    @State private var width: CGFloat = .infinity
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .opacity(width < 28 ? 0 : 1)
     }
 }
 
