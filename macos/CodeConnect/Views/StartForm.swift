@@ -95,30 +95,6 @@ struct StartForm: View {
         return nil
     }
 
-    /// The Branch row, unless a render draws one of its other options.
-    private var branchRowShown: Bool {
-        #if DEBUG
-            return !["B", "C", "D", "E"].contains(BranchOption.current ?? "")
-        #else
-            return true
-        #endif
-    }
-
-    #if DEBUG
-        /// C and D: the chosen place's chip, and its menu, for a folder in a repository.
-        private func optionGit(_ context: StartContext) -> (StartProject, StartGit)? {
-            guard let folder, let git = context.git(folder.path) ?? nil else { return nil }
-            return (folder, git)
-        }
-
-        private func optionMenu(_ context: StartContext, _ folder: StartProject, _ git: StartGit) -> some View {
-            BranchMenu(git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil) {
-                if let chosen = $0 { place = chosen } else { newName = "" }
-                branchMenuOpen = false
-            }
-        }
-    #endif
-
     /// The window has less room than the tallest form needs (a new worktree being named in a folder with changes, under
     /// a notice): after the folder list, the heading goes, the first message starts at one line and the rows stand closer.
     private var short: Bool { room < 600 }
@@ -210,20 +186,7 @@ struct StartForm: View {
                         // Its panel opens below it, over what follows.
                         .zIndex(computerMenuOpen ? 1 : 0)
                     folderRows(context)
-                    #if DEBUG
-                        if let folder, context.branchAhead(folder), let git = context.git(folder.path) ?? nil {
-                            if BranchOption.current == "B" {
-                                BranchList(
-                                    git: git, folder: folder, running: context.runningFolders, place: $place,
-                                    newName: $newName)
-                            } else if BranchOption.current == "E" {
-                                BranchSegments(
-                                    git: git, folder: folder, running: context.runningFolders, place: $place,
-                                    newName: $newName)
-                            }
-                        }
-                    #endif
-                    if let folder, context.branchAhead(folder), branchRowShown {
+                    if let folder, context.branchAhead(folder) {
                         BranchRow(
                             context: context, folder: folder, agent: pick?.agent, place: $place, newName: $newName,
                             open: $branchMenuOpen
@@ -359,14 +322,6 @@ struct StartForm: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
-                #if DEBUG
-                    .overlay(alignment: .bottomLeading) {
-                        if BranchOption.current == "C", branchMenuOpen, let option = optionGit(context) {
-                            optionMenu(context, option.0, option.1).alignmentGuide(.bottom) { $0[.top] - Theme.panelGap }
-                        }
-                    }
-                    .zIndex(BranchOption.current == "C" && branchMenuOpen ? 1 : 0)
-                #endif
             }
         }
     }
@@ -396,17 +351,6 @@ struct StartForm: View {
                     .foregroundStyle(Theme.text3)
                     .lineLimit(1)
                     .truncationMode(.head)
-                #if DEBUG
-                    if BranchOption.current == "C", folderPath == project.path, let context,
-                        let option = optionGit(context)
-                    {
-                        BranchChip(
-                            title: startPlaceSummary(place, agent: pick?.agent ?? .claude, project: option.0, git: option.1),
-                            open: $branchMenuOpen
-                        )
-                        .padding(.leading, -7)
-                    }
-                #endif
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -488,21 +432,8 @@ struct StartForm: View {
                 .textFieldStyle(.plain)
                 .font(Theme.ui(12.5))
                 .lineLimit(short ? 1...5 : 2...5)
-            HStack(spacing: 4) {
-                ModelButton(context: context, pick: pick, open: $menuOpen) { chosen = $0 }
-                #if DEBUG
-                    if BranchOption.current == "D", let option = optionGit(context) {
-                        BranchChip(
-                            title: startPlaceSummary(place, agent: pick?.agent ?? .claude, project: option.0, git: option.1),
-                            open: $branchMenuOpen
-                        )
-                        .overlay(alignment: .bottomLeading) {
-                            if branchMenuOpen { optionMenu(context, option.0, option.1).offset(y: -(22 + Theme.panelGap)) }
-                        }
-                    }
-                #endif
-            }
-            .padding(.leading, -7)
+            ModelButton(context: context, pick: pick, open: $menuOpen) { chosen = $0 }
+                .padding(.leading, -7)
         }
         .padding(.horizontal, 10)
         .padding(.top, 8)
