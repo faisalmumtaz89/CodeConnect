@@ -90,6 +90,8 @@ struct FleetList: View {
                 Group {
                     if let refused = shownComputerRefusal {
                         DifferentVersion(sentence: refused.linkHealth.detail) { refused.connection.retryNow() }
+                    } else if !machines.launchSettled {
+                        Connecting()
                     } else if scope == .active {
                         NoAgentsYet(newAgent: newAgent)
                     } else {

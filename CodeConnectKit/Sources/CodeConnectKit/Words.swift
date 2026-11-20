@@ -24,6 +24,8 @@ public enum FleetWords {
     public static let projects = "Projects"
     public static let newAgent = "New agent"
     public static let startAnAgent = "Start an agent"
+    /// The list while its computers are still answering, or waited out: never "Start an agent" before then.
+    public static let connecting = "Connecting to your computer…"
     public static let agentsAppearHere = "Agents you start with CodeConnect appear here."
     public static let noEndedRuns = "No ended runs."
     public static let noComputersYet = "No computers yet"

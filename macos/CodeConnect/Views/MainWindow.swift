@@ -66,6 +66,8 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
+        // Until every computer has caught up, or been waited out, the list says it is connecting.
+        .task { await machines.waitOutLaunch() }
         .onChange(of: opened) { chosen = nil }
         // A computer removed, here or from Settings: the list lets go of its narrowing to it and of its run, which
         // has left the list with it.
