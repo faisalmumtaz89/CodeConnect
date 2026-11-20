@@ -229,10 +229,6 @@ extension LinkHealth.Level {
 }
 
 extension LinkHealth {
-    /// The word said beside a computer's name: the link's own word for a refusal ("Different version" or "Pair
-    /// again"), and the level's word otherwise.
-    var machineWord: String? { level == .rejected ? word : level.machineMark.word }
-
     /// What VoiceOver says for the link: the state, and its age while there is
     /// a link to age, spelled out — "14s" is read as "fourteen ess".
     var spokenValue: String {
@@ -286,64 +282,29 @@ extension LinkHealth {
         onSettings: @escaping () -> Void,
         onTailscale: (() -> Void)? = nil
     ) -> CCBannerItem? {
-        switch level {
-        case .live, .lagging:
-            return nil
-        case .rejected:
-            return CCBannerItem(
-                .rejected, title: word, message: detail, tone: .danger,
-                icon: "lock-open", actionTitle: "Settings", action: onSettings)
-        case .blocked:
-            // The pairing is still held, so this is not "Pair again" — no Settings/code
-            // action. The app reconnects when the computer allows it again; Retry only
-            // asks now.
-            return CCBannerItem(
-                .offline, title: word, message: detail, tone: .neutral,
-                icon: "lock", actionTitle: "Try again", action: onRetry)
-        case .offline:
-            switch cause {
-            case .tailnetHostUnresolvable(let host):
-                // Recovery guidance, not a claim: DNS said only that the name
-                // did not answer. On a tailnet name that is almost always
-                // Tailscale being off on this phone — but "almost always" is
-                // why the title is an instruction rather than a diagnosis.
-                return CCBannerItem(
-                    .offline, title: "Connect Tailscale",
-                    message:
-                        "Can’t find your computer at `\(host)`. Turn on Tailscale on this iPhone, signed in to the same account as your computer. CodeConnect reconnects on its own.",
-                    tone: .neutral,
-                    icon: "plugs",
-                    actionTitle: TailscaleAssist.isInstallHintNeeded
-                        ? "Set up Tailscale" : "Open Tailscale",
-                    action: onTailscale ?? onRetry)
-            case .hostUnresolvable(let host):
-                return CCBannerItem(
-                    .offline, title: "Host not found",
-                    message:
-                        "`\(host)` isn’t resolving. Check the paired address and this iPhone’s network. CodeConnect reconnects on its own.",
-                    tone: .neutral,
-                    icon: "plugs",
-                    actionTitle: "Settings", action: onSettings)
-            case nil, .refused:
-                return CCBannerItem(
-                    .offline, title: "Offline", message: detail, tone: .neutral,
-                    icon: "plugs", actionTitle: "Try again", action: onRetry)
+        // The words and the one action are the Kit's (`LinkHealth.notice`), which the Mac's computer row and list
+        // say too; the slot, tone and icon are this screen's.
+        guard let notice else { return nil }
+        let action: (title: String, run: () -> Void)? =
+            switch notice.action {
+            case .retry: ("Try again", onRetry)
+            case .settings: ("Settings", onSettings)
+            case .tailscale:
+                (TailscaleAssist.isInstallHintNeeded ? "Set up Tailscale" : "Open Tailscale", onTailscale ?? onRetry)
+            case nil: nil
             }
-        case .stale:
-            // No Retry: a quiet link is cut and dialled again on its own after
-            // half a second at most, and a retry only cuts that wait short.
-            return CCBannerItem(
-                .stale, title: "Link stale",
-                message:
-                    "\(ageText) since your computer last answered. Actions are disabled until it answers.",
-                tone: .danger, icon: "warning-fill")
-        case .connecting:
-            // Only after 2s of connecting — a banner that flashes on
-            // every reconnect is noise. The caller owns that delay.
-            return CCBannerItem(
-                .offline, title: "Connecting", message: "Connecting to your computer…",
-                tone: .info, icon: "arrows-clockwise")
-        }
+        let (slot, tone, icon): (CCBannerPriority, CCTone, String) =
+            switch level {
+            case .live, .lagging: (.offline, .neutral, "plugs")
+            case .rejected: (.rejected, .danger, "lock-open")
+            case .blocked: (.offline, .neutral, "lock")
+            case .offline: (.offline, .neutral, "plugs")
+            case .stale: (.stale, .danger, "warning-fill")
+            case .connecting: (.offline, .info, "arrows-clockwise")
+            }
+        return CCBannerItem(
+            slot, title: notice.title, message: notice.sentence, tone: tone, icon: icon,
+            actionTitle: action?.title, action: action?.run)
     }
 }
 

@@ -1746,10 +1746,46 @@ public final class AppModel {
     // MARK: - Derived state
 
     public var linkHealth: LinkHealth {
-        LinkHealth.evaluate(
+        #if DEBUG
+            if let forced = forcedLinkHealth { return forced }
+        #endif
+        return LinkHealth.evaluate(
             phase: connection.phase, lastContactAt: connection.lastContactAt,
             dialFailure: connection.dialFailure, refusal: connection.refusal, isRedial: connection.isRedial, now: now)
     }
+
+    #if DEBUG
+        /// `-CC_LINK_STATE unreachable|tailnet|host|blocked|version|pair|stale|connecting`: every computer's link as
+        /// that state, built as the live one is (`LinkHealth.evaluate`, with the refusal's own sentence), for a render.
+        private var forcedLinkHealth: LinkHealth? {
+            guard let state = UserDefaults.standard.string(forKey: "CC_LINK_STATE") else { return nil }
+            let failed = { (error: ConnectionError) in
+                LinkHealth.evaluate(
+                    phase: .failed(reason: error.localizedDescription), lastContactAt: nil,
+                    refusal: ConnectionRefusal(error), now: self.now)
+            }
+            let waiting = { (failure: DaemonConnection.DialFailure) in
+                LinkHealth.evaluate(
+                    phase: .waiting(until: self.now, reason: ""), lastContactAt: self.now.addingTimeInterval(-90),
+                    dialFailure: failure, isRedial: true, now: self.now)
+            }
+            switch state {
+            case "unreachable": return waiting(.unreachable)
+            case "tailnet": return waiting(.hostUnresolvable(host: "jordans-mac-studio.tail1a2b3.ts.net"))
+            case "host": return waiting(.hostUnresolvable(host: "mac-studio.local"))
+            case "blocked": return waiting(.blocked)
+            case "version":
+                return failed(.incompatible(DaemonConnection.differentVersion(named: machineName, older: true)))
+            case "pair": return failed(.unauthorized)
+            case "stale":
+                return LinkHealth.evaluate(
+                    phase: .connected(since: now.addingTimeInterval(-600)),
+                    lastContactAt: now.addingTimeInterval(-75), now: now)
+            case "connecting": return LinkHealth.evaluate(phase: .connecting, lastContactAt: nil, now: now)
+            default: return nil
+            }
+        }
+    #endif
 
     /// Why a decision cannot be answered from here, or nil when it can.
     ///
@@ -1770,7 +1806,17 @@ public final class AppModel {
     var machine: PairedMachine? { machineID.flatMap(pairing.machine(id:)) }
 
     /// Where this machine is reached.
-    public var endpoint: DaemonEndpoint? { machine?.endpoint }
+    public var endpoint: DaemonEndpoint? {
+        #if DEBUG
+            // A render's forced link (`-CC_LINK_STATE`) is a paired computer's: it has the address a pairing keeps.
+            if machine == nil, UserDefaults.standard.string(forKey: "CC_LINK_STATE") != nil {
+                return DaemonEndpoint(
+                    host: "jordans-mac-studio.tail1a2b3.ts.net", port: DaemonEndpoint.defaultPort,
+                    credential: .token("render"), useTLS: false)
+            }
+        #endif
+        return machine?.endpoint
+    }
 
     /// Why this machine's encrypted connection cannot be used, when it cannot.
     public var tlsUnavailableReason: String? { machineID.flatMap(pairing.tlsUnavailableReason(for:)) }

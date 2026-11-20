@@ -536,6 +536,9 @@ public struct LinkHealth: Sendable, Equatable {
 
     public var ageText: String { age.map(Format.age) ?? "-" }
 
+    /// A refusal that pairing again cures: its word, and the Mac's action for it.
+    public static let pairAgain = "Pair again"
+
     /// The level in words, as the link's spoken value, each computer's row in
     /// Settings and its own screen say it.
     public var word: String {
@@ -545,8 +548,61 @@ public struct LinkHealth: Sendable, Equatable {
         case .stale: return "Stale"
         case .connecting: return "Connecting"
         case .offline: return "Offline"
-        case .rejected: return cause == .refused(.differentVersion) ? "Different version" : "Pair again"
+        case .rejected: return cause == .refused(.differentVersion) ? "Different version" : Self.pairAgain
         case .blocked: return "Blocked"
+        }
+    }
+
+    /// The word said beside a computer's name: none while the link is live or merely lagging; a refusal's own word
+    /// ("Different version" or "Pair again"); the level's word otherwise.
+    public var machineWord: String? {
+        switch level {
+        case .live, .lagging: return nil
+        default: return word
+        }
+    }
+
+    /// What a screen says about a link that is not working, or nil when it is: a short title, the whole sentence,
+    /// and the one thing to do. The iPhone's banner, and the Mac's computer row and list, say it in these words.
+    public var notice: LinkNotice? {
+        let device = HostDevice.current.name
+        switch level {
+        case .live, .lagging:
+            return nil
+        case .rejected:
+            return LinkNotice(title: word, sentence: detail, action: .settings)
+        case .blocked:
+            // The pairing is still held, so this is not "Pair again": the app reconnects when the computer allows
+            // it again, and Try again only asks now.
+            return LinkNotice(title: word, sentence: detail, action: .retry)
+        case .offline:
+            switch cause {
+            case .tailnetHostUnresolvable(let host):
+                // Recovery guidance, not a claim: DNS said only that the name did not answer. On a tailnet name
+                // that is almost always Tailscale being off on this device, which is why the title is an
+                // instruction rather than a diagnosis.
+                return LinkNotice(
+                    title: "Connect Tailscale",
+                    sentence:
+                        "Can’t find your computer at `\(host)`. Turn on Tailscale on this \(device), signed in to the same account as your computer. CodeConnect reconnects on its own.",
+                    action: .tailscale)
+            case .hostUnresolvable(let host):
+                return LinkNotice(
+                    title: "Host not found",
+                    sentence:
+                        "`\(host)` isn’t resolving. Check the paired address and this \(device)’s network. CodeConnect reconnects on its own.",
+                    action: .settings)
+            case nil, .refused:
+                return LinkNotice(title: "Offline", sentence: detail, action: .retry)
+            }
+        case .stale:
+            // No action: a quiet link is cut and dialled again on its own after half a second at most.
+            return LinkNotice(
+                title: "Link stale",
+                sentence: "\(ageText) since your computer last answered. Actions are disabled until it answers.",
+                action: nil)
+        case .connecting:
+            return LinkNotice(title: "Connecting", sentence: "Connecting to your computer…", action: nil)
         }
     }
 
@@ -650,6 +706,30 @@ public struct LinkHealth: Sendable, Equatable {
             return LinkHealth(level: .live, age: age, detail: "Live.")
         }
     }
+}
+
+/// What a screen says about a link that is not working: a short title a list can show whole, the whole sentence,
+/// and the one thing to do, if any.
+public struct LinkNotice: Sendable, Equatable {
+    /// What a not-connected computer's row says beside its one action: its words, or none when they say what the
+    /// action says ("Pair again" beside Pair Again), so the same words are never shown twice.
+    public static func words(_ words: String, beside action: String?) -> String? {
+        guard let action, action.caseInsensitiveCompare(words) == .orderedSame else { return words }
+        return nil
+    }
+
+    public enum Action: Sendable, Equatable {
+        /// Ask now; the link is retried on its own as well.
+        case retry
+        /// Turn Tailscale on on this device.
+        case tailscale
+        /// Change the pairing: pair again, or correct the paired address.
+        case settings
+    }
+
+    public let title: String
+    public let sentence: String
+    public let action: Action?
 }
 
 // MARK: - Formatting

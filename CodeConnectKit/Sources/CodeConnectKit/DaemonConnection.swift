@@ -1384,8 +1384,13 @@ public final class DaemonConnection {
     /// surface offers comes from the ack's capabilities.
     static func incompatibility(of ack: HelloAck) -> String? {
         guard ack.protocolVersion != Wire.protocolVersion else { return nil }
-        let computer = HostDevice.current.computer("This computer", named: ack.machineName)
-        return ack.protocolVersion < Wire.protocolVersion
+        return differentVersion(named: ack.machineName, older: ack.protocolVersion < Wire.protocolVersion)
+    }
+
+    /// A different version's sentence: the computer's CodeConnect is older, or newer, than this device's.
+    static func differentVersion(named name: String?, older: Bool) -> String {
+        let computer = HostDevice.current.computer("This computer", named: name)
+        return older
             ? "\(computer) has an older CodeConnect. Update CodeConnect on it, then try again."
             : "\(computer) has a newer CodeConnect. Update CodeConnect on this \(HostDevice.current.name), then try again."
     }
