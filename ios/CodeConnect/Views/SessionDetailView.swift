@@ -1025,20 +1025,26 @@ struct SessionDetailView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                if let palette = paletteContent {
-                    CommandPalette(content: palette, onAction: route)
+                // A run that takes no reply has no reply box, as on the Mac:
+                // one quiet line in its place says it has ended.
+                if summary?.takesNoReply == true {
+                    EndedLine()
+                } else {
+                    if let palette = paletteContent {
+                        CommandPalette(content: palette, onAction: route)
+                    }
+                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
+                    SessionComposeBar(
+                        key: key,
+                        text: $composeText,
+                        result: composeResult,
+                        sending: sending,
+                        runLabel: label.spoken,
+                        summary: summary,
+                        onWhy: { showLinkDetail = true },
+                        onSend: send,
+                        focused: $composerFocused)
                 }
-                HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
-                SessionComposeBar(
-                    key: key,
-                    text: $composeText,
-                    result: composeResult,
-                    sending: sending,
-                    runLabel: label.spoken,
-                    summary: summary,
-                    onWhy: { showLinkDetail = true },
-                    onSend: send,
-                    focused: $composerFocused)
             }
             .onChange(of: composeText) { old, new in
                 // If the draft has moved off the words it held — the same
@@ -2480,5 +2486,31 @@ private struct RunFacts: View {
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("session-facts")
         }
+    }
+}
+
+/// In an ended run's reply box's place: a hairline, then the run's end said
+/// quietly, a check mark on the text's first line (`SessionWords.runEnded`).
+private struct EndedLine: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            CCHairline()
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
+                CCIcon("check-circle", size: 14)
+                    .foregroundStyle(CC.text.tertiary)
+                    .ccMark(beside: CC.type.footnote)
+                    .accessibilityHidden(true)
+                Text(SessionWords.runEnded)
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(CC.color.bg)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("session-ended-line")
     }
 }
