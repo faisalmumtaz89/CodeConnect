@@ -22,6 +22,8 @@ struct MainWindow: View {
     @State private var chosen: (run: String, tab: SessionTab)?
     /// Whether the open run's composer is using Esc: its commands list is open or its field has focus.
     @FocusedValue(\.composerHoldsEscape) private var composerHoldsEscape
+    /// Raised by Return in the run list: the open run's reply box takes the cursor.
+    @State private var replyFocus = 0
     /// The window's width, from which the list's share beside an open run is worked out.
     @State private var width: CGFloat = 0
 
@@ -50,10 +52,17 @@ struct MainWindow: View {
                     // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
                     // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
                     .frame(width: model == nil ? nil : min(580, max(290, width - 218 - 450)))
+                    // The arrows open a run; Return then puts the cursor in its reply box.
+                    .onKeyPress(.return) {
+                        guard opened != nil else { return .ignored }
+                        replyFocus += 1
+                        return .handled
+                    }
                 if let open, let model {
                     Rectangle().fill(Theme.hairline).frame(width: 1)
                     SessionPane(row: open, model: model, tab: tab(of: open.id))
                         .id(open.id)
+                        .environment(\.replyFocusRequest, replyFocus)
                 }
             } else {
                 EmptyFleet(adding: $adding)
