@@ -7,6 +7,8 @@ User-facing changes, newest first. Mac releases are cut per
 
 - On the Mac, the update window opens centred over the main window, as wide as the setup checklist,
   and ends at its own padding: no empty band under its buttons, and no footer on a step that has none.
+  Its release notes box is as tall as the notes, up to twelve lines that then scroll, and its buttons
+  line up with the text above them.
 - On the Mac, remove a computer from the "…" on its row in the sidebar, as on the iPhone: the Mac
   forgets it and its sessions. This Mac's own computer is not offered, since the app pairs with it
   again at every launch.

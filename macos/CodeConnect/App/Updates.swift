@@ -282,13 +282,14 @@ struct UpdateSheet: View {
                 if hasFooter(step) {
                     VStack(spacing: 0) {
                         Rectangle().fill(Theme.hairline).frame(height: 1)
+                        // At the content's edges, as every sheet's footer is.
                         HStack(spacing: 8) { buttons(step) }
-                            .padding(.horizontal, 14)
+                            .padding(.horizontal, 24)
                             .frame(height: 52)
                     }
                 }
             }
-            .frame(width: 560, height: hasNotes(step) ? 400 : nil)
+            .frame(width: 560)
             .background(Theme.sheet)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("update.\(step.name)")
@@ -329,16 +330,7 @@ struct UpdateSheet: View {
     @ViewBuilder private func content(_ step: Updates.Step) -> some View {
         switch step {
         case .found(_, let notes, _, _) where !notes.isEmpty:
-            ScrollView {
-                Text(notes).font(Theme.ui(12)).foregroundStyle(Theme.text2)
-                    .lineSpacing(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(14)
-            }
-            .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
-            .padding(.horizontal, 24)
+            NotesBox(notes: notes).padding(.horizontal, 24)
         case .checking, .installing:
             ProgressView().progressViewStyle(.linear).padding(.horizontal, 24)
         case .downloading(let received, let expected, _):
@@ -400,5 +392,49 @@ struct UpdateSheet: View {
 
     private func bytes(_ count: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(clamping: count), countStyle: .file)
+    }
+}
+
+/// The release's notes in a raised box as tall as they are, up to `lines` lines; longer notes scroll, and the box then
+/// shows whole lines at rest, its padding the same above and below.
+private struct NotesBox: View {
+    let notes: String
+    private static let lines = 12
+    @State private var textHeight: CGFloat = 0
+    @State private var oneLine: CGFloat = 0
+    @State private var twoLines: CGFloat = 0
+
+    private func text(_ string: String) -> some View {
+        Text(string).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineSpacing(3)
+    }
+
+    /// The text's height in the box: all of it, or the most whole lines that fit.
+    private var shown: CGFloat {
+        let most = oneLine + CGFloat(Self.lines - 1) * (twoLines - oneLine)
+        return oneLine > 0 ? min(textHeight, most) : textHeight
+    }
+
+    var body: some View {
+        ScrollView {
+            text(notes)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { textHeight = $0 }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        // The padding is outside the scroll, so the lines shown end where the box's padding starts.
+        .frame(height: shown)
+        .padding(14)
+        .background(alignment: .topLeading) {
+            // One line and two, measured in the notes' own type: the step from one line to the next.
+            ZStack {
+                text("A").fixedSize().onGeometryChange(for: CGFloat.self) { $0.size.height } action: { oneLine = $0 }
+                text("A\nA").fixedSize().onGeometryChange(for: CGFloat.self) { $0.size.height } action: { twoLines = $0 }
+            }
+            .hidden()
+        }
+        .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
     }
 }
