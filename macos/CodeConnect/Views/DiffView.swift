@@ -2,7 +2,7 @@ import CodeConnectKit
 import SwiftUI
 
 /// One file's diff as Kit parses it (`UnifiedDiff.FileDiff`): its path and what happened to it, its lines added and
-/// removed, then each hunk with added lines on green and removed ones on red. Unchanged stretches Kit folds are one
+/// removed, then each hunk with added lines on green and removed ones on red, every line numbered old and new. Unchanged stretches Kit folds are one
 /// line saying how many, which a click opens; this file's opened stretches stay open while it is shown, as the iPhone's
 /// do. What it draws and speaks from the diff is `displaySafe`: a file's name, lines and hunk headers
 /// come from the repository, and the characters that reorder a line would draw different code from what the bytes say.
@@ -113,6 +113,8 @@ private struct DiffLine: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // A line number is a coordinate to look up, not a fact to read: the dimmest text, a point under the code.
+            Text(numbers).font(Theme.mono(11).monospacedDigit()).foregroundStyle(Theme.text3).accessibilityHidden(true)
             Text(mark).foregroundStyle(color).frame(width: 8, alignment: .leading).accessibilityHidden(true)
             Text(shown.isEmpty ? " " : shown).foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
@@ -127,6 +129,16 @@ private struct DiffLine: View {
     }
 
     private var shown: String { line.text.displaySafe }
+
+    /// The line's old and new numbers, each right-aligned in four places, as the iPhone's gutter prints them; a side
+    /// the line is not on is blank.
+    private var numbers: String {
+        func padded(_ number: Int?) -> String {
+            let text = number.map(String.init) ?? ""
+            return String(repeating: " ", count: max(0, 4 - text.count)) + text
+        }
+        return "\(padded(line.oldNumber)) \(padded(line.newNumber))"
+    }
 
     /// The line as a screen reader says it: whether it was added or removed, then its text.
     private var spoken: String {
