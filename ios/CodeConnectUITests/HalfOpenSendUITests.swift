@@ -47,7 +47,7 @@ final class HalfOpenSendUITests: XCTestCase {
             let shown = (field.value as? String) ?? ""
             let elapsed = Date().timeIntervalSince(sentAt)
             print(String(format: "B18 t=%5.1fs composer=%@", elapsed, shown))
-            if shown.isEmpty || shown == "Ask anything" {
+            if shown.isEmpty || shown.hasPrefix("Reply to ") {
                 cleared = elapsed
                 break
             }

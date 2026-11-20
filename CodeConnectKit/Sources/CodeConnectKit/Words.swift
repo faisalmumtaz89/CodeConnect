@@ -52,3 +52,29 @@ public enum FolderWords {
         "\(computer)’s CodeConnect isn’t answering, so its folders can’t be shown."
     }
 }
+
+/// A run's own screen: its reply box, its turn control and what its
+/// conversation says about itself.
+public enum SessionWords {
+    public static func replyPrompt(_ agent: String) -> String { "Reply to \(agent)…" }
+    public static let interrupted = "Interrupted"
+    public static let interruptedSpoken = "Interrupted — this reply was cut short"
+    public static let loadingEarlier = "Loading earlier history…"
+    public static let stopThisTurn = "Stop this turn"
+    public static let stopping = "Stopping…"
+    public static let stopHelp = "Stop the turn this run is running"
+    public static let tryAgainInAMoment = "Try again in a moment."
+    /// A tool call or its result the computer cut whole before sending it.
+    public static var cutShort: String {
+        "Cut short by \(HostDevice.current.computer("your computer")). This is not the whole output."
+    }
+    public static let nothingLiveYet = "Nothing live has arrived for this run yet."
+}
+
+/// A run's settings, as both apps name them.
+public enum RunSettingWords {
+    public static let model = "Model"
+    public static let effort = "Effort"
+    public static let permissionMode = "Permission mode"
+    public static let compactOrClear = "Compact or clear the context"
+}

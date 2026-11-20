@@ -67,10 +67,10 @@ struct HostedSettingsButton: View {
         }
     }
 
-    /// The run's mode as its fact names it, "Mode" when the fact names none of the listed modes.
+    /// The run's mode as its fact names it, "Permission mode" when the fact names none of the listed modes.
     private var modeButton: some View {
-        let label = settings.selectedMode?.label ?? "Mode"
-        return control(.mode, id: "session.composer.modes", label: label, help: "Mode") {
+        let label = settings.selectedMode?.label ?? RunSettingWords.permissionMode
+        return control(.mode, id: "session.composer.modes", label: label, help: RunSettingWords.permissionMode) {
             HStack(spacing: 5) {
                 Text(label).foregroundStyle(settings.selectedMode?.confirm == true ? Theme.red : Theme.text)
                 chevron
@@ -81,7 +81,7 @@ struct HostedSettingsButton: View {
     }
 
     private var moreButton: some View {
-        control(.more, id: "session.composer.more", label: "More", help: "Compact or clear the conversation") {
+        control(.more, id: "session.composer.more", label: "More", help: RunSettingWords.compactOrClear) {
             Image(systemName: "ellipsis").font(.system(size: 11, weight: .semibold))
                 .frame(width: 12)
         } panel: {

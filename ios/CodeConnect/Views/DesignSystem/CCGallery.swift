@@ -969,7 +969,7 @@ import SwiftUI
                         error: "That is not a valid pairing token.")
                     CCField(
                         label: "Message", text: $multiline,
-                        placeholder: "Ask anything",
+                        placeholder: SessionWords.replyPrompt("Claude Code"),
                         axis: .vertical, lineLimit: 1...5)
 
                     Text("NO LABEL - THE COMPOSE BAR'S FORM")
@@ -983,7 +983,7 @@ import SwiftUI
                     .fixedSize(horizontal: false, vertical: true)
                     CCField(
                         text: $unlabelled,
-                        placeholder: "Ask anything",
+                        placeholder: SessionWords.replyPrompt("Claude Code"),
                         axis: .vertical, lineLimit: 1...5)
                 }
             }

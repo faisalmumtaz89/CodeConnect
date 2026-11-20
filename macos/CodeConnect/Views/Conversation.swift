@@ -38,7 +38,7 @@ struct Earlier: View {
 
     var body: some View {
         let loading = model.isLoadingEarlier(key)
-        Text("Loading earlier history")
+        Text(SessionWords.loadingEarlier)
             .font(Theme.ui(12))
             .foregroundStyle(Theme.text3)
             .frame(maxWidth: .infinity)
@@ -87,10 +87,10 @@ private struct WaitingLine: View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle").font(.system(size: 11)).foregroundStyle(Theme.amber)
                 .accessibilityHidden(true)
-            Text("Waiting on you below").font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+            Text("Waiting for you below").font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Waiting on you below")
+        .accessibilityLabel("Waiting for you below")
     }
 }
 
@@ -152,7 +152,7 @@ private struct Prose: View {
                 }
             }
             if isInterrupted {
-                Text("Stopped before it finished").font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                Text(SessionWords.interrupted).font(Theme.ui(12)).foregroundStyle(Theme.text3)
             }
         }
         .textSelection(.enabled)
@@ -239,7 +239,7 @@ private struct ToolLine: View {
                     if let output = tool.output, !output.isEmpty { CodeBlock(text: output) }
                     // Kit marks the call or its result cut whole by the computer: which one, the row cannot tell.
                     if tool.isTruncated {
-                        Text("Too large to send whole: \(HostDevice.current.computer("the computer")) cut it short")
+                        Text(SessionWords.cutShort)
                             .font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                     }
                 }

@@ -153,7 +153,7 @@ private struct Composer: View {
         let agent = summary?.agent.displayName ?? "the agent"
         return VStack(alignment: .leading, spacing: 10) {
             TextField(
-                "", text: $kept.reply, prompt: Text("Reply to \(agent)…").foregroundStyle(Theme.text3), axis: .vertical
+                "", text: $kept.reply, prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
             )
                 .textFieldStyle(.plain)
                 .font(Theme.ui(13))
@@ -162,7 +162,7 @@ private struct Composer: View {
                 .onSubmit(submit)
                 .focused($fieldFocused)
                 .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
-                .accessibilityLabel("Reply to \(agent)…")
+                .accessibilityLabel(SessionWords.replyPrompt(agent))
                 .accessibilityIdentifier("session.composer.field")
             HStack(spacing: 10) {
                 if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {

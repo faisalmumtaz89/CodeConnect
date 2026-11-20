@@ -49,11 +49,11 @@ struct CommandPalette: View {
             command: "effort", subtitle: "Choose reasoning effort", icon: "gauge",
             action: .nativeEffort),
         PaletteRow(
-            command: "compact", subtitle: "Compact context",
+            command: "compact", subtitle: CompactPrompt.title,
             icon: "arrows-in",
             action: .nativeCompact(prefillInstructions: "")),
         PaletteRow(
-            command: "clear", subtitle: "Clear Claude’s context", icon: "eraser",
+            command: "clear", subtitle: ClearConfirmation.clear, icon: "eraser",
             action: .nativeClear),
         PaletteRow(
             command: "diff", subtitle: "Review working-tree changes",
