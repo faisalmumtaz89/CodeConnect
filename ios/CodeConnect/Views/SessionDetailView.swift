@@ -1921,10 +1921,12 @@ private struct SessionTimeline: View {
     private var emptyTimeline: some View {
         // Anchored rather than centred, so the compose bar stays reachable —
         // you can always talk to an agent.
+        // A run that has ended will record nothing more, so it says only that
+        // nothing was recorded.
         CCEmptyState(
             glyph: "clock",
-            title: "Nothing recorded yet",
-            message: "Events appear here as the agent works.")
+            title: SessionWords.nothingRecorded,
+            message: model.shownSummary(for: key)?.takesNoReply == true ? nil : SessionWords.eventsAppearHere)
             // 96pt from the top of the list, counting the empty state's own
             // 32pt of vertical padding.
             .padding(.top, CC.space.xxxl + CC.space.md)

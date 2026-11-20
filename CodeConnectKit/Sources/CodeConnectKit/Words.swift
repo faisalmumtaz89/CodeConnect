@@ -106,6 +106,10 @@ public enum SessionWords {
     public static let nothingLiveYet = "Nothing live has arrived for this run yet."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
     public static let runEnded = "This run has ended. Its conversation stays here to read."
+    /// A conversation with nothing in it.
+    public static let nothingRecorded = "Nothing recorded yet"
+    /// Under `nothingRecorded`, while the run can still record something: not on one that takes no reply.
+    public static let eventsAppearHere = "Events appear here as the agent works."
 }
 
 /// A run's settings, as both apps name them.
