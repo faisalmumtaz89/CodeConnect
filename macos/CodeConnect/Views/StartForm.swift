@@ -2,7 +2,7 @@ import CodeConnectKit
 import SwiftUI
 
 /// Start an agent on one of the computers that can start one: a recent folder there (on this Mac, any folder, from
-/// the standard folder panel), the first message, and, under it, the model, whose menu holds Claude Code's
+/// the standard folder panel), where in its repository (`BranchRow`), the first message, and, under it, the model, whose menu holds Claude Code's
 /// and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
 /// the iPhone; the Mac shows it as one form. The computer defaults to the one used last, the model to the Default of
 /// the agent last used in the folder, else of the first one there. Once sent, the form gives way to the start's
@@ -35,6 +35,10 @@ struct StartForm: View {
     @State private var folderPath: String?
     @State private var chosen: StartModelChoice?
     @State private var menuOpen = false
+    /// Where in the folder's repository it starts; a new worktree's name while one is being named.
+    @State private var place = StartPlace.folder
+    @State private var newName: String?
+    @State private var branchMenuOpen = false
     @State private var message = ""
     @State private var requestID: String?
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
@@ -83,7 +87,16 @@ struct StartForm: View {
         if StartAgent.allCases.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
         guard folder != nil else { return "Choose a folder." }
+        if let name = newName?.trimmingCharacters(in: .whitespaces) {
+            if name.isEmpty { return StartWords.nameTheWorktree }
+            if !StartPlace.isValidName(name) { return StartWords.nameBreaksTheRule }
+        }
         return nil
+    }
+
+    /// The place Start sends: a new worktree by the name typed, else the one chosen.
+    private var startPlace: StartPlace {
+        newName.map { .new($0.trimmingCharacters(in: .whitespaces)) } ?? place
     }
 
     var body: some View {
@@ -116,6 +129,22 @@ struct StartForm: View {
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
+        // Another folder, or the same path on another computer, starts in the folder as it is, and its repository is
+        // read, as the iPhone's folder step does.
+        .task(id: [context?.id ?? "", folderPath ?? ""]) {
+            place = .folder
+            newName = nil
+            branchMenuOpen = false
+            guard let context, let folder, context.asksGit else { return }
+            context.askGit(folder.path)
+            #if DEBUG
+                RenderWindow.branch(in: context.git(folder.path) ?? nil, place: &place, newName: &newName)
+                // Opened once the render has sized its window: a resize closes an open panel.
+                guard RenderWindow.opensBranchMenu else { return }
+                try? await Task.sleep(for: .seconds(1))
+                branchMenuOpen = true
+            #endif
+        }
         .task { thisMac = setup.installer.flatMap { LocalDaemon.machineID(root: $0.root) } }
         #if DEBUG
             .task {
@@ -151,6 +180,14 @@ struct StartForm: View {
                         // Its panel opens below it, over what follows.
                         .zIndex(computerMenuOpen ? 1 : 0)
                     folderRows(context)
+                    if let folder, context.branchAhead(folder) {
+                        BranchRow(
+                            context: context, folder: folder, agent: pick?.agent, place: $place, newName: $newName,
+                            open: $branchMenuOpen
+                        )
+                        // Its menu opens above it, over the folders.
+                        .zIndex(branchMenuOpen ? 1 : 0)
+                    }
                     AgentNotice(context: context, elsewhere: !isThisMac(context))
                     composer(context)
                 } else {
@@ -181,7 +218,8 @@ struct StartForm: View {
     private func start() {
         guard blocked == nil, let context, let folder, let pick else { return }
         requestID = context.start(
-            folder, agent: pick.agent, model: pick.model, prompt: message.trimmingCharacters(in: .whitespacesAndNewlines))
+            folder, place: startPlace, agent: pick.agent, model: pick.model,
+            prompt: message.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Back to the form from a start that failed or asked about its folder, with its first message put back when the
@@ -271,8 +309,9 @@ struct StartForm: View {
                     // opens or the choice or the list changes, so a click on a row in view moves nothing.
                     .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
-                // As tall as its rows, up to 170 pt, then it scrolls.
-                .frame(height: min(max(listHeight, 1), 170))
+                // As tall as its rows, up to 170 pt, then it scrolls; in a short window it gives way first, down to one
+                // row, so the rows under it and Start stay in the sheet. The chosen folder stays scrolled into view.
+                .frame(minHeight: min(max(listHeight, 1), 44), maxHeight: min(max(listHeight, 1), 170))
                 // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
                 .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))

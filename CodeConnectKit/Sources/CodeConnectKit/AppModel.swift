@@ -1196,6 +1196,8 @@ public final class AppModel {
     public func projectGit(_ path: String) {
         #if DEBUG
             if fixturesActive {
+                // `-CC_GIT_PENDING YES`: a render of the start while the computer is still reading the repository.
+                if UserDefaults.standard.bool(forKey: "CC_GIT_PENDING") { return }
                 starter.receive(git: SessionStarter.fixtureGit(path, projects: starter.projects ?? []), for: path)
                 return
             }

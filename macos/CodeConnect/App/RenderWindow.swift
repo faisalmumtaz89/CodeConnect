@@ -61,6 +61,19 @@
         static var pickedFolder: String? { UserDefaults.standard.string(forKey: "CC_PICK_FOLDER") }
         /// `-CC_MODEL_MENU YES`: Start an agent opens with its model menu open.
         static var opensModelMenu: Bool { UserDefaults.standard.bool(forKey: "CC_MODEL_MENU") }
+        /// `-CC_BRANCH_MENU YES`: the start form's Branch menu open.
+        static var opensBranchMenu: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_MENU") }
+        /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.
+        /// `-CC_BRANCH_NAME <name>`: a new worktree being named, as typed.
+        static func branch(in git: StartGit?, place: inout StartPlace, newName: inout String?) {
+            let defaults = UserDefaults.standard
+            if let branch = defaults.string(forKey: "CC_BRANCH_PLACE"),
+                let checkout = git?.others(than: "").first(where: { $0.branch == branch })
+            {
+                place = .existing(checkout)
+            }
+            if let name = defaults.string(forKey: "CC_BRANCH_NAME") { newName = name }
+        }
         /// `-CC_TOOL_INPUT YES`: a Claude card opens its "Full tool input".
         static var opensToolInput: Bool { UserDefaults.standard.bool(forKey: "CC_TOOL_INPUT") }
         /// `-CC_FIELD_UNFOCUSED YES`: an opened run's reply field is not given the keyboard, as when the run is opened
@@ -380,7 +393,9 @@
                     return
                 }
                 started = true
-                RenderWindow.renderAndQuit(window)
+                // A start still reading its folder's repository (`-CC_GIT_PENDING`) shows a turning ring, which never
+                // stops changing.
+                RenderWindow.renderAndQuit(window, still: !UserDefaults.standard.bool(forKey: "CC_GIT_PENDING"))
             }
         }
 
