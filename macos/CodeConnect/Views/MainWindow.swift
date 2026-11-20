@@ -67,6 +67,14 @@ struct MainWindow: View {
         .background(WindowChrome())
         .focusedSceneValue(\.adding, $adding)
         .onChange(of: opened) { chosen = nil }
+        // A computer removed, here or from Settings: the list lets go of its narrowing to it and of its run, which
+        // has left the list with it.
+        .onChange(of: machines.models.compactMap(\.machineID)) { before, after in
+            let removed = Set(before).subtracting(after)
+            guard !removed.isEmpty else { return }
+            if case .computer(let id) = filter, removed.contains(id) { filter = nil }
+            if let opened, !machines.fleet.contains(where: { $0.id == opened }) { self.opened = nil }
+        }
         // Esc closes the open run; a sheet's own Esc is its Cancel. Not while the composer is using it: Esc closes its
         // list, or leaves its field, first.
         .background {
@@ -273,28 +281,9 @@ private struct Sidebar: View {
             }
         }
         .background(Theme.sidebar)
-        // Removing a computer forgets it on this Mac and nothing else: it asks once, in the iPhone's words.
-        .alert(
-            "Remove this computer?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-            presenting: removing
-        ) { computer in
-            Button("Remove", role: .destructive) { remove(computer) }.accessibilityIdentifier("computer.remove.confirm")
-            Button("Cancel", role: .cancel) {}.accessibilityIdentifier("computer.remove.cancel")
-        } message: { computer in
-            Text(
-                "This Mac forgets \(computer.machineName ?? "this computer"). To use it again, show a new code on it and enter it here (codeconnect.sh/support shows how)."
-            )
-        }
+        .removesComputer($removing)
     }
 
-    /// Forgets the computer, and with it the list's narrowing to it and its run open beside the list.
-    private func remove(_ computer: AppModel) {
-        guard let id = computer.machineID else { return }
-        if filter == .computer(id) { filter = nil }
-        if let opened, machines.fleet.first(where: { $0.id == opened })?.machineID == id { self.opened = nil }
-        moreOpen = nil
-        machines.unpair(computer)
-    }
 
     private func nav(_ target: FleetScope, symbol: String) -> some View {
         Button { scope = target } label: {
