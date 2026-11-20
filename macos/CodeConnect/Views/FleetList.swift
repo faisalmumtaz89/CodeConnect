@@ -454,7 +454,7 @@ private struct FleetLine: View {
                     .layoutPriority(isCommandTool(activity.tool) ? 0.5 : 0)
                 if let argument = activity.argument, !argument.isEmpty {
                     if isCommandTool(activity.tool) {
-                        CommandPreview(command: argument).layoutPriority(0.5)
+                        CommandPreview(command: argument).modifier(DropsWhenNarrow()).layoutPriority(0.5)
                     } else {
                         Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
                     }
