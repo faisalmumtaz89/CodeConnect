@@ -41,7 +41,8 @@ struct SetupView: View {
                     ActionButton(title: "Done", key: nil, prominent: true, id: "setup.done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
                 }
-                .padding(.horizontal, 14)
+                // Its buttons end on the content's edge.
+                .padding(.horizontal, 24)
                 .frame(height: 52)
             }
         }
