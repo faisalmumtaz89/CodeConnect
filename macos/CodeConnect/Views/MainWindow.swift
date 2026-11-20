@@ -200,10 +200,12 @@ extension MainWindow {
         opened.flatMap { key in machines.fleet.first { $0.id == key } }.flatMap { machines.model(forSession: $0.id) } != nil
     }
 
-    /// Where a pane's header keeps clear of the window's own controls: of its buttons and the two toggles beside them
-    /// when the pane comes first, and of the run's toggle when it comes last.
+    /// Where a pane's header keeps clear of the window's own controls, one gap on both sides: its text and controls
+    /// start 16 pt after the two toggles beside the window's buttons (which end 142 pt in) when the pane comes first, and
+    /// end 16 pt before the run's toggle (which starts 40 pt in) when it comes last. Only the header band moves; the
+    /// pane's content keeps its own inset, under the hairline that closes the band.
     fileprivate func clearance(first: Bool, last: Bool) -> EdgeInsets {
-        EdgeInsets(top: 0, leading: first ? 150 : 0, bottom: 0, trailing: last ? 48 : 0)
+        EdgeInsets(top: 0, leading: first ? 158 : 0, bottom: 0, trailing: last ? 56 : 0)
     }
 }
 

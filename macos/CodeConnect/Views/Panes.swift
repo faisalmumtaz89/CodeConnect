@@ -14,7 +14,8 @@ extension FocusedValues {
     @Entry var runIsOpen: Bool?
 }
 
-/// One pane's toggle at the window's top edge, as the window's own controls draw one: lit while its pane shows.
+/// One pane's toggle at the window's top edge, as a Mac toolbar's pane toggles are drawn: the icon alone, the hover
+/// plate under the pointer, and its pane's own presence for its state; a hidden pane's icon is a step dimmer.
 struct PaneToggle: View {
     let symbol: String
     let shown: Bool
@@ -26,9 +27,8 @@ struct PaneToggle: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 13))
-                .foregroundStyle(shown ? Theme.text : Theme.text2)
+                .foregroundStyle(shown ? Theme.text2 : Theme.text3)
                 .frame(width: 28, height: 24)
-                .background(shown ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.hover(radius: 5, id: id))
