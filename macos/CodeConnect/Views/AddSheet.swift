@@ -332,6 +332,8 @@ private struct IPhoneSide: View {
     @Environment(Setup.self) private var setup
     @Environment(\.dismiss) private var dismiss
     @State private var code: Code?
+    /// What the Tailscale note under the intro says, so the two never disagree.
+    @State private var tailscale: TailscaleNote.Status?
 
     private enum Code {
         case shown(PairingQRPayload)
@@ -353,7 +355,7 @@ private struct IPhoneSide: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            TailscaleNote()
+            TailscaleNote(reports: { tailscale = $0 })
             if case .shown(let payload) = code, let image = Self.qr(payload.link) {
                 Image(nsImage: image)
                     .interpolation(.none)
@@ -389,6 +391,12 @@ private struct IPhoneSide: View {
             }
         }
         .task {
+            #if DEBUG
+                if RenderWindow.onLoopback {
+                    code = .unreachable
+                    return
+                }
+            #endif
             let root = setup.installer?.root
             while !Task.isCancelled {
                 code = await Self.mint(root: root)
@@ -424,8 +432,13 @@ private struct IPhoneSide: View {
 
     private var intro: String {
         switch code {
+        // In the note's own state. Signed in, on loopback, is the daemon still moving onto Tailscale.
         case .unreachable:
-            "Your iPhone can’t reach this Mac yet. Connect this Mac to a network your iPhone can reach, such as Tailscale, then come back here."
+            switch tailscale {
+            case .notConnected: PairingWords.iPhoneReachesOnceConnected
+            case .moving, .signedIn, .tagged: PairingWords.iPhoneReachesOnceMoved
+            case .notInstalled, nil: PairingWords.iPhoneCantReach
+            }
         case .notAnswering: "The background service isn’t answering. Choose Set Up CodeConnect… to try again."
         case .added(let name): "\(name) was added."
         case .shown, nil: "Scan this with your iPhone’s camera to pair it with this Mac."

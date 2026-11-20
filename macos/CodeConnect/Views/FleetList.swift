@@ -375,6 +375,30 @@ struct ProjectPlace: View {
     }
 }
 
+/// A run's command line cut to the room the row leaves it, by the Kit's rule (`commandPreview`): its start and its
+/// end, never a tail cut that hides what it runs on. It takes the row's room up to the agent's mark, so the width it
+/// measures is that room and not its own text's; until measured, the whole command, held to one line. Spoken in full.
+private struct CommandPreview: View {
+    let command: String
+    @State private var width: CGFloat = 0
+
+    /// One character's width in the line's font: a monospaced font has one.
+    private static let advance = max(("0" as NSString).size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)]).width, 1)
+
+    /// Half a point of slack, so a rounding difference never pushes the last character past the edge.
+    private var columns: Int { width > 0 ? Int(((width - 0.5) / Self.advance).rounded(.down)) : 0 }
+
+    var body: some View {
+        Text(columns > 0 ? commandPreview(command, columns: columns) : command)
+            .font(Theme.mono(11.5))
+            .foregroundStyle(Theme.text3)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .accessibilityLabel(command)
+    }
+}
+
 /// One run on one line: its state, what it is called, what it is doing, which agent, and how long
 /// since it last did anything. Its computer is its group's to say.
 private struct FleetLine: View {
@@ -402,8 +426,14 @@ private struct FleetLine: View {
                 Text("Stopping…").font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
             } else if let activity = row.activity {
                 Text(activity.tool).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(1)
+                    // Beside a command, which fills the row, the tool's name keeps its own width.
+                    .layoutPriority(isCommandTool(activity.tool) ? 0.5 : 0)
                 if let argument = activity.argument, !argument.isEmpty {
-                    Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                    if isCommandTool(activity.tool) {
+                        CommandPreview(command: argument).layoutPriority(0.5)
+                    } else {
+                        Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                    }
                 }
             } else if !row.subtitle.isEmpty {
                 Text(row.subtitle).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)

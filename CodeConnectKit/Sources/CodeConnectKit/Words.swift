@@ -185,4 +185,12 @@ public enum PairingWords {
     public static let connect = "Connect"
     public static let connecting = "Connecting…"
     public static let codeWorksOnce = "Each code works once and expires after five minutes."
+
+    /// The Mac's Add an iPhone while no iPhone could reach this Mac yet, one sentence for each thing the Tailscale
+    /// note under it can say: with no Tailscale (or none said yet), …
+    public static let iPhoneCantReach = "Your iPhone can’t reach this Mac until both are on one network, such as Tailscale."
+    /// … with Tailscale on but not connected, …
+    public static let iPhoneReachesOnceConnected = "Your iPhone can reach this Mac once Tailscale is connected."
+    /// … and with Tailscale connected, while this Mac's CodeConnect moves onto it.
+    public static let iPhoneReachesOnceMoved = "Your iPhone can reach this Mac once CodeConnect is on Tailscale."
 }

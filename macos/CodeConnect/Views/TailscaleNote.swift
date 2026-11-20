@@ -10,6 +10,8 @@ struct TailscaleNote: View {
     @Environment(Setup.self) private var setup
     /// Where this Mac's daemon answers devices now (`daemon_info`), asked every five seconds.
     @State private var address: LocalDaemon.Address?
+    /// Told the status the note shows, each time it changes; nil while the daemon hasn't said.
+    var reports: (Status?) -> Void = { _ in }
 
     /// What the frame puts this Mac in, with its words.
     enum Status: Equatable {
@@ -48,12 +50,13 @@ struct TailscaleNote: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let directory {
-                card(Status(directory, onLoopback: address.map { PairingQRPayload.unreachableHost($0.host) != nil } ?? false))
+            if let status {
+                card(status)
                     .padding(.horizontal, 18)
                     .padding(.top, 14)
             }
         }
+        .onChange(of: status, initial: true) { _, status in reports(status) }
         .task {
             guard let root = setup.installer?.root else { return }
             while !Task.isCancelled {
@@ -61,6 +64,16 @@ struct TailscaleNote: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+
+    private var status: Status? { directory.map { Status($0, onLoopback: onLoopback) } }
+
+    /// Whether this Mac's daemon answers devices only at loopback, where no iPhone or other computer reaches it.
+    private var onLoopback: Bool {
+        #if DEBUG
+            if RenderWindow.onLoopback { return true }
+        #endif
+        return address.map { PairingQRPayload.unreachableHost($0.host) != nil } ?? false
     }
 
     /// What this Mac's daemon last said about its Tailscale.
