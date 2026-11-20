@@ -17,6 +17,11 @@ User-facing changes, newest first. Mac releases are cut per
 - Set Up's Try Again and Done end on the same edge as its list.
 - The Mac's lists in Settings and Set Up share one box colour and one row inset, as Start's folder list has.
 - The Mac's Settings window takes each pane's own height and scrolls only a long list.
+- A run's model control names the model the run is on, as its header does ("Opus 5.5"), not the menu
+  row it was started with; "Default" is only a row of the menu.
+- On the Mac, a run's reply box stands on the same column as its conversation and heading.
+- In a run's Changes, a file git doesn't track yet reads as its path and "untracked", as the file
+  headers name a file's kind, in place of git's "??".
 
 ## CodeConnect 0.19.1, with the iPhone app 1.1.18
 

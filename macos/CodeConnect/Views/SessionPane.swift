@@ -60,6 +60,9 @@ struct SessionPane: View {
                 if tab == .changes { ChangesTab(model: model, key: row.id) }
             }
         }
+        #if DEBUG
+            .task { if let shown = RenderWindow.sessionTab { tab = shown } }
+        #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .background(Theme.window)

@@ -65,7 +65,8 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        .padding(.horizontal, 20)
+        // On the pane's one content column: the conversation's rows and the heading stand 28 pt in.
+        .padding(.horizontal, 28)
         .padding(.top, 4)
         .padding(.bottom, 16)
         .onChange(of: kept.reply) { old, new in
@@ -100,6 +101,12 @@ private struct Composer: View {
         // A request that arrives is answered above the box: no settings panel may cover its answers.
         .onChange(of: model.shown(for: key)?.pendingApprovals.first?.id) { _, now in if now != nil { panel = nil } }
         .onChange(of: model.receipts(for: key)?.compactSeq) { _, _ in settle() }
+        #if DEBUG
+            .task {
+                if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
+                if let shown = RenderWindow.panel { panel = shown }
+            }
+        #endif
         .onDisappear {
             retire?.cancel()
             quiet?.cancel()

@@ -29,6 +29,13 @@ public struct UnifiedDiff: Sendable, Hashable {
     /// How many lines of context to keep visible on each side of a change.
     static let contextLines = 3
 
+    /// A line of `preamble` or `trailing` as a person reads it: an untracked name, which the daemon appends as git's
+    /// status prints it (`?? <path>`), is its path with the word a file header gives its kind; any other line stays
+    /// as it is, with no word.
+    public static func reported(_ line: String) -> (text: String, label: String?) {
+        line.hasPrefix("?? ") ? (String(line.dropFirst(3)), "untracked") : (line, nil)
+    }
+
     // MARK: - Model
 
     public struct FileDiff: Sendable, Hashable, Identifiable {

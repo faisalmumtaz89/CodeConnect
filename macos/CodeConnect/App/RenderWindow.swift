@@ -155,6 +155,23 @@
 
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
+        /// `-CC_SESSION_TAB changes`: the opened run shows its Changes.
+        static var sessionTab: SessionTab? {
+            UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil
+        }
+        /// `-CC_REPLY <text>`: the opened run's reply box holds these words, as typed (`\n` for a new line).
+        static var reply: String? {
+            UserDefaults.standard.string(forKey: "CC_REPLY")?.replacingOccurrences(of: "\\n", with: "\n")
+        }
+        /// `-CC_PANEL model|mode|more`: the opened run's settings panel of that name is open.
+        static var panel: SettingsPanel? {
+            switch UserDefaults.standard.string(forKey: "CC_PANEL") {
+            case "model": .model
+            case "mode": .mode
+            case "more": .more
+            default: nil
+            }
+        }
 
         /// `-CC_UPDATE_FEED <url>`: the updater starts, with this feed in place of the app's; it checks when asked
         /// (Check for Updates…).
