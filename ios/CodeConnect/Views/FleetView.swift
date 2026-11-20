@@ -2799,7 +2799,7 @@ struct LinkHealthSheet: View {
     private var linkSection: some View {
         section("Link") {
             CCFactRow(
-                "State", value: model.linkHealth.detail,
+                "State", value: model.linkHealth.word,
                 tone: model.linkHealth.level.ccTone, separator: true)
             CCFactRow(
                 "Computer last answered",
