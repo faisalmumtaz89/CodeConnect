@@ -618,7 +618,10 @@ mod tests {
     #[cfg(feature = "test-launchd-label")]
     #[test]
     fn a_rig_build_reads_no_tailscale_it_was_not_given() {
-        assert_eq!(Config::default().tailscale_candidates(), Vec::<std::path::PathBuf>::new());
+        assert_eq!(
+            Config::default().tailscale_candidates(),
+            Vec::<std::path::PathBuf>::new()
+        );
         assert_eq!(Config::default().tailscale_bin(), None);
         let present = std::env::current_exe().unwrap();
         let named = Config {
