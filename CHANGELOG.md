@@ -3,6 +3,38 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.4, with the iPhone app 1.1.21
+
+- On the Mac, every question and notice is the app's own card, centred on its window, never a system alert: End
+  Run, Remove, Clear, a permission mode that asks first, removing a computer, and Block or Allow in Settings. Esc
+  gives the safe answer, and a destructive answer never takes Return.
+- A model is named in the agent's own words. The Mac's model menus show the agent's description beside each
+  model's name, and a run's model reads as the agent reports it.
+- On the iPhone, an open run shows its branch and its uncommitted +N −M under the session bar, and a start can
+  name its model, as on the Mac.
+- On the Mac, an ended run shows one quiet line, "This run has ended. Its conversation stays here to read.",
+  where its reply box was. A run the next message would relaunch keeps its box.
+- On the Mac, every panel closes on a click outside it or on Esc, and each act in a "…" panel has an icon, End
+  Run…, Remove… and Clear… in red.
+- On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list is one Tab
+  stop, Return in the run list puts the cursor in the open run's reply box, and Start opens with the keyboard in
+  its folder search.
+- On the Mac, Help › CodeConnect Support opens the support page, and Settings stays above the Dock.
+- Settings › Devices lists each device under its own name, a Mac's computer name or "iPhone", in place of
+  "CodeConnect Mac-2". A device paired before takes its name the next time it connects.
+- On the iPhone, a computer that refused the link says "Different version" or "Pair again" on its card, in
+  place of "Not paired". Typing /model, /effort, /diff or /compact where it can't be typed says what to do
+  instead, and every sentence either app shows uses the typographic apostrophe and no long dash.
+- On the Mac, the list says "Connecting to your computer…" until your computers have answered, rather than
+  offering to start an agent.
+- A card answered just after its agent's host re-attaches, after the daemon restarts, is no longer refused.
+- On the Mac, a run row shows its status whole or not at all, a long command keeps its start and its end, a
+  request's answers line up with the card above them, a run's settings panels stay inside its pane, and Add an
+  iPhone's intro says what the Tailscale note under it says.
+- On the iPhone, New agent stays and says why when no computer can start one, a signed-out agent says so at
+  start with how to sign in, short sheets are as tall as their content, a fact too long for its line moves under
+  its label whole, and Link health's State reads one word.
+
 ## CodeConnect 0.19.3, with the iPhone app 1.1.20
 
 - The Mac and the iPhone word the same things the same way: an ended run is "Ended" and a run waiting on an
