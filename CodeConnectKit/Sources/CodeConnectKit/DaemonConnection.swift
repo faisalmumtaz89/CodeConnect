@@ -1609,6 +1609,12 @@ public final class DaemonConnection {
             self.phase = phase
         }
 
+        /// Test seam: a link the computer refused, for `refusal`, with the sentence it gave.
+        public func setRefusedForTesting(_ refusal: ConnectionRefusal, reason: String) {
+            phase = .failed(reason: reason)
+            self.refusal = refusal
+        }
+
         /// Test seam: answer `deleteSession` locally, and record what was asked.
         ///
         /// **Without this, the removal tests were unfalsifiable.** An `AppModel`

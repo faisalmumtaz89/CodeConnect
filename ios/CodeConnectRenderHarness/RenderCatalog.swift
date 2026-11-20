@@ -611,6 +611,23 @@ enum RenderCatalog {
             }),
 
         RenderScenario(
+            name: "fleet-refused-version",
+            purpose: "a computer that refused the link for a different version: the card's mark and the banner say so",
+            arguments: ["-CC_FIXTURE", "stacked", "-CC_FIXTURE_LINK", "refused-version"],
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Different version", in: app), "the different-version mark")
+            }),
+
+        RenderScenario(
+            name: "fleet-refused-pairing",
+            purpose: "a computer that refused this iPhone's pairing: the card's mark and the banner say Pair again",
+            arguments: ["-CC_FIXTURE", "stacked", "-CC_FIXTURE_LINK", "refused-pairing"],
+            reach: { app, driver in
+                try driver.require(driver.element(containing: "Pair again", in: app), "the pair-again mark")
+            }),
+
+        RenderScenario(
             name: "deck-high",
             purpose: "the HIGH card as it arrives, before the command has been read",
             // The deep link rather than a tap on the accessory bar: at

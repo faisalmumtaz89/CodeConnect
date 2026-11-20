@@ -1066,7 +1066,23 @@ public final class AppModel {
             // `…but the daem…` and dimmed to 3.16:1, and nothing could render
             // the frame that showed it. `LinkHealth.staleAfter` is 30s, so the
             // state arrives on its own about half a minute in.
-            guard UserDefaults.standard.string(forKey: "CC_FIXTURE_LINK") != "stale" else { return }
+            //
+            // **`-CC_FIXTURE_LINK refused-version` / `refused-pairing`** puts the link where the computer refused it,
+            // for a different version or for its pairing, with the fleet still on screen: no fixture reached a refusal,
+            // which only a live pairing produces, so the word each refusal says could not be rendered.
+            switch UserDefaults.standard.string(forKey: "CC_FIXTURE_LINK") {
+            case "stale": return
+            case "refused-version":
+                connection.setRefusedForTesting(
+                    .differentVersion,
+                    reason: "That computer runs a different version of CodeConnect. Update CodeConnect on it and on "
+                        + "this \(HostDevice.current.name), then try again.")
+                return
+            case "refused-pairing":
+                connection.setRefusedForTesting(.credential, reason: "This \(HostDevice.current.name) is not paired with it.")
+                return
+            default: break
+            }
             Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(5))
