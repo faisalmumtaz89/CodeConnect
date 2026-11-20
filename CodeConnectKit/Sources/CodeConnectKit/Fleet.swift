@@ -313,15 +313,23 @@ public enum FleetFreshness {
 
 enum FleetOrdering {
     /// Within a status band, the most recently active session comes first: the
-    /// thing that just changed is the thing you are looking for.
+    /// thing that just changed is the thing you are looking for. A finished
+    /// turn stands in one band whether or not it has been looked at (`place`),
+    /// so opening a run never moves its row: being seen changes its mark only.
     static func sort(_ rows: [FleetRow]) -> [FleetRow] {
         rows.sorted { lhs, rhs in
-            if lhs.status != rhs.status { return lhs.status < rhs.status }
+            if place(lhs.status) != place(rhs.status) { return place(lhs.status) < place(rhs.status) }
             if lhs.lastActive != rhs.lastActive { return lhs.lastActive > rhs.lastActive }
             // The key, not the name: two runs called `cc-1` need a total order
             // or they can swap places between renders.
             return lhs.summary.sessionKey < rhs.summary.sessionKey
         }
+    }
+
+    /// A status's band in the list: its own, but Idle (a turn seen, or none
+    /// yet) stands with Done.
+    static func place(_ status: FleetStatus) -> Int {
+        status == .idle ? FleetStatus.doneUnreviewed.rawValue : status.rawValue
     }
 }
 
