@@ -26,6 +26,16 @@ public enum FleetWords {
     public static let startAnAgent = "Start an agent"
     /// The list while its computers are still answering, or waited out: never "Start an agent" before then.
     public static let connecting = "Connecting to your computer…"
+    /// Under the launch's mark once it has waited a second for its computers (`LaunchMark`).
+    public static func connecting(to computers: [String]) -> String {
+        computers.count == 1 ? "Connecting to \(computers[0])…" : "Connecting to your computers…"
+    }
+    /// Under the launch's mark when the wait ran out on computers that never answered.
+    public static func notAnswering(_ computers: [String]) -> String {
+        computers.count == 1
+            ? "\(computers[0]) isn’t answering. Showing what it last said."
+            : "Your computers aren’t answering. Showing what they last said."
+    }
     public static let agentsAppearHere = "Agents you start with CodeConnect appear here."
     public static let noEndedRuns = "No ended runs."
     public static let noComputersYet = "No computers yet"
