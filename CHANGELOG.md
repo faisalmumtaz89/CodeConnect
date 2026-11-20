@@ -22,6 +22,14 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, every panel closes on a click outside it, on Esc or when the window is resized, each act in a "…"
   panel has an icon, End Run…, Remove… and Clear… in red, and a row's "…" menu opens over every row, at its dots
   or wherever a right-click on the row lands.
+- On the Mac, closing the window keeps CodeConnect running in the Dock, and ⌘Q quits it. The window opens again
+  on the same list and run, and New Agent, Add Computer and Add iPhone bring it back when it is closed.
+- On the Mac, the sidebar, the run list and the open run each hide and show by themselves, from the toggles at
+  the window's top edge or the View menu, ⌃⌘S for the sidebar. A hidden pane's room goes to the panes beside it,
+  and the window keeps the panes as they were left.
+- A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
+  give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
+  still cut.
 - On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list is one Tab
   stop, Return in the run list puts the cursor in the open run's reply box, and Start opens with the keyboard in
   its folder search.
