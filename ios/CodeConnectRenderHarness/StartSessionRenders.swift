@@ -264,6 +264,18 @@ extension RenderCatalog {
             guard app.buttons["start-project-query-parser"].exists, !app.buttons["start-project-gpu-benchmarks"].exists
             else { throw RenderFailure.unreachable("Jordan’s folders after the drop, not \(server)’s") }
         },
+        RenderScenario(
+            name: "start2-k-none-connected", purpose: "steps: New while no computer is connected says why",
+            arguments: args(linkDropMS: 8000)
+        ) { app, driver in
+            try driver.fleet(app)
+            // The fixture drops the link 8 s after the app starts and brings it
+            // back 5 s later; New is tapped once the fleet says it is connecting.
+            try driver.require(driver.text(containing: "Connecting", in: app), "the dropped link")
+            try tap(app, "start-entry", driver)
+            try driver.requireExists(
+                driver.text(containing: "None of your computers is connected", in: app), "why none can start")
+        },
         RenderScenario(name: "start2-c-agent", purpose: "steps: the agent", arguments: args()) {
             app, driver in
             try toAgents(app, driver)

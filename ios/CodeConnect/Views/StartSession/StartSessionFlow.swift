@@ -25,7 +25,7 @@ struct StartSeed {
 /// answer moves on; back returns one screen, and in the browser one folder.
 struct StartStepsSheet: View {
     /// The paired computers that can start a session now: the first step's
-    /// list, live.
+    /// list, live. With none, the step says why.
     let contexts: [StartContext]
     let onStarted: (String) -> Void
     let onClose: () -> Void
@@ -54,6 +54,7 @@ struct StartStepsSheet: View {
     @State private var creatingIn = ""
     @FocusState private var composing: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(Machines.self) private var machines
 
     /// The computer tapped on the first step, held from then on: a link that
     /// drops later neither takes it away nor hands its choices to another.
@@ -132,7 +133,7 @@ struct StartStepsSheet: View {
 
     private var title: String {
         switch screen {
-        case .computer: return "Which computer?"
+        case .computer: return contexts.isEmpty ? FleetWords.startAnAgent : "Which computer?"
         case .folder: return "Which folder?"
         case .browse(let path):
             let shown = chosen?.listing(StartFolderRequest(path: path, showHidden: showsHidden))?.path ?? path
@@ -183,7 +184,40 @@ struct StartStepsSheet: View {
 
     // MARK: Computer
 
+    @ViewBuilder
     private var computerStep: some View {
+        if contexts.isEmpty {
+            unavailableStep
+        } else {
+            computerList
+        }
+    }
+
+    /// Why no computer can start an agent now, in the Kit's words, and for a
+    /// computer on a different version, Try again.
+    private var unavailableStep: some View {
+        ScrollView {
+            Text(machines.noStartReason)
+                .ccType(CC.type.body)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(CC.space.md)
+                .accessibilityIdentifier("start-unavailable")
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let refused = machines.startRefusedComputer {
+                CCActionBar {
+                    CCButton("Try again", variant: .secondary, fullWidth: true) {
+                        refused.connection.retryNow()
+                    }
+                    .accessibilityIdentifier("start-try-again")
+                }
+            }
+        }
+    }
+
+    private var computerList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(contexts, id: \.id) { candidate in

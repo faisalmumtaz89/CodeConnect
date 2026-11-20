@@ -192,6 +192,27 @@ extension Machines {
         models.flatMap { $0.starter.unanswered }.filter { !$0.retryStopped }
             .max { $0.sentAt < $1.sentAt }
     }
+
+    /// A computer refused for running a different version of CodeConnect: what
+    /// keeps it from starting agents, cured only by updating, then trying again.
+    public var startRefusedComputer: AppModel? {
+        models.first { $0.linkHealth.cause == .refused(.differentVersion) }
+    }
+
+    /// Why no computer can start an agent right now: none paired, none
+    /// connected, or a computer's CodeConnect too old to start one from here.
+    public var noStartReason: String {
+        guard showsFleet else {
+            return "An agent runs on one of your computers, in a project there. Add a computer first, then start one here."
+        }
+        if let refused = startRefusedComputer {
+            return "\(refused.machineName ?? "A computer") isn’t connected. \(refused.linkHealth.detail)"
+        }
+        guard let old = models.first(where: { $0.connection.phase.isConnected }) else {
+            return "None of your computers is connected right now. You can start an agent once one is."
+        }
+        return "\(old.machineName ?? "That computer")’s CodeConnect is too old to start agents from here. Update it, then try again."
+    }
 }
 
 /// `main · 4m ago · Claude Code`: the branch, when it was last used and by
