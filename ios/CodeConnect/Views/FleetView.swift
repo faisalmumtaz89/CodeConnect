@@ -354,6 +354,11 @@ struct FleetView: View {
                     .ccHitTarget()
                 }
                 .buttonStyle(.plain)
+                // On the button itself, not only its label: the bar sizes a
+                // leading item from the button, and sized from its label alone
+                // it gave a slot an icon's width, so a title longer than "New"
+                // spilled past the screen's left edge.
+                .fixedSize()
                 .accessibilityLabel(FleetWords.newAgent)
                 .accessibilityIdentifier("start-entry")
             }
