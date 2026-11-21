@@ -124,6 +124,11 @@ private struct ConfirmationCard: View {
                     .accessibilityLabel(field.placeholder)
                     .accessibilityIdentifier("confirmation.field")
                     .focused($fieldFocused)
+                    // Esc while typing reaches the field first; unanswered here it climbs to the sheet the card sits in,
+                    // which it would close. The field gives the safe answer instead, as Esc does on every card.
+                    .onExitCommand {
+                        if let safe = confirmation.answers.first(where: { $0.kind == .cancel }) { answer(safe) }
+                    }
                     .textFieldStyle(.plain)
                     .font(Theme.ui(12.5))
                     .padding(.horizontal, 10)
