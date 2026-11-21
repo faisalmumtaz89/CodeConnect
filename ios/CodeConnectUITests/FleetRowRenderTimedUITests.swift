@@ -12,7 +12,7 @@ import XCTest
 /// recreated on every event would otherwise pass as unchanged. The fixture's
 /// last frame — `fx-5`'s next command — arrives late, while the fleet is on
 /// screen.
-final class FleetRowRenderUITests: XCTestCase {
+final class FleetRowRenderTimedUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false

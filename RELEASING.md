@@ -45,8 +45,13 @@ app that speaks it.
 
 Each block starts from the repository root.
 
-1. **Gates.** Everything CI runs, plus the live UI tests it leaves out (its
-   `ios-ui` job runs the rest of the UI suite; the live ones need a computer):
+1. **Gates.** Everything CI runs, plus the whole iPhone UI suite here. CI's
+   `ios-ui` job leaves out two groups of classes by name, as ci.yml sets out:
+   the live ones, which need a computer, and the timed ones, whose timings
+   hold on a Mac and not on the runner. The suite runs on a fresh iPhone 17 Pro,
+   on the newest iOS that supports it, signed as Xcode signs it by default; the
+   live classes run against a computer given by `TEST_RUNNER_CC_HOST` and
+   `TEST_RUNNER_CC_TOKEN`, and skip without one:
 
    ```sh
    (cd mac && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
@@ -54,11 +59,15 @@ Each block starts from the repository root.
      -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
      -only-testing:CodeConnectTests \
      CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
+   udid=$(xcrun simctl create "iPhone 17 Pro" com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro)
    (cd ios && rm -rf .artifacts/uitest-deriveddata && xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
-     -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
-     -derivedDataPath .artifacts/uitest-deriveddata \
-     -only-testing:CodeConnectUITests CODE_SIGNING_ALLOWED=NO)
+     -destination "id=$udid" -derivedDataPath .artifacts/uitest-deriveddata \
+     -only-testing:CodeConnectUITests)
+   xcrun simctl delete "$udid"
    ```
+
+   Keep the UI run's closing line (`Executed N tests, with 0 failures`) with
+   the commit it ran on: a release needs that line for the commit it tags.
 
    CI builds the Mac app (`mac-app`: Debug, and again without the `DEBUG`
    condition) and runs no tests of it, since it has none; build it here as

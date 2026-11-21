@@ -178,15 +178,23 @@ jobs:
             -only-testing:CodeConnectTests \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
 
-  # **The iPhone UI suite, every test that needs no computer.** RELEASING.md's
-  # UI suite, on the iPhone 17 Pro the tests are written for, with Xcode 27.1
-  # on the image the Mac job uses, as the app is built with. The live classes
-  # drive the app against a running `ccd`; a runner has none, so they are left
-  # out by name. A class is live when its file reads the test runner's
-  # environment, which is how the live tests get a computer's address and token
-  # (TEST_RUNNER_CC_*). The first step holds the named list to that rule, so a
-  # new live class fails this job until it is named here, and a named class
-  # that stops being live fails it too: neither is run nor skipped unseen.
+  # **The iPhone UI suite, less two groups of classes.** RELEASING.md's UI
+  # suite, on the iPhone 17 Pro the tests are written for, with Xcode 27.1 on
+  # the image the Mac job uses, as the app is built with. Two groups are left
+  # out by name, whole classes, and the whole suite runs on a Mac before every
+  # release (RELEASING.md):
+  # - Live: the class's file reads the test runner's environment, which is how
+  #   a live test gets a computer's address and token (TEST_RUNNER_CC_*). A
+  #   runner has no computer.
+  # - Timed: the class's file, not live, passes a fixture clock (a
+  #   `-CC_FIXTURE_…_MS` launch argument), measures elapsed wall time
+  #   (`timeIntervalSince(`), or drags after a long press (`press(forDuration:`
+  #   of half a second or more with `thenDragTo:`). Their timings hold on a Mac
+  #   and not on this runner's three cores. A timed test has a class of its
+  #   own, <Class>TimedUITests, so the rest of its class still runs here.
+  # The first step holds both lists to those rules, so a new class that matches
+  # one fails this job until it is named here, and a named class that stops
+  # matching fails it too: nothing is run or left out unseen.
   ios-ui:
     name: iPhone UI tests (no computer)
     runs-on: xcode-27
@@ -197,21 +205,36 @@ jobs:
         ApprovalFlowUITests EndRunLiveUITests FolderTrustLiveUITests
         HalfOpenSendUITests LiveDaemonUITests PairingLiveUITests
         MultiMachineLiveUITests SessionIdentityLiveUITests
+      TIMED_CLASSES: >-
+        BulkRemoveTimedUITests CardReorderTimedUITests DeckTimedUITests
+        FleetLargeTypeScrollTimedUITests FleetRowChangeTimedUITests
+        FleetRowRenderTimedUITests QuestionCardTimedUITests
+        SessionShowAllTimedUITests SwipeToRemoveTimedUITests
     steps:
       - uses: actions/checkout@v4
 
-      - name: The live classes named here are the live classes in the suite
+      - name: The classes left out are the ones the rules find
         working-directory: ios/CodeConnectUITests
         run: |
-          found=$(grep -l 'processInfo.environment' -- *.swift \
-            | xargs sed -n 's/^final class \([A-Za-z0-9_]*\): XCTestCase.*/\1/p' | sort)
-          # shellcheck disable=SC2086
-          named=$(printf '%s\n' $LIVE_CLASSES | sort)
-          if [ "$found" != "$named" ]; then
-            echo "::error::the live classes in the suite differ from LIVE_CLASSES (< in the suite, > named)"
-            diff <(echo "$found") <(echo "$named") || true
-            exit 1
-          fi
+          classes() { xargs sed -n 's/^final class \([A-Za-z0-9_]*\): .*/\1/p' | sort; }
+          live=$(grep -l 'processInfo.environment' -- *.swift | classes)
+          timed=$({
+            grep -lE -- '-CC_FIXTURE_[A-Z_]+_MS' *.swift
+            grep -lE 'timeIntervalSince\(' -- *.swift
+            grep -lE 'press\(forDuration: *([1-9]|0\.[5-9])[0-9.]*, *thenDragTo:' -- *.swift
+          } | sort -u | classes | comm -23 - <(echo "$live"))
+          failed=0
+          for group in LIVE TIMED; do
+            found=$live; [ "$group" = TIMED ] && found=$timed
+            list="${group}_CLASSES"
+            named=$(printf '%s\n' ${!list} | sort)
+            if [ "$found" != "$named" ]; then
+              echo "::error::the $group classes in the suite differ from $list (< in the suite, > named)"
+              diff <(echo "$found") <(echo "$named") || true
+              failed=1
+            fi
+          done
+          exit "$failed"
 
       # The image carries no iPhone 17 Pro, so the job makes one, fresh each
       # run, on the newest installed iOS that supports it.
@@ -239,7 +262,7 @@ jobs:
         run: |
           xcodebuild -version
           skip=()
-          for class in $LIVE_CLASSES; do skip+=("-skip-testing:CodeConnectUITests/$class"); done
+          for class in $LIVE_CLASSES $TIMED_CLASSES; do skip+=("-skip-testing:CodeConnectUITests/$class"); done
           xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
             -destination "id=$UDID" \
             -only-testing:CodeConnectUITests "${skip[@]}" \

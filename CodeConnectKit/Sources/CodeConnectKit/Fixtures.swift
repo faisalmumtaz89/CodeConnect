@@ -76,7 +76,7 @@ enum Fixtures {
         /// lines, past the 40 a tool output shows before "Show all". The one
         /// fixture where that button sits at the tail with its block's top
         /// above the screen — the geometry where the list used to carry the
-        /// reader to the last line. `SessionShowAllUITests` exists for it.
+        /// reader to the last line. `SessionShowAllTimedUITests` exists for it.
         case longOutput
         /// `stacked`, with the running agent one call further on: an MCP tool,
         /// named the way Claude Code names every one, `mcp__<server>__<tool>`,

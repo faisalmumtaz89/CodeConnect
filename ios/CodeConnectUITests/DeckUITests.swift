@@ -1,31 +1,9 @@
 import XCTest
 
-/// The Deck — the product's signature interaction — driven end to end.
-///
-/// Fixture-backed rather than daemon-backed, and that is the point: the Deck
-/// only means anything when *several* agents are blocked at once at *different*
-/// risk classes, and that is not a state a test can arrange on a live Mac on
-/// demand. The frames it replays are the daemon's own JSON, decoded by the app's
-/// real decoders, with real `payload_hash` values — so a card that failed
-/// verification here would fail on a phone too.
-///
-/// `ApprovalFlowUITests` covers the same cards against a real `ccd`. This file
-/// covers the things that need a fleet.
-///
-/// **Every launch pins its own Dynamic Type size.** The suite used to run at
-/// whatever the simulator had been left at, which meant a render pass at AX5
-/// left four tests failing for a reason that had nothing to do with the code.
-/// The read-gate tests below need both sizes anyway, and a size the test states
-/// is a size the test can reason about.
-///
-/// **The waits are long on purpose.** A cold launch of this app on a busy
-/// machine has been measured at over twenty seconds; a five-second wait turns
-/// that into a failure that reads like a regression and is not one. The
-/// assertions are what this suite is for, and none of them are about speed.
-final class DeckUITests: XCTestCase {
-
+/// What `DeckUITests` and `DeckTimedUITests` share: how they launch the app and find their way to the state each tests.
+class DeckUITestsBase: XCTestCase {
     /// The sizes the design is verified at.
-    private enum TypeSize: String {
+    enum TypeSize: String {
         case medium = "UICTContentSizeCategoryM"
         case ax4 = "UICTContentSizeCategoryAccessibilityXXL"
         case ax5 = "UICTContentSizeCategoryAccessibilityXXXL"
@@ -34,10 +12,11 @@ final class DeckUITests: XCTestCase {
     /// The gate's own sentences, drawn by `ccDisabled` under the control they
     /// block. Not accessibility hints: a disabled control renders its reason as
     /// visible text.
-    private static let readGateReason = "Scroll the command into view before deciding."
+    static let readGateReason = "Scroll the command into view before deciding."
+
     /// What HIGH says once the command has been seen but the class it was given
     /// has not. MEDIUM never shows this one.
-    private static let readGateHighReason =
+    static let readGateHighReason =
         "Scroll to the end of the command block before deciding."
 
     override func setUp() {
@@ -45,11 +24,12 @@ final class DeckUITests: XCTestCase {
     }
 
     /// The fixture's MEDIUM card — a `Write` to a path outside the worktree.
-    private static let mediumRequestID = "toolu_fixture_medium"
-    /// Its LOW card — a `Read` of a 24-character path.
-    private static let lowRequestID = "toolu_fixture_low"
+    static let mediumRequestID = "toolu_fixture_medium"
 
-    private func launch(
+    /// Its LOW card — a `Read` of a 24-character path.
+    static let lowRequestID = "toolu_fixture_low"
+
+    func launch(
         biometrics: String = "allow", size: TypeSize = .medium,
         fixture: String = "deck", openingCard requestID: String? = nil
     ) -> XCUIApplication {
@@ -73,6 +53,115 @@ final class DeckUITests: XCTestCase {
         return app
     }
 
+    /// Opens `fx-2`'s chat at `size`, opens its `Write` card with the approval
+    /// row's `Review`, and scrolls until `Allow` arms.
+    func assertTheSessionSheetArms(at size: TypeSize) {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-UIPreferredContentSizeCategoryName", size.rawValue,
+            "-CC_DEEPLINK", "codeconnect://session/fx-2",
+        ]
+        app.launch()
+        let review = app.buttons["Review"].firstMatch
+        XCTAssertTrue(review.waitForExistence(timeout: 25), "fx-2's approval row")
+        review.tap()
+
+        let allow = allowButton(app, tool: "Write")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25), "the sheet opened the Write card")
+        scrollUntil(app, "the read gate arms") { allowButton(app, tool: "Write").isEnabled }
+        attach(app, "sheet-\(size.rawValue)-armed")
+    }
+
+    // MARK: Helpers
+
+    func openDeck(_ app: XCUIApplication) {
+        let bar = app.buttons["deck-bar"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 25), "the deck bar is the way in")
+        bar.tap()
+        XCTAssertTrue(
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 20), "the deck opened")
+    }
+
+    /// Sends the top card to the back of the queue.
+    ///
+    /// At accessibility sizes `Come back to this` leaves the pinned action bar
+    /// and lands in the card's own footer — four stacked controls in the bar
+    /// measured 440pt at AX5 and left the document a four-line sliver — so it
+    /// has to be scrolled to. That scroll is on the card being *postponed*, and
+    /// the card that comes forward gets a fresh gate.
+    func postponeTopCard(_ app: XCUIApplication) {
+        let later = app.buttons.matching(identifier: "deck-later").firstMatch
+        XCTAssertTrue(later.waitForExistence(timeout: 25))
+        scrollUntil(app, "`Come back to this` is reachable") { later.isHittable }
+        later.tap()
+    }
+
+    /// Scrolls the document until `condition` holds, or fails saying what it was
+    /// waiting for. A test that gives up silently is worse than no test.
+    func scrollUntil(
+        _ app: XCUIApplication, _ what: String, attempts: Int = 12,
+        condition: () -> Bool
+    ) {
+        for _ in 0..<attempts {
+            if condition() { return }
+            dragUp(app)
+        }
+        XCTAssertTrue(condition(), "gave up scrolling before \(what)")
+    }
+
+    /// A controlled press-and-drag inside the readable strip.
+    ///
+    /// **Not `swipeUp()`.** Measured on the Deck at AX5: five consecutive
+    /// `app.swipeUp()` calls moved the card's scroll view exactly zero points —
+    /// the flick's end point lands in the navigation bar and the gesture is
+    /// never delivered to the scroll view. A press, a drag between two points
+    /// that are both inside the document, and a release scrolls every time.
+    func dragUp(_ app: XCUIApplication) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            .press(
+                forDuration: 0.05,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
+    }
+
+    /// `firstMatch` throughout: SwiftUI's `safeAreaInset` renders the action bar
+    /// into the hierarchy more than once, so an exact query is ambiguous even
+    /// when only one is on screen.
+    func allowButton(_ app: XCUIApplication, tool: String) -> XCUIElement {
+        app.buttons.matching(identifier: "Allow this \(tool) call").firstMatch
+    }
+
+    func attach(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+}
+
+/// The Deck — the product's signature interaction — driven end to end.
+///
+/// Fixture-backed rather than daemon-backed, and that is the point: the Deck
+/// only means anything when *several* agents are blocked at once at *different*
+/// risk classes, and that is not a state a test can arrange on a live Mac on
+/// demand. The frames it replays are the daemon's own JSON, decoded by the app's
+/// real decoders, with real `payload_hash` values — so a card that failed
+/// verification here would fail on a phone too.
+///
+/// `ApprovalFlowUITests` covers the same cards against a real `ccd`. This file
+/// covers the things that need a fleet.
+///
+/// **Every launch pins its own Dynamic Type size.** The suite used to run at
+/// whatever the simulator had been left at, which meant a render pass at AX5
+/// left four tests failing for a reason that had nothing to do with the code.
+/// The read-gate tests below need both sizes anyway, and a size the test states
+/// is a size the test can reason about.
+///
+/// **The waits are long on purpose.** A cold launch of this app on a busy
+/// machine has been measured at over twenty seconds; a five-second wait turns
+/// that into a failure that reads like a regression and is not one. The
+/// assertions are what this suite is for, and none of them are about speed.
+final class DeckUITests: DeckUITestsBase {
     // MARK: The bar
 
     /// The accessory bar rises when something is pending, counts what is
@@ -349,51 +438,6 @@ final class DeckUITests: XCTestCase {
 
     func testTheSessionSheetArmsAfterScrollingAtAX5() { assertTheSessionSheetArms(at: .ax5) }
 
-    /// Opens `fx-2`'s chat at `size`, opens its `Write` card with the approval
-    /// row's `Review`, and scrolls until `Allow` arms.
-    private func assertTheSessionSheetArms(at size: TypeSize) {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
-            "-UIPreferredContentSizeCategoryName", size.rawValue,
-            "-CC_DEEPLINK", "codeconnect://session/fx-2",
-        ]
-        app.launch()
-        let review = app.buttons["Review"].firstMatch
-        XCTAssertTrue(review.waitForExistence(timeout: 25), "fx-2's approval row")
-        review.tap()
-
-        let allow = allowButton(app, tool: "Write")
-        XCTAssertTrue(allow.waitForExistence(timeout: 25), "the sheet opened the Write card")
-        scrollUntil(app, "the read gate arms") { allowButton(app, tool: "Write").isEnabled }
-        attach(app, "sheet-\(size.rawValue)-armed")
-    }
-
-    /// An answer the Mac has not confirmed says how long it has waited, and
-    /// VoiceOver hears that as a duration — "4 seconds" — never as "4s",
-    /// which it reads "four ess".
-    func testAnUnconfirmedAnswerSpeaksHowLongItHasWaited() {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
-            "-UIPreferredContentSizeCategoryName", TypeSize.medium.rawValue,
-            "-CC_FIXTURE_ANSWER_MS", "20000",
-            "-CC_DEEPLINK", "codeconnect://deck/\(Self.lowRequestID)",
-        ]
-        app.launch()
-        let allow = allowButton(app, tool: "Read")
-        XCTAssertTrue(allow.waitForExistence(timeout: 25))
-        allow.tap()
-        let notice = app.staticTexts.matching(
-            NSPredicate(format: "label BEGINSWITH 'Still waiting on the computer'")
-        ).firstMatch
-        XCTAssertTrue(notice.waitForExistence(timeout: 15), "the unconfirmed notice")
-        XCTAssertNotNil(
-            notice.label.range(
-                of: #"^Still waiting on the computer, \d+ seconds?\.$"#, options: .regularExpression),
-            notice.label)
-    }
-
     /// The same card at a reading size, where the command does fit.
     func testMediumCardIsArmedWhenTheCommandFitsAtMedium() {
         let app = launch(size: .medium, openingCard: Self.mediumRequestID)
@@ -640,70 +684,5 @@ final class DeckUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(chip.waitForExistence(timeout: 25), "file chips name what changed")
         attach(app, "diff")
-    }
-
-    // MARK: Helpers
-
-    private func openDeck(_ app: XCUIApplication) {
-        let bar = app.buttons["deck-bar"]
-        XCTAssertTrue(bar.waitForExistence(timeout: 25), "the deck bar is the way in")
-        bar.tap()
-        XCTAssertTrue(
-            app.navigationBars["Waiting for you"].waitForExistence(timeout: 20), "the deck opened")
-    }
-
-    /// Sends the top card to the back of the queue.
-    ///
-    /// At accessibility sizes `Come back to this` leaves the pinned action bar
-    /// and lands in the card's own footer — four stacked controls in the bar
-    /// measured 440pt at AX5 and left the document a four-line sliver — so it
-    /// has to be scrolled to. That scroll is on the card being *postponed*, and
-    /// the card that comes forward gets a fresh gate.
-    private func postponeTopCard(_ app: XCUIApplication) {
-        let later = app.buttons.matching(identifier: "deck-later").firstMatch
-        XCTAssertTrue(later.waitForExistence(timeout: 25))
-        scrollUntil(app, "`Come back to this` is reachable") { later.isHittable }
-        later.tap()
-    }
-
-    /// Scrolls the document until `condition` holds, or fails saying what it was
-    /// waiting for. A test that gives up silently is worse than no test.
-    private func scrollUntil(
-        _ app: XCUIApplication, _ what: String, attempts: Int = 12,
-        condition: () -> Bool
-    ) {
-        for _ in 0..<attempts {
-            if condition() { return }
-            dragUp(app)
-        }
-        XCTAssertTrue(condition(), "gave up scrolling before \(what)")
-    }
-
-    /// A controlled press-and-drag inside the readable strip.
-    ///
-    /// **Not `swipeUp()`.** Measured on the Deck at AX5: five consecutive
-    /// `app.swipeUp()` calls moved the card's scroll view exactly zero points —
-    /// the flick's end point lands in the navigation bar and the gesture is
-    /// never delivered to the scroll view. A press, a drag between two points
-    /// that are both inside the document, and a release scrolls every time.
-    private func dragUp(_ app: XCUIApplication) {
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
-            .press(
-                forDuration: 0.05,
-                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
-    }
-
-    /// `firstMatch` throughout: SwiftUI's `safeAreaInset` renders the action bar
-    /// into the hierarchy more than once, so an exact query is ambiguous even
-    /// when only one is on screen.
-    private func allowButton(_ app: XCUIApplication, tool: String) -> XCUIElement {
-        app.buttons.matching(identifier: "Allow this \(tool) call").firstMatch
-    }
-
-    private func attach(_ app: XCUIApplication, _ name: String) {
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = name
-        shot.lifetime = .keepAlways
-        add(shot)
     }
 }
