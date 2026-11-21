@@ -7,6 +7,10 @@ User-facing changes, newest first. Mac releases are cut per
 
 - On the Mac, a Claude Code run's model reads as the model's id, such as claude-sonnet-5-5, after the run has ended
   too, as on the iPhone; an ended run used to show Claude Code's receipt of the change, "sonnet (claude-sonnet-5-5)".
+- On the iPhone, VoiceOver reads the way back to the latest event with its count, such as "Jump to the latest event,
+  3 new", as on the Mac.
+- On the iPhone, a card that asks for a name, such as New folder, is answered from the keyboard as on the Mac: its
+  acting answer is drawn as the card's main button, and the keyboard's done key gives it once a name is typed.
 
 ## CodeConnect 0.19.4, with the iPhone app 1.1.21
 
