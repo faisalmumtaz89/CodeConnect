@@ -53,14 +53,18 @@ User-facing changes, newest first. Mac releases are cut per
   with the file and lines it is about.
 - On the Mac, Return sends and Shift-Return or Option-Return adds a line, in the reply box, in a card's answer to
   the agent and in a comment on a diff. Shift-Return used to send a message half-written.
+- On the Mac, as on the iPhone, typing "/" in a Claude Code run's reply box shows the commands the app answers
+  itself, /model, /effort, /compact, /clear and /diff, with "Run other commands on the computer." under a bare "/",
+  and the letters after it narrow them. The arrow keys move between them and Return or a click runs one; Esc or a
+  click outside closes the list and keeps the words, so the next Return sends them as typed. A Codex run shows none.
 - On the Mac, a run whose history has a hole now says so where it happened, as the iPhone does ("Resynced, 12
   events not shown."), as a notice row with Dismiss; both apps place it by one rule in the Kit.
 - A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
   give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
   still cut.
-- On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list is one Tab
-  stop, Return in the run list puts the cursor in the open run's reply box, and Start opens with the keyboard in
-  its folder search.
+- On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list and the open
+  run's conversation is one Tab stop, Return in the run list puts the cursor in the open run's reply box, and
+  Start opens with the keyboard in its folder search.
 - On the Mac, Help › CodeConnect Support opens the support page, and Settings stays above the Dock. Settings is
   drawn by the app, with its title in the app's type and the run pane's underlined tabs, and a question in it
   covers the whole window. In Settings › Folders each folder's word, button and Forget line up in columns.
