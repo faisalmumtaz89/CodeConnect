@@ -127,6 +127,27 @@ final class PaletteContentTests: XCTestCase {
         }
     }
 
+    /// The palette's keys: the first row lit, ↑ and ↓ move the light and stop at the ends, Return runs the lit row,
+    /// ⇧/⌥Return add a line, Esc closes it; with no palette every key is the box's but ⇧/⌥Return. Must-fail: Return
+    /// with a row lit falls through to the box and sends the fragment as typed.
+    func testThePalettesKeys() {
+        func outcome(_ key: SlashPalette.Key, rows: Int = 3, lit: Int = 0) -> SlashPalette.KeyOutcome {
+            SlashPalette.outcome(of: key, rows: rows, highlighted: lit)
+        }
+        XCTAssertEqual(outcome(.return(addsLine: false)), .run(0), "Return runs the first row, lit when it shows")
+        XCTAssertEqual(outcome(.return(addsLine: false), lit: 2), .run(2))
+        XCTAssertEqual(outcome(.down), .highlight(1))
+        XCTAssertEqual(outcome(.down, lit: 2), .highlight(2), "↓ stops at the last row")
+        XCTAssertEqual(outcome(.up, lit: 1), .highlight(0))
+        XCTAssertEqual(outcome(.up), .highlight(0), "↑ stops at the first row")
+        XCTAssertEqual(outcome(.escape), .close)
+        XCTAssertEqual(outcome(.return(addsLine: true)), .addLine, "⇧/⌥Return adds a line over the palette")
+        for key: SlashPalette.Key in [.up, .down, .escape, .return(addsLine: false)] {
+            XCTAssertEqual(outcome(key, rows: 0), .toBox, "no palette: \(key)")
+        }
+        XCTAssertEqual(outcome(.return(addsLine: true), rows: 0), .addLine)
+    }
+
     /// A tapped row and the typed command resolve to the same action — the
     /// palette can never do something typing would not.
     func testRowActionsMatchTheTypedPolicy() {
