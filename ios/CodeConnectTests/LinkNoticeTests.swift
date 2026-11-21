@@ -62,13 +62,16 @@ final class LinkNoticeTests: XCTestCase {
         XCTAssertEqual(shown.action, "Try again")
     }
 
-    func testARefusalSaysItsOwnWordWithSettings() throws {
+    /// A different version is cured by updating, then asking again, so its action is Try again on both apps; every
+    /// other refusal is cured by changing the pairing. Must-fail: `.settings` for a different version.
+    func testARefusalSaysItsOwnWordAndItsCure() throws {
         let version = "Your computer has an older CodeConnect. Update CodeConnect on it, then try again."
-        let different = try XCTUnwrap(banner(LinkHealth(
-            level: .rejected, age: nil, detail: version, cause: .refused(.differentVersion))))
+        let health = LinkHealth(level: .rejected, age: nil, detail: version, cause: .refused(.differentVersion))
+        XCTAssertEqual(health.notice?.action, .retry)
+        let different = try XCTUnwrap(banner(health))
         XCTAssertEqual(different.title, "Different version")
         XCTAssertEqual(different.message, version)
-        XCTAssertEqual(different.action, "Settings")
+        XCTAssertEqual(different.action, "Try again")
         let pair = try XCTUnwrap(banner(LinkHealth(
             level: .rejected, age: nil, detail: "The computer did not accept this device.", cause: .refused(.credential))))
         XCTAssertEqual(pair.title, "Pair again")

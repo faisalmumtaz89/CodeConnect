@@ -417,12 +417,10 @@ struct FleetList: View {
     }
 
     /// The notice's one action on the Mac, as the computer's sidebar row offers it: Try Again where the link can be
-    /// asked again (a different version too, once cured), Pair Again where the pairing or its address has to change.
+    /// asked again, Pair Again where the pairing or its address has to change.
     private func noticeAction(_ computer: AppModel, _ notice: LinkNotice) -> (title: String, run: () -> Void)? {
         switch notice.action {
         case .retry, .tailscale: return (PeerWords.tryAgain, { computer.connection.retryNow() })
-        case .settings where computer.linkHealth.cause == .refused(.differentVersion):
-            return (PeerWords.tryAgain, { computer.connection.retryNow() })
         case .settings:
             guard let address = computer.endpoint?.typedAddress else { return nil }
             return (LinkHealth.pairAgain, { pairAgain(address) })
