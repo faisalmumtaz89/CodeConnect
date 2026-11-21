@@ -1003,6 +1003,20 @@ public final class AppModel {
                     }
                 }
             }
+            // **`-CC_FIXTURE_TAIL_EVENTS <n>`** lands n more of `fx-5`'s tool calls, 20 ms apart, from 2.4 s in: a
+            // run that keeps working while the reader reads, for a load no fixture's own frames reach.
+            let tailEvents = UserDefaults.standard.integer(forKey: "CC_FIXTURE_TAIL_EVENTS")
+            if tailEvents > 0 {
+                Task { @MainActor [weak connection] in
+                    try? await Task.sleep(for: .milliseconds(2400))
+                    for index in 0..<tailEvents {
+                        if let frame = Fixtures.tailEvent(seq: UInt64(28 + index)) {
+                            connection?.injectForTesting(frame)
+                        }
+                        try? await Task.sleep(for: .milliseconds(20))
+                    }
+                }
+            }
             if lateApprovalsMS > 0,
                 let first = frames.firstIndex(where: {
                     if case .event(let event) = $0 { return event.kind == .approvalRequest }

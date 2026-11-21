@@ -859,6 +859,15 @@ enum Fixtures {
         ]
     }
 
+    /// One more of `fx-5`'s calls, at `seq`, for `-CC_FIXTURE_TAIL_EVENTS`.
+    static func tailEvent(seq: UInt64) -> ServerMessage? {
+        decode(
+            #"{"type":"event","event":{"seq":\#(seq),"session_id":"fx-5","ts":"\#(rfc3339(Date()))","#
+                + #""kind":"tool_call","source":"hook","#
+                + #""payload":{"tool_use_id":"toolu_tail_\#(seq)","tool_name":"Bash","#
+                + #""tool_input":{"command":"./soak/run.sh --tail \#(seq)"}}}}"#)
+    }
+
     /// `fx-5`'s next call: a real MCP tool, whose name alone is wider than a row.
     private static func wideToolJSON(now: Date) -> String {
         """

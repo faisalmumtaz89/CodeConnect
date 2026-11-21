@@ -26,6 +26,7 @@ struct ConversationTable: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView { context.coordinator.scroll }
 
     func updateNSView(_ view: NSScrollView, context: Context) {
+        noteFollow("UPDATE")
         context.coordinator.show(items, drawnThrough: drawnThrough, model: model)
     }
 
@@ -48,7 +49,14 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private var model: AppModel
     private let key: String
     private let tail: Tail
+    /// The way back to the end: assigned from `away` and `arrived` when they change, never read here, so nothing this
+    /// column does during a view update depends on what it writes.
     private let latest: Latest
+    private var away = false
+    /// Rows that arrived while the reader was away from the end.
+    private var arrived = 0
+    /// What `latest.count` was last given.
+    private var shownArrived = 0
     /// Where the timeline ended at the last `show`.
     private var end: TimelineEnd?
     private var entries: [Entry] = []
@@ -121,12 +129,8 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     /// afresh.
     func show(_ items: [TimelineItem], drawnThrough: UInt64, model: AppModel) {
         self.model = model
-        // Rows that arrived while the reader was away from the end, as the iPhone counts them. Written only when there
-        // are some: every write repaints the pill and comes back here, and a write of nothing would come back for ever.
-        if let end, !layout.following {
-            let arrived = TimelineEnd.rowsAfter(end, in: items)
-            if arrived > 0 { latest.count += arrived }
-        }
+        // Rows that arrived while the reader was away from the end, as the iPhone counts them.
+        if let end, !layout.following { arrived += TimelineEnd.rowsAfter(end, in: items) }
         end = TimelineEnd(items, drawnThrough: drawnThrough)
         let places = TimelineItem.places(items)
         let next = [Entry(place: Self.earlier, item: nil)] + zip(places, items).map { Entry(place: $0, item: $1) }
@@ -316,9 +320,16 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     /// The way back to the end shows while the reader is away from it and not already there; back at the end, nothing
     /// is new.
     private func noteLatest() {
-        let away = !layout.following && !layout.isAtEnd
-        if latest.away != away { latest.away = away }
-        if layout.following, latest.count != 0 { latest.count = 0 }
+        let nowAway = !layout.following && !layout.isAtEnd
+        if layout.following { arrived = 0 }
+        if nowAway != away {
+            away = nowAway
+            latest.away = nowAway
+        }
+        if arrived != shownArrived {
+            shownArrived = arrived
+            latest.count = arrived
+        }
     }
 
     /// To the end, as End takes the reader there: the column follows again from there.
