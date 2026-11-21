@@ -39,17 +39,16 @@ public final class AppSettings {
         self.defaults = defaults
         let storedDiff = defaults.double(forKey: Key.diffFontSize)
         diffFontSize = Self.diffFontRange.contains(storedDiff) ? storedDiff : 12
-        var persists = true
+        let stored = (defaults.stringArray(forKey: Key.projectOrder) ?? []).compactMap(ProjectKey.init(stored:))
         #if DEBUG
             let underTest =
                 defaults.string(forKey: "CC_FIXTURE") != nil
                 || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            persists = !underTest || defaults.bool(forKey: "CC_FIXTURE_KEEP_ORDER")
+            persistsProjectOrder = !underTest || defaults.bool(forKey: "CC_FIXTURE_KEEP_ORDER")
+            projectOrder = persistsProjectOrder ? stored : []
+        #else
+            persistsProjectOrder = true
+            projectOrder = stored
         #endif
-        persistsProjectOrder = persists
-        projectOrder =
-            persists
-            ? (defaults.stringArray(forKey: Key.projectOrder) ?? []).compactMap(ProjectKey.init(stored:))
-            : []
     }
 }
