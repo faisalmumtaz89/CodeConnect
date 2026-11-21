@@ -509,6 +509,12 @@ struct UnderlineTab: View {
     }
 }
 
+/// `text` on the general pasteboard as plain text, in place of whatever it held: every Copy in the app.
+@MainActor func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
 /// A block's Copy, as the iPhone's code block draws it: the glyph alone at the block's trailing edge, centred on the
 /// whole block it copies, a check in green for a moment once it has. The block keeps `slot` clear at its trailing edge
 /// for its whole height, so the end of a line, a command's above all, is never under it.
@@ -540,8 +546,7 @@ struct CopyButton: View {
     }
 
     private func copy() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        copyToPasteboard(text)
         reset?.cancel()
         copied = true
         reset = Task {

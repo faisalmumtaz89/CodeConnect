@@ -63,8 +63,7 @@ private struct ResumeCommand: View {
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
                     .accessibilityIdentifier("session.resume.command")
                 ActionButton(title: copied ? "Copied" : "Copy", key: nil, prominent: false, id: "session.resume.copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(command, forType: .string)
+                    copyToPasteboard(command)
                     copied = true
                 }
             }
