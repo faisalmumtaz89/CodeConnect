@@ -172,7 +172,7 @@ struct FleetView: View {
         let held = holdingChanges(scroll, screen)
         let navigated = navigation(held, screen)
         let presented = presentations(navigated, screen)
-        return lifecycle(presented)
+        return lifecycle(presented, screen)
     }
 
     private func fleetScroll(_ screen: FleetScreen) -> some View {
@@ -464,7 +464,7 @@ struct FleetView: View {
             }
     }
 
-    private func lifecycle(_ list: some View) -> some View {
+    private func lifecycle(_ list: some View, _ screen: FleetScreen) -> some View {
         list
             // Only a computer's removal clears the list's filter, as on the Mac: a project with no runs left keeps
             // its chip over its empty line.
@@ -474,10 +474,9 @@ struct FleetView: View {
             #if DEBUG
                 // `-CC_FILTER <name>`: the list narrowed to the computer, or failing that the project, of that name,
                 // once the fleet has it.
-                .onChange(of: FleetFilterChoices(machines: machines).computers.count
-                    + FleetFilterChoices(machines: machines).projects.count, initial: true) { _, _ in
+                .onChange(of: screen.choices.computers.count + screen.choices.projects.count, initial: true) { _, _ in
                     guard filter == nil, let wanted = UserDefaults.standard.string(forKey: "CC_FILTER") else { return }
-                    let choices = FleetFilterChoices(machines: machines)
+                    let choices = screen.choices
                     if let choice = (choices.computers + choices.projects).first(where: { $0.name == wanted }) {
                         narrow(to: choice.filter)
                     }
@@ -536,6 +535,8 @@ struct FleetView: View {
         /// a card has arrived, and then the bar rises.
         let risks: [RiskClass: Int]
         let hasLiveFleet: Bool
+        /// What the title's menu offers, from the same rows.
+        let choices: FleetFilterChoices
 
         /// The daemon has said there is no session, as opposed to not having
         /// said anything yet.
@@ -650,7 +651,8 @@ struct FleetView: View {
             risks: deck.reduce(into: [:]) {
                 $0[$1.assessment(profile: machines.profile(forSession: $1.sessionKey)).effective, default: 0] += 1
             },
-            hasLiveFleet: machines.hasLiveFleet)
+            hasLiveFleet: machines.hasLiveFleet,
+            choices: FleetFilterChoices(machines: machines, fleet: every))
     }
 
     /// The model of the machine this session is on.
@@ -674,7 +676,7 @@ struct FleetView: View {
     private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-                title
+                title(screen)
                 CCAdaptiveSpacer(minLength: CC.space.sm)
                 // The pill is always in its place, unseen and inert while the list
                 // holds nothing back, and always one line: the whole change where
@@ -711,8 +713,8 @@ struct FleetView: View {
 
     /// The large title: a menu of what the list can be narrowed to, when there is a choice.
     @ViewBuilder
-    private var title: some View {
-        let choices = FleetFilterChoices(machines: machines)
+    private func title(_ screen: FleetScreen) -> some View {
+        let choices = screen.choices
         if choices.offered {
             FleetFilterMenu(choices: choices, chosen: Binding(get: { filter }, set: { narrow(to: $0) }))
         } else {

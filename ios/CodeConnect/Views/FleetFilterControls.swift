@@ -1,8 +1,9 @@
 import CodeConnectKit
 import SwiftUI
 
-/// What the fleet can be narrowed to: every computer the list names, then every project, each a
-/// `FleetFilter`. Offered only when there are two or more of either, the Mac's rule.
+/// What the fleet can be narrowed to: every computer the list names, then every project in `fleet`, each a
+/// `FleetFilter`. Offered only when there are two or more of either, the Mac's rule. Built with the screen, from the
+/// rows it already read, so a screen held behind a chat or the Deck reads no session for it.
 struct FleetFilterChoices {
     struct Choice: Identifiable {
         let filter: FleetFilter
@@ -15,11 +16,11 @@ struct FleetFilterChoices {
     let computers: [Choice]
     let projects: [Choice]
 
-    @MainActor init(machines: Machines) {
+    @MainActor init(machines: Machines, fleet: [FleetRow]) {
         computers = machines.models.filter(\.showsFleet).compactMap { model in
             model.machineName.map { Choice(filter: .computer(model.machineID ?? ""), name: $0, computer: nil) }
         }
-        projects = FleetGroup.groups(machines.fleet.filter { $0.status != .ended }, by: .project).map {
+        projects = FleetGroup.groups(fleet.filter { $0.status != .ended }, by: .project).map {
             Choice(filter: .project($0.id), name: $0.name, computer: $0.computer)
         }
     }
@@ -52,6 +53,7 @@ struct FleetFilterMenu: View {
             }
             // Whole on one line beside the held-change pill, which gives way to its count instead.
             .fixedSize()
+            .ccHitTarget(minWidth: 0)
         }
         .accessibilityLabel("\(FleetWords.projects), show")
         .accessibilityIdentifier("fleet-filter-menu")
