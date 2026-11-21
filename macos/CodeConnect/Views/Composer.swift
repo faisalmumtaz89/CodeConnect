@@ -110,9 +110,8 @@ private struct Composer: View {
     @State private var opener: String?
     /// The slash palette's lit row, the first whenever it shows.
     @State private var slashLit = 0
-    /// The draft the slash palette was closed on (Esc, a click outside, a row run): it stays closed until the draft
-    /// changes, so the next Return sends the words as typed.
-    @State private var slashClosed: String?
+    /// Whether the slash palette is closed on the draft as it stands (Kit's `SlashPalette.Latch`).
+    @State private var slashLatch = SlashPalette.Latch()
     @State private var slashHeight: CGFloat = 0
 
     private struct Running: Equatable {
@@ -132,13 +131,12 @@ private struct Composer: View {
     /// `SlashPalette`: the commands this app answers itself, as the iPhone offers them). A Codex run has no slash
     /// vocabulary.
     private var slash: SlashPalette.Content? {
-        guard summary?.agent == .claude, fieldFocused, panel == nil, slashClosed != kept.reply else { return nil }
-        return SlashPalette.content(for: kept.reply)
+        slashLatch.content(for: kept.reply, claudeRun: summary?.agent == .claude, focused: fieldFocused && panel == nil)
     }
 
     /// A palette row, as the typed command would go: the same `route`, then the palette stays closed.
     private func runSlash(_ row: SlashRow) {
-        slashClosed = kept.reply
+        slashLatch.close()
         route(row.action, draft: kept.reply)
     }
 
@@ -202,7 +200,7 @@ private struct Composer: View {
                 // row, as ↓ would.
                 if RenderWindow.reply?.hasPrefix("/") == true {
                     try? await Task.sleep(for: .seconds(1))
-                    slashClosed = nil
+                    slashLatch.edited()
                     fieldFocused = true
                     try? await Task.sleep(for: .milliseconds(300))
                     slashLit = RenderWindow.slashLit
@@ -273,7 +271,7 @@ private struct Composer: View {
                     switch SlashPalette.outcome(of: key, rows: slash.rows.count, highlighted: slashLit) {
                     case .highlight(let row): slashLit = row
                     case .run(let row): runSlash(slash.rows[row])
-                    case .close: slashClosed = kept.reply
+                    case .close: slashLatch.close()
                     case .addLine, .toBox: return .ignored
                     }
                     return .handled
@@ -338,8 +336,11 @@ private struct Composer: View {
             }
         }
         // Around the box and its palette: a click outside or Esc closes the palette and keeps the words.
-        .closesPanel(Binding(get: { slash != nil }, set: { if !$0 { slashClosed = kept.reply } }))
-        .onChange(of: kept.reply) { slashLit = 0 }
+        .closesPanel(Binding(get: { slash != nil }, set: { if !$0 { slashLatch.close() } }))
+        .onChange(of: kept.reply) {
+            slashLit = 0
+            slashLatch.edited()
+        }
     }
 
     private var sendButton: some View {

@@ -277,6 +277,26 @@ public enum SlashPalette {
         return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
     }
 
+    /// Whether the palette is closed on the draft as it stands. Esc, a click outside or a row run close it; any edit of
+    /// the draft opens it again, so the same words typed again show it again, and words left after Esc are sent as
+    /// typed by the next Return.
+    public struct Latch: Equatable, Sendable {
+        public private(set) var closed = false
+
+        public init() {}
+
+        public mutating func close() { closed = true }
+
+        /// The draft changed.
+        public mutating func edited() { closed = false }
+
+        /// The palette for `draft` on a Claude run whose reply box has the keyboard, unless it is closed.
+        public func content(for draft: String, claudeRun: Bool, focused: Bool) -> Content? {
+            guard claudeRun, focused, !closed else { return nil }
+            return SlashPalette.content(for: draft)
+        }
+    }
+
     /// A key pressed in the reply box while it may show the palette.
     public enum Key: Sendable {
         case up, down, escape

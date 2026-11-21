@@ -127,6 +127,25 @@ final class PaletteContentTests: XCTestCase {
         }
     }
 
+    /// The palette closes when a row runs, on Esc and on a click outside, and comes back on the next edit: after
+    /// /model ran from "/", clearing the box and typing "/" again shows it again. Must-fail: a close that outlasts the
+    /// edit (the latch kept the draft it closed on, and "/" typed again matched it), so Return sent a bare "/".
+    func testThePaletteComesBackOnTheNextEdit() {
+        var latch = SlashPalette.Latch()
+        XCTAssertNotNil(latch.content(for: "/", claudeRun: true, focused: true))
+        latch.close()  // /model ran from the palette
+        XCTAssertNil(latch.content(for: "/", claudeRun: true, focused: true), "closed on the draft it ran from")
+        latch.edited()  // ⌘A Delete
+        latch.edited()  // "/"
+        XCTAssertNotNil(latch.content(for: "/", claudeRun: true, focused: true), "the same words typed again show it")
+        latch.close()  // Esc on "/c"
+        XCTAssertNil(latch.content(for: "/c", claudeRun: true, focused: true), "Esc keeps it closed on the words")
+        latch.edited()  // "/cl"
+        XCTAssertEqual(latch.content(for: "/cl", claudeRun: true, focused: true)?.rows.map(\.command), ["clear"])
+        XCTAssertNil(latch.content(for: "/", claudeRun: false, focused: true), "a Codex run has no palette")
+        XCTAssertNil(latch.content(for: "/", claudeRun: true, focused: false), "nor a box without the keyboard")
+    }
+
     /// The palette's keys: the first row lit, ↑ and ↓ move the light and stop at the ends, Return runs the lit row,
     /// ⇧/⌥Return add a line, Esc closes it; with no palette every key is the box's but ⇧/⌥Return. Must-fail: Return
     /// with a row lit falls through to the box and sends the fragment as typed.
