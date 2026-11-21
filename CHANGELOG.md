@@ -30,6 +30,10 @@ User-facing changes, newest first. Mac releases are cut per
   is, one of its worktrees, a new worktree for a branch, or a new one by name, from a Branch menu under the
   folder. New branch… puts the name field in the row with the keyboard in it, and Start waits until the name is
   good.
+- On the Mac, a run can start in any folder of a computer that is not this Mac, as on the iPhone: Browse… shows
+  the folder's path, ".." and its folders in the Folder box, a double-click or Return goes in, and Use This Folder
+  starts there, with Show hidden folders and New Folder… beside it. On both apps the browser says which folder
+  the computer is reading while it lists it, and New Folder's Create waits for a name.
 - On the Mac, every panel closes on a click outside it, on Esc or when the window is resized, each act in a "…"
   panel has an icon, End Run…, Remove… and Clear… in red, and a row's "…" menu opens over every row, at its dots
   or wherever a right-click on the row lands.
@@ -44,6 +48,11 @@ User-facing changes, newest first. Mac releases are cut per
   copies the run's folder whole, as the iPhone's run does.
 - On the Mac, a reader who scrolls up in a conversation has a way back at its foot, as on the iPhone: a pill that
   reads "Latest", or how many new rows arrived ("2 new"), and takes them to the end with a click.
+- On the Mac, as on the iPhone, a diff hunk in a run's Changes has Comment to Agent…, Copy Hunk and Copy File
+  Path, from the "…" on its header or a right-click; the comment is typed under the header and goes to the agent
+  with the file and lines it is about.
+- On the Mac, Return sends and Shift-Return or Option-Return adds a line, in the reply box, in a card's answer to
+  the agent and in a comment on a diff. Shift-Return used to send a message half-written.
 - A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
   give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
   still cut.
