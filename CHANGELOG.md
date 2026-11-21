@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.6, with the iPhone app 1.1.23
+
+- On the Mac, the conversation shows a ring in the focus colour while it has the keyboard, so after Tab it is clear
+  where the arrow, Page, Home and End keys will scroll; the ring goes when the keyboard moves on or the window is not
+  in front.
+
 ## CodeConnect 0.19.5, with the iPhone app 1.1.22
 
 - On the Mac, a Claude Code run's model reads as the model's id, such as claude-sonnet-5-5, after the run has ended
