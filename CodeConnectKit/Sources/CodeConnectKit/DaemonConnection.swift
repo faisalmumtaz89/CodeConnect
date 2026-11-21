@@ -347,7 +347,7 @@ public final class DaemonConnection {
     /// than that has already failed here, so dropping its link loses nothing
     /// more. A network that vanished leaves a socket that accepts writes and
     /// delivers nothing, which only this silence reveals.
-    static let silenceDeadline: TimeInterval = 30
+    nonisolated static let silenceDeadline: TimeInterval = 30
     /// Comfortably longer than the daemon's own 10s handshake window.
     private static let handshakeTimeout: Duration = .seconds(15)
     nonisolated private static let maxBackoff: Double = 30

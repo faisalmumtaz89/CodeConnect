@@ -23,7 +23,7 @@ struct Conversation: View {
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { tail.wake() }
             }
-            .onAppear {
+            .onAppear { [weak model] in
                 tail.reachedTop = { [weak model, key] in model?.reachedTop(key: key) }
                 tail.pageBackOnItsOwn = { [weak model, key] in model?.pageBackOnItsOwn(key: key) }
             }
