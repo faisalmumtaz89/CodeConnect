@@ -42,6 +42,8 @@ User-facing changes, newest first. Mac releases are cut per
   the iPhone; the list already updates on its own, so Refresh is there for when you want to be sure.
 - On the Mac, a run's "…" menu, at its dots or on a right-click on its row, offers Copy Working Directory, which
   copies the run's folder whole, as the iPhone's run does.
+- On the Mac, a reader who scrolls up in a conversation has a way back at its foot, as on the iPhone: a pill that
+  reads "Latest", or how many new rows arrived ("2 new"), and takes them to the end with a click.
 - A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
   give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
   still cut.
