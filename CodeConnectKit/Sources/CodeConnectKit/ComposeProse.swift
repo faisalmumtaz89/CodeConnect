@@ -205,18 +205,16 @@ extension AppModel {
         return nil
     }
 
-    /// The line above the composer when nothing was just sent: why sending cannot work, else "observe only"
-    /// (offering "Why?"), else nil.
+    /// The line above the composer when nothing was just sent: why sending cannot work, else "observe only" with the
+    /// run's own reason it cannot be answered from here (offering "Why?"), else nil.
     public func standingNote(for key: String, draft: String) -> ComposeProse.Note? {
         if let reason = sendBlockedReason(for: key, draft: draft) {
             return ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill")
         }
         if let summary = shownSummary(for: key),
-            !FleetStatusRule.capability(summary: summary, capabilities: connection.capabilities).canAct
+            let reason = FleetStatusRule.capability(summary: summary, capabilities: connection.capabilities).reason
         {
-            let computer = HostDevice.current.computer("the computer")
-            return ComposeProse.Note(
-                text: "Observe only - answers are given at \(computer).", tone: .neutral, icon: nil, offersWhy: true)
+            return ComposeProse.Note(text: "Observe only. \(reason)", tone: .neutral, icon: nil, offersWhy: true)
         }
         return nil
     }
