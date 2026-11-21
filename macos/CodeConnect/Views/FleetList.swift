@@ -180,6 +180,8 @@ struct FleetList: View {
                                     // while the run is live, or Remove… once it has ended (an adopted run's at any
                                     // time); for VoiceOver, which does not hover, that is the row's own action.
                                     .accessibilityActions {
+                                        Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
+                                            .accessibilityIdentifier("fleet.row.\(row.id).copyWorkingDirectoryAction")
                                         if endable {
                                             Button("End Run…") { ending = row }
                                                 .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
@@ -197,7 +199,7 @@ struct FleetList: View {
                                         guard endable || removable, !selecting else { return }
                                         RunMore.show(
                                             menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
-                                            action: endable ? .endRun : .remove
+                                            action: endable ? .endRun : .remove, copies: row.summary.cwd
                                         ) { if endable { ending = row } else { removing = row } }
                                     }
                                     .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
@@ -336,7 +338,7 @@ struct FleetList: View {
     /// The row's "…" while it is shown: on hover, or while its panel is open.
     @ViewBuilder private func moreButton(_ row: FleetRow, endable: Bool, shown: Bool) -> some View {
         if shown {
-            RunMore(id: "fleet.row.\(row.id).more", action: endable ? .endRun : .remove) {
+            RunMore(id: "fleet.row.\(row.id).more", action: endable ? .endRun : .remove, copies: row.summary.cwd) {
                 if endable { ending = row } else { removing = row }
             }
             .padding(.trailing, 16)
@@ -641,8 +643,9 @@ private struct FleetLine: View {
 }
 
 /// A row's "…" (a run's, or a computer's in the sidebar): it opens the window's row menu (`RowMenu`) below itself,
-/// holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent. A right-click
-/// on the row opens the same menu at the pointer (`RunMore.show`).
+/// holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent; a run's menu
+/// first offers Copy Working Directory, its folder as the computer names it, as the iPhone's run offers it. A
+/// right-click on the row opens the same menu at the pointer (`RunMore.show`).
 struct RunMore: View {
     enum Action {
         case endRun, remove
@@ -655,6 +658,8 @@ struct RunMore: View {
     static let width: CGFloat = 26
     let id: String
     let action: Action
+    /// A run's folder, which the menu's first item copies; none for a computer.
+    var copies: String? = nil
     let perform: () -> Void
     #if DEBUG
         /// A render's `-CC_RUN_MENU <uid>` names this run's "…", or `-CC_COMPUTER_MENU` a computer's: once shown, it
@@ -670,7 +675,7 @@ struct RunMore: View {
     private var open: Bool { menu.shown?.owner == id }
 
     var body: some View {
-        Button { Self.show(menu, at: frame, id: id, action: action, perform: perform) } label: {
+        Button { Self.show(menu, at: frame, id: id, action: action, copies: copies, perform: perform) } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.text2)
@@ -691,21 +696,27 @@ struct RunMore: View {
                 guard opensAtLaunch else { return }
                 // After the render has sized and placed its window, as a click comes on a window at rest.
                 try? await Task.sleep(for: .seconds(1))
-                Self.show(menu, at: frame, id: id, action: action, perform: perform)
+                Self.show(menu, at: frame, id: id, action: action, copies: copies, perform: perform)
             }
         #endif
     }
 
-    /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect), its one item acting on the
-    /// row's own subject through `perform`.
+    /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect): Copy Working Directory when
+    /// it `copies` a folder, then the act on the row's own subject through `perform`.
     @MainActor static func show(
-        _ menu: RowMenu, at rect: CGRect, id: String, action: Action, perform: @escaping () -> Void
+        _ menu: RowMenu, at rect: CGRect, id: String, action: Action, copies: String? = nil,
+        perform: @escaping () -> Void
     ) {
-        menu.toggle(rect, owner: id, items: [
+        let copy = copies.map { folder in
+            RowMenu.Item(id: "\(id).copyWorkingDirectory", title: "Copy Working Directory", symbol: PanelSymbol.copy,
+                         destructive: false) { copyToPasteboard(folder) }
+        }
+        menu.toggle(rect, owner: id, items: [copy].compactMap { $0 } + [
             RowMenu.Item(id: "\(id).\(action.id)", title: action.title, symbol: action.symbol, destructive: true,
                          perform: perform)
         ])
     }
+
 }
 
 /// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name.
