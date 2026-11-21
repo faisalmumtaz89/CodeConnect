@@ -71,8 +71,9 @@ User-facing changes, newest first. Mac releases are cut per
   drawn by the app, with its title in the app's type and the run pane's underlined tabs, and a question in it
   covers the whole window. In Settings › Folders each folder's word, button and Forget line up in columns.
 - On the Mac, a computer whose link isn't working says why under its name, in the iPhone's words, with Try Again
-  or Pair Again beside it and the whole sentence when the pointer rests on it. The list narrowed to that computer
-  says the sentence in full, and the computer's group header names its state.
+  or Pair Again beside it and the whole sentence when the pointer rests on it. With Tailscale off on this Mac it
+  offers Open Tailscale, as the iPhone does, when the Tailscale app is installed, and Try Again when it isn't.
+  The list narrowed to that computer says the sentence in full, and the computer's group header names its state.
 - Both apps draw one green, amber, red and three text greys: the iPhone's green, amber and greys take the Mac's
   values, and the quietest grey is lighter on the Mac, as on the iPhone, so it can be read on every ground.
 - Settings › Devices lists each device under its own name, a Mac's computer name or "iPhone", in place of
