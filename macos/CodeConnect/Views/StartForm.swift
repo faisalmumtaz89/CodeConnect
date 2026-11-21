@@ -196,10 +196,12 @@ struct StartForm: View {
                 if let context {
                     computerRow(context)
                         // Its panel opens below it, over what follows.
-                        .zIndex(computerMenuOpen ? 1 : 0)
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(AddSheet.space)).minY } action: {
                             rowsTop = $0
                         }
+                        // Its last modifier: a modifier after it hides it from the stack, which then draws the Folder
+                        // section over the panel.
+                        .zIndex(computerMenuOpen ? 1 : 0)
                     folderRows(context)
                     if let folder, context.branchAhead(folder) {
                         BranchRow(
