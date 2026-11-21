@@ -517,3 +517,51 @@ struct UnderlineTab: View {
         .accessibilityIdentifier(id)
     }
 }
+
+/// `text` on the general pasteboard as plain text, in place of whatever it held: every Copy in the app.
+@MainActor func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
+/// A block's Copy, as the iPhone's code block draws it: the glyph alone at the block's trailing edge, centred on the
+/// whole block it copies, a check in green for a moment once it has. The block keeps `slot` clear at its trailing edge
+/// for its whole height, so the end of a line, a command's above all, is never under it.
+struct CopyButton: View {
+    let text: String
+    let id: String
+    @State private var copied = false
+    @State private var reset: Task<Void, Never>?
+
+    /// The text's trailing room: the button, its inset from the block's edge, and a gap before the text.
+    static let slot: CGFloat = size + inset + 8
+    private static let size: CGFloat = 24
+    private static let inset: CGFloat = 4
+
+    var body: some View {
+        Button(action: copy) {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(copied ? Theme.green : Theme.text3)
+                .frame(width: Self.size, height: Self.size)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 5, id: id))
+        .padding(.trailing, Self.inset)
+        .help("Copy")
+        .accessibilityLabel("Copy")
+        .accessibilityValue(copied ? "Copied" : "")
+        .accessibilityIdentifier(id)
+    }
+
+    private func copy() {
+        copyToPasteboard(text)
+        reset?.cancel()
+        copied = true
+        reset = Task {
+            try? await Task.sleep(for: .seconds(CC.duration.toast))
+            guard !Task.isCancelled else { return }
+            copied = false
+        }
+    }
+}

@@ -40,8 +40,7 @@ struct AgentNotice: View {
                             .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
                             .accessibilityIdentifier("agent.notice.command")
                         ActionButton(title: copied ? "Copied" : "Copy", key: nil, prominent: false, id: "agent.notice.copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(StartContext.claudeSignIn, forType: .string)
+                            copyToPasteboard(StartContext.claudeSignIn)
                             copied = true
                         }
                     }
