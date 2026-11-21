@@ -50,7 +50,7 @@ struct BranchRow: View {
         .closesPanel($open)
     }
 
-    private static let space = "start.branch.row"
+    private nonisolated static let space = "start.branch.row"
     /// The least a menu keeps from the sheet's edges.
     private static let margin: CGFloat = 8
 

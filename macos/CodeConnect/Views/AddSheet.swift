@@ -92,7 +92,7 @@ struct AddSheet: View {
     @State private var height: CGFloat = 0
 
     /// The sheet's own coordinates, top-left origin, in which a panel inside it finds the room it has.
-    static let space = "add.sheet"
+    nonisolated static let space = "add.sheet"
 }
 
 extension EnvironmentValues {
