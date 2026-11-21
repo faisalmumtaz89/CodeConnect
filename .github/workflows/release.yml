@@ -72,6 +72,10 @@ jobs:
   pin:
     name: Pin the release commit
     runs-on: ubuntu-latest
+    # Reading CI's runs needs actions: read; this job writes nothing.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       sha: ${{ steps.pin.outputs.sha }}
       version: ${{ steps.pin.outputs.version }}
@@ -120,6 +124,30 @@ jobs:
             echo "dir=codeconnect-$version"
           } >> "$GITHUB_OUTPUT"
           echo "$tag is $sha"
+
+      # "Do not tag until the release commit is green" (RELEASING.md), held
+      # here. The newest push run of ci.yml for this exact commit must have
+      # finished and passed: a red, cancelled or still running one, or none,
+      # is a refusal. A tag pushed before CI is done is built later by running
+      # this workflow for the tag. Workflow runs rather than check runs: the
+      # commit's check runs include this workflow's own jobs.
+      - name: Refuse a commit that CI has not passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=100" \
+            --jq '.workflow_runs | max_by(.created_at) // empty | "\(.status) \(.conclusion) \(.html_url)"')
+          if [ -z "$run" ]; then
+            echo "::error::CI has not run on $SHA; push it to a branch CI runs on and wait for green"
+            exit 1
+          fi
+          read -r status conclusion url <<< "$run"
+          if [ "$status $conclusion" != "completed success" ]; then
+            echo "::error::CI on $SHA is $status, $conclusion: $url"
+            exit 1
+          fi
+          echo "CI passed on $SHA: $url"
 
       # Before anything is built or signed, so a mistake costs seconds.
       - name: Refuse a release that is not newer than the published one

@@ -152,10 +152,7 @@ jobs:
           sudo xcode-select -s "$newest"
           xcodebuild -version
 
-      # Only the unit tests. The `*LiveUITests` suites drive the real app
-      # against a running `ccd` and have nothing to talk to on a runner — they
-      # skip cleanly, but running them here would buy nothing and cost several
-      # minutes of simulator boot.
+      # Only the unit tests; the UI suite is the `ios-ui` job.
       - name: Build and test
         working-directory: ios
         run: |
@@ -180,6 +177,52 @@ jobs:
             -destination "platform=iOS Simulator,name=$device" \
             -only-testing:CodeConnectTests \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
+
+  # **The iPhone UI suite, every test that needs no computer.** RELEASING.md's
+  # UI command, on the iPhone 17 Pro the tests are written for, with Xcode 27.1
+  # on the image the Mac job uses, as the app is built with. The live classes
+  # drive the app against a running `ccd`; a runner has none, so they are left
+  # out by name. A class is live when its file reads the test runner's
+  # environment, which is how the live tests get a computer's address and token
+  # (TEST_RUNNER_CC_*). The first step holds the named list to that rule, so a
+  # new live class fails this job until it is named here, and a named class
+  # that stops being live fails it too: neither is run nor skipped unseen.
+  ios-ui:
+    name: iPhone UI tests (no computer)
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      LIVE_CLASSES: >-
+        ApprovalFlowUITests EndRunLiveUITests FolderTrustLiveUITests
+        HalfOpenSendUITests LiveDaemonUITests PairingLiveUITests
+        MultiMachineLiveUITests SessionIdentityLiveUITests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The live classes named here are the live classes in the suite
+        working-directory: ios/CodeConnectUITests
+        run: |
+          found=$(grep -l 'processInfo.environment' -- *.swift \
+            | xargs sed -n 's/^final class \([A-Za-z0-9_]*\): XCTestCase.*/\1/p' | sort)
+          # shellcheck disable=SC2086
+          named=$(printf '%s\n' $LIVE_CLASSES | sort)
+          if [ "$found" != "$named" ]; then
+            echo "::error::the live classes in the suite differ from LIVE_CLASSES (< in the suite, > named)"
+            diff <(echo "$found") <(echo "$named") || true
+            exit 1
+          fi
+
+      - name: UI tests
+        working-directory: ios
+        run: |
+          xcodebuild -version
+          skip=()
+          for class in $LIVE_CLASSES; do skip+=("-skip-testing:CodeConnectUITests/$class"); done
+          xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
+            -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+            -only-testing:CodeConnectUITests "${skip[@]}" \
+            CODE_SIGNING_ALLOWED=NO
 
   # **The Mac app, compiled on every change.** Without this job only the
   # release's draft job builds macos/, so a change could break the app with

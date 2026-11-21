@@ -45,7 +45,8 @@ app that speaks it.
 
 Each block starts from the repository root.
 
-1. **Gates.** Everything CI runs, plus the UI suites CI skips:
+1. **Gates.** Everything CI runs, plus the live UI tests it leaves out (its
+   `ios-ui` job runs the rest of the UI suite; the live ones need a computer):
 
    ```sh
    (cd mac && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
@@ -93,7 +94,9 @@ Each block starts from the repository root.
    ```
 
    Wait for CI to go green on that commit before tagging it — a tag is a
-   claim the commit builds, and CI is the proof.
+   claim the commit builds, and CI is the proof. The release's pin job
+   refuses a commit whose newest CI run has not passed; a tag pushed too
+   early is built by running the Release workflow for it once CI is green.
 
    If the release changes `mac/push-relay`, deploy the relay from this commit
    first ([`ops/push-relay/README.md`](ops/push-relay/README.md#deploy-and-rollback))
