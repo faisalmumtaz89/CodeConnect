@@ -412,7 +412,7 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(
             app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "a deep link lands in the Deck, past the fleet")
-        XCTAssertTrue(app.staticTexts["Write"].firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Claude asks to use Write"].firstMatch.waitForExistence(timeout: 20))
         XCTAssertFalse(
             allowButton(app, tool: "Bash").exists,
             "the named card is on top, not the riskiest one")
@@ -586,7 +586,7 @@ final class DeckUITests: XCTestCase {
 
         postponeTopCard(app)
         XCTAssertTrue(
-            app.staticTexts["Write"].firstMatch.waitForExistence(timeout: 20),
+            app.staticTexts["Claude asks to use Write"].firstMatch.waitForExistence(timeout: 20),
             "the next card came forward")
 
         let counter = app.descendants(matching: .any).matching(identifier: "deck-count")
