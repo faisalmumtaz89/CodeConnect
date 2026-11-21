@@ -24,6 +24,28 @@ public struct GapNotice: Sendable, Hashable {
     var cause: Cause
     public var at: Date
 
+    /// Where the notice stands in a drawn timeline (`TimelineBuilder.drawn`): after the last item dated at or before
+    /// the moment the hole was seen, or after the last item when none is. Both apps draw it there.
+    public func index(in items: [TimelineItem]) -> Int {
+        items.lastIndex { $0.date <= at } ?? max(0, items.count - 1)
+    }
+
+    #if DEBUG
+        /// A render's notice from `-CC_GAP`: `jump:<n>` (n events not shown), `resync` or `resync:<n>` (the daemon
+        /// replayed, n events behind), `rewound`, `discarded`; dated `at`.
+        static func forRender(_ text: String, at: Date) -> GapNotice? {
+            let parts = text.split(separator: ":", maxSplits: 1).map(String.init)
+            let count = parts.count == 2 ? Int(parts[1]) : nil
+            switch parts.first {
+            case "jump": return count.map { GapNotice(cause: .sequenceJump(missing: $0), at: at) }
+            case "resync": return GapNotice(cause: .daemonResync(skipped: count), at: at)
+            case "rewound": return GapNotice(cause: .logRewound, at: at)
+            case "discarded": return GapNotice(cause: .cacheDiscarded, at: at)
+            default: return nil
+            }
+        }
+    #endif
+
     public var message: String {
         switch cause {
         case .daemonResync(let skipped):
@@ -856,6 +878,14 @@ public final class SessionState {
             publications.append(.gapDismissed)
         #endif
     }
+
+    #if DEBUG
+        /// A render's notice (`-CC_GAP`), set as a live one is: through `gap`, then published.
+        func showForRender(_ notice: GapNotice) {
+            gap = notice
+            publish()
+        }
+    #endif
 
     /// The reader has seen this run through what is on screen — never further,
     /// whatever has arrived and not been drawn. Their own act, so the mark is

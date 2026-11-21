@@ -16,6 +16,8 @@ struct ConversationTable: NSViewRepresentable {
     let items: [TimelineItem]
     /// The last event `items` were drawn from, from which "N new" counts (`TimelineEnd`).
     let drawnThrough: UInt64
+    /// The run's missed-events notice, drawn among the items where `GapNotice.index(in:)` places it.
+    let gap: GapNotice?
     let tail: Tail
     let latest: Latest
 
@@ -27,7 +29,7 @@ struct ConversationTable: NSViewRepresentable {
 
     func updateNSView(_ view: NSScrollView, context: Context) {
         noteFollow("UPDATE")
-        context.coordinator.show(items, drawnThrough: drawnThrough, model: model)
+        context.coordinator.show(items, drawnThrough: drawnThrough, gap: gap, model: model)
     }
 
     static func dismantleNSView(_ view: NSScrollView, coordinator: ConversationColumn) { coordinator.detach() }
@@ -38,9 +40,11 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private struct Entry {
         let place: String
         let item: TimelineItem?
+        /// The missed-events notice, on its own entry.
+        var notice: GapNotice? = nil
     }
 
-    private static let earlier = "column.earlier", end = "column.tail"
+    private static let earlier = "column.earlier", gap = "column.gap", end = "column.tail"
     /// A row's margins: the column's sides and half the gap between rows above and below it.
     private static let insets = EdgeInsets(top: 7, leading: 28, bottom: 7, trailing: 28)
 
@@ -124,23 +128,24 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
 
     // MARK: The rows
 
-    /// The published timeline. New rows and rows whose item changed are measured (once the column has a width), the
-    /// rest keep their heights; then one `apply`: a page above, rows below, rows changed in place, or the rows set
-    /// afresh.
-    func show(_ items: [TimelineItem], drawnThrough: UInt64, model: AppModel) {
+    /// The published timeline, and its missed-events notice after the row the Kit places it by. New rows and rows
+    /// whose item or notice changed are measured (once the column has a width), the rest keep their heights; then one
+    /// `apply`: a page above, rows below, rows changed in place, or the rows set afresh.
+    func show(_ items: [TimelineItem], drawnThrough: UInt64, gap: GapNotice?, model: AppModel) {
         self.model = model
         // Rows that arrived while the reader was away from the end, as the iPhone counts them.
         if let end, !layout.following { arrived += TimelineEnd.rowsAfter(end, in: items) }
         end = TimelineEnd(items, drawnThrough: drawnThrough)
         let places = TimelineItem.places(items)
-        let next = [Entry(place: Self.earlier, item: nil)] + zip(places, items).map { Entry(place: $0, item: $1) }
-            + [Entry(place: Self.end, item: nil)]
-        var was: [String: (item: TimelineItem?, height: CGFloat)] = [:]
-        for (entry, row) in zip(entries, layout.rows) { was[entry.place] = (entry.item, row.height) }
+        var timeline = zip(places, items).map { Entry(place: $0, item: $1) }
+        if let gap, !items.isEmpty { timeline.insert(Entry(place: Self.gap, item: nil, notice: gap), at: gap.index(in: items) + 1) }
+        let next = [Entry(place: Self.earlier, item: nil)] + timeline + [Entry(place: Self.end, item: nil)]
+        var was: [String: (item: TimelineItem?, notice: GapNotice?, height: CGFloat)] = [:]
+        for (entry, row) in zip(entries, layout.rows) { was[entry.place] = (entry.item, entry.notice, row.height) }
         var changed: [String] = []
         let rows = next.map { entry -> MacColumnLayout.Row in
             let kept = was[entry.place]
-            if let kept, kept.item == entry.item {
+            if let kept, kept.item == entry.item, kept.notice == entry.notice {
                 return .init(place: entry.place, height: kept.height, isTimeline: entry.item != nil)
             }
             if kept != nil { changed.append(entry.place) }
@@ -193,6 +198,13 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private func view(_ entry: Entry) -> AnyView {
         guard let item = entry.item else {
             if entry.place == Self.earlier { return AnyView(Earlier(model: model, key: key).padding(Self.insets)) }
+            if let notice = entry.notice {
+                return AnyView(
+                    NoticeLine(gap: notice) { [model, key] in model.dismissGap(key) }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("conversation.gap")
+                        .padding(Self.insets))
+            }
             return AnyView(Color.clear.frame(height: 1))
         }
         let opened = openings[entry.place] ?? RowOpenings()

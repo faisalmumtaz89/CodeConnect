@@ -1034,6 +1034,9 @@ public final class AppModel {
             for message in frames {
                 connection.injectForTesting(message)
             }
+            #if DEBUG
+                applyGapFixture()
+            #endif
             applyFixtureDiff()
             applyCachedFixture()
             applyPushStateFixture()
@@ -2021,6 +2024,25 @@ public final class AppModel {
     }
 
     /// The reader acknowledged this run's gap notice.
+    #if DEBUG
+        /// `-CC_GAP <cause>` (`GapNotice.forRender`): once the fixture's events have been drawn, as a live hole is seen
+        /// after events have arrived, each run of two or more drawn rows gets that notice, dated halfway between its
+        /// first row and its last, so it stands mid-conversation.
+        private func applyGapFixture() {
+            guard let text = UserDefaults.standard.string(forKey: "CC_GAP") else { return }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                for state in self?.states.values.map({ $0 }) ?? [] {
+                    let rows = TimelineBuilder.drawn(state.timeline)
+                    guard rows.count > 1, let first = rows.first?.date, let last = rows.last?.date,
+                        let notice = GapNotice.forRender(text, at: first.addingTimeInterval(last.timeIntervalSince(first) / 2))
+                    else { continue }
+                    state.showForRender(notice)
+                }
+            }
+        }
+    #endif
+
     public func dismissGap(_ key: String) {
         shownSessions[key]?.dismissGap()
     }

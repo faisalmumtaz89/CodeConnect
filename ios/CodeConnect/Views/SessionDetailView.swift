@@ -1746,7 +1746,7 @@ private struct SessionTimeline: View {
                             // does more for readability than any amount of styling.
                             .padding(.top, topSpacing(at: index, in: rows))
 
-                            if let gap = state.gap, index == gapIndex(rows, gap: gap) {
+                            if let gap = state.gap, index == gap.index(in: rows) {
                                 CCGapMarker(
                                     label: gap.message,
                                     actionLabel: "Dismiss this notice",
@@ -1902,12 +1902,6 @@ private struct SessionTimeline: View {
         // of lines; each row keeps its own tap height.
         if case .tool = items[index].content, case .tool = items[index - 1].content { return 0 }
         return CC.space.xs
-    }
-
-    /// Where in the log the discontinuity sits, so the marker can be drawn at
-    /// its position in time rather than at the top of the screen.
-    private func gapIndex(_ items: [TimelineItem], gap: GapNotice) -> Int {
-        items.lastIndex { $0.date <= gap.at } ?? max(0, items.count - 1)
     }
 
     private var emptyTimeline: some View {
