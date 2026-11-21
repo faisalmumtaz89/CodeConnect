@@ -1314,6 +1314,10 @@ public final class AppModel {
     /// argument is a test seam and never sets it.
     public private(set) var sampleFleetActive = false
 
+    /// Whether Settings lists this as a computer: one paired (it has a machine id), or a fixture's computer. Never the
+    /// sample fleet, which is no computer: with only it, Settings says no computer is there yet.
+    public var listsAsComputer: Bool { machineID != nil || (fixturesActive && !sampleFleetActive) }
+
     /// The fixture's diff on its own run, or with `-CC_FIXTURE_DIFF_ALL YES` on every run, as the sample fleet's.
     private func applyFixtureDiff() {
         guard let diff = Fixtures.diff() else { return }
