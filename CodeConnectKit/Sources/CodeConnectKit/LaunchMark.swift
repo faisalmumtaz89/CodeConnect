@@ -142,14 +142,19 @@ public struct LaunchMark: View {
     /// Each band in the 1024 box, unrotated and unslid: the top segment above y = 415, the middle band between the
     /// chords, the bottom segment below y = 609; a point along each arc every degree.
     static let parts: [Path] = {
-        let radius: CGFloat = 284
+        let radius: Double = 284
         // Where the chords meet the circle: 97 from the centre.
-        let half = asin(97 / radius) * 180 / .pi
+        let halfRadians: Double = asin(97 / radius)
+        let half: Double = halfRadians * 180 / Double.pi
         func arc(_ from: Double, _ to: Double) -> [CGPoint] {
-            let steps = max(2, Int(abs(to - from)))
-            return (0...steps).map { step in
-                let angle = (from + (to - from) * Double(step) / Double(steps)) * .pi / 180
-                return CGPoint(x: 512 + radius * cos(angle), y: 512 + radius * sin(angle))
+            let steps: Int = max(2, Int(abs(to - from)))
+            return (0...steps).map { (step: Int) -> CGPoint in
+                let swept: Double = (to - from) * Double(step) / Double(steps)
+                let degrees: Double = from + swept
+                let angle: Double = degrees * Double.pi / 180
+                let x: CGFloat = CGFloat(512 + radius * cos(angle))
+                let y: CGFloat = CGFloat(512 + radius * sin(angle))
+                return CGPoint(x: x, y: y)
             }
         }
         func shape(_ points: [CGPoint]) -> Path {
