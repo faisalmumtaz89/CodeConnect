@@ -16,6 +16,9 @@ User-facing changes, newest first. Mac releases are cut per
   one highlight. Return picks the highlighted row, and a row that cannot be chosen is skipped.
 - On the Mac, the start's Computer picker opens over the Folder section again: with two computers, 0.19.4 drew the
   Folder section over it, and the second computer could not be chosen.
+- On the Mac, once the Clear question or a mode's question, such as Bypass Permissions, is answered or cancelled,
+  the reply box has the keyboard again, its words kept and the cursor after them; and the folder browser's arrow
+  keys work again after New Folder.
 
 ## CodeConnect 0.19.4, with the iPhone app 1.1.21
 
