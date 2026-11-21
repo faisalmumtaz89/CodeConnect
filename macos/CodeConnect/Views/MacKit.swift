@@ -293,7 +293,11 @@ private struct TakesKeyboardWhenShown: ViewModifier {
     @FocusState private var focused: Bool
 
     func body(content: Content) -> some View {
-        content.focused($focused).onAppear { focused = true }
+        content.focused($focused)
+            // A turn later, not as it appears: the choice that showed it closed a panel in the same update, and AppKit
+            // settles the keyboard after that close (on the field that had it, or the window's first control), over
+            // a focus set before.
+            .onAppear { DispatchQueue.main.async { focused = true } }
     }
 }
 
