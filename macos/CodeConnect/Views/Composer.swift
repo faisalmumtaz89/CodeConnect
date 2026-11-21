@@ -47,26 +47,21 @@ private struct EndedLine: View {
 /// computer (Kit's `resumeCommand`), drawn whole, selectable and copied whole by its button, as the iPhone offers it.
 private struct ResumeCommand: View {
     let command: String
-    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text2)
-            HStack(spacing: 8) {
-                // Whole, wrapping where it must: a cut would hide what runs.
-                Text(command).font(Theme.mono(12)).foregroundStyle(Theme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                    .accessibilityIdentifier("session.resume.command")
-                ActionButton(title: copied ? "Copied" : "Copy", key: nil, prominent: false, id: "session.resume.copy") {
-                    copyToPasteboard(command)
-                    copied = true
-                }
-            }
+            // Whole, wrapping where it must: a cut would hide what runs.
+            Text(command).font(Theme.mono(12)).foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(.leading, 10)
+                .padding(.trailing, CopyButton.slot)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityIdentifier("session.resume.command")
+                .overlay(alignment: .trailing) { CopyButton(text: command, id: "session.resume.copy") }
         }
         .padding(.horizontal, 28)
         .padding(.bottom, 12)

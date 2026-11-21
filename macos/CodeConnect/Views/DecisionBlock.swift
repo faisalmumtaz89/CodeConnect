@@ -280,10 +280,15 @@ struct DecisionBlock: View {
                 .foregroundStyle(Theme.text3)
             }
             .textSelection(.enabled)
-            .padding(10)
+            .padding(.leading, 10)
+            .padding(.trailing, CopyButton.slot)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
             .accessibilityIdentifier("\(id).input.text")
+            .overlay(alignment: .trailing) {
+                CopyButton(text: approval.card.shownToolInput, id: "\(id).input.copy")
+            }
         }
     }
 
