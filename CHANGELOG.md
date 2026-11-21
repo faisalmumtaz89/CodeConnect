@@ -23,7 +23,13 @@ User-facing changes, newest first. Mac releases are cut per
   box was, on the Mac and on the iPhone. A run the next message would relaunch keeps its box.
 - On the Mac, as on the iPhone, an ended Claude Code run shows the command that picks its conversation up at the
   computer, with a Copy button, a diff numbers each line with its old and new line numbers and a folded stretch
-  of unchanged lines opens on a click, and a conversation with nothing in it says "Nothing recorded yet".
+  of unchanged lines opens on a click, a code block and an approval's command each have a Copy button at their
+  trailing edge, and a conversation with nothing in it says "Nothing recorded yet", or "Nothing recorded" once
+  the run has ended, on both apps.
+- On the Mac, the start form chooses where in the repository a run starts, as the iPhone does: the folder as it
+  is, one of its worktrees, a new worktree for a branch, or a new one by name, from a Branch menu under the
+  folder. New branch… puts the name field in the row with the keyboard in it, and Start waits until the name is
+  good.
 - On the Mac, every panel closes on a click outside it, on Esc or when the window is resized, each act in a "…"
   panel has an icon, End Run…, Remove… and Clear… in red, and a row's "…" menu opens over every row, at its dots
   or wherever a right-click on the row lands.
@@ -34,6 +40,8 @@ User-facing changes, newest first. Mac releases are cut per
   and the window keeps the panes as they were left.
 - On the Mac, View › Refresh (⌘R) asks every connected computer for its runs again, as pulling to refresh does on
   the iPhone; the list already updates on its own, so Refresh is there for when you want to be sure.
+- On the Mac, a run's "…" menu, at its dots or on a right-click on its row, offers Copy Working Directory, which
+  copies the run's folder whole, as the iPhone's run does.
 - A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
   give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
   still cut.
