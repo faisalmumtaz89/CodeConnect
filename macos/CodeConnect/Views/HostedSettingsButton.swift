@@ -131,11 +131,13 @@ struct HostedSettingsButton: View {
         case .mode: card(width: 240) { modeRows }
         case .more:
             card(width: 180) {
-                PanelItem(title: "Compact…", symbol: PanelSymbol.compact, id: "session.composer.compact") {
+                PanelItem(index: 0, title: "Compact…", symbol: PanelSymbol.compact, id: "session.composer.compact") {
                     open = nil
                     compact()
                 }
-                PanelItem(title: "Clear…", symbol: PanelSymbol.clear, destructive: true, id: "session.composer.clear") {
+                PanelItem(
+                    index: 1, title: "Clear…", symbol: PanelSymbol.clear, destructive: true, id: "session.composer.clear"
+                ) {
                     open = nil
                     clear()
                 }
@@ -147,10 +149,10 @@ struct HostedSettingsButton: View {
     private var modelPanel: some View {
         card(width: 420) {
             header("Model")
-            ForEach(settings.models, id: \.value) { entry in
+            ForEach(Array(settings.models.enumerated()), id: \.element.value) { index, entry in
                 let marked = entry == settings.selectedModel
                 let id = "session.composer.model.\(entry.value)"
-                row(entry.label, detail: entry.detail, marked: marked, id: id) {
+                row(index, entry.label, detail: entry.detail, marked: marked, id: id) {
                     _ = await model.setModel(for: key, modelValue: entry.value)
                 }
             }
@@ -162,10 +164,12 @@ struct HostedSettingsButton: View {
         }
     }
 
-    /// The selected model's efforts as one row of segments, the selected one filled.
+    /// The selected model's efforts as one row of segments, the selected one filled; to the keys, the rows after the
+    /// models, left to right.
     private var efforts: some View {
         SegmentedTrack(
             options: settings.efforts, chosen: settings.selectedEffort, fill: Theme.window.opacity(0.6),
+            firstPanelRow: settings.models.count,
             id: { "session.composer.effort.\($0.value)" },
             choose: { effort in choose { _ = await model.setEffort(for: key, effortValue: effort.value) } }
         ) { effort, chosen in
@@ -180,8 +184,8 @@ struct HostedSettingsButton: View {
     }
 
     private var modeRows: some View {
-        ForEach(settings.modes, id: \.value) { mode in
-            row(mode.confirm ? "\(mode.label)…" : mode.label, marked: mode == settings.selectedMode,
+        ForEach(Array(settings.modes.enumerated()), id: \.element.value) { index, mode in
+            row(index, mode.confirm ? "\(mode.label)…" : mode.label, marked: mode == settings.selectedMode,
                 id: "session.composer.mode.\(mode.value)", asksFirst: mode.confirm) {
                 if mode.confirm {
                     confirmMode(mode)
@@ -229,9 +233,9 @@ struct HostedSettingsButton: View {
         Task { await set() }
     }
 
-    /// One choice. The checked one is the run's fact already.
+    /// Choice `index` of its panel. The checked one is the run's fact already, never chosen or lit.
     private func row(
-        _ title: String, detail: String? = nil, marked: Bool, id: String, asksFirst: Bool = false,
+        _ index: Int, _ title: String, detail: String? = nil, marked: Bool, id: String, asksFirst: Bool = false,
         set: @escaping () async -> Void
     ) -> some View {
         Button {
@@ -239,7 +243,8 @@ struct HostedSettingsButton: View {
         } label: {
             rowLabel(title, detail: detail, marked: marked)
         }
-        .buttonStyle(.hover(radius: 4, id: id))
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: id) { choose(asksFirst: asksFirst, set) }
         .padding(.horizontal, 4)
         .disabled(marked)
         .accessibilityElement(children: .combine)

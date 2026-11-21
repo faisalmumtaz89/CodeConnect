@@ -200,7 +200,11 @@ private struct Composer: View {
                     try? await Task.sleep(for: .milliseconds(300))
                     slashLit = RenderWindow.slashLit
                 }
-                if let shown = RenderWindow.panel { panel = shown }
+                // Opened once the render has sized its window: a resize closes an open panel.
+                if let shown = RenderWindow.panel {
+                    try? await Task.sleep(for: .seconds(1))
+                    panel = shown
+                }
             }
         #endif
         .onDisappear {
@@ -323,7 +327,8 @@ private struct Composer: View {
         // The slash palette above the box, clear of it by the panels' one gap, as wide as the reply row.
         .overlay(alignment: .topLeading) {
             if let slash {
-                SlashPanel(content: slash, lit: min(slashLit, slash.rows.count - 1), run: runSlash)
+                SlashPanel(
+                    content: slash, lit: min(slashLit, slash.rows.count - 1), light: { slashLit = $0 }, run: runSlash)
                     .frame(width: rowWidth + 24)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { slashHeight = $0 }
                     .openPanel()

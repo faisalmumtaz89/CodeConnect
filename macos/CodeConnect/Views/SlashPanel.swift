@@ -2,10 +2,12 @@ import CodeConnectKit
 import SwiftUI
 
 /// The slash palette above a Claude run's reply box (Kit's `SlashPalette`): the commands this app answers itself, the
-/// lit one plated, the caption under a bare `/`. A click runs a row; the keys are the reply box's (`SlashPalette.outcome`).
+/// lit one plated as every panel's is (`PanelLight.fill`), the caption under a bare `/`. A click runs a row; the
+/// pointer entering a row lights it (`light`), and the keys are the reply box's (`SlashPalette.outcome`).
 struct SlashPanel: View {
     let content: SlashPalette.Content
     let lit: Int
+    let light: (Int) -> Void
     let run: (SlashRow) -> Void
 
     var body: some View {
@@ -23,10 +25,11 @@ struct SlashPanel: View {
                     }
                     .padding(.horizontal, 8)
                     .frame(height: 24)
-                    .background(index == lit ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 4))
+                    .background(index == lit ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 4))
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.hover(radius: 4, id: "session.slash.\(row.command)"))
+                .buttonStyle(.panelRow)
+                .onHover { if $0 { light(index) } }
                 .padding(.horizontal, 4)
                 .accessibilityLabel(row.title)
                 .accessibilityIdentifier("session.slash.\(row.command)")

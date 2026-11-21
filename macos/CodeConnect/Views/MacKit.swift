@@ -161,15 +161,18 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
     let chosen: Option?
     /// The track's own fill, under its segments.
     let fill: Color
+    /// In a panel, the first segment's row there (`panelRow`): the segments are its rows from it, left to right, the
+    /// chosen one never lit, and the panel's light stands for the pointer's lightening.
+    var firstPanelRow: Int? = nil
     let id: (Option) -> String
     let choose: (Option) -> Void
     @ViewBuilder let segment: (Option, Bool) -> Segment
 
     var body: some View {
         HStack(spacing: trackInset) {
-            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+            ForEach(Array(options.enumerated()), id: \.offset) { offset, option in
                 let isChosen = option == chosen
-                Button {
+                let button = Button {
                     if !isChosen { choose(option) }
                 } label: {
                     // As wide as its chosen look whatever is chosen, so choosing moves no segment's label.
@@ -180,8 +183,18 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
                         .background(isChosen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: trackRadius - trackInset))
                         .contentShape(Rectangle())
                 }
-                // A dim unchosen label needs more lift than a bright one to show it is under the pointer.
-                .buttonStyle(.hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id(option)))
+                Group {
+                    if let firstPanelRow {
+                        button.buttonStyle(.panelRow)
+                            .panelRow(firstPanelRow + offset, id: id(option), choosable: !isChosen, lifts: true) {
+                                choose(option)
+                            }
+                    } else {
+                        // A dim unchosen label needs more lift than a bright one to show it is under the pointer.
+                        button.buttonStyle(
+                            .hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id(option)))
+                    }
+                }
                 .accessibilityIdentifier(id(option))
                 .accessibilityAddTraits(isChosen ? .isSelected : [])
             }
@@ -244,12 +257,14 @@ private struct ClosesPanel: ViewModifier {
     /// The view it modifies is the control; else the panel says where its control is (the window's row menu).
     let measuresControl: Bool
     @State private var frames = PanelFrames()
+    @State private var light = PanelLight()
     @State private var monitor: Any?
     @State private var resizing: NSObjectProtocol?
 
     func body(content: Content) -> some View {
         content
             .environment(\.panelFrames, frames)
+            .environment(\.panelLight, light)
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
                 if measuresControl { frames.control = $0 }
             }
@@ -263,6 +278,10 @@ private struct ClosesPanel: ViewModifier {
     private func start() {
         let frames = frames
         let close = $open
+        let light = light
+        light.opened()
+        // The window the panel opened in, which had the keyboard: keys typed in another window are that window's.
+        let window = NSApp.keyWindow
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) {
             event in
             // A scroll closes it: an open panel never moves with, or hides behind, what scrolls under it.
@@ -271,8 +290,20 @@ private struct ClosesPanel: ViewModifier {
                 return event
             }
             if event.type == .keyDown {
-                guard event.keyCode == 53 else { return event }  // Esc
-                close.wrappedValue = false
+                guard event.window === window else { return event }
+                if event.keyCode == 53 {  // Esc
+                    close.wrappedValue = false
+                    return nil
+                }
+                // ↓ ↑ Return move and choose the panel's light (`PanelLight`); held with ⌘, ⌃, ⇧ or ⌥ (Kit's
+                // `MenuLight.key`), or over a panel whose rows take no keys here, they go on as before.
+                let held = event.modifierFlags
+                guard let key = MenuLight.key(
+                        code: event.keyCode, command: held.contains(.command), control: held.contains(.control),
+                        shift: held.contains(.shift), option: held.contains(.option)),
+                    let outcome = MainActor.assumeIsolated({ light.press(key) })
+                else { return event }
+                if outcome == .close { close.wrappedValue = false }
                 return nil
             }
             if let view = event.window?.contentView {
@@ -319,6 +350,136 @@ private struct OpenPanel: ViewModifier {
     }
 }
 
+extension EnvironmentValues {
+    /// The open panel's light, which its `closesPanel` keeps.
+    @Entry var panelLight: PanelLight?
+}
+
+/// An open panel's one lit row (Kit's `MenuLight`): the pointer entering a row lights it, ↓ ↑ move the light, Return
+/// chooses the lit row. Each row of the panel says where it stands and whether it can be chosen (`panelRow`).
+@Observable @MainActor final class PanelLight {
+    /// A lit row's plate, in every panel.
+    static let fill = Theme.selected
+
+    private(set) var light = MenuLight()
+    /// The row the keys last lit, which a panel that scrolls brings into sight (`PanelScroll`).
+    private(set) var keyed: Int?
+    @ObservationIgnored private var rows: [Int: Row] = [:]
+
+    private struct Row {
+        let id: String
+        let enabled: Bool
+        let choose: () -> Void
+    }
+
+    /// The panel opened: nothing is lit.
+    func opened() {
+        light = MenuLight()
+        keyed = nil
+    }
+
+    func register(_ index: Int, id: String, enabled: Bool, choose: @escaping () -> Void) {
+        rows[index] = Row(id: id, enabled: enabled, choose: choose)
+    }
+
+    /// Row `index` went away, and its light with it: the panel changed (a run's Model panel for its Mode panel).
+    func remove(_ index: Int, id: String) {
+        if rows[index]?.id == id { rows[index] = nil }
+        if light.lit == index { opened() }
+    }
+
+    func enter(_ index: Int) { light.enter(index, enabled: enabled) }
+
+    /// `key`, pressed while the panel is open; nil when no row of it takes keys here (the slash panel's are the reply
+    /// box's), so the key goes on.
+    func press(_ key: MenuLight.Key) -> MenuLight.Outcome? {
+        guard !rows.isEmpty else { return nil }
+        let outcome = light.press(key, enabled: enabled)
+        switch outcome {
+        case .moved: keyed = light.lit
+        case .choose(let row): rows[row]?.choose()
+        case .close: break
+        }
+        return outcome
+    }
+
+    private var enabled: [Bool] {
+        (0..<((rows.keys.max() ?? -1) + 1)).map { rows[$0]?.enabled ?? false }
+    }
+}
+
+extension View {
+    /// Row `index` of an open panel, in reading order, which `choose` chooses as a click does: lit when it is the panel's
+    /// light, by a plate or, on a track's segment, by lightening (`lifts`). A disabled row, or one `choosable` says
+    /// isn't, never lights. A test launch's `-CC_HOVER id` lights it as the pointer does.
+    func panelRow(_ index: Int, id: String, choosable: Bool = true, lifts: Bool = false, choose: @escaping () -> Void)
+        -> some View
+    {
+        modifier(PanelRow(index: index, id: id, choosable: choosable, lifts: lifts, choose: choose))
+    }
+}
+
+private struct PanelRow: ViewModifier {
+    let index: Int
+    let id: String
+    let choosable: Bool
+    let lifts: Bool
+    let choose: () -> Void
+    @Environment(\.panelLight) private var light
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        let lit = light?.light.lit == index
+        content
+            .background(lit && !lifts ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 4))
+            .brightness(lit && lifts ? Theme.segmentLift : 0)
+            .onHover { if $0 { light?.enter(index) } }
+            .onAppear {
+                register()
+                if HoverButtonStyle.forced(id) { light?.enter(index) }
+            }
+            .onChange(of: choosable && isEnabled) { register() }
+            .onDisappear { light?.remove(index, id: id) }
+            .id(index)
+    }
+
+    private func register() { light?.register(index, id: id, enabled: choosable && isEnabled, choose: choose) }
+}
+
+/// A panel row's button: the panel's light is its only plate (`panelRow`); disabled it dims, pressed it fades.
+struct PanelRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { Label(configuration: configuration) }
+
+    private struct Label: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var enabled
+
+        var body: some View {
+            configuration.label
+                .opacity(!enabled ? Theme.disabledOpacity : configuration.isPressed ? 0.7 : 1)
+                .contentShape(RoundedRectangle(cornerRadius: 4))
+        }
+    }
+}
+
+extension ButtonStyle where Self == PanelRowStyle {
+    /// `PanelRowStyle`.
+    static var panelRow: PanelRowStyle { PanelRowStyle() }
+}
+
+/// A panel's rows that scroll: the row the keys light comes into sight.
+struct PanelScroll<Content: View>: View {
+    @ViewBuilder let content: Content
+    @Environment(\.panelLight) private var light
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView { content }
+                .onChange(of: light?.keyed) { _, row in if let row { proxy.scrollTo(row) } }
+        }
+    }
+}
+
 /// Each "…" panel act's one symbol, chosen once for both apps: the iPhone's menus draw the same act with the Phosphor
 /// icon named beside it.
 enum PanelSymbol {
@@ -337,8 +498,10 @@ enum PanelSymbol {
 }
 
 /// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon, the 12.5 pt label 8 pt in, 4 pt above and
-/// below, a 4-pt-radius hover plate 4 pt in from the panel's edge. A destructive act's icon and label are red.
+/// below, lit by the panel's plate 4 pt in from its edge (`panelRow`, row `index`). A destructive act's icon and label
+/// are red.
 struct PanelItem: View {
+    let index: Int
     let title: String
     let symbol: String
     var destructive = false
@@ -359,7 +522,8 @@ struct PanelItem: View {
             .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 4, id: id))
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: id, choose: perform)
         .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
     }
@@ -467,8 +631,11 @@ private struct RowMenuHost: ViewModifier {
                         let bounds = window.frame(in: .global)
                         let corner = place(shown.rect, in: bounds)
                         VStack(alignment: .leading, spacing: 0) {
-                            ForEach(shown.items) { item in
-                                PanelItem(title: item.title, symbol: item.symbol, destructive: item.destructive, id: item.id) {
+                            ForEach(Array(shown.items.enumerated()), id: \.element.id) { index, item in
+                                PanelItem(
+                                    index: index, title: item.title, symbol: item.symbol, destructive: item.destructive,
+                                    id: item.id
+                                ) {
                                     menu.close()
                                     item.perform()
                                 }
