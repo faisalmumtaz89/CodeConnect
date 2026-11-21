@@ -172,7 +172,7 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
         HStack(spacing: trackInset) {
             ForEach(Array(options.enumerated()), id: \.offset) { offset, option in
                 let isChosen = option == chosen
-                let button = Button {
+                Button {
                     if !isChosen { choose(option) }
                 } label: {
                     // As wide as its chosen look whatever is chosen, so choosing moves no segment's label.
@@ -183,25 +183,34 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
                         .background(isChosen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: trackRadius - trackInset))
                         .contentShape(Rectangle())
                 }
-                Group {
-                    if let firstPanelRow {
-                        button.buttonStyle(.panelRow)
-                            .panelRow(firstPanelRow + offset, id: id(option), choosable: !isChosen, lifts: true) {
-                                choose(option)
-                            }
-                    } else {
-                        // A dim unchosen label needs more lift than a bright one to show it is under the pointer.
-                        button.buttonStyle(
-                            .hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id(option)))
-                    }
-                }
                 .accessibilityIdentifier(id(option))
                 .accessibilityAddTraits(isChosen ? .isSelected : [])
+                .modifier(
+                    SegmentLight(
+                        panelRow: firstPanelRow.map { $0 + offset }, id: id(option), chosen: isChosen,
+                        choose: { choose(option) }))
             }
         }
         .padding(trackInset)
         .background(fill, in: RoundedRectangle(cornerRadius: trackRadius))
         .overlay(RoundedRectangle(cornerRadius: trackRadius).strokeBorder(Theme.hairline))
+    }
+}
+
+/// A track segment's light: in a panel, the panel's (`panelRow`, at `panelRow`), the chosen segment never lit; else
+/// the pointer's own lightening, as a dim unchosen label needs more lift than a bright one to show it is under it.
+private struct SegmentLight: ViewModifier {
+    let panelRow: Int?
+    let id: String
+    let chosen: Bool
+    let choose: () -> Void
+
+    func body(content: Content) -> some View {
+        if let panelRow {
+            content.buttonStyle(.panelRow).panelRow(panelRow, id: id, choosable: !chosen, lifts: true, choose: choose)
+        } else {
+            content.buttonStyle(.hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id))
+        }
     }
 }
 
