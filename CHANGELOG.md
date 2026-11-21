@@ -14,9 +14,9 @@ User-facing changes, newest first. Mac releases are cut per
   first, Esc on the Mac and a tap outside the card on the iPhone give it, and a destructive answer is drawn in
   red; on the Mac it never takes Return.
 - A model is named in the agent's own words. Both apps' model lists show the agent's description beside each
-  model's name, and a Claude Code run's model reads as the model's id, such as claude-sonnet-5-5, rather than
-  Claude Code's whole receipt of a change; a Codex run's, or a model the agent gives no id, reads as its menu
-  names it.
+  model's name, and a Claude Code run's model reads as the model's id while the run is live, such as
+  claude-sonnet-5-5, rather than Claude Code's whole receipt of a change; a Codex run's, or a model the agent gives
+  no id, reads as its menu names it.
 - On the iPhone, an open run shows its branch and its uncommitted +N −M under the session bar, and a start can
   name its model, as on the Mac.
 - An ended run shows one quiet line, "This run has ended. Its conversation stays here to read.", where its reply
