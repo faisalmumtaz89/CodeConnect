@@ -1175,16 +1175,13 @@ struct DiffDocumentView: View {
                 }
             }
 
-            // Where the grid stopped, saying what it stopped short of. A reader
-            // who scrolls to the end of a hunk finds the number there as well as
-            // in the banner they scrolled past, and the way to see the rest.
+            // Where the grid stopped, the way to see the rest. The totals are the
+            // banner's, which the reader scrolled past.
             if plan.isPartial {
                 CCGapMarker(
-                    // The fact and the way on, in the timeline row's own idiom.
-                    // The count of lines one tap draws is in the hint rather
-                    // than the label:
-                    // it changes on every tap, and a label that renumbers itself
-                    // as you use it is noise.
+                    // The way on, in the timeline row's own idiom: the lines one
+                    // tap draws, as the Mac's Changes says it. It stays the same
+                    // tap after tap until the last, short one.
                     label: ChangesWords.showMoreLines(min(plan.heldBack, Self.hunkRowBudget)),
                     actionLabel:
                         "Draws the next \(min(plan.heldBack, Self.hunkRowBudget).formatted()) "
