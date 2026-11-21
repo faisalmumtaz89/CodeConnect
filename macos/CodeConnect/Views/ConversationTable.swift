@@ -107,7 +107,8 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         // is never a stop.
         scroll.verticalScroller?.refusesFirstResponder = true
         ring.isHidden = true
-        scroll.addSubview(ring)
+        // Under the scroll bar, so its knob stays whole over the ring, as it does over a system ring.
+        scroll.addSubview(ring, positioned: .below, relativeTo: scroll.verticalScroller)
         table.ring = ring
         tail.attach(scroll)
         tail.readerLeaves = { [weak self] in self?.left() }
