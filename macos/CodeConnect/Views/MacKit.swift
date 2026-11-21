@@ -10,9 +10,9 @@ extension AttributedString {
     init(macMarkdown source: String) {
         let unbroken = source.replacing(/`[^`]*`/) { $0.output.replacingOccurrences(of: " ", with: "\u{00A0}") }
         self = (try? AttributedString(markdown: unbroken)) ?? AttributedString(source)
-        for range in runs.filter({ $0.link != nil }).map(\.range) {
-            self[range].foregroundColor = CC.color.accent
-            self[range].underlineStyle = .single
+        for range in runs.filter({ $0[AttributeScopes.FoundationAttributes.LinkAttribute.self] != nil }).map(\.range) {
+            self[range][AttributeScopes.SwiftUIAttributes.ForegroundColorAttribute.self] = CC.color.accent
+            self[range][AttributeScopes.SwiftUIAttributes.UnderlineStyleAttribute.self] = .single
         }
     }
 }
