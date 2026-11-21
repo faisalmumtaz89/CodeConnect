@@ -3,6 +3,11 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.5, with the iPhone app 1.1.22
+
+- On the Mac, a Claude Code run's model reads as the model's id, such as claude-sonnet-5-5, after the run has ended
+  too, as on the iPhone; an ended run used to show Claude Code's receipt of the change, "sonnet (claude-sonnet-5-5)".
+
 ## CodeConnect 0.19.4, with the iPhone app 1.1.21
 
 - A cold launch opens on CodeConnect's mark assembling itself on the app's ground, on the Mac and the iPhone, and
