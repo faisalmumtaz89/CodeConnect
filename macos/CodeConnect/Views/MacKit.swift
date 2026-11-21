@@ -220,6 +220,13 @@ extension View {
     /// A field that appears because of a choice just made takes the keyboard as it appears, so what is typed next
     /// goes into it and not into the field that had the keyboard before.
     func takesKeyboardWhenShown() -> some View { modifier(TakesKeyboardWhenShown()) }
+
+    /// The same, for a field that reads its own focus: it takes the keyboard through `focused`, a turn after it
+    /// appears. The choice that showed it closed a panel in the same update, and AppKit settles the keyboard after that
+    /// close (on the field that had it, or the window's first control), over a focus set before.
+    func takesKeyboardWhenShown(_ focused: FocusState<Bool>.Binding) -> some View {
+        self.focused(focused).onAppear { DispatchQueue.main.async { focused.wrappedValue = true } }
+    }
 }
 
 /// Where a control and its open panel are, in the window's coordinates (top-left origin).
@@ -292,13 +299,7 @@ private struct ClosesPanel: ViewModifier {
 private struct TakesKeyboardWhenShown: ViewModifier {
     @FocusState private var focused: Bool
 
-    func body(content: Content) -> some View {
-        content.focused($focused)
-            // A turn later, not as it appears: the choice that showed it closed a panel in the same update, and AppKit
-            // settles the keyboard after that close (on the field that had it, or the window's first control), over
-            // a focus set before.
-            .onAppear { DispatchQueue.main.async { focused = true } }
-    }
+    func body(content: Content) -> some View { content.takesKeyboardWhenShown($focused) }
 }
 
 private struct OpenPanel: ViewModifier {
@@ -329,6 +330,8 @@ enum PanelSymbol {
     static let compact = "arrow.down.right.and.arrow.up.left"
     /// iPhone: `eraser`.
     static let clear = "eraser"
+    /// iPhone: `chat-text`.
+    static let comment = "text.bubble"
     /// iPhone: `copy`.
     static let copy = "doc.on.doc"
 }
@@ -363,6 +366,21 @@ struct PanelItem: View {
 }
 
 extension View {
+    /// A box that sends to an agent (the reply box, a card's reason, a hunk's comment): Return sends; ⇧Return and
+    /// ⌥Return add a line where the caret is (`ComposeProse.returnAddsLine`).
+    func sendsOnReturn(_ send: @escaping () -> Void) -> some View {
+        onKeyPress(.return, phases: .down) { press in
+            let held = press.modifiers
+            guard ComposeProse.returnAddsLine(
+                shift: held.contains(.shift), option: held.contains(.option), command: held.contains(.command),
+                control: held.contains(.control))
+            else { return .ignored }
+            NSApp.sendAction(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), to: nil, from: nil)
+            return .handled
+        }
+        .onSubmit(send)
+    }
+
     /// A right-click on this view, at the pointer's place in the window's coordinates (top-left origin), the coordinates
     /// `.global` frames use. Only the right button stops here: every other click, the hover and the keyboard reach the
     /// view as before, and nothing else draws a menu for it.

@@ -4,7 +4,7 @@ import SwiftUI
 /// One file's diff as Kit parses it (`UnifiedDiff.FileDiff`): its path and what happened to it, its lines added and
 /// removed, then each hunk with added lines on green and removed ones on red, every line numbered old and new. Unchanged stretches Kit folds are one
 /// line saying how many, which a click opens; this file's opened stretches stay open while it is shown, as the iPhone's
-/// do. What it draws and speaks from the diff is `displaySafe`: a file's name, lines and hunk headers
+/// do. In a run's Changes tab each hunk's header carries the hunk's acts (`HunkActions`), as the iPhone's does. What it draws and speaks from the diff is `displaySafe`: a file's name, lines and hunk headers
 /// come from the repository, and the characters that reorder a line would draw different code from what the bytes say.
 struct FileDiffView: View {
     let file: UnifiedDiff.FileDiff
@@ -17,10 +17,13 @@ struct FileDiffView: View {
     var lineLimit: Int?
     /// The folded stretches opened here, by hunk and segment.
     @State private var opened: Set<String> = []
+    /// What the hunks can do here: a run's Changes tab gives them; an approval card's diff has none.
+    @Environment(HunkActions.self) private var actions: HunkActions?
 
     /// One drawn row: a hunk's header, a line, a folded stretch, or a note.
     private enum Row: Identifiable {
-        case header(String, Int), line(UnifiedDiff.Line, Int), folded(count: Int, fold: String, Int), note(String, Int)
+        case header(UnifiedDiff.Hunk, Int), line(UnifiedDiff.Line, Int), folded(count: Int, fold: String, Int)
+        case note(String, Int)
 
         var id: Int {
             switch self {
@@ -33,7 +36,7 @@ struct FileDiffView: View {
         var rows: [Row] = []
         var left = lineLimit ?? Int.max
         for hunk in file.hunks where left > 0 {
-            rows.append(.header(hunk.header, rows.count))
+            rows.append(.header(hunk, rows.count))
             for segment in hunk.segments where left > 0 {
                 let fold = "\(hunk.id)#\(segment.id)"
                 if segment.isFolded, !opened.contains(fold) {
@@ -65,7 +68,7 @@ struct FileDiffView: View {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
                     switch row {
-                    case .header(let text, _): quiet(text, mono: true)
+                    case .header(let hunk, _): header(hunk)
                     case .line(let line, _): DiffLine(line: line)
                     case .folded(let count, let fold, _): foldedRow(count: count, fold: fold)
                     case .note(let text, _): quiet(text, mono: false)
@@ -85,6 +88,22 @@ struct FileDiffView: View {
                 }
             }
         #endif
+    }
+
+    @ViewBuilder
+    private func header(_ hunk: UnifiedDiff.Hunk) -> some View {
+        if let actions {
+            let id = HunkActions.id(file: file, hunk: hunk)
+            HunkHeader(file: file, hunk: hunk, actions: actions)
+            if actions.commenting == id { HunkCommentField(file: file, hunk: hunk, actions: actions) }
+            if actions.sent == id {
+                KitNote(text: ChangesWords.commentSent, tone: .success, id: "changes.comment.sent")
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 3)
+            }
+        } else {
+            quiet(hunk.header, mono: true)
+        }
     }
 
     private func foldedRow(count: Int, fold: String) -> some View {

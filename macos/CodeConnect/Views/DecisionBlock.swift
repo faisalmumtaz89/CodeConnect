@@ -390,7 +390,7 @@ struct DecisionBlock: View {
                     .lineLimit(1...4)
                     .focused($reasonFocused)
                     // Return sends a Deny only with a reason in it; on an empty field it does nothing.
-                    .onSubmit { if reasonTyped { send(.text(trimmedReason), from: "reason") } }
+                    .sendsOnReturn { if reasonTyped { send(.text(trimmedReason), from: "reason") } }
                     // Esc leaves the field before it closes the run, as in the reply box.
                     .onExitCommand { reasonFocused = false }
                     .focusedValue(\.composerHoldsEscape, reasonFocused ? true : nil)

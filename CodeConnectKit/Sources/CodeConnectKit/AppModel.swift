@@ -944,6 +944,7 @@ public final class AppModel {
                 UserDefaults.standard.string(forKey: "CC_CODEX"))
             {
                 applyCodexFixture(state)
+                applyFixtureDiff()
                 return
             }
             // `-CC_QUESTION <state>` stages one Claude question card, for the
@@ -1033,10 +1034,7 @@ public final class AppModel {
             for message in frames {
                 connection.injectForTesting(message)
             }
-            if let diff = Fixtures.diff() {
-                diffs[diff.sessionID] = .loaded(
-                    diff, parsed: UnifiedDiff.parse(diff.unified), fetchedAt: Date())
-            }
+            applyFixtureDiff()
             applyCachedFixture()
             applyPushStateFixture()
             // **`-CC_FIXTURE_LINK_DROP_MS <n>` drops the link once, `n` ms in,**
@@ -1310,6 +1308,14 @@ public final class AppModel {
     /// what it would have done instead of reaching for a Mac. The launch
     /// argument is a test seam and never sets it.
     public private(set) var sampleFleetActive = false
+
+    /// The fixture's diff on its own run, or with `-CC_FIXTURE_DIFF_ALL YES` on every run, as the sample fleet's.
+    private func applyFixtureDiff() {
+        guard let diff = Fixtures.diff() else { return }
+        let parsed = UnifiedDiff.parse(diff.unified)
+        let keys = UserDefaults.standard.bool(forKey: "CC_FIXTURE_DIFF_ALL") ? Array(states.keys) : [diff.sessionID]
+        for key in keys { diffs[key] = .loaded(diff, parsed: parsed, fetchedAt: Date()) }
+    }
 
     /// Show the sample fleet. The only way in, and it takes an explicit tap.
     ///

@@ -10,6 +10,13 @@ import SwiftUI
 struct ChangesTab: View {
     let model: AppModel
     let key: String
+    @State private var hunks: HunkActions
+
+    init(model: AppModel, key: String) {
+        self.model = model
+        self.key = key
+        _hunks = State(initialValue: HunkActions(model: model, key: key))
+    }
 
     var body: some View {
         let state = model.diffState(for: key)
@@ -51,7 +58,7 @@ struct ChangesTab: View {
                     id: "changes.empty", title: ChangesWords.noDiff,
                     sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
             case .loaded(let raw, let parsed, _):
-                Document(raw: raw, diff: parsed)
+                Document(raw: raw, diff: parsed).environment(hunks)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
