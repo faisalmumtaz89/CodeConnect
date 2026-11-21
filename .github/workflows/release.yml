@@ -125,7 +125,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "$tag is $sha"
 
-      # "Do not tag until the release commit is green" (RELEASING.md), held
+      # "A tag goes on a commit every gate has passed" (RELEASING.md), held
       # here. The newest push run of ci.yml for this exact commit must have
       # finished and passed: a red, cancelled or still running one, or none,
       # is a refusal. A tag pushed before CI is done is built later by running
@@ -185,6 +185,18 @@ jobs:
             exit 1
           fi
           echo "$VERSION is newer than ${previous#v}"
+          # The update window's notes are written by the merges since the last
+          # release (RELEASING.md, step 2), so notes still the last release's
+          # would tell every Mac the wrong news.
+          if ! gh api "repos/$GITHUB_REPOSITORY/contents/macos/release-notes.txt?ref=$previous" \
+              -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/previous-notes.txt"; then
+            echo "::error::could not read $previous's macos/release-notes.txt"
+            exit 1
+          fi
+          if cmp -s "$RUNNER_TEMP/previous-notes.txt" macos/release-notes.txt; then
+            echo "::error::macos/release-notes.txt is still $previous's; write $VERSION's notes"
+            exit 1
+          fi
 
   build:
     name: Build ${{ matrix.arch }}
