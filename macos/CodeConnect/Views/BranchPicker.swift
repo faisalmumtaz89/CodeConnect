@@ -127,6 +127,8 @@ struct BranchRow: View {
                 .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(trimmed.isEmpty || valid ? Theme.hairline : Theme.red))
                 .onExitCommand { newName = nil }
+                // It appears because "New branch…" was just chosen: what is typed next is its name.
+                .takesKeyboardWhenShown()
             }
             Text(trimmed.isEmpty || valid ? StartWords.worktreeNameRule : StartWords.worktreeNameBroken)
                 .font(Theme.ui(11))
