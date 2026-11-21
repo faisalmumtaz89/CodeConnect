@@ -733,6 +733,25 @@ public struct LinkNotice: Sendable, Equatable {
     public let title: String
     public let sentence: String
     public let action: Action?
+
+    /// The word of the action that opens the Tailscale app, in both apps.
+    public static let openTailscale = "Open Tailscale"
+
+    /// What the Mac does about a notice's action.
+    public enum MacAction: Sendable, Equatable {
+        case tryAgain, openTailscale, pairAgain
+    }
+
+    /// The Mac's one action for a notice: Tailscale is opened where this Mac has its app; without it, asking again is
+    /// what is left.
+    public static func macAction(_ action: Action?, tailscaleFound: Bool) -> MacAction? {
+        switch action {
+        case .retry: .tryAgain
+        case .tailscale: tailscaleFound ? .openTailscale : .tryAgain
+        case .settings: .pairAgain
+        case nil: nil
+        }
+    }
 }
 
 // MARK: - Formatting

@@ -2,6 +2,19 @@ import AppKit
 import CodeConnectKit
 import SwiftUI
 
+/// The Tailscale app on this Mac, by its bundle id: the App Store's, then the standalone one. A render is told by
+/// `-CC_TAILSCALE_APP`, so this Mac's own install never decides a picture.
+@MainActor
+enum TailscaleApp {
+    static var url: URL? {
+        #if DEBUG
+            if RenderWindow.isRendering { return RenderWindow.tailscaleApp }
+        #endif
+        return ["io.tailscale.ipn.macos", "io.tailscale.ipn.macsys"].lazy
+            .compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.first
+    }
+}
+
 /// This Mac's Tailscale on the Computer and iPhone sides of the Add sheet, as this Mac's own daemon says it in
 /// its `peers` frame (the app never runs `tailscale`): one line in plain words, the one thing to do about it,
 /// and, once signed in, what signing in trusts. Nothing until that daemon has said.
@@ -45,8 +58,6 @@ struct TailscaleNote: View {
         "A computer signed in to your Tailscale is trusted as a whole: every user account on it can reach your sessions. For a shared computer, use another Tailscale account."
     /// Tailscale's own download page: its steps are Tailscale's to keep current.
     private static let download = URL(string: "https://tailscale.com/download")!
-    /// The Tailscale app, where the daemon looks for it.
-    private static let app = URL(fileURLWithPath: "/Applications/Tailscale.app")
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -108,11 +119,11 @@ struct TailscaleNote: View {
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
     }
 
-    /// The one thing to do: get Tailscale, or open it when its app is where the daemon found it.
+    /// The one thing to do: get Tailscale, or open its app when this Mac has it (`TailscaleApp`).
     private func action(_ status: Status) -> (title: String, url: URL)? {
         switch status {
         case .notInstalled: ("Get Tailscale", Self.download)
-        case .notConnected where FileManager.default.fileExists(atPath: Self.app.path): ("Open Tailscale", Self.app)
+        case .notConnected: TailscaleApp.url.map { (LinkNotice.openTailscale, $0) }
         default: nil
         }
     }

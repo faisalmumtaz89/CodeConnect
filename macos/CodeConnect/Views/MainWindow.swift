@@ -557,14 +557,18 @@ private struct ComputerRow: View {
             diskUsed: stats.diskUsed, diskTotal: stats.diskTotal)
     }
 
-    /// What the row does about a link that is not working, where the iPhone's banner offers it: Try Again where the
-    /// link can be asked again, Pair Again where the pairing or its address has to change.
+    /// What the row does about a link that is not working, where the iPhone's banner offers it
+    /// (`LinkNotice.macAction`): Try Again where the link can be asked again, Open Tailscale where Tailscale is off and
+    /// its app is here, Pair Again where the pairing or its address has to change.
     private var act: (title: String, id: String, run: () -> Void)? {
-        let health = computer.linkHealth
-        switch health.notice?.action {
-        case .retry, .tailscale:
+        let app = TailscaleApp.url
+        switch LinkNotice.macAction(computer.linkHealth.notice?.action, tailscaleFound: app != nil) {
+        case .tryAgain:
             return (PeerWords.tryAgain, "\(id).tryAgain", { computer.connection.retryNow() })
-        case .settings:
+        case .openTailscale:
+            guard let app else { return nil }
+            return (LinkNotice.openTailscale, "\(id).openTailscale", { NSWorkspace.shared.open(app) })
+        case .pairAgain:
             guard let address else { return nil }
             return (LinkHealth.pairAgain, "\(id).pairAgain", { pairAgain(address) })
         case nil:
