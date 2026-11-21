@@ -22,8 +22,8 @@ User-facing changes, newest first. Mac releases are cut per
 - An ended run shows one quiet line, "This run has ended. Its conversation stays here to read.", where its reply
   box was, on the Mac and on the iPhone. A run the next message would relaunch keeps its box.
 - On the Mac, as on the iPhone, an ended Claude Code run shows the command that picks its conversation up at the
-  computer, with a Copy button, a folded stretch of unchanged lines in a diff opens on a click, and a conversation
-  with nothing in it says "Nothing recorded yet".
+  computer, with a Copy button, a diff numbers each line with its old and new line numbers and a folded stretch
+  of unchanged lines opens on a click, and a conversation with nothing in it says "Nothing recorded yet".
 - On the Mac, every panel closes on a click outside it, on Esc or when the window is resized, each act in a "…"
   panel has an icon, End Run…, Remove… and Clear… in red, and a row's "…" menu opens over every row, at its dots
   or wherever a right-click on the row lands.
