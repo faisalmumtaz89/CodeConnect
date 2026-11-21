@@ -3,12 +3,13 @@ import SwiftUI
 
 /// Any folder on a computer that is not this Mac, found as in a terminal, in the Folder box of the start form: the
 /// folder's path, ".." and the folders in it. A click chooses a row, a double-click or Return goes into it, ← or ⌫ goes
-/// up; Use This Folder starts in the folder shown. New Folder… names one in the app's own card and goes into it. What
-/// it says is the Kit's, as on the iPhone's browse step.
+/// up; Use This Folder starts in the folder shown, Recent Folders goes back to the recent ones. New Folder… names one
+/// in the app's own card and goes into it. What it says is the Kit's, as on the iPhone's browse step.
 struct FolderBrowser: View {
     let context: StartContext
     let use: (String) -> Void
-    let cancel: () -> Void
+    /// Back to the recent folders, with nothing chosen.
+    let recent: () -> Void
 
     /// The folder shown; nil is the computer's home, until it names it.
     @State private var path: String?
@@ -23,10 +24,10 @@ struct FolderBrowser: View {
     @State private var listHeight: CGFloat = 0
     @FocusState private var focused: Bool
 
-    init(context: StartContext, use: @escaping (String) -> Void, cancel: @escaping () -> Void) {
+    init(context: StartContext, use: @escaping (String) -> Void, recent: @escaping () -> Void) {
         self.context = context
         self.use = use
-        self.cancel = cancel
+        self.recent = recent
         #if DEBUG
             _path = State(initialValue: RenderWindow.browsed.flatMap { $0 == "~" ? nil : $0 })
             _showsHidden = State(initialValue: RenderWindow.browsesHidden)
@@ -158,27 +159,24 @@ struct FolderBrowser: View {
         .id(target)
     }
 
-    /// Hidden folders, New Folder…, and the two ways out: the folder shown, or back to the recent ones.
+    /// As the Mac's own folder panel lays its bar out: New Folder… at the leading edge, hidden folders beside it, and the
+    /// two ways out at the trailing edge, back to the recent folders or into the folder shown.
     private var bar: some View {
         let readable = listing.map { $0.error == nil } ?? false
         return HStack(spacing: 8) {
+            ActionButton(title: StartWords.newFolderAction, key: nil, prominent: false, id: "start.browse.new") {
+                folderName = ""
+                naming = true
+            }
+            .disabled(!readable)
             Toggle(StartWords.showHiddenFolders, isOn: $showsHidden)
                 .toggleStyle(.checkbox)
                 .font(Theme.ui(11.5))
                 .foregroundStyle(Theme.text2)
+                .padding(.leading, 4)
                 .accessibilityIdentifier("start.browse.hidden")
-            Button {
-                folderName = ""
-                naming = true
-            } label: {
-                Text(StartWords.newFolderAction.titleStyle).font(Theme.ui(11.5)).foregroundStyle(Theme.text2)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.hover(bare: true, id: "start.browse.new"))
-            .disabled(!readable)
-            .accessibilityIdentifier("start.browse.new")
             Spacer(minLength: 8)
-            ActionButton(title: "Cancel", key: nil, prominent: false, id: "start.browse.cancel", action: cancel)
+            ActionButton(title: "Recent Folders", key: nil, prominent: false, id: "start.browse.recent", action: recent)
             ActionButton(title: StartWords.useThisFolder, key: nil, prominent: true, id: "start.browse.use") {
                 if let listing { use(listing.path) }
             }

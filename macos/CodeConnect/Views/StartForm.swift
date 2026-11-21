@@ -297,7 +297,7 @@ struct StartForm: View {
                         choose($0)
                         browsing = false
                     },
-                    cancel: { browsing = false }
+                    recent: { browsing = false }
                 )
                 .id(context.id)
             } else if context.starter.projects == nil {
