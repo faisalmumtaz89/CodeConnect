@@ -465,8 +465,7 @@ struct PairingView: View {
 
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
-                    // Nothing paired — the sample fleet — has no machine to open,
-                    // and the row says so.
+                    // With no computer listed, the row says so.
                     if listedMachines.isEmpty {
                         CCRow(FleetWords.noComputersYet) {
                             CCStatusDot(

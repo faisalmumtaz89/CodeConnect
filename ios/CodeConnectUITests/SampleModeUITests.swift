@@ -78,12 +78,12 @@ final class SampleModeUITests: XCTestCase {
             app.staticTexts["Live"].exists,
             "sample data must never be presented as a live link to a Mac")
 
-        // Nor does Settings name a computer: none is paired, so no card names
-        // one either.
+        // Nor does Settings claim a paired computer: it lists the sample fleet
+        // as one computer that says it is not paired.
         app.buttons["Settings"].tap()
         XCTAssertTrue(
             app.descendants(matching: .any).matching(
-                NSPredicate(format: "label BEGINSWITH 'No computers yet'")
+                NSPredicate(format: "label BEGINSWITH 'Not paired'")
             ).firstMatch.waitForExistence(timeout: 10),
             "Settings must say no computer is paired")
     }
