@@ -53,6 +53,8 @@ User-facing changes, newest first. Mac releases are cut per
   with the file and lines it is about.
 - On the Mac, Return sends and Shift-Return or Option-Return adds a line, in the reply box, in a card's answer to
   the agent and in a comment on a diff. Shift-Return used to send a message half-written.
+- On the Mac, a run whose history has a hole now says so where it happened, as the iPhone does ("Resynced, 12
+  events not shown."), as a notice row with Dismiss; both apps place it by one rule in the Kit.
 - A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
   give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
   still cut.
