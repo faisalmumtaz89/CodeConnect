@@ -15,7 +15,8 @@ User-facing changes, newest first. Mac releases are cut per
   red; on the Mac it never takes Return.
 - A model is named in the agent's own words. Both apps' model lists show the agent's description beside each
   model's name, and a Claude Code run's model reads as the model's id, such as claude-sonnet-5-5, rather than
-  Claude Code's whole receipt of a change; a Codex run's reads as its menu names it.
+  Claude Code's whole receipt of a change; a Codex run's, or a model the agent gives no id, reads as its menu
+  names it.
 - On the iPhone, an open run shows its branch and its uncommitted +N −M under the session bar, and a start can
   name its model, as on the Mac.
 - An ended run shows one quiet line, "This run has ended. Its conversation stays here to read.", where its reply
@@ -37,7 +38,14 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, the arrow keys move through the run list, the sidebar and Start's folders, each list is one Tab
   stop, Return in the run list puts the cursor in the open run's reply box, and Start opens with the keyboard in
   its folder search.
-- On the Mac, Help › CodeConnect Support opens the support page, and Settings stays above the Dock.
+- On the Mac, Help › CodeConnect Support opens the support page, and Settings stays above the Dock. Settings is
+  drawn by the app, with its title in the app's type and the run pane's underlined tabs, and a question in it
+  covers the whole window. In Settings › Folders each folder's word, button and Forget line up in columns.
+- On the Mac, a computer whose link isn't working says why under its name, in the iPhone's words, with Try Again
+  or Pair Again beside it and the whole sentence when the pointer rests on it. The list narrowed to that computer
+  says the sentence in full, and the computer's group header names its state.
+- Both apps draw one green, amber, red and three text greys: the iPhone's green, amber and greys take the Mac's
+  values, and the quietest grey is lighter on the Mac, as on the iPhone, so it can be read on every ground.
 - Settings › Devices lists each device under its own name, a Mac's computer name or "iPhone", in place of
   "CodeConnect Mac-2". A device paired before takes its name the next time it connects.
 - Every computer on your Tailscale account that runs CodeConnect joins the list by itself, or says why it didn't:
