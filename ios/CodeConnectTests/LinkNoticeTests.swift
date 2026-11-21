@@ -114,6 +114,9 @@ final class LinkNoticeTests: XCTestCase {
         XCTAssertNil(LinkNotice.words("Pair again", beside: "Pair Again"))
         XCTAssertEqual(LinkNotice.words("Offline", beside: "Try Again"), "Offline")
         XCTAssertEqual(LinkNotice.words("Pair again", beside: nil), "Pair again")
+        // Must-fail: the Tailscale pair kept, which wrapped the Mac's row onto two lines.
+        XCTAssertNil(LinkNotice.words("Connect Tailscale", beside: "Open Tailscale"))
+        XCTAssertEqual(LinkNotice.words("Connect Tailscale", beside: "Try Again"), "Connect Tailscale")
     }
 
     /// The Mac opens Tailscale only where it has the app; without it, Try Again as before. Must-fail: `.tailscale`
