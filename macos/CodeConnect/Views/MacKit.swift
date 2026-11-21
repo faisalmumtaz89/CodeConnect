@@ -220,6 +220,13 @@ extension View {
     /// A field that appears because of a choice just made takes the keyboard as it appears, so what is typed next
     /// goes into it and not into the field that had the keyboard before.
     func takesKeyboardWhenShown() -> some View { modifier(TakesKeyboardWhenShown()) }
+
+    /// The same, for a field that reads its own focus: it takes the keyboard through `focused`, a turn after it
+    /// appears. The choice that showed it closed a panel in the same update, and AppKit settles the keyboard after that
+    /// close (on the field that had it, or the window's first control), over a focus set before.
+    func takesKeyboardWhenShown(_ focused: FocusState<Bool>.Binding) -> some View {
+        self.focused(focused).onAppear { DispatchQueue.main.async { focused.wrappedValue = true } }
+    }
 }
 
 /// Where a control and its open panel are, in the window's coordinates (top-left origin).
@@ -292,13 +299,7 @@ private struct ClosesPanel: ViewModifier {
 private struct TakesKeyboardWhenShown: ViewModifier {
     @FocusState private var focused: Bool
 
-    func body(content: Content) -> some View {
-        content.focused($focused)
-            // A turn later, not as it appears: the choice that showed it closed a panel in the same update, and AppKit
-            // settles the keyboard after that close (on the field that had it, or the window's first control), over
-            // a focus set before.
-            .onAppear { DispatchQueue.main.async { focused = true } }
-    }
+    func body(content: Content) -> some View { content.takesKeyboardWhenShown($focused) }
 }
 
 private struct OpenPanel: ViewModifier {

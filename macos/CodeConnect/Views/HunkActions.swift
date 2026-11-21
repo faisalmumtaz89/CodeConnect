@@ -150,7 +150,8 @@ struct HunkCommentField: View {
                 .foregroundStyle(Theme.text)
                 .lineLimit(1...5)
                 .sendsOnReturn(send)
-                .focused($focused)
+                // It appears because Comment to Agent… was just chosen: what is typed next is the comment.
+                .takesKeyboardWhenShown($focused)
                 .onExitCommand { actions.commenting = nil }
                 .accessibilityLabel(ChangesWords.commentPrompt)
                 .accessibilityIdentifier("changes.comment.field")
@@ -164,8 +165,6 @@ struct HunkCommentField: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .focusedValue(\.composerHoldsEscape, focused ? true : nil)
-        // From a task, as the reply box takes the keyboard: in onAppear the field is not in the window yet.
-        .task { focused = true }
         #if DEBUG
             .task {
                 // A render's words and refusal, typed after the field has the keyboard, as a person's are.
